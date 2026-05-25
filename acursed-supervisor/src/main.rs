@@ -27,6 +27,12 @@ struct Cli {
 
     #[arg(long, default_value = "info")]
     log: String,
+
+    /// First-boot helper: write a fresh auth.toml with a randomly generated
+    /// admin password to PATH (mode 0600), print the plaintext password to
+    /// stdout, and exit. Used by /usr/local/bin/acursed-firstboot.
+    #[arg(long, value_name = "PATH")]
+    generate_auth: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -36,6 +42,12 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::new(&cli.log))
         .with_target(false)
         .init();
+
+    if let Some(path) = cli.generate_auth {
+        let pw = auth::generate_default(&path)?;
+        println!("{pw}");
+        return Ok(());
+    }
 
     let cfg = api::Config::load(cli.config)?;
     let tls_config = tls::ensure_cert(&cfg)?;

@@ -8,10 +8,15 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use serde::Deserialize;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use tokio::net::UnixListener;
+use tower::ServiceExt;
 use tracing::info;
 
 pub async fn serve(state: SharedState) -> Result<()> {
@@ -24,7 +29,7 @@ pub async fn serve(state: SharedState) -> Result<()> {
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o660)).ok();
     info!(sock = %sock.display(), "hid API listening");
 
-    let app = Router::new()
+    let app: Router = Router::new()
         .route("/status", get(get_status))
         .route("/type", post(post_type))
         .route("/key", post(post_key))
@@ -34,8 +39,22 @@ pub async fn serve(state: SharedState) -> Result<()> {
         .route("/release_all", post(post_release_all))
         .with_state(state);
 
-    axum::serve(listener, app).await?;
-    Ok(())
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let app = app.clone();
+        tokio::spawn(async move {
+            let svc = service_fn(move |req: hyper::Request<Incoming>| {
+                let app = app.clone();
+                async move { app.oneshot(req).await }
+            });
+            if let Err(e) = ConnBuilder::new(TokioExecutor::new())
+                .serve_connection(io, svc).await
+            {
+                tracing::debug!(?e, "connection ended");
+            }
+        });
+    }
 }
 
 async fn get_status(State(state): State<SharedState>) -> impl IntoResponse {

@@ -45,6 +45,7 @@ pub fn detect(device: &Path) -> Result<CaptureMode> {
 /// Lower-overhead than `--list-formats-ext`: gets the device's CURRENT
 /// configured format. Useful to keep the size we ask for matching what the
 /// device wants to give us, even when the enum has multiple options.
+#[allow(dead_code)] // utility for future supervise.rs tuning
 pub fn current_resolution(device: &Path) -> Option<String> {
     let out = Command::new("v4l2-ctl")
         .args(["-d"])

@@ -14,9 +14,14 @@ use axum::http::{Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use tokio::net::UnixListener;
+use tower::ServiceExt;
 use tracing::info;
 
 pub async fn serve(state: SharedState) -> Result<()> {
@@ -30,21 +35,36 @@ pub async fn serve(state: SharedState) -> Result<()> {
 
     info!(sock = %sock_path.display(), "streamer API listening");
 
-    let app = Router::new()
+    let app: Router = Router::new()
         .route("/state", get(get_state))
         .route("/relaunch", post(force_relaunch))
         .route("/snapshot", get(snapshot_proxy))
         .route("/stream", get(stream_proxy))
         .with_state(state.clone());
 
-    let shutdown = async move {
-        state.0.shutdown_signal.notified().await;
-    };
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
-    Ok(())
+    // axum::serve only takes TcpListener; for unix sockets we run an
+    // accept loop and dispatch each connection to a fresh tower service.
+    loop {
+        tokio::select! {
+            _ = state.0.shutdown_signal.notified() => return Ok(()),
+            res = listener.accept() => {
+                let (stream, _addr) = res?;
+                let io = TokioIo::new(stream);
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req: hyper::Request<Incoming>| {
+                        let app = app.clone();
+                        async move { app.oneshot(req).await }
+                    });
+                    if let Err(e) = ConnBuilder::new(TokioExecutor::new())
+                        .serve_connection(io, svc).await
+                    {
+                        tracing::debug!(?e, "connection ended");
+                    }
+                });
+            }
+        }
+    }
 }
 
 async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {

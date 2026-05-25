@@ -14,10 +14,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 axum = { workspace = true }
+tower = { workspace = true }
 tower-http = { workspace = true }
 clap = { workspace = true }
 nix = { workspace = true }
 parking_lot = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1"] }
 
 [[bin]]
 name = "acursed-hid"

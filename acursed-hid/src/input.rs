@@ -22,6 +22,9 @@ pub struct Hid {
     kbd: Mutex<PathBuf>,
     mouse: Mutex<Option<PathBuf>>,
     consumer: Mutex<Option<PathBuf>>,
+    /// Reserved for the Apple Magic persona's trackpad device path. Multi-
+    /// touch report writers will live in a follow-on commit.
+    #[allow(dead_code)]
     trackpad: Mutex<Option<PathBuf>>,
 }
 
