@@ -1,0 +1,17 @@
+[Unit]
+Description=Aeon Cursed KVM — adaptive video streamer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/acursed-streamer --config /etc/acursed/streamer.toml
+Restart=on-failure
+RestartSec=2
+# Needs read on /dev/video* and write on /run/acursed/
+User=acursed
+Group=acursed
+SupplementaryGroups=video
+
+[Install]
+WantedBy=multi-user.target

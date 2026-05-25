@@ -1,0 +1,8 @@
+[Unit]
+Description=Aeon Cursed KVM — WiFi-or-AP-fallback watchdog
+After=NetworkManager.service
+Requires=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/acursed-netwatch

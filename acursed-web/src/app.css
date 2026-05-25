@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply selection:bg-cursed-500/40 selection:text-white;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-ink-600 rounded-full;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium
+           bg-ink-700 hover:bg-ink-600 active:bg-ink-800 transition-colors
+           focus:outline-none focus:ring-2 focus:ring-cursed-500 focus:ring-offset-2 focus:ring-offset-ink-900;
+  }
+  .btn-primary {
+    @apply btn bg-cursed-600 hover:bg-cursed-500 active:bg-cursed-700 text-white;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+  .pill-live {
+    @apply pill bg-live-500/20 text-live-400 border border-live-500/40;
+  }
+  .pill-offline {
+    @apply pill bg-red-500/20 text-red-400 border border-red-500/40;
+  }
+}

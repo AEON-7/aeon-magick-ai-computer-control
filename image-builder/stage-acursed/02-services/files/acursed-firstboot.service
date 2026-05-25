@@ -1,0 +1,12 @@
+[Unit]
+Description=Aeon Cursed KVM — first-boot setup
+After=local-fs.target
+ConditionPathExists=!/var/lib/acursed/firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/acursed-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

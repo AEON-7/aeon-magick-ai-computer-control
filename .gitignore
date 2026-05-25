@@ -1,0 +1,34 @@
+# Rust
+target/
+Cargo.lock.bak
+*.rs.bk
+
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+build/
+dist/
+.env
+.env.local
+.env.*.local
+
+# pi-gen
+work/
+deploy/
+*.img
+*.img.xz
+*.img.zip
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# project-local
+config.local.toml
+secrets.toml
+*.predeploy-*
+*.bak
+*.bak2
