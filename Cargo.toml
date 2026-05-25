@@ -30,13 +30,10 @@ toml = "0.8"
 
 # HTTP
 axum = { version = "0.7", features = ["ws"] }
-tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 hyper = { version = "1" }
 
-# Linux / V4L2 / sysfs
-v4l = "0.14"
+# Linux / sysfs syscalls (pure Rust; we shell out to v4l2-ctl for capture queries)
 nix = { version = "0.27", features = ["fs", "process", "signal"] }
 
 # Misc
