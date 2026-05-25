@@ -1,0 +1,32 @@
+--- /dev/fd/12	2026-05-25 19:28:36
++++ /Users/albert/pi-gen/scripts/common	2026-05-25 19:23:15
+@@ -64,15 +64,24 @@
+ 	else
+ 		sleep 1
+ 	fi
+-	LOOP_DEVICE=$(losetup -n -O NAME -j "$1")
+-	if [ -n "$LOOP_DEVICE" ]; then
+-		for part in "$LOOP_DEVICE"p*; do
+-			if DIR=$(findmnt -n -o target -S "$part"); then
++	# losetup -j may return MULTIPLE loop devices when the same image was
++	# attached at different offsets (our OrbStack workaround for partition
++	# scanning). Iterate explicitly.
++	while read -r LOOP_DEVICE; do
++		[ -z "$LOOP_DEVICE" ] && continue
++		# Direct mount of the offset loop device
++		if DIR=$(findmnt -n -o target -S "$LOOP_DEVICE" 2>/dev/null); then
++			unmount "$DIR"
++		fi
++		# Partition device nodes (--partscan mode, when in use)
++		for part in "${LOOP_DEVICE}"p*; do
++			[ -b "$part" ] || continue
++			if DIR=$(findmnt -n -o target -S "$part" 2>/dev/null); then
+ 				unmount "$DIR"
+ 			fi
+ 		done
+ 		losetup -d "$LOOP_DEVICE"
+-	fi
++	done <<< "$(losetup -n -O NAME -j "$1")"
+ }
+ export -f unmount_image
+ 

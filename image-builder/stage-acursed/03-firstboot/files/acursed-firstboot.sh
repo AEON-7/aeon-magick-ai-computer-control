@@ -15,9 +15,14 @@ mkdir -p /var/lib/acursed
 mkdir -p /etc/acursed
 
 # ── 1. Auth ──
+# Generate a random web-UI admin password. Also reset the Linux system
+# user 'admin' password to the same value, so SSH login + web UI login
+# share one credential.
 if [ ! -f /etc/acursed/auth.toml ]; then
     PW=$(/usr/local/bin/acursed-supervisor --generate-auth /etc/acursed/auth.toml 2>/dev/null || true)
     if [ -n "$PW" ]; then
+        # Reset the Linux user too — pi-gen baked a placeholder password.
+        echo "admin:$PW" | chpasswd 2>/dev/null || true
         cat > /boot/firmware/aeon-credentials.txt <<EOF
 # Aeon Cursed KVM — generated credentials
 # DELETE THIS FILE ONCE YOU'VE NOTED THE PASSWORD.
