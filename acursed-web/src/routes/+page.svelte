@@ -134,6 +134,8 @@
 
   <!-- video canvas -->
   <main class="flex-1 relative bg-ink-950">
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       bind:this={canvas}
       class="absolute inset-0 outline-none"
