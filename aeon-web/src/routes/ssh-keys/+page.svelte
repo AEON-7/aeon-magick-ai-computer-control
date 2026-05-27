@@ -71,7 +71,8 @@
     </div>
   </header>
 
-  <main class="flex-1 overflow-auto p-6 max-w-3xl mx-auto w-full space-y-6">
+  <main class="flex-1 overflow-auto">
+    <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
     <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-4">
       <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Add a public key</h2>
       <p class="text-sm text-zinc-400">
@@ -166,5 +167,6 @@
         (<code>PasswordAuthentication no</code>) — locks down the device against brute-force.
       </p>
     </section>
+    </div>
   </main>
 </div>

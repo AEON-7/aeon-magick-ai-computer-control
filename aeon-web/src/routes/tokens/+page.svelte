@@ -105,7 +105,8 @@
     </div>
   </header>
 
-  <main class="flex-1 overflow-auto p-6 max-w-4xl mx-auto w-full space-y-6">
+  <main class="flex-1 overflow-auto">
+    <div class="p-6 max-w-4xl mx-auto w-full space-y-6">
     <!-- New token creation -->
     <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
       <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
@@ -248,5 +249,6 @@
     </section>
 
     <TipJar />
+    </div>
   </main>
 </div>

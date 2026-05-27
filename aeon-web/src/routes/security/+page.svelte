@@ -72,7 +72,8 @@
     </div>
   </header>
 
-  <main class="flex-1 overflow-auto p-6 max-w-5xl mx-auto w-full space-y-6">
+  <main class="flex-1 overflow-auto">
+    <div class="p-6 max-w-5xl mx-auto w-full space-y-6">
     {#if error}<p class="text-red-400 text-sm">{error}</p>{/if}
 
     {#if m}
@@ -197,5 +198,6 @@
       keep ~5 minutes of throughput history in supervisor memory; no
       timeseries DB needed.
     </section>
+    </div>
   </main>
 </div>

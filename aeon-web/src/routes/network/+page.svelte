@@ -297,7 +297,8 @@
     </div>
   </header>
 
-  <main class="flex-1 overflow-auto p-6 max-w-3xl mx-auto w-full space-y-6">
+  <main class="flex-1 overflow-auto">
+    <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
     {#if loading}
       <p class="text-zinc-500 text-sm">loading…</p>
     {:else if error}
@@ -1072,5 +1073,6 @@ obfs4 …`}
 
       <TipJar />
     {/if}
+    </div>
   </main>
 </div>

@@ -98,7 +98,8 @@
     </button>
   </header>
 
-  <main class="flex-1 overflow-auto p-6 max-w-5xl mx-auto w-full space-y-6">
+  <main class="flex-1 overflow-auto">
+    <div class="p-6 max-w-5xl mx-auto w-full space-y-6">
     {#if loading}<p class="text-zinc-500 text-sm">loading…</p>{/if}
     {#if error}<p class="text-red-400 text-sm">{error}</p>{/if}
 
@@ -199,5 +200,6 @@
         excluded to keep the log to high-signal events.
       </section>
     {/if}
+    </div>
   </main>
 </div>
