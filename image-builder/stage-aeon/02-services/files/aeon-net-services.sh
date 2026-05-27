@@ -378,7 +378,9 @@ except Exception:
 }
 
 apply_vpn_tor() {
-    # Bridges: optional newline-separated obfs4 bridge lines.
+    # Bridge preset selection — see apply_tor_bridges below.
+    local preset; preset="$(toml_get vpn.tor preset direct)"
+    # Custom bridges (only used if preset=custom): multi-line via Python read.
     local bridges="$(python3 -c "
 import tomllib
 try:
@@ -412,18 +414,67 @@ AutomapHostsSuffixes .onion,.exit
 # Don't run a SOCKS port on a privileged interface.
 SOCKSPort 127.0.0.1:9050
 EOF
-    if [ -n "$bridges" ]; then
-        cat >> /etc/tor/torrc.d/aeon.conf <<EOF
+    # Apply bridge configuration based on preset. Each preset emits its
+    # own ClientTransportPlugin + Bridge lines to torrc.d/aeon.conf.
+    case "$preset" in
+        direct)
+            log "tor: preset=direct, no bridges"
+            ;;
+        obfs4)
+            log "tor: preset=obfs4, using built-in obfs4 bridges"
+            cat >> /etc/tor/torrc.d/aeon.conf <<'EOF'
+UseBridges 1
+ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy managed
+# Built-in obfs4 bridges from Tor Browser. These rotate with releases;
+# if all are unreachable, request fresh ones from bridges.torproject.org
+# and use preset="custom".
+Bridge obfs4 192.95.36.142:443 CDF2E852BF539B82BD10E27E9115A31734E378C2 cert=qUVQ0srL1JI/vO6V6m/24anYXiJD3QP2HgzUKQtQ7GRqqUvs7P+tG43RtAqdhLOALP7DJQ iat-mode=1
+Bridge obfs4 37.218.245.14:38224 D9A82D2F9C2F65A18407B1D2B764F130847F8B5D cert=bjRaMrr1BRiAW8IE9U5z27fQaYgOhX1UCmOpg2pFpoMvo6ZgQMzLsaTzzQNTlm7hNcb+Sg iat-mode=0
+Bridge obfs4 85.31.186.98:443 011F2599C0E9B27EE74B353155E244813763C3E5 cert=ayq0XzCwhpdysn5o0EyDUbmSOx3X/oTEbzDMvczHOdBJKlvIdHHLJGkZARtT4dcBFArPPg iat-mode=0
+Bridge obfs4 85.31.186.26:443 91A6354697E6B02A386312F68D82CF86824D3606 cert=PBwr+S8JTVZo6MPdHnkTwXJPILWADLqfMGoVvhZClMq/Urndyd42BwX9YFJHZnBB3H0XCw iat-mode=0
+EOF
+            ;;
+        meek-azure)
+            log "tor: preset=meek-azure, using Microsoft Azure CDN fronting"
+            cat >> /etc/tor/torrc.d/aeon.conf <<'EOF'
+UseBridges 1
+ClientTransportPlugin meek_lite exec /usr/bin/obfs4proxy managed
+# meek_lite via Azure CDN — looks like HTTPS to Microsoft to any DPI
+# observer. Slower than obfs4 but harder to block.
+Bridge meek_lite 192.0.2.18:80 BE776A53492E1E044A26F17306E1BC46A55A1625 url=https://meek.azureedge.net/ front=ajax.aspnetcdn.com
+EOF
+            ;;
+        snowflake)
+            log "tor: preset=snowflake"
+            if [ ! -x /usr/bin/snowflake-client ]; then
+                log "WARN: snowflake-client binary not installed (try: apt install snowflake-client); falling back to direct"
+            else
+                cat >> /etc/tor/torrc.d/aeon.conf <<'EOF'
+UseBridges 1
+ClientTransportPlugin snowflake exec /usr/bin/snowflake-client -url https://snowflake-broker.torproject.net.global.prod.fastly.net/ -front cdn.sstatic.net -ice stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478,stun:stun.dus.net:3478,stun:stun.epygi.com:3478,stun:stun.sonetel.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.voys.nl:3478
+Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72
+EOF
+            fi
+            ;;
+        custom)
+            if [ -n "$bridges" ]; then
+                log "tor: preset=custom, $(printf '%s\n' "$bridges" | wc -l) bridge(s) configured"
+                cat >> /etc/tor/torrc.d/aeon.conf <<'EOF'
 UseBridges 1
 ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy managed
 EOF
-        # Append each bridge line.
-        printf '%s\n' "$bridges" | while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            echo "Bridge $line" >> /etc/tor/torrc.d/aeon.conf
-        done
-        log "tor: $(printf '%s\n' "$bridges" | wc -l) bridge(s) configured"
-    fi
+                printf '%s\n' "$bridges" | while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    echo "Bridge $line" >> /etc/tor/torrc.d/aeon.conf
+                done
+            else
+                log "tor: preset=custom but no bridges field — defaulting to direct"
+            fi
+            ;;
+        *)
+            log "tor: unknown preset '$preset' — defaulting to direct"
+            ;;
+    esac
 
     # Make sure /etc/tor/torrc includes drop-ins. Debian's default does
     # (`%include /etc/tor/torrc.d/*.conf`) but be defensive.

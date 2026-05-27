@@ -131,16 +131,30 @@ auth_username = ""
 auth_password = ""
 
 # Tor: transparent-proxy + DNS-over-Tor.
-#   bridges       — paste obfs4 lines, one per line, if your local
-#                   network blocks plain Tor. Leave empty for direct.
+#   preset        — pre-canned bridge configuration:
+#                     "direct"   — no bridges (default; works on
+#                                  unrestricted networks)
+#                     "obfs4"    — use built-in obfs4 bridges from
+#                                  the Tor Browser default set
+#                                  (rotates with Tor releases)
+#                     "meek-azure" — meek transport fronting through
+#                                  Microsoft's Azure CDN; looks like
+#                                  HTTPS to Microsoft. Works in many
+#                                  countries where obfs4 is blocked.
+#                     "snowflake" — WebRTC-based ephemeral bridges;
+#                                  requires snowflake-client binary.
+#                     "custom"   — use the `bridges` field below
+#   bridges       — paste bridge lines manually, one per line. Only
+#                   used when preset="custom". Get fresh bridges from
+#                   https://bridges.torproject.org/
 #   exit_country  — ISO-3166 country code for forced exit nodes (e.g.
 #                   "us", "de", "nl"). Empty = let Tor pick by
 #                   performance.
-#   meek_mode     — true = also enable meek-azure bridge (looks like
-#                   HTTPS to Microsoft cloud-front; works in countries
-#                   where plain obfs4 is blocked or detected).
+#   meek_mode     — DEPRECATED: use preset="meek-azure" instead. Kept
+#                   for backwards compatibility.
 
 [vpn.tor]
+preset = "direct"
 bridges = ""
 exit_country = ""
 meek_mode = false

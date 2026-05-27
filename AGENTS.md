@@ -70,14 +70,16 @@ computer you want to control.
 
 1. Plug power into the Pi. Don't plug ethernet.
 2. Wait ~2 minutes. After 90 seconds of "no internet" the Pi spins up its
-   own WiFi access point.
-3. From your phone or laptop, join WiFi network **`aeon-setup`**.
-   Password: **`aeon-setup-pw`**.
-4. Once joined, open `https://192.168.50.1/setup` in a browser.
-5. The setup page asks for your WiFi SSID + password and optionally a
-   Tailscale auth key. Submit. The Pi joins your network and the `aeon-setup`
-   AP closes.
-6. Open `https://aeon-magick.local/` from your normal network.
+   own WiFi access point: **`aeon-setup`** (password **`aeon-setup-pw`**).
+3. From your phone or laptop, join `aeon-setup`. On every modern OS this
+   triggers a **captive portal sheet** that auto-opens to the WiFi
+   picker — no need to remember the IP. (If it doesn't, browse to
+   `http://anything`; we hijack DNS + HTTP to redirect.)
+4. The picker live-scans nearby networks with signal-strength bars.
+   Click one, type the password, watch the device join — the
+   `aeon-setup` AP tears itself down automatically.
+5. Reconnect your laptop to your normal WiFi, then open
+   `https://aeon-magick.local/` to land on the main UI.
 
 ### Path 3 — Pre-configured before first boot (best for fleets)
 

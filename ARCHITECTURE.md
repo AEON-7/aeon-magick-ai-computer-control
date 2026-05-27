@@ -6,27 +6,33 @@ reachable from a SvelteKit web UI.
 ## Daemons
 
 ```
-                          ┌───────────────────────────────┐
-                          │   aeon-supervisor          │
-                          │   :8443 HTTPS                 │  ← Web UI + REST
-                          │   Auth, session, routing      │     + Agent API
-                          └───────────────┬───────────────┘
-                                          │
-                ┌─────────────────────────┼─────────────────────────┐
-                ▼                         ▼                         ▼
-   ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
-   │ aeon-streamer    │   │ aeon-hid         │   │ aeon-netd        │
-   │ unix:streamer.sock  │   │ unix:hid.sock       │   │ (systemd-networkd + │
-   │                     │   │                     │   │  wpa_supplicant +   │
-   │ Capture /dev/video0 │   │ ConfigFS USB        │   │  hostapd watchdog)  │
-   │ Adaptive format/res │   │  gadget setup       │   │ WiFi AP fallback    │
-   │ HW H.264 (Pi 4)     │   │ HID personas        │   └─────────────────────┘
-   │ MJPEG/WebRTC out    │   │ Atomic input ops    │
-   └─────────────────────┘   └─────────────────────┘
-                                          │
-                                          ▼
+                       ┌──────────────────────────────────┐
+                       │   aeon-supervisor                │
+                       │   :8443 HTTPS (rustls)           │  ← Web UI + REST
+                       │   Auth, sessions, /api/* routing │     + Agent API
+                       │   MCP server at /api/mcp         │     + MCP
+                       │   /api/network /api/storage      │
+                       │   /api/wifi /api/streamer/*      │
+                       └──────────────┬───────────────────┘
+                                      │ Unix sockets in /run/aeon/
+                ┌─────────────────────┼─────────────────────┐
+                ▼                     ▼                     ▼
+   ┌────────────────────┐ ┌────────────────────┐ ┌────────────────────┐
+   │ aeon-streamer      │ │ aeon-hid           │ │ shell oneshots     │
+   │ streamer.sock      │ │ hid.sock           │ │ (root, idempotent) │
+   │                    │ │                    │ │                    │
+   │ Capture /dev/video0│ │ ConfigFS USB       │ │ aeon-net-services  │
+   │ ffmpeg pipe→memory │ │  gadget setup      │ │  (usb_eth + dnscrypt│
+   │ JPEG SOI/EOI parse │ │ HID personas       │ │   + VPN apply)     │
+   │ watch channel      │ │ Mass-storage CDROM │ │ aeon-netwatch      │
+   │ MJPEG HTTP fan-out │ │ Atomic input ops   │ │  (AP fallback)     │
+   └────────────────────┘ └────────────────────┘ │ aeon-firstboot     │
+                                      │          │  (creds + setup)   │
+                                      ▼          └────────────────────┘
                        ┌────────────────────────────────┐
                        │ /dev/hidg0..n                  │  USB HID gadget
+                       │ + CDC NCM ethernet (usb0)      │  + optional eth
+                       │ + mass_storage.0 (CDROM)       │  + optional disk
                        │ → USB-C OTG → target Mac/PC    │  visible to host
                        └────────────────────────────────┘
 ```
@@ -43,10 +49,9 @@ reachable from a SvelteKit web UI.
 These came from the eye-Pi build that preceded this project:
 
 - **Cam Link 4K UVC enumeration changes with the source signal.** At 4K it
-  ONLY offers NV12 (which ustreamer can't capture in stock builds); at lower
-  res it offers YUYV + YU12 + NV12. Solution baked into `aeon-streamer`:
-  swscale-based NV12 native support + a "always-pick-YU12-when-uncertain"
-  rule (Cam Link offers it at every resolution).
+  ONLY offers NV12; at lower res it offers YUYV + YU12 + NV12. Solution baked
+  into `aeon-streamer`: ffmpeg auto-detects whichever pixel format the v4l2
+  device is currently presenting, encodes to MJPEG on the fly.
 - **USB UVC devices don't support V4L2 DV-timings.** Adaptive resolution
   needs polling — both a v4l2-enum-hash watchdog AND a "is the streamer
   actually producing frames" watchdog. Both built into the streamer itself.
@@ -88,38 +93,60 @@ hardware-in-the-loop iteration.
 ## Streamer pipeline
 
 ```
-/dev/video0 (Cam Link UVC)
+/dev/video0 (Cam Link UVC, MS2109, …)
    │
    ▼
-v4l2 capture (V4L::Capture) ── current source's native format/res
+ffmpeg ─ auto-detected format / resolution
+   │   Linux v4l2 input, MJPEG passthrough preferred,
+   │   YUV/RGB sources transcoded to MJPEG via libjpeg.
    │
+   │   -f image2pipe -c:v mjpeg pipe:1
    ▼
-swscale convert ── NV12 / YUYV / UYVY / YU12 → I420
-   │
+stdout pipe → aeon-streamer (jpeg_pipe.rs)
+   │   Parses JPEG SOI (0xFFD8) / EOI (0xFFD9) markers,
+   │   extracts one Bytes per frame, drops partial buffers
+   │   on resync. No intermediate disk writes — frames live
+   │   in process memory only.
    ▼
-encoder
-   ├─ Pi 4: h264_v4l2m2m  → H.264 Annex B
-   ├─ Pi 5: libx264 (sw)  → H.264 Annex B
-   └─ Always available: turbojpeg → MJPEG
-   │
-   ▼
-fan-out
-   ├─ WebRTC track (low-latency primary)
-   ├─ MJPEG HTTP (compat / agent snapshot endpoint)
-   └─ JPEG memsink (single-frame snapshot, cheap polling)
+tokio::sync::watch<Option<Bytes>> ── single source of truth
+   ├─ HTTP multipart MJPEG stream (`/api/streamer/stream`)
+   │   long-lived connection, re-emits latest frame on watch
+   │   change + heartbeat every 1.5s if source stalls.
+   ├─ HTTP snapshot (`/api/streamer/snapshot`)
+   │   reads `.borrow().clone()`, returns immediately.
+   └─ Watchdog
+       checks `has_changed()` — restarts ffmpeg if no new
+       frame for N seconds.
 ```
 
 `aeon-streamer` watches the v4l2 device:
 - Polls `--list-formats-ext` hash every 2s; if it changes, reconfigure capture.
-- Polls own capture-fps; if 0 for 4+s, reset device.
+- Polls own watch channel; if no new frame for 4+s, restart ffmpeg.
+
+The pipe-based design replaced an earlier file-based one (v15-v23 wrote
+`live.jpg` with `-update 1 -atomic_writing 1`, but Chrome's multipart
+parser occasionally caught a half-written frame and discarded the rest
+of the stream). In-memory pipe eliminates the race entirely.
 
 ## Web UI
 
-SvelteKit + TailwindCSS. WebRTC video in a `<canvas>` for pixel-accurate
-display. Input capture overlays the canvas and posts to `/api/hid/*`.
+SvelteKit + TailwindCSS. The live stream is a long-lived multipart MJPEG
+`<img>` fed by `/api/streamer/stream`. Input capture overlays the image
+container and posts to `/api/hid/*`. Snapshot ops (`/api/streamer/snapshot`)
+share the same in-memory frame channel — no separate v4l2 grab.
 
-First-boot mode: when `aeon-netd` is in AP fallback, the web UI shows a
-WiFi setup wizard instead of the KVM session. After WiFi joins, full UI.
+Pages:
+- `/` — main KVM session (live stream + persona + input)
+- `/network` — USB ethernet + DNSCrypt + VPN (Tailscale/WireGuard/OpenVPN/Tor/I2P)
+- `/storage` — USB-CDROM library: upload ISO, set active, eject
+- `/tokens` — issue scoped API tokens (admin/full/macros/read)
+- `/setup` — first-boot admin password
+- `/setup/wifi` — live-scanning WiFi picker (served from the captive AP)
+
+First-boot mode: when `aeon-netwatch` is in AP fallback, the
+`/setup/wifi` route is served unauthenticated (state == `open`) and
+captive-portal HTTP responders + DNS wildcard auto-launch this page
+on every modern OS.
 
 ## Tailscale
 

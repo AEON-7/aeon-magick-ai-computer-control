@@ -45,6 +45,18 @@ anything is connected besides a perfectly normal-looking peripheral.
 
 It's the strangest USB device in the universe and also the most boring one.
 
+## What it does, in one bullet list
+
+- 🎹 **Pretends to be a keyboard/mouse/trackpad** via USB-C OTG (Linux gadget framework) — three hot-swappable personas including Apple Magic Keyboard + Trackpad with real multi-touch descriptor
+- 🎥 **Captures HDMI** via Elgato Cam Link 4K (or any UVC device), streams MJPEG to a browser at native resolution, 1080p60 capable
+- 🌐 **Optional USB ethernet adapter** on the same cable — host pipes its WAN through the Pi (`isolation` / `sharing` / `restricted` modes)
+- 🔒 **Optional encrypted DNS** (DNSCrypt v2 + DoH) — Cloudflare / Quad9 / AdGuard / NextDNS / Mullvad — for both the Pi AND USB clients
+- 🕳️ **Optional VPN tunnel** — Tailscale · WireGuard · OpenVPN · **Tor** (with bridge presets: direct/obfs4/meek-azure/snowflake/custom) · I2P — with kill-switch + LAN-bypass
+- 💿 **Optional USB-CDROM disk** — upload an ISO, expose it to the host as a bootable read-only drive
+- 🤖 **REST + MCP** — every operation atomic; macros + prompts shipped; works with any AI agent
+- 🎯 **Zero-touch first-boot** — captive-portal WiFi wizard, generated admin password on `/boot/firmware/`
+- 🔐 **argon2 + HMAC-signed cookies** — TLS with self-signed cert (or BYO), scoped API tokens (admin/full/macros/read)
+
 ## Personas
 
 `aeon-hid` builds a USB composite HID gadget on the Pi's USB-C OTG port. It
@@ -60,18 +72,59 @@ Switching persona requires a USB re-enumeration on the target. Takes about
 a second. The target host briefly sees the device disappear and a different
 one appear in its place.
 
+## Network — three independent layers
+
+The box doubles as a network appliance. All three layers are independent
+and any subset can be active.
+
+| Layer | What it does |
+|---|---|
+| **USB ethernet** (CDC NCM gadget) | The same USB-C that delivers HID adds a virtual ethernet adapter. Three modes: **isolation** (host reaches the Pi + internet via NAT, *cannot* see your LAN — guest-laptop safe), **sharing** (full LAN bridge), **restricted** (WAN only, host can't even see the Pi). 250+ Mbit on USB 3.0. |
+| **DNSCrypt** | Optional local `dnscrypt-proxy` on `127.0.2.1:53`. Curated providers (Cloudflare, Quad9, AdGuard, NextDNS, Mullvad, Cloudflare-for-Families). When enabled, both the Pi *and* every USB-connected client resolve via encrypted DoH. Plaintext DNS never leaves the device. |
+| **VPN tunnel** | One of: Tailscale (just paste an auth-key) · WireGuard (paste a `.conf`) · OpenVPN (paste a `.ovpn` + optional creds) · **Tor** (transparent proxy + DNS-over-Tor with bridge presets: direct / obfs4 / meek-azure / snowflake / custom) · I2P (garlic-routed, optional outproxy). Built-in **kill-switch** drops WAN if the tunnel falls; LAN-bypass keeps management always reachable. |
+
+Live VPN status panel polls every few seconds — bootstrap %, exit IP +
+country (or Tor circuit hops with `Guard → Middle → Exit`), peer count
+for Tailscale/WireGuard, handshake age. The "rotate identity" button
+sends `SIGNAL NEWNYM` to Tor, force-cycles WireGuard peers, etc.
+
+## First-boot setup wizard
+
+A `aeon-setup` WiFi AP comes up automatically if the device can't reach
+the internet for ~90 seconds. Connecting to it triggers the captive
+portal flow on every OS (Apple's `hotspot-detect.html`, Android's
+`generate_204`, Windows' `ncsi.txt` — all served via tiny HTTP listener
+on :80, with DNS wildcard + iptables redirect catching anything else),
+which auto-launches a browser pointing at the live-scanning WiFi picker.
+Pick a network, type the password, the device joins, the AP tears
+itself down. Zero monitor, zero keyboard, zero serial cable.
+
+## USB-CDROM disk drive
+
+Upload an ISO via the web UI; the Pi exposes it as a read-only USB CDROM
+the target boots from. Useful for booting installers, recovery images,
+or shimming a Linux live-USB onto a sealed device. Multi-GB streaming
+uploads with SHA-256 verification + atomic rename so a half-uploaded ISO
+can't corrupt your library. Hot-swap the "inserted" disk without
+unplugging the USB cable.
+
 ## Vision
 
-`aeon-streamer` wraps `ustreamer` (we owe PiKVM a beer) with an adaptive
-layer that automatically figures out what format and resolution the capture
-device is offering and gives ustreamer arguments that actually work. Two
-watchdog loops, one based on the v4l2 format-list hash and one based on
-ustreamer's own `source.online` signal, kick the streamer to respawn
-whenever the source signal changes. Hot-plugging the HDMI cable on the
-target and getting fresh frames within ~5 seconds is the design target.
+`aeon-streamer` runs ffmpeg with `-f image2pipe` so MJPEG frames stream
+straight into the supervisor's memory via stdout — no intermediate disk
+writes, no half-written-frame races, no jpeg corruption when the browser
+fetches at exactly the wrong microsecond. A single `tokio::sync::watch`
+channel fans the latest frame out to all consumers: the multipart MJPEG
+HTTP stream, the snapshot endpoint, and the watchdog. Two watchdog loops
+— one based on the v4l2 format-list hash, one based on the watch channel
+going stale — kick ffmpeg to respawn whenever the source signal changes.
+Hot-plugging the HDMI cable on the target and getting fresh frames within
+~5 seconds is the design target.
 
-Hardware H.264 encoding is used on Pi 4 (`h264_v4l2m2m`). Pi 5 falls back
-to MJPEG / software libx264.
+The capture pipeline auto-detects format and resolution from the v4l2
+device (MJPEG passthrough preferred; YUV/RGB sources get encoded), and
+adapts on the fly when the source resolution changes (e.g. when the
+target laptop wakes from sleep and renegotiates).
 
 ## Agents-first interfaces
 
@@ -116,14 +169,19 @@ aeon (system user), running:
   aeon-streamer.service  aeon-hid.service  aeon-supervisor.service
   aeon-firstboot.service                    ← oneshot: generates admin password, applies aeon-setup.toml
   aeon-netwatch.service + .timer            ← polls connectivity; spins up `aeon-setup` WiFi AP if offline for 90s+
+  aeon-net-services.service                 ← oneshot: applies network.toml (usb_eth + dnscrypt + vpn) on changes
+  dnscrypt-proxy.service tor.service        ← lazy-started by aeon-net-services when enabled
 
 /usr/share/aeon/web/
   the SvelteKit single-page app
 
 /usr/local/bin/aeon-firstboot
 /usr/local/bin/aeon-netwatch
+/usr/local/bin/aeon-net-services             ← applies network config; idempotent
 
 /etc/udev/rules.d/99-aeon-capture.rules    ← Elgato Cam Link 4K + MS2109 → /dev/kvmd-video
+
+/var/lib/aeon/iso/                           ← uploaded ISOs + .meta sidecars
 
 In /boot/firmware/ on the SD card after first boot:
   aeon-credentials.txt   ← admin password (mode 0600, delete it once you've noted it)

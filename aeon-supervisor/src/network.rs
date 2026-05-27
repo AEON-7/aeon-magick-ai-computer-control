@@ -122,8 +122,10 @@ impl Default for Vpn {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct TorCfg {
+    #[serde(default = "default_tor_preset")]
+    preset: String,
     #[serde(default)]
     bridges: String,
     #[serde(default)]
@@ -131,6 +133,19 @@ struct TorCfg {
     #[serde(default)]
     meek_mode: bool,
 }
+
+impl Default for TorCfg {
+    fn default() -> Self {
+        Self {
+            preset: default_tor_preset(),
+            bridges: String::new(),
+            exit_country: String::new(),
+            meek_mode: false,
+        }
+    }
+}
+
+fn default_tor_preset() -> String { "direct".to_string() }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct I2pCfg {
@@ -412,9 +427,17 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
             "has_auth_password": !s.vpn.openvpn.auth_password.is_empty(),
         },
         "tor": {
+            "preset": s.vpn.tor.preset,
             "has_bridges": !s.vpn.tor.bridges.is_empty(),
             "exit_country": s.vpn.tor.exit_country,
             "meek_mode": s.vpn.tor.meek_mode,
+            "presets": [
+                {"id": "direct", "label": "Direct", "blurb": "No bridge. Works on unrestricted networks. Fastest option."},
+                {"id": "obfs4", "label": "obfs4 (built-in)", "blurb": "Standard obfs4 obfuscation against simple traffic-analysis. Uses the Tor Browser default bridge list."},
+                {"id": "meek-azure", "label": "meek-azure", "blurb": "Tunnels through Microsoft Azure CDN, looking like HTTPS to Microsoft. Slow but very hard to block — works in most restrictive networks."},
+                {"id": "snowflake", "label": "Snowflake", "blurb": "Ephemeral WebRTC-based bridges via volunteer proxies. Requires snowflake-client (install: apt install snowflake-client)."},
+                {"id": "custom", "label": "Custom", "blurb": "Paste your own bridge lines below. Get fresh bridges from bridges.torproject.org."},
+            ],
         },
         "i2p": {
             "outproxy": s.vpn.i2p.outproxy,
@@ -454,6 +477,8 @@ pub struct VpnPutReq {
 
 #[derive(Deserialize)]
 pub struct TorPut {
+    #[serde(default)]
+    pub preset: Option<String>,
     #[serde(default)]
     pub bridges: Option<String>,
     #[serde(default)]
@@ -544,6 +569,16 @@ pub async fn put_vpn(
         if let Some(v) = ov.auth_password { nf.vpn.openvpn.auth_password = v; }
     }
     if let Some(tor) = req.tor {
+        if let Some(p) = tor.preset {
+            const VALID_PRESETS: &[&str] = &["direct", "obfs4", "meek-azure", "snowflake", "custom"];
+            if !VALID_PRESETS.contains(&p.as_str()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": format!("unknown tor preset '{p}'")})),
+                ).into_response();
+            }
+            nf.vpn.tor.preset = p;
+        }
         if let Some(v) = tor.bridges { nf.vpn.tor.bridges = v; }
         if let Some(v) = tor.exit_country {
             // Country codes are 2-letter ISO-3166. Reject anything else

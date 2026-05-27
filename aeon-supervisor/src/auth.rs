@@ -146,6 +146,7 @@ impl AuthStore {
         self.auth.read().password_hash.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn admin_username(&self) -> String {
         self.auth.read().username.clone()
     }

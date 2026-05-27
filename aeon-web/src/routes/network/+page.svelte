@@ -43,6 +43,7 @@
   let ovUser = '';
   let ovPass = '';
   let torBridges = '';
+  let torPreset = 'direct';
   let i2pOutproxy = '';
   let vpnSaving = false;
   let vpnMsg = '';
@@ -84,6 +85,7 @@
       ovConfig = '';
       ovPass = '';
       torBridges = '';
+      torPreset = v.tor?.preset ?? 'direct';
     } catch (e: any) {
       error = e?.message ?? 'failed to load network state';
     } finally {
@@ -236,8 +238,9 @@
         patch.openvpn = { auth_username: ovUser };
         if (ovConfig) patch.openvpn.config = ovConfig;
         if (ovPass) patch.openvpn.auth_password = ovPass;
-      } else if (vpnProvider === 'tor' && torBridges) {
-        patch.tor = { bridges: torBridges };
+      } else if (vpnProvider === 'tor') {
+        patch.tor = { preset: torPreset };
+        if (torBridges) patch.tor.bridges = torBridges;
       } else if (vpnProvider === 'i2p') {
         patch.i2p = { outproxy: i2pOutproxy };
       }
@@ -658,29 +661,60 @@ AllowedIPs = 0.0.0.0/0`}
             {/if}
 
             {#if vpnEnabled && vpnProvider === 'tor'}
-              <div class="space-y-2 pl-7">
-                <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="tor-br">
-                  Obfs4 bridges (optional)
-                  {#if vpnState?.tor.has_bridges}
-                    <span class="text-cursed-400 normal-case ml-1 text-[10px]">
-                      (saved — paste to replace, leave blank to keep)
-                    </span>
+              <div class="space-y-3 pl-7">
+                <!-- Bridge preset selector -->
+                <div class="space-y-2" role="radiogroup" aria-label="Tor bridge preset">
+                  <p class="text-xs uppercase tracking-wider text-zinc-500">
+                    Bridge preset
+                  </p>
+                  {#if vpnState?.tor.presets}
+                    {#each vpnState.tor.presets as p}
+                      <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="radio" bind:group={torPreset} value={p.id}
+                               class="mt-1 w-4 h-4 accent-cursed-500" />
+                        <div class="space-y-1">
+                          <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
+                          <p class="text-xs text-zinc-500">{p.blurb}</p>
+                        </div>
+                      </label>
+                    {/each}
                   {/if}
-                </label>
-                <textarea id="tor-br" bind:value={torBridges} rows="4"
-                          placeholder={`obfs4 12.34.56.78:443 BB6E…1A2B cert=…  iat-mode=0
+                </div>
+
+                <!-- Custom bridge text area — only relevant for preset=custom -->
+                {#if torPreset === 'custom'}
+                  <div class="space-y-1 pt-2 border-t border-ink-800">
+                    <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="tor-br">
+                      Custom bridge lines
+                      {#if vpnState?.tor.has_bridges}
+                        <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                          (saved — paste to replace, leave blank to keep)
+                        </span>
+                      {/if}
+                    </label>
+                    <textarea id="tor-br" bind:value={torBridges} rows="4"
+                              placeholder={`obfs4 12.34.56.78:443 BB6E…1A2B cert=…  iat-mode=0
 obfs4 …`}
-                          class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
-                <p class="text-xs text-zinc-500">
-                  Only set bridges if your local network blocks plain Tor.
-                  Get bridge lines from
-                  <a class="text-cursed-300 hover:underline"
-                     href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">
-                    bridges.torproject.org</a>. One bridge per line.
-                  Tor will run a transparent proxy on <code>127.0.0.1:9040</code>
+                              class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                    <p class="text-xs text-zinc-500">
+                      Request fresh bridges from
+                      <a class="text-cursed-300 hover:underline"
+                         href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">
+                        bridges.torproject.org</a>. One bridge per line.
+                      Most users won't need this — try one of the built-in
+                      presets above first.
+                    </p>
+                  </div>
+                {/if}
+
+                <p class="text-xs text-zinc-500 pt-2 border-t border-ink-800">
+                  Tor runs a transparent proxy on <code>127.0.0.1:9040</code>
                   and DNS on <code>127.0.0.1:5353</code>; iptables redirects
-                  all outbound TCP + DNS through it. UDP is dropped (Tor
-                  doesn't carry UDP).
+                  all outbound TCP + DNS through it, including traffic from
+                  USB-connected client devices. UDP is dropped (Tor doesn't
+                  carry UDP). When DNSCrypt is also enabled,
+                  DNSCrypt's DoH queries ride through Tor's TransPort too —
+                  ISP sees only Tor traffic.
                 </p>
               </div>
             {/if}

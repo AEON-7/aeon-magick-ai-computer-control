@@ -268,7 +268,11 @@ export interface VpnState {
     auth_username: string;
     has_auth_password: boolean;
   };
-  tor: { has_bridges: boolean };
+  tor: {
+    preset: string;
+    has_bridges: boolean;
+    presets: { id: string; label: string; blurb: string }[];
+  };
   i2p: { outproxy: string };
   providers: VpnProviderInfo[];
 }
@@ -290,7 +294,7 @@ export interface VpnPatch {
     auth_username?: string;
     auth_password?: string;
   };
-  tor?: { bridges?: string };
+  tor?: { preset?: string; bridges?: string };
   i2p?: { outproxy?: string };
 }
 
