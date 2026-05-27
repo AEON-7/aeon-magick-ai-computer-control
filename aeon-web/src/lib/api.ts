@@ -496,6 +496,59 @@ export const setDnsBlacklist = (b: DnsBlacklist) =>
 export const uploadDnsBlacklistCsv = (csv: string) =>
   req<{ ok: boolean; added: number }>('POST', '/dns/blacklist/import', { csv });
 
+// ── DNS blacklist subscription sources ─────────────────────────────────
+
+export interface DnsSource {
+  id: string;
+  name: string;
+  url: string;
+  format: 'hosts' | 'domains' | 'adblock';
+  refresh_hours: number;
+  enabled: boolean;
+  last_fetched_ms: number;
+  last_attempt_ms: number;
+  last_error: string;
+  entry_count: number;
+  sha256: string;
+  stale: boolean;          // true when refresh due
+}
+
+export interface DnsSourcePreset {
+  name: string;
+  url: string;
+  format: 'hosts' | 'domains' | 'adblock';
+  blurb: string;
+  category: 'general' | 'comprehensive' | 'lite' | 'security';
+}
+
+export const listDnsSources = () =>
+  req<{ ok: boolean; sources: DnsSource[]; presets: DnsSourcePreset[] }>(
+    'GET',
+    '/dns/sources',
+  );
+
+export const addDnsSource = (
+  src: { name: string; url: string; format: string; refresh_hours?: number },
+) =>
+  req<{ ok: boolean; id: string }>('POST', '/dns/sources', {
+    refresh_hours: 24,
+    ...src,
+  });
+
+export const updateDnsSource = (
+  id: string,
+  patch: { enabled?: boolean; refresh_hours?: number },
+) => req<{ ok: boolean }>('PUT', `/dns/sources/${encodeURIComponent(id)}`, patch);
+
+export const deleteDnsSource = (id: string) =>
+  req<{ ok: boolean }>('DELETE', `/dns/sources/${encodeURIComponent(id)}`);
+
+export const refreshDnsSource = (id: string) =>
+  req<{ ok: boolean; entry_count: number; sha256: string }>(
+    'POST',
+    `/dns/sources/${encodeURIComponent(id)}/refresh`,
+  );
+
 // ── SSH key management ────────────────────────────────────────────────
 
 export interface SshKey {

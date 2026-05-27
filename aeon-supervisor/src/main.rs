@@ -75,6 +75,9 @@ async fn main() -> Result<()> {
     // unconditionally is cheap and means we don't need a separate
     // service lifecycle.
     tokio::spawn(captive::serve());
+    // Background refresh loop for DNS blacklist subscription sources.
+    // Runs forever; checks every 5 min for stale lists and re-fetches.
+    tokio::spawn(dns_log::run_refresh_loop());
 
     axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service()).await?;
     Ok(())

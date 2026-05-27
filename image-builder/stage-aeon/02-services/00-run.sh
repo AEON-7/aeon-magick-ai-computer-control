@@ -45,6 +45,9 @@ d /run/aeon/snapshots 0755 aeon aeon -
 # root for port-80 binding.
 d /var/lib/aeon 0755 root root -
 d /var/lib/aeon/iso 0755 root root -
+# DNS blacklist subscription caches — one file per source, populated by
+# the supervisor's background refresh task.
+d /var/lib/aeon/dns-sources 0755 root root -
 EOF
 
 # Helper scripts

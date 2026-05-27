@@ -214,6 +214,14 @@ pub fn build_router(cfg: Config) -> Router {
             get(crate::dns_log::get_blacklist)
                 .put(crate::dns_log::put_blacklist))
         .route("/dns/blacklist/import", post(crate::dns_log::import_csv))
+        // Subscription sources for the blacklist (StevenBlack, OISD, etc.)
+        .route("/dns/sources",
+            get(crate::dns_log::list_sources)
+                .post(crate::dns_log::add_source))
+        .route("/dns/sources/:id",
+            axum::routing::put(crate::dns_log::update_source)
+                .delete(crate::dns_log::delete_source))
+        .route("/dns/sources/:id/refresh", post(crate::dns_log::refresh_source))
         // Security console — throughput + blocked counters + top clients.
         .route("/security/metrics",
             get(crate::security_metrics::get_metrics))

@@ -153,6 +153,9 @@ fn tools_catalog() -> Value {
             tool("dns_blacklist",
                  "Return the current DNS blacklist (domains + regex patterns) plus the most recent query log (when logging is enabled).",
                  json!({"type":"object","properties":{}})),
+            tool("dns_sources",
+                 "List subscription blacklist sources (StevenBlack / OISD / Ultimate Hosts / etc.) and the curated presets the user can subscribe to. Includes per-source fetch status + entry count.",
+                 json!({"type":"object","properties":{}})),
             tool("ssh_keys",
                  "List trusted SSH public keys (fingerprint + comment).",
                  json!({"type":"object","properties":{}})),
@@ -281,6 +284,10 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 "log": log.0,
             });
             Ok(text_result(&serde_json::to_string_pretty(&combined).unwrap_or_default()))
+        }
+        "dns_sources" => {
+            let s = crate::dns_log::list_sources(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&s.0).unwrap_or_default()))
         }
         "ssh_keys" => {
             let k = crate::ssh_keys::list_keys(axum::extract::State(state.clone())).await;
