@@ -51,9 +51,43 @@
     }
   }
 
+  // Highlight flash for the new-rule form when we arrive via a deep
+  // link from /security's "allow this traffic" button.
+  let prefilledFromUrl = false;
+
   onMount(() => {
     refresh();
     refresh_iv = setInterval(refresh, 5000);
+
+    // Deep-link from /security → pre-populate newRule from URL params.
+    // /security/+page.svelte builds the URL via allowLink(); we mirror
+    // its schema here. Wrapped in a try so a malformed URL doesn't
+    // break the editor.
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      if (sp.get('createRule') === '1') {
+        if (sp.has('chain'))   newRule.chain = sp.get('chain')!;
+        if (sp.has('action'))  newRule.action = sp.get('action')!;
+        if (sp.has('proto'))   newRule.proto = sp.get('proto')!;
+        if (sp.has('iface'))   newRule.interface = sp.get('iface')!;
+        if (sp.has('src'))     newRule.src = sp.get('src')!;
+        if (sp.has('dst'))     newRule.dst = sp.get('dst')!;
+        if (sp.has('sport'))   newRule.sport = sp.get('sport')!;
+        if (sp.has('dport'))   newRule.dport = sp.get('dport')!;
+        if (sp.has('comment')) newRule.comment = sp.get('comment')!;
+        prefilledFromUrl = true;
+        // Scroll the form into view + fade the highlight after a moment.
+        setTimeout(() => {
+          document.getElementById('fw-add-rule')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
+        setTimeout(() => (prefilledFromUrl = false), 4000);
+        // Clean the URL so a refresh doesn't re-trigger the pre-fill.
+        const cleaned = window.location.pathname + window.location.hash;
+        history.replaceState({}, '', cleaned);
+      }
+    } catch (e) {
+      console.warn('deep-link parse failed', e);
+    }
   });
   onDestroy(() => { if (refresh_iv) clearInterval(refresh_iv); });
 
@@ -130,9 +164,21 @@
     </span>
   </div>
 
-  <!-- Add-rule form -->
-  <section class="bg-ink-950/40 border border-ink-800 rounded-lg p-4 space-y-3">
-    <h4 class="font-mono text-xs uppercase tracking-wider text-zinc-400">Add rule</h4>
+  <!-- Add-rule form. The id is the deep-link anchor target for
+       "allow this traffic" buttons on the /security page. -->
+  <section id="fw-add-rule"
+           class="border rounded-lg p-4 space-y-3 transition-colors duration-500
+                  {prefilledFromUrl
+                    ? 'bg-live-500/10 border-live-500/40 shadow-[0_0_18px_rgba(110,231,183,0.18)]'
+                    : 'bg-ink-950/40 border-ink-800'}">
+    <h4 class="font-mono text-xs uppercase tracking-wider text-zinc-400">
+      Add rule
+      {#if prefilledFromUrl}
+        <span class="ml-2 text-[10px] text-live-300 normal-case">
+          ← pre-filled from blocked-traffic log; review + save
+        </span>
+      {/if}
+    </h4>
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
       <label class="space-y-1">
         <span class="text-zinc-500">Chain</span>

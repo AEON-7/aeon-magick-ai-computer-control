@@ -618,3 +618,21 @@ export interface SecurityMetrics {
 
 export const getSecurityMetrics = () =>
   req<SecurityMetrics>('GET', '/security/metrics');
+
+export interface BlockedPacket {
+  ts_ms: number;
+  in_iface: string;
+  out_iface: string;
+  proto: string;        // TCP / UDP / ICMP
+  src: string;
+  dst: string;
+  sport: string;
+  dport: string;
+  length: number;
+}
+
+export const getBlockedPackets = (limit = 300) =>
+  req<{ ok: boolean; entries: BlockedPacket[]; since: string }>(
+    'GET',
+    `/security/blocked?limit=${limit}`,
+  );

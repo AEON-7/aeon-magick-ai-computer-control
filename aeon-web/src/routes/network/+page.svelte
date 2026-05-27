@@ -133,6 +133,16 @@
     // bootstrap progress smoothly.
     vpnStatusPollTimer = setInterval(pollVpnStatus, 4000);
     pollVpnStatus();
+    // Auto-expand the Advanced (firewall rules) section if we arrived
+    // via the /security page's "allow this traffic" deep-link. Without
+    // this the RulesEditor doesn't mount, so its onMount can't read the
+    // ?createRule=1 params.
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      if (sp.get('createRule') === '1') {
+        advancedOpen = true;
+      }
+    } catch { /* ignore */ }
   });
 
   onDestroy(() => {

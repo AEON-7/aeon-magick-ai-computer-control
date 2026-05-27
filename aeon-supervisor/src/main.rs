@@ -17,6 +17,7 @@ use tracing::info;
 mod api;
 mod audit;
 mod auth;
+mod blocked_log;
 mod captive;
 mod dns_log;
 mod firewall;
@@ -79,6 +80,10 @@ async fn main() -> Result<()> {
     // Background refresh loop for DNS blacklist subscription sources.
     // Runs forever; checks every 5 min for stale lists and re-fetches.
     tokio::spawn(dns_log::run_refresh_loop());
+    // Ensure the AEON_DROP iptables chain exists at startup so every
+    // DROP rule we apply (user or system) gets logged on the way down.
+    // This is what populates the "Blocked traffic" panel.
+    firewall::ensure_drop_chain();
 
     axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service()).await?;
     Ok(())

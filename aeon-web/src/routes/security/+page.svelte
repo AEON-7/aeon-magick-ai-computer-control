@@ -3,12 +3,17 @@
   import * as api from '$lib/api';
 
   let m: api.SecurityMetrics | null = null;
+  let blocked: api.BlockedPacket[] = [];
+  let blockedSince = '';
   let error = '';
   let poll_iv: ReturnType<typeof setInterval>;
 
   async function refresh() {
     try {
       m = await api.getSecurityMetrics();
+      const b = await api.getBlockedPackets(300);
+      blocked = b.entries;
+      blockedSince = b.since;
     } catch (e: any) {
       error = e?.message ?? 'failed to load';
     }
@@ -17,10 +22,39 @@
   onMount(() => {
     refresh();
     // 5s poll keeps the Pi cool — each request is one /sys file read
-    // per iface + one iptables -nvL invocation.
+    // per iface + one iptables -nvL invocation + one journalctl tail.
     poll_iv = setInterval(refresh, 5000);
   });
   onDestroy(() => { if (poll_iv) clearInterval(poll_iv); });
+
+  function fmtTime(ms: number): string {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    return d.toLocaleTimeString();
+  }
+  function fmtAgo(ms: number): string {
+    const dt = Date.now() - ms;
+    if (dt < 60_000) return 'just now';
+    if (dt < 3_600_000) return `${Math.floor(dt / 60_000)} min ago`;
+    return `${Math.floor(dt / 3_600_000)}h ago`;
+  }
+
+  /// Build a /network deep-link that pre-populates the firewall rule
+  /// form to ALLOW the observed traffic. The RulesEditor reads the
+  /// query params on mount.
+  function allowLink(p: api.BlockedPacket): string {
+    const params = new URLSearchParams();
+    params.set('createRule', '1');
+    params.set('chain', 'FORWARD');                       // packet was forwarded
+    params.set('action', 'ACCEPT');
+    if (p.proto) params.set('proto', p.proto.toLowerCase());
+    if (p.in_iface) params.set('iface', p.in_iface);
+    if (p.src) params.set('src', p.src);
+    if (p.dst) params.set('dst', p.dst);
+    if (p.dport) params.set('dport', p.dport);
+    params.set('comment', `Allow ${p.proto || 'traffic'} from ${p.src || 'any'} to ${p.dst || 'any'}${p.dport ? ':' + p.dport : ''}`);
+    return `/network?${params.toString()}#advanced`;
+  }
 
   function fmtBps(bps: number): string {
     if (bps < 1_000) return `${bps} bps`;
@@ -165,6 +199,64 @@
           </div>
         </section>
       {/if}
+
+      <!-- ─── Blocked traffic (last 2h) ─── -->
+      <section class="bg-ink-900 border border-red-500/30 rounded-xl p-5 space-y-3">
+        <header class="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h3 class="font-mono text-xs uppercase tracking-wider text-red-300">
+              Blocked traffic
+              <span class="text-zinc-500 ml-2">({blocked.length})</span>
+            </h3>
+            <p class="text-[11px] text-zinc-500">
+              Last 2 hours of packets dropped by the firewall. Use "allow this traffic"
+              to open a pre-populated firewall rule. Logging is rate-limited (5/sec)
+              so a chatty broadcast storm can't flood this view.
+            </p>
+          </div>
+        </header>
+        {#if blocked.length === 0}
+          <p class="text-xs text-zinc-500 italic">
+            Nothing blocked recently. Either no rules are firing or your traffic
+            is all legit — both are good outcomes.
+          </p>
+        {:else}
+          <div class="max-h-[420px] overflow-auto rounded border border-ink-800
+                      divide-y divide-ink-800 bg-ink-950">
+            {#each blocked as b (b.ts_ms + b.src + b.dst + b.dport + b.proto)}
+              <div class="flex items-center gap-3 p-2 text-[11px] font-mono
+                          hover:bg-ink-900/60">
+                <span class="text-zinc-600 w-20 shrink-0" title={fmtTime(b.ts_ms)}>
+                  {fmtAgo(b.ts_ms)}
+                </span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0
+                             {b.proto === 'TCP' ? 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40'
+                               : b.proto === 'UDP' ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40'
+                               : 'bg-ink-700 text-zinc-300 border-ink-600'}">
+                  {b.proto || '?'}
+                </span>
+                <span class="text-zinc-500 w-12 shrink-0 truncate">
+                  {b.in_iface || '?'}
+                </span>
+                <span class="text-zinc-300 flex-1 truncate"
+                      title={`${b.src}${b.sport ? ':' + b.sport : ''} → ${b.dst}${b.dport ? ':' + b.dport : ''}`}>
+                  {b.src}{b.sport ? ':' + b.sport : ''}
+                  <span class="text-zinc-600">→</span>
+                  {b.dst}{b.dport ? ':' + b.dport : ''}
+                </span>
+                <a href={allowLink(b)}
+                   class="text-[10px] px-2 py-1 rounded shrink-0
+                          border border-live-500/40 text-live-300
+                          hover:bg-live-500/15 hover:text-live-200
+                          transition-colors"
+                   title="Open firewall rule editor pre-filled to ACCEPT this traffic">
+                  ✓ allow this traffic
+                </a>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
 
       <!-- Suspicious events -->
       {#if m.suspicious_events.length}

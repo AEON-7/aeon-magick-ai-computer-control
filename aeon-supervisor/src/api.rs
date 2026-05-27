@@ -225,6 +225,10 @@ pub fn build_router(cfg: Config) -> Router {
         // Security console — throughput + blocked counters + top clients.
         .route("/security/metrics",
             get(crate::security_metrics::get_metrics))
+        // Recent blocked packets — populated by the AEON_DROP chain's
+        // LOG entries, parsed from the kernel journal on demand.
+        .route("/security/blocked",
+            get(crate::blocked_log::list))
         // Audit log — recent admin actions and authentication events.
         .route("/audit",
             get(crate::audit::list)

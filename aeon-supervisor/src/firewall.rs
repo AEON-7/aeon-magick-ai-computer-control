@@ -93,6 +93,41 @@ fn write_rules(rf: &RulesFile) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Ensure the `AEON_DROP` chain exists and is populated. Every DROP
+/// rule we apply (user-created or system) jumps to this chain instead
+/// of `-j DROP` directly, so we get a rate-limited LOG entry per
+/// blocked packet. blocked_log.rs reads those via journalctl.
+///
+/// Safe to call repeatedly — the `-N` is idempotent (returns code 1
+/// if already exists, which we ignore), and we flush+rewrite the
+/// chain's contents each time so any operator-edited rules get reset
+/// to our canonical form.
+pub fn ensure_drop_chain() {
+    use std::process::Command;
+    // Create the chain (no-op if it exists; iptables prints an error to
+    // stderr but exits 1 — we ignore both).
+    let _ = Command::new("iptables")
+        .args(["-N", "AEON_DROP"])
+        .status();
+    // Wipe whatever was in it; we re-add our canonical LOG + DROP pair.
+    let _ = Command::new("iptables").args(["-F", "AEON_DROP"]).status();
+    // LOG (rate-limited so a chatty broadcast storm can't flood the
+    // journal). burst 10 absorbs short spikes. --log-prefix is what
+    // blocked_log.rs greps for.
+    let _ = Command::new("iptables")
+        .args([
+            "-A", "AEON_DROP",
+            "-m", "limit",
+            "--limit", "5/sec",
+            "--limit-burst", "10",
+            "-j", "LOG",
+            "--log-prefix", "AEON-DROP: ",
+            "--log-level", "4",
+        ])
+        .status();
+    let _ = Command::new("iptables").args(["-A", "AEON_DROP", "-j", "DROP"]).status();
+}
+
 /// Build the iptables CLI arguments for one rule.
 fn rule_to_args(r: &Rule) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
@@ -134,8 +169,17 @@ fn rule_to_args(r: &Rule) -> Vec<String> {
         args.push("--dport".into());
         args.push(r.dport.clone());
     }
-    args.push("-j".into());
-    args.push(r.action.clone());
+    // DROP routes through the AEON_DROP chain so the packet gets logged
+    // (rate-limited) before being dropped — that's how the security
+    // console's "Blocked traffic" panel gets populated. Direct -j DROP
+    // would silently kill the packet with nothing to show in the UI.
+    if r.action == "DROP" {
+        args.push("-j".into());
+        args.push("AEON_DROP".into());
+    } else {
+        args.push("-j".into());
+        args.push(r.action.clone());
+    }
     if !r.target_arg.is_empty() {
         match r.action.as_str() {
             "REDIRECT" => {
@@ -165,6 +209,9 @@ fn rule_to_args(r: &Rule) -> Vec<String> {
 /// rule set in order. Same line-number-driven delete pattern as
 /// network.rs's iptables sweep.
 fn apply_rules(rf: &RulesFile) -> Result<(), String> {
+    // 0. Make sure the AEON_DROP chain exists before any rule that
+    // jumps to it (any user-created DROP rule does).
+    ensure_drop_chain();
     // 1. Sweep.
     for table in &["filter", "nat", "mangle"] {
         for chain in &["INPUT", "OUTPUT", "FORWARD", "PREROUTING", "POSTROUTING"] {

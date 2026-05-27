@@ -109,6 +109,17 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null
 #     This is standard hotspot-router behavior (every captive portal
 #     does this) and is what makes restricted mode actually meaningful
 #     for DNS privacy too.
+# Make sure the AEON_DROP target chain exists before any -j AEON_DROP
+# rule below references it. Idempotent — survives re-apply across
+# multiple toggles. Logged drops feed the security console's
+# "Blocked traffic" panel.
+iptables -N AEON_DROP 2>/dev/null || true
+iptables -F AEON_DROP 2>/dev/null || true
+iptables -A AEON_DROP \
+    -m limit --limit 5/sec --limit-burst 10 \
+    -j LOG --log-prefix "AEON-DROP: " --log-level 4
+iptables -A AEON_DROP -j DROP
+
 iptables -t nat -A PREROUTING -i usb0 -p udp --dport 53 \
     -j DNAT --to-destination "${PI_ADDR}:53" \
     -m comment --comment "aeon-usb-net"
@@ -122,11 +133,11 @@ iptables -t nat -A PREROUTING -i usb0 -p tcp --dport 53 \
 apply_isolation_forward() {
     # Order matters: deny RFC1918 destinations FIRST. Insert at front of
     # FORWARD so they evaluate before any NM-installed ACCEPTs.
-    iptables -I FORWARD 1 -i usb0 -d 192.168.0.0/16 -j DROP -m comment --comment "aeon-usb-net"
-    iptables -I FORWARD 1 -i usb0 -d 172.16.0.0/12  -j DROP -m comment --comment "aeon-usb-net"
+    iptables -I FORWARD 1 -i usb0 -d 192.168.0.0/16 -j AEON_DROP -m comment --comment "aeon-usb-net"
+    iptables -I FORWARD 1 -i usb0 -d 172.16.0.0/12  -j AEON_DROP -m comment --comment "aeon-usb-net"
     # 10.x is tricky — block all of 10/8 EXCEPT our own usb-net subnet
     # (which contains the Pi and DHCP clients).
-    iptables -I FORWARD 1 -i usb0 -d 10.0.0.0/8 ! -d "$SUBNET" -j DROP -m comment --comment "aeon-usb-net"
+    iptables -I FORWARD 1 -i usb0 -d 10.0.0.0/8 ! -d "$SUBNET" -j AEON_DROP -m comment --comment "aeon-usb-net"
 }
 
 case "$MODE" in
@@ -139,7 +150,7 @@ case "$MODE" in
         # (iptables -I always inserts at position 1, pushing earlier rules
         # down). Final ordering: ACCEPT tcp/53, ACCEPT udp/53, ACCEPT udp/67,
         # DROP all.
-        iptables -I INPUT 1 -i usb0 -j DROP -m comment --comment "aeon-usb-net"
+        iptables -I INPUT 1 -i usb0 -j AEON_DROP -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p udp --dport 67 -j ACCEPT -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p udp --dport 53 -j ACCEPT -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p tcp --dport 53 -j ACCEPT -m comment --comment "aeon-usb-net"
@@ -167,9 +178,9 @@ case "$MODE" in
         # AP), and (b) it covers ANY future Pi interface address that
         # falls in the private space — including container bridges,
         # docker0, etc. — without enumeration drift.
-        iptables -I INPUT -i usb0 -d 10.0.0.0/8     -j DROP   -m comment --comment "aeon-usb-net"
-        iptables -I INPUT -i usb0 -d 172.16.0.0/12  -j DROP   -m comment --comment "aeon-usb-net"
-        iptables -I INPUT -i usb0 -d 192.168.0.0/16 -j DROP   -m comment --comment "aeon-usb-net"
+        iptables -I INPUT -i usb0 -d 10.0.0.0/8     -j AEON_DROP -m comment --comment "aeon-usb-net"
+        iptables -I INPUT -i usb0 -d 172.16.0.0/12  -j AEON_DROP -m comment --comment "aeon-usb-net"
+        iptables -I INPUT -i usb0 -d 192.168.0.0/16 -j AEON_DROP -m comment --comment "aeon-usb-net"
         # ACCEPT must be inserted LAST so it ends up at position 1
         # — first match wins, so this gets matched before any DROP.
         iptables -I INPUT -i usb0 -d "$PI_ADDR"     -j ACCEPT -m comment --comment "aeon-usb-net"
