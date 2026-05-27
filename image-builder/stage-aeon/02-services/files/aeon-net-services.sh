@@ -104,22 +104,52 @@ apply_dnscrypt() {
         cp "$DNSCRYPT_CONF" "$DNSCRYPT_BACKUP"
     fi
 
-    local resolvers; resolvers=$(dnscrypt_resolvers_for "$provider")
-    # Build server_names = ['a', 'b', ...]
-    local server_list=""
-    for r in $resolvers; do
-        if [ -z "$server_list" ]; then
-            server_list="'$r'"
-        else
-            server_list="$server_list, '$r'"
-        fi
-    done
+    local custom_stamp; custom_stamp="$(toml_get dnscrypt custom_stamp '')"
+    local custom_label; custom_label="$(toml_get dnscrypt custom_label custom)"
+    # Sanitize label to alphanumeric-and-dashes so it slots into the
+    # [static.LABEL] section header without TOML weirdness.
+    custom_label=$(printf '%s' "$custom_label" | tr -c 'a-zA-Z0-9_-' '_' | head -c 40)
+    [ -z "$custom_label" ] && custom_label="custom"
 
-    # Geo preference (best-effort). dnscrypt-proxy supports a
-    # `disabled_server_names` list but no positive geo filter — we lean
-    # on the resolver short-list itself which is already region-curated
-    # for Cloudflare/Quad9. Location is therefore informational only;
-    # we just log it and let dnscrypt-proxy's latency probe pick.
+    local server_list=""
+    local custom_static_section=""
+
+    if [ "$provider" = "custom" ]; then
+        if [ -z "$custom_stamp" ]; then
+            log "WARN: dnscrypt provider=custom but custom_stamp is empty — falling back to cloudflare"
+            provider="cloudflare"
+        else
+            # Single-server config via [static.LABEL]. dnscrypt-proxy
+            # reads the sdns:// stamp out of this section instead of
+            # pulling from the public-resolvers list.
+            server_list="'$custom_label'"
+            custom_static_section=$(cat <<EOF
+
+[static]
+  [static.'$custom_label']
+    stamp = '$custom_stamp'
+EOF
+)
+            log "dnscrypt: using custom provider '$custom_label'"
+        fi
+    fi
+
+    if [ -z "$server_list" ]; then
+        local resolvers; resolvers=$(dnscrypt_resolvers_for "$provider")
+        for r in $resolvers; do
+            if [ -z "$server_list" ]; then
+                server_list="'$r'"
+            else
+                server_list="$server_list, '$r'"
+            fi
+        done
+    fi
+
+    # Geo preference. dnscrypt-proxy supports a `lb_strategy` for tie-
+    # breaking and a `disabled_server_names` list but no positive geo
+    # filter — we lean on the resolver short-list itself which is
+    # already region-curated for Cloudflare/Quad9. Location maps to a
+    # built-in latency probe hint dnscrypt-proxy uses to weight picks.
     log "selected resolvers: $server_list (location hint: $location)"
 
     # If Tor VPN is active, route DNSCrypt's bootstrap (the initial
@@ -181,6 +211,7 @@ cache_neg_max_ttl = 600
     minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
     refresh_delay = 73
     prefix = ''
+${custom_static_section}
 EOF
     chmod 0644 "$DNSCRYPT_CONF"
 
@@ -402,9 +433,21 @@ except Exception:
     # package's default torrc keeps shipping the SOCKS port too (useful
     # for in-Pi apps that prefer SOCKS).
     install -d -m 0755 /etc/tor/torrc.d
+    # Bind TransPort + DNSPort to BOTH loopback AND usb0 IP (if USB
+    # ethernet is enabled). The usb0 binding is what lets USB-connected
+    # clients reach Tor via PREROUTING REDIRECT — DNAT'ing to 127.0.0.1
+    # from a non-loopback interface needs route_localnet=1 AND wins
+    # against rp_filter on some kernels and not others. REDIRECT to the
+    # input interface's own IP is reliable everywhere.
+    #
+    # We deliberately DON'T bind to 0.0.0.0 — that would expose Tor's
+    # unauthenticated TransPort to eth0/wlan0 too, turning the Pi into
+    # an open Tor proxy for anyone on the LAN.
+    local usb_enabled_for_tor; usb_enabled_for_tor="$(toml_get usb_ethernet enabled false)"
+    local pi_addr_for_tor; pi_addr_for_tor="$(toml_get usb_ethernet pi_addr 10.55.0.1)"
     cat > /etc/tor/torrc.d/aeon.conf <<EOF
 # Managed by aeon-net-services.
-# Transparent proxy port for iptables REDIRECT.
+# Transparent proxy port for iptables REDIRECT (Pi's own traffic).
 TransPort 127.0.0.1:9040 IsolateClientAddr IsolateDestPort IsolateDestAddr
 # DNS resolver — iptables redirects UDP/53 here.
 DNSPort 127.0.0.1:5353
@@ -414,6 +457,14 @@ AutomapHostsSuffixes .onion,.exit
 # Don't run a SOCKS port on a privileged interface.
 SOCKSPort 127.0.0.1:9050
 EOF
+    if [ "$usb_enabled_for_tor" = "true" ]; then
+        cat >> /etc/tor/torrc.d/aeon.conf <<EOF
+# Extra bindings for USB-connected client traffic. iptables PREROUTING
+# REDIRECT in the usb0 chain rewrites client destinations to these.
+TransPort ${pi_addr_for_tor}:9040 IsolateClientAddr IsolateDestPort IsolateDestAddr
+DNSPort ${pi_addr_for_tor}:5353
+EOF
+    fi
     # Apply bridge configuration based on preset. Each preset emits its
     # own ClientTransportPlugin + Bridge lines to torrc.d/aeon.conf.
     case "$preset" in
@@ -501,7 +552,12 @@ EOF
         echo "StrictNodes 1" >> /etc/tor/torrc.d/aeon.conf
     fi
 
-    systemctl enable --now tor.service 2>&1 | tee -a "$LOG" || true
+    # enable + (re)start. enable --now only starts if stopped, so we
+    # follow with an explicit restart to make sure a Tor that was
+    # already running with old config picks up the new torrc.d/aeon.conf
+    # (TransPort bindings change when usb_ethernet is toggled).
+    systemctl enable tor.service 2>&1 | tee -a "$LOG" || true
+    systemctl restart tor.service 2>&1 | tee -a "$LOG" || true
 
     # Wait for Tor's TransPort to actually start listening before
     # applying the iptables REDIRECTs. If we redirect to a port that
@@ -576,45 +632,59 @@ EOF
     # The OUTPUT chain only sees packets originating ON the Pi. USB
     # clients' traffic enters via usb0, hits PREROUTING → FORWARD →
     # POSTROUTING → eth0 egress — OUTPUT is never touched. Without
-    # PREROUTING DNAT rules, client TCP escapes Tor entirely and goes
-    # straight out the Pi's WAN connection. v24-prior bakes had this
-    # gap; v25 closes it.
+    # PREROUTING redirect rules, client TCP escapes Tor entirely and
+    # goes straight out the Pi's WAN connection.
     #
-    # Two pieces:
-    #   (a) route_localnet=1 sysctl on usb0 — allows the kernel to
-    #       route packets DNAT'd to 127.0.0.1 even though they arrived
-    #       on a non-loopback interface. Disabled by default for
-    #       safety; this is exactly the use-case it was added for.
-    #   (b) PREROUTING DNAT for usb0 TCP, EXEMPTING port 53 (already
-    #       DNAT'd to dnsmasq by aeon-usb-net) and the Pi's own usb0
-    #       IP (so clients can still reach the local web UI).
+    # v24-v27: tried DNAT --to-destination 127.0.0.1:9040 + route_localnet=1.
+    #          Works on some kernels, silently drops on others (rp_filter,
+    #          martian filtering, distro-specific sysctls).
+    # v28+:    use REDIRECT, which rewrites dst to the INBOUND INTERFACE's
+    #          own IP. We bind extra TransPort/DNSPort lines on the usb0
+    #          IP (see apply_vpn_tor torrc setup above) so Tor accepts
+    #          the redirected traffic. No route_localnet, no rp_filter
+    #          juggling — just standard NAT.
     local usb_enabled; usb_enabled="$(toml_get usb_ethernet enabled false)"
     if [ "$usb_enabled" = "true" ]; then
         local pi_addr; pi_addr="$(toml_get usb_ethernet pi_addr 10.55.0.1)"
-        # (a) sysctl — quiet because newer kernels print a deprecation
-        # warning even though the knob still works.
-        sysctl -w net.ipv4.conf.usb0.route_localnet=1 >/dev/null 2>&1 || true
-        # (b1) Exempt Pi's own usb0 IP — keep web UI reachable from clients.
-        iptables -t nat -A PREROUTING -i usb0 -d "$pi_addr" \
+        # (a) Exempt Pi's own usb0 IP for non-DNS ports — keep web UI
+        # reachable from clients (we don't want to proxy HTTPS to the
+        # web UI through Tor; that would loop).
+        iptables -t nat -A PREROUTING -i usb0 -d "$pi_addr" -p tcp \
+            ! --dport 53 \
             -j RETURN -m comment --comment "aeon-vpn"
-        # (b2) DNAT all other client TCP (except port 53, which the
-        # aeon-usb-net DNS-hijack rule already DNATs to dnsmasq) to
-        # Tor's TransPort on localhost.
+        # (b) Redirect all OTHER client TCP (except port 53; dnsmasq
+        # handles that and forwards to DNSCrypt or Tor DNSPort) to
+        # Tor's TransPort listening on the usb0 IP.
         iptables -t nat -A PREROUTING -i usb0 -p tcp \
-            ! --dport 53 --syn \
-            -j DNAT --to-destination "127.0.0.1:$trans_port" \
+            ! --dport 53 \
+            -j REDIRECT --to-ports "$trans_port" \
             -m comment --comment "aeon-vpn"
-        # Drop forwarded UDP from usb0 (Tor can't carry UDP). DHCP
-        # (67/68) and NTP (123) and mDNS (5353) stay accepted in
-        # FORWARD so clients can still bootstrap their network. The
-        # rest of the world's UDP — QUIC, WebRTC, gaming, BitTorrent
-        # — is dropped to prevent privacy leakage around Tor.
+        # (c) DNS handling: aeon-usb-net.sh already DNATs usb0 port-53
+        # traffic to dnsmasq on PI_ADDR:53 (rule installed at boot).
+        # dnsmasq forwards to its upstream (system resolver); those
+        # upstream queries pass through the OUTPUT chain which we
+        # already REDIRECT to 5353 (Tor DNSPort). So client DNS rides
+        # through Tor automatically — no extra PREROUTING rule needed
+        # here, and adding one would be unreachable dead code anyway
+        # (the aeon-usb-net DNAT comes first in the chain).
+        #
+        # (d) FORWARD: drop client UDP except DHCP/NTP/mDNS. Tor can't
+        # carry UDP; letting it leak around Tor would deanonymize.
+        # (TCP is intercepted by PREROUTING above so it never reaches
+        # FORWARD in the first place.)
         iptables -A FORWARD -i usb0 -p udp --dport 67   -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 68   -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 123  -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp              -j DROP   -m comment --comment "aeon-vpn"
-        log "tor: USB client traffic hijacked through TransPort:$trans_port (TCP); UDP dropped except DHCP/NTP/mDNS"
+        # (e) Make sure the INPUT chain accepts the redirected TCP on
+        # the usb0 IP. Default Debian INPUT is ACCEPT but NetworkManager
+        # / hardening profiles sometimes flip it. Add an explicit rule
+        # tagged with our comment so a stricter base policy doesn't
+        # silently drop the proxied traffic.
+        iptables -A INPUT -i usb0 -d "$pi_addr" -p tcp --dport "$trans_port" \
+            -j ACCEPT -m comment --comment "aeon-vpn"
+        log "tor: USB client TCP REDIRECTed to ${pi_addr}:${trans_port}; DNS via dnsmasq → Tor; UDP dropped except DHCP/NTP/mDNS"
     fi
     # UDP can't traverse Tor — drop it BUT exempt:
     #  - Loopback (allows local UDP to DNSCrypt 127.0.2.1:53, Tor's

@@ -207,6 +207,12 @@ export interface DnscryptProvider {
   id: string;
   label: string;
   blurb: string;
+  transport: string;          // "DoH" / "DoT" / "DNSCrypt" / "any"
+  log_policy: string;         // "no_logs" / "anonymized" / "self_logs" / "varies"
+  log_detail: string;         // human-readable detail
+  security: string;           // "basic" / "filtered" / "family" / "ad_block" / "varies"
+  jurisdiction: string;       // ISO country code or "varies"
+  homepage: string;
 }
 
 export interface DnscryptLocation {
@@ -219,6 +225,8 @@ export interface DnscryptState {
   enabled: boolean;
   provider: string;
   location: string;
+  custom_stamp: string;
+  custom_label: string;
   providers: DnscryptProvider[];
   locations: DnscryptLocation[];
 }
@@ -226,7 +234,13 @@ export interface DnscryptState {
 export const getDnscrypt = () => req<DnscryptState>('GET', '/network/dnscrypt');
 
 export const setDnscrypt = (
-  patch: { enabled?: boolean; provider?: string; location?: string },
+  patch: {
+    enabled?: boolean;
+    provider?: string;
+    location?: string;
+    custom_stamp?: string;
+    custom_label?: string;
+  },
 ) =>
   req<{ ok: boolean; enabled: boolean; provider: string; location: string }>(
     'PUT',
@@ -396,3 +410,125 @@ export async function uploadIso(
     xhr.send(file);
   });
 }
+
+// ── Firewall / NAT / Port-forward ──────────────────────────────────────
+
+export interface FirewallRule {
+  id: string;
+  chain: string;                  // INPUT / OUTPUT / FORWARD / PREROUTING / POSTROUTING
+  table: string;                  // filter / nat / mangle
+  direction: 'inbound' | 'outbound' | 'forward';
+  iface: string;                  // empty = any
+  proto: string;                  // tcp / udp / icmp / "" (any)
+  src: string;                    // CIDR or empty
+  dst: string;                    // CIDR or empty
+  sport: string;                  // port range or empty
+  dport: string;                  // port range or empty
+  action: string;                 // ACCEPT / DROP / REJECT / DNAT / SNAT / REDIRECT / MASQUERADE
+  comment: string;
+  packets: number;                // hit counter (from iptables -nvL)
+  bytes: number;
+  redundant_with: number | null;  // 1-based rule number if redundant
+}
+
+export interface FirewallRuleDraft {
+  chain: string;
+  table: string;
+  direction: 'inbound' | 'outbound' | 'forward';
+  interface: string;
+  proto: string;
+  src: string;
+  dst: string;
+  sport: string;
+  dport: string;
+  action: string;
+  comment: string;
+}
+
+export const listFirewallRules = () =>
+  req<{ ok: boolean; rules: FirewallRule[] }>('GET', '/firewall/rules');
+
+export const addFirewallRule = (rule: FirewallRuleDraft) =>
+  req<{ ok: boolean; id: string }>('POST', '/firewall/rules', rule);
+
+export const deleteFirewallRule = (id: string) =>
+  req<{ ok: boolean }>('DELETE', `/firewall/rules/${encodeURIComponent(id)}`);
+
+/** Move a rule one slot up (-1) or down (+1) within its chain. */
+export const moveFirewallRule = (id: string, delta: -1 | 1) =>
+  req<{ ok: boolean }>(
+    'POST',
+    `/firewall/rules/${encodeURIComponent(id)}/move`,
+    { delta },
+  );
+
+// ── DNS activity log + blacklist ───────────────────────────────────────
+
+export interface DnsLogEntry {
+  ts_ms: number;
+  client: string;
+  domain: string;
+  qtype: string;        // A / AAAA / CNAME / etc.
+  action: 'allow' | 'block';
+  source: string;       // "dnsmasq" / "blacklist" / "regex"
+}
+
+export interface DnsLogState {
+  ok: boolean;
+  enabled: boolean;
+  entries: DnsLogEntry[];
+  blocked_total: number;
+  allowed_total: number;
+}
+
+export const getDnsLog = () => req<DnsLogState>('GET', '/dns/log');
+export const setDnsLogEnabled = (enabled: boolean) =>
+  req<{ ok: boolean }>('PUT', '/dns/log', { enabled });
+
+export interface DnsBlacklist {
+  domains: string[];     // exact-match domains
+  regexes: string[];     // regex patterns
+}
+export const getDnsBlacklist = () =>
+  req<{ ok: boolean; blacklist: DnsBlacklist }>('GET', '/dns/blacklist');
+export const setDnsBlacklist = (b: DnsBlacklist) =>
+  req<{ ok: boolean }>('PUT', '/dns/blacklist', b);
+export const uploadDnsBlacklistCsv = (csv: string) =>
+  req<{ ok: boolean; added: number }>('POST', '/dns/blacklist/import', { csv });
+
+// ── SSH key management ────────────────────────────────────────────────
+
+export interface SshKey {
+  id: string;
+  comment: string;        // free-form trailing comment ("user@host")
+  type: string;           // ssh-ed25519 / ssh-rsa / etc
+  fingerprint: string;    // SHA256:…
+  added_at_ms: number;
+}
+
+export const listSshKeys = () =>
+  req<{ ok: boolean; keys: SshKey[] }>('GET', '/ssh/keys');
+export const addSshKey = (key: string) =>
+  req<{ ok: boolean; id: string }>('POST', '/ssh/keys', { key });
+export const removeSshKey = (id: string) =>
+  req<{ ok: boolean }>('DELETE', `/ssh/keys/${encodeURIComponent(id)}`);
+
+// ── Security console metrics ──────────────────────────────────────────
+
+export interface SecurityMetrics {
+  ok: boolean;
+  throughput_bps: { in: number; out: number };
+  throughput_history: { ts_ms: number; in_bps: number; out_bps: number }[];
+  blocked_24h: number;
+  suspicious_events: {
+    ts_ms: number;
+    severity: 'info' | 'warn' | 'crit';
+    label: string;
+    detail: string;
+  }[];
+  top_blocked_domains: { domain: string; count: number }[];
+  top_clients: { ip: string; bytes: number }[];
+}
+
+export const getSecurityMetrics = () =>
+  req<SecurityMetrics>('GET', '/security/metrics');

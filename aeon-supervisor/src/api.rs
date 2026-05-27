@@ -191,6 +191,32 @@ pub fn build_router(cfg: Config) -> Router {
                 // Disable axum's default 2MB body limit — ISOs are GB-scale
                 .layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/storage/:slug", axum::routing::delete(crate::storage::delete))
+        // Firewall + NAT + port-forward rules. State is /etc/aeon/firewall.toml;
+        // apply layer regenerates iptables-restore rules + executes.
+        .route("/firewall/rules",
+            get(crate::firewall::list_rules)
+                .post(crate::firewall::add_rule))
+        .route("/firewall/rules/:id",
+            axum::routing::delete(crate::firewall::delete_rule))
+        .route("/firewall/rules/:id/move",
+            post(crate::firewall::move_rule))
+        // SSH key trust store (admin user's authorized_keys).
+        .route("/ssh/keys",
+            get(crate::ssh_keys::list_keys)
+                .post(crate::ssh_keys::add_key))
+        .route("/ssh/keys/:id",
+            axum::routing::delete(crate::ssh_keys::remove_key))
+        // DNS blacklist + query log.
+        .route("/dns/log",
+            get(crate::dns_log::get_log)
+                .put(crate::dns_log::put_log))
+        .route("/dns/blacklist",
+            get(crate::dns_log::get_blacklist)
+                .put(crate::dns_log::put_blacklist))
+        .route("/dns/blacklist/import", post(crate::dns_log::import_csv))
+        // Security console — throughput + blocked counters + top clients.
+        .route("/security/metrics",
+            get(crate::security_metrics::get_metrics))
         // MCP (Model Context Protocol) — Streamable HTTP transport
         .route("/mcp", post(crate::mcp::handle));
 

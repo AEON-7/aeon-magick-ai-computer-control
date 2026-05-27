@@ -8,6 +8,7 @@
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
   import TipJar from '$lib/components/TipJar.svelte';
+  import RulesEditor from '$lib/components/RulesEditor.svelte';
 
   // ── USB ethernet ──
   let usbState: api.UsbNetState | null = null;
@@ -21,6 +22,8 @@
   let dnsEnabled = false;
   let dnsProvider = 'cloudflare';
   let dnsLocation = 'auto';
+  let dnsCustomStamp = '';
+  let dnsCustomLabel = '';
   let dnsSaving = false;
   let dnsMsg = '';
 
@@ -68,6 +71,8 @@
       dnsEnabled = d.enabled;
       dnsProvider = d.provider;
       dnsLocation = d.location;
+      dnsCustomStamp = d.custom_stamp ?? '';
+      dnsCustomLabel = d.custom_label ?? '';
       vpnState = v;
       vpnEnabled = v.enabled;
       vpnProvider = v.provider;
@@ -184,11 +189,16 @@
     dnsSaving = true;
     error = '';
     try {
-      await api.setDnscrypt({
+      const patch: Parameters<typeof api.setDnscrypt>[0] = {
         enabled: dnsEnabled,
         provider: dnsProvider,
         location: dnsLocation,
-      });
+      };
+      if (dnsProvider === 'custom') {
+        if (dnsCustomStamp) patch.custom_stamp = dnsCustomStamp.trim();
+        if (dnsCustomLabel) patch.custom_label = dnsCustomLabel.trim();
+      }
+      await api.setDnscrypt(patch);
       dnsMsg = '✓ saved + applied';
       setTimeout(() => (dnsMsg = ''), 3000);
       await refresh();
@@ -196,6 +206,27 @@
       error = e?.message ?? 'save failed';
     } finally {
       dnsSaving = false;
+    }
+  }
+
+  // Map machine tags to human-readable lozenges. Keeps the radio rows
+  // scannable rather than dumping "log_policy: anonymized" raw at the
+  // user.
+  function logBadge(policy: string): { text: string; classes: string } {
+    switch (policy) {
+      case 'no_logs':    return { text: 'no logs', classes: 'bg-live-500/20 text-live-300 border-live-500/40' };
+      case 'anonymized': return { text: 'anonymized', classes: 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40' };
+      case 'self_logs':  return { text: 'your dashboard', classes: 'bg-amber-500/15 text-amber-300 border-amber-500/40' };
+      default:           return { text: policy, classes: 'bg-ink-700 text-zinc-400 border-ink-600' };
+    }
+  }
+  function secBadge(sec: string): { text: string; classes: string } {
+    switch (sec) {
+      case 'basic':      return { text: 'basic', classes: 'bg-ink-700 text-zinc-300 border-ink-600' };
+      case 'filtered':   return { text: 'malware filter', classes: 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40' };
+      case 'family':     return { text: 'family filter', classes: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40' };
+      case 'ad_block':   return { text: 'ads + trackers', classes: 'bg-live-500/15 text-live-300 border-live-500/40' };
+      default:           return { text: sec, classes: 'bg-ink-700 text-zinc-400 border-ink-600' };
     }
   }
 
@@ -398,20 +429,16 @@
       </section>
 
       <!-- ──────────────────────────────────────────────────────────── -->
-      <!-- Advanced: DNSCrypt + VPN                                      -->
+      <!-- DNSCrypt + VPN — fully expanded as standard network settings  -->
       <!-- ──────────────────────────────────────────────────────────── -->
-      <details class="bg-ink-900 border border-ink-700 rounded-xl"
-               bind:open={advancedOpen}>
-        <summary class="cursor-pointer select-none px-6 py-4 flex items-center justify-between">
+      <div class="bg-ink-900 border border-ink-700 rounded-xl">
+        <div class="px-6 py-4 border-b border-ink-700">
           <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-            Advanced network
+            Standard network settings
           </span>
-          <span class="text-xs text-zinc-500">
-            {advancedOpen ? 'hide' : 'show'} DNSCrypt &amp; VPN
-          </span>
-        </summary>
+        </div>
 
-        <div class="border-t border-ink-700 p-6 space-y-8">
+        <div class="p-6 space-y-8">
 
           <!-- ─── DNSCrypt ─── -->
           <section class="space-y-4">
@@ -434,7 +461,7 @@
               <span class="text-zinc-200 text-sm">Enable DNSCrypt</span>
             </label>
 
-            <div class="space-y-3 pl-7" class:opacity-40={!dnsEnabled} class:pointer-events-none={!dnsEnabled}>
+            <div class="space-y-4 pl-7" class:opacity-40={!dnsEnabled} class:pointer-events-none={!dnsEnabled}>
               <div class="space-y-2" role="radiogroup" aria-label="DNSCrypt provider">
                 <p class="text-xs uppercase tracking-wider text-zinc-500">
                   Provider
@@ -442,12 +469,43 @@
                 <div class="space-y-2">
                   {#if dnsState}
                     {#each dnsState.providers as p}
-                      <label class="flex items-start gap-3 cursor-pointer">
+                      {@const lb = logBadge(p.log_policy)}
+                      {@const sb = secBadge(p.security)}
+                      <label class="flex items-start gap-3 cursor-pointer
+                                    p-3 rounded-lg border transition-colors
+                                    {dnsProvider === p.id
+                                      ? 'bg-cursed-500/10 border-cursed-500/50'
+                                      : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
                         <input type="radio" bind:group={dnsProvider} value={p.id}
                                class="mt-1 w-4 h-4 accent-cursed-500" />
-                        <div class="space-y-1">
-                          <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
-                          <p class="text-xs text-zinc-500">{p.blurb}</p>
+                        <div class="space-y-1.5 flex-1 min-w-0">
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-zinc-200 text-sm font-medium">{p.label}</span>
+                            <span class="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">
+                              {p.transport}
+                            </span>
+                            <span class="text-[10px] font-mono px-1.5 py-0.5 rounded
+                                         border {lb.classes}">
+                              {lb.text}
+                            </span>
+                            <span class="text-[10px] font-mono px-1.5 py-0.5 rounded
+                                         border {sb.classes}">
+                              {sb.text}
+                            </span>
+                            <span class="text-[10px] font-mono text-zinc-500 uppercase">
+                              {p.jurisdiction}
+                            </span>
+                          </div>
+                          <p class="text-xs text-zinc-400">{p.blurb}</p>
+                          <p class="text-[11px] text-zinc-500 italic">
+                            Logs: {p.log_detail}
+                          </p>
+                          {#if p.homepage}
+                            <a href={p.homepage} target="_blank" rel="noreferrer"
+                               class="text-[10px] text-cursed-300 hover:underline font-mono">
+                              → {p.homepage.replace(/^https?:\/\//, '')}
+                            </a>
+                          {/if}
                         </div>
                       </label>
                     {/each}
@@ -455,17 +513,60 @@
                 </div>
               </div>
 
+              {#if dnsProvider === 'custom'}
+                <!-- Custom stamp input — only shown when "custom" picked. -->
+                <div class="space-y-2 border-l-2 border-cursed-500/40 pl-4">
+                  <p class="text-xs uppercase tracking-wider text-zinc-500">
+                    Custom DNSCrypt v2 stamp
+                  </p>
+                  <input type="text" bind:value={dnsCustomLabel}
+                         placeholder="Friendly label (e.g. mycorp-dns)"
+                         class="w-full bg-ink-800 border border-ink-700 rounded
+                                px-3 py-2 text-sm text-zinc-200" />
+                  <textarea bind:value={dnsCustomStamp} rows="3"
+                            placeholder="sdns://AgcAAAAAAAAAAAAQZG5zLmV4YW1wbGUuY29tCi9kbnMtcXVlcnk"
+                            class="w-full bg-ink-800 border border-ink-700 rounded
+                                   px-3 py-2 text-xs text-zinc-200 font-mono break-all"
+                  ></textarea>
+                  <p class="text-xs text-zinc-500 leading-relaxed">
+                    Paste an <code class="text-cursed-300">sdns://</code> stamp from
+                    <a class="text-cursed-300 hover:underline"
+                       href="https://dnscrypt.info/stamps/" target="_blank" rel="noreferrer">
+                      dnscrypt.info/stamps</a>
+                    or any provider's documentation. Stamps encode DNSCrypt v2,
+                    DoH (DNS-over-HTTPS), DoT (DNS-over-TLS), or ODoH endpoints
+                    along with their public key + hash pin. The label is
+                    cosmetic, used only in dnscrypt-proxy's log output.
+                  </p>
+                </div>
+              {/if}
+
               <div class="space-y-2">
-                <p class="text-xs text-zinc-500 leading-relaxed">
-                  <span class="text-zinc-400">Geo routing:</span> the
-                  curated resolvers above all use <strong>anycast</strong> —
-                  one global IP per provider, BGP sends your query to the
-                  nearest Point-of-Presence regardless of preference.
-                  There's no DNS-layer knob that overrides this. For real
-                  geo control, route DNS through a VPN exit in your
-                  target country (WireGuard/OpenVPN/Tailscale to a peer
-                  there) or Tor with an exit-country pin — both are in
-                  the VPN section below.
+                <p class="text-xs uppercase tracking-wider text-zinc-500">
+                  Preferred region
+                </p>
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {#if dnsState}
+                    {#each dnsState.locations as loc}
+                      <label class="flex items-center gap-2 cursor-pointer
+                                    p-2 rounded border transition-colors text-xs
+                                    {dnsLocation === loc.id
+                                      ? 'bg-cursed-500/10 border-cursed-500/50 text-cursed-200'
+                                      : 'bg-ink-950/40 border-ink-800 text-zinc-400 hover:border-ink-700'}">
+                        <input type="radio" bind:group={dnsLocation} value={loc.id}
+                               class="w-3 h-3 accent-cursed-500" />
+                        <span>{loc.label}</span>
+                      </label>
+                    {/each}
+                  {/if}
+                </div>
+                <p class="text-[11px] text-zinc-500 leading-relaxed">
+                  Curated providers above all run global anycast — actual
+                  exit Point-of-Presence is picked by BGP, not by this knob.
+                  Region influences latency-probe weighting and which
+                  resolver of a provider's set is preferred. For real geo
+                  control, route DNS through a VPN exit in your target
+                  country (the VPN section below).
                 </p>
               </div>
             </div>
@@ -929,6 +1030,27 @@ obfs4 …`}
             {/if}
           </section>
 
+        </div>
+      </div>
+
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <!-- Advanced network — firewall, NAT, port-forward, etc.          -->
+      <!-- Big rules editor lives in a sub-component imported below.     -->
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <details class="bg-ink-900 border border-ink-700 rounded-xl"
+               bind:open={advancedOpen}>
+        <summary class="cursor-pointer select-none px-6 py-4 flex items-center justify-between">
+          <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            Advanced network — firewall + NAT + port-forward
+          </span>
+          <span class="text-xs text-zinc-500">
+            {advancedOpen ? 'hide' : 'show'} rules editor
+          </span>
+        </summary>
+        <div class="border-t border-ink-700">
+          {#if advancedOpen}
+            <RulesEditor />
+          {/if}
         </div>
       </details>
 

@@ -6,6 +6,13 @@
   let state: api.StreamerState | null = null;
   let hid: api.HidStatus | null = null;
   let poll_iv: ReturnType<typeof setInterval>;
+  // Network status pills — refreshed every 5s. We only care about the
+  // small "is it on?" booleans on this page, not the full config — the
+  // /network page is for that.
+  let vpnOn = false;
+  let vpnProvider: string = 'none';
+  let dnscryptOn = false;
+  let net_poll_iv: ReturnType<typeof setInterval>;
 
   let canvas: HTMLDivElement;
   let dragging = false;
@@ -32,10 +39,27 @@
     }
   }
 
+  // Refresh VPN + DNSCrypt enabled flags. Polled less often than the
+  // streamer state (5s vs 2s) — these change rarely.
+  async function refreshNet() {
+    try {
+      const [v, d] = await Promise.all([api.getVpn(), api.getDnscrypt()]);
+      vpnOn = v.enabled;
+      vpnProvider = v.provider;
+      dnscryptOn = d.enabled;
+    } catch (e) {
+      // Permission errors (read-only token, etc.) are silent — pills
+      // just disappear in that case.
+      console.warn('net refresh failed', e);
+    }
+  }
+
   onMount(() => {
     stream_url = api.streamURL();
     refreshState();
+    refreshNet();
     poll_iv = setInterval(refreshState, 2000);
+    net_poll_iv = setInterval(refreshNet, 5000);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
     document.addEventListener('pointerlockchange', onPointerLockChange);
@@ -44,6 +68,7 @@
 
   onDestroy(() => {
     clearInterval(poll_iv);
+    clearInterval(net_poll_iv);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKey);
     document.removeEventListener('pointerlockchange', onPointerLockChange);
@@ -246,6 +271,21 @@
           {state.mode.resolution} · {state.mode.format} · {state.captured_fps} fps
         </span>
       {/if}
+      <!-- Network status pills — clickable to the network page. -->
+      {#if vpnOn}
+        <a href="/network" class="pill-net" title="Click to manage VPN">
+          <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
+          {vpnProvider === 'tor' ? 'TOR' : vpnProvider === 'tailscale' ? 'TAILSCALE'
+            : vpnProvider === 'wireguard' ? 'WIREGUARD' : vpnProvider === 'openvpn' ? 'OPENVPN'
+            : vpnProvider === 'i2p' ? 'I2P' : 'VPN'}
+        </a>
+      {/if}
+      {#if dnscryptOn}
+        <a href="/network" class="pill-net" title="DNSCrypt encrypted DNS — click to configure">
+          <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
+          DNSCrypt
+        </a>
+      {/if}
       {#if hid}
         <!-- Persona selector — switch the HID descriptor (Generic / Logitech / Apple). -->
         <label class="flex items-center gap-1.5 text-xs font-mono text-cursed-400/80">
@@ -283,7 +323,10 @@
         </button>
       {/if}
       <a href="/network" class="btn text-xs">network</a>
+      <a href="/security" class="btn text-xs">security</a>
+      <a href="/dns" class="btn text-xs">DNS</a>
       <a href="/storage" class="btn text-xs">disk&nbsp;drive</a>
+      <a href="/ssh-keys" class="btn text-xs">SSH&nbsp;keys</a>
       <a href="/tokens" class="btn text-xs">API&nbsp;tokens</a>
       <button class="btn" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
       <button class="btn" on:click={onRelaunch}>relaunch&nbsp;streamer</button>

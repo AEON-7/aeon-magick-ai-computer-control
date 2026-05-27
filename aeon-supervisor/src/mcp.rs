@@ -140,6 +140,22 @@ fn tools_catalog() -> Value {
                         "properties":{
                             "name":{"type":"string"},
                             "params":{"type":"object","additionalProperties":{"type":"string"}}}})),
+            // ── Network / security / config tools ──
+            tool("network_status",
+                 "Read-only snapshot of all network-layer state: USB ethernet config, DNSCrypt config + provider, VPN provider + bootstrap status, current public IP/country if a tunnel is up. Use this to confirm the device's outbound posture before triggering sensitive ops.",
+                 json!({"type":"object","properties":{}})),
+            tool("security_metrics",
+                 "Read-only throughput + blocked-packet counters + top-clients list. Cheap to call (Pi-friendly). Use this to verify traffic is flowing through the expected interface (VPN vs WAN) or to spot a spike.",
+                 json!({"type":"object","properties":{}})),
+            tool("firewall_rules",
+                 "List all user-defined firewall/NAT/port-forward rules with hit counters and any redundancy flags.",
+                 json!({"type":"object","properties":{}})),
+            tool("dns_blacklist",
+                 "Return the current DNS blacklist (domains + regex patterns) plus the most recent query log (when logging is enabled).",
+                 json!({"type":"object","properties":{}})),
+            tool("ssh_keys",
+                 "List trusted SSH public keys (fingerprint + comment).",
+                 json!({"type":"object","properties":{}})),
         ]
     })
 }
@@ -232,6 +248,43 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             };
             let Json(result) = macros::run(state, name, &params).await;
             Ok(text_result(&serde_json::to_string_pretty(&result).unwrap_or_default()))
+        }
+        "network_status" => {
+            // Hit each network handler — they only read /etc/aeon/network.toml
+            // + system tools, no shared state needed beyond AppState.
+            // vpn_status (live tunnel state) intentionally NOT bundled here:
+            // it shells out to aeon-vpn-status which is expensive; agents
+            // should call it explicitly via REST when they need it.
+            let usb = crate::network::get_state(axum::extract::State(state.clone())).await;
+            let dns = crate::network::get_dnscrypt(axum::extract::State(state.clone())).await;
+            let vpn = crate::network::get_vpn(axum::extract::State(state.clone())).await;
+            let combined = json!({
+                "usb_ethernet": usb.0,
+                "dnscrypt": dns.0,
+                "vpn": vpn.0,
+            });
+            Ok(text_result(&serde_json::to_string_pretty(&combined).unwrap_or_default()))
+        }
+        "security_metrics" => {
+            let m = crate::security_metrics::get_metrics(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&m.0).unwrap_or_default()))
+        }
+        "firewall_rules" => {
+            let r = crate::firewall::list_rules(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&r.0).unwrap_or_default()))
+        }
+        "dns_blacklist" => {
+            let b = crate::dns_log::get_blacklist(axum::extract::State(state.clone())).await;
+            let log = crate::dns_log::get_log(axum::extract::State(state.clone())).await;
+            let combined = json!({
+                "blacklist": b.0,
+                "log": log.0,
+            });
+            Ok(text_result(&serde_json::to_string_pretty(&combined).unwrap_or_default()))
+        }
+        "ssh_keys" => {
+            let k = crate::ssh_keys::list_keys(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&k.0).unwrap_or_default()))
         }
         other => Err(format!("unknown tool: {other}")),
     }

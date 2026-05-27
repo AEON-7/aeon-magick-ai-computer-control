@@ -72,6 +72,14 @@ struct Dnscrypt {
     provider: String,
     #[serde(default = "default_dns_location")]
     location: String,
+    /// Custom sdns:// stamp (when provider="custom"). DNSCrypt v2 stamps
+    /// can encode DNSCrypt, DoH, DoT, or ODoH endpoints — see
+    /// https://dnscrypt.info/stamps for the format.
+    #[serde(default)]
+    custom_stamp: String,
+    /// Friendly label for the custom stamp (shown in the UI).
+    #[serde(default)]
+    custom_label: String,
 }
 
 impl Default for Dnscrypt {
@@ -80,6 +88,8 @@ impl Default for Dnscrypt {
             enabled: false,
             provider: default_dns_provider(),
             location: default_dns_location(),
+            custom_stamp: String::new(),
+            custom_label: String::new(),
         }
     }
 }
@@ -302,24 +312,106 @@ pub async fn put_state(
 /// GET /api/network/dnscrypt — current DNSCrypt state.
 pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
     let s = read_state();
+    // Each provider carries metadata so the UI can show users what they
+    // signed up for: log policy, DNSSEC validation, filtering, the
+    // transport, and the jurisdiction the operator's behind. All of
+    // this is on the provider's published privacy page; we just
+    // surface it next to the radio button.
+    //
+    // Logging tiers:
+    //   "no_logs"        — operator publicly commits to zero logging
+    //   "anonymized"     — operator keeps aggregated/anonymized stats
+    //   "self_logs"      — operator keeps per-user dashboards (opt-in tier)
+    //
+    // Security tiers:
+    //   "basic"          — DNSSEC valid, encrypted transport
+    //   "filtered"       — also blocks malware/phishing
+    //   "family"         — also blocks adult content
+    //   "ad_block"       — also blocks ads + trackers
     Json(json!({
         "ok": true,
         "enabled": s.dnscrypt.enabled,
         "provider": s.dnscrypt.provider,
         "location": s.dnscrypt.location,
+        "custom_stamp": s.dnscrypt.custom_stamp,
+        "custom_label": s.dnscrypt.custom_label,
         "providers": [
-            {"id": "cloudflare", "label": "Cloudflare", "blurb": "Cloudflare's 1.1.1.1 over DoH. Fast anycast, claims zero-logging."},
-            {"id": "cloudflare-fam", "label": "Cloudflare for Families", "blurb": "Cloudflare 1.1.1.3 — adds malware + adult-content filtering."},
-            {"id": "quad9", "label": "Quad9", "blurb": "Swiss-based, blocks known-malicious domains via threat intel."},
-            {"id": "adguard", "label": "AdGuard DNS", "blurb": "DoH with ad + tracker blocking built in."},
-            {"id": "nextdns", "label": "NextDNS", "blurb": "Anycast DoH; free tier; per-user dashboard for filtering."},
-            {"id": "mullvad", "label": "Mullvad", "blurb": "Privacy-focused DoH; no logging; pairs well with Mullvad VPN."},
+            {
+                "id": "cloudflare", "label": "Cloudflare 1.1.1.1",
+                "blurb": "Anycast DoH. Fast everywhere; advertised zero-log.",
+                "transport": "DoH",
+                "log_policy": "anonymized",
+                "log_detail": "24-hour transient logs; no IP retention per their published policy.",
+                "security": "basic",
+                "jurisdiction": "US",
+                "homepage": "https://1.1.1.1/",
+            },
+            {
+                "id": "cloudflare-fam", "label": "Cloudflare for Families",
+                "blurb": "Same as Cloudflare with malware + adult content filtering at the resolver.",
+                "transport": "DoH",
+                "log_policy": "anonymized",
+                "log_detail": "Same retention as 1.1.1.1; filtering happens server-side.",
+                "security": "family",
+                "jurisdiction": "US",
+                "homepage": "https://1.1.1.1/family/",
+            },
+            {
+                "id": "quad9", "label": "Quad9 9.9.9.9",
+                "blurb": "Swiss non-profit; blocks known-malicious domains via threat-intel feeds.",
+                "transport": "DNSCrypt",
+                "log_policy": "no_logs",
+                "log_detail": "Publicly audited zero-log policy; Swiss data-protection law applies.",
+                "security": "filtered",
+                "jurisdiction": "CH",
+                "homepage": "https://quad9.net/",
+            },
+            {
+                "id": "adguard", "label": "AdGuard DNS",
+                "blurb": "DoH/DoT with ad + tracker blocklists active at the resolver layer.",
+                "transport": "DoH",
+                "log_policy": "anonymized",
+                "log_detail": "Aggregated query stats only; no per-user identifiers retained.",
+                "security": "ad_block",
+                "jurisdiction": "CY",
+                "homepage": "https://adguard-dns.io/",
+            },
+            {
+                "id": "nextdns", "label": "NextDNS",
+                "blurb": "Free tier of NextDNS anycast; per-account configurable filters via dashboard.",
+                "transport": "DoH",
+                "log_policy": "self_logs",
+                "log_detail": "Logs visible to YOU in your NextDNS dashboard (toggle-able). Defaults to anonymized.",
+                "security": "filtered",
+                "jurisdiction": "US/IE",
+                "homepage": "https://nextdns.io/",
+            },
+            {
+                "id": "mullvad", "label": "Mullvad DNS",
+                "blurb": "Mullvad's public resolvers; same anti-logging stance as their VPN.",
+                "transport": "DoH",
+                "log_policy": "no_logs",
+                "log_detail": "Mullvad's published zero-knowledge stance — no IP, no query content.",
+                "security": "ad_block",
+                "jurisdiction": "SE",
+                "homepage": "https://mullvad.net/help/dns-over-https-and-dns-over-tls/",
+            },
+            {
+                "id": "custom", "label": "Custom (paste a stamp)",
+                "blurb": "Paste an sdns:// stamp from dnscrypt.info or a provider's site — supports DNSCrypt v2, DoH, DoT, ODoH.",
+                "transport": "any",
+                "log_policy": "varies",
+                "log_detail": "Depends on the operator behind the stamp.",
+                "security": "varies",
+                "jurisdiction": "varies",
+                "homepage": "https://dnscrypt.info/stamps/",
+            },
         ],
         "locations": [
             {"id": "auto", "label": "Auto (pick by latency)"},
-            {"id": "us", "label": "United States"},
-            {"id": "eu", "label": "Europe"},
-            {"id": "asia", "label": "Asia"},
+            {"id": "us", "label": "Americas"},
+            {"id": "eu", "label": "Europe / Africa"},
+            {"id": "asia", "label": "Asia / Pacific"},
         ],
     }))
 }
@@ -332,6 +424,10 @@ pub struct DnscryptPutReq {
     pub provider: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    #[serde(default)]
+    pub custom_stamp: Option<String>,
+    #[serde(default)]
+    pub custom_label: Option<String>,
 }
 
 /// PUT /api/network/dnscrypt — update DNSCrypt config + apply.
@@ -346,6 +442,7 @@ pub async fn put_dnscrypt(
         "adguard",
         "nextdns",
         "mullvad",
+        "custom",
     ];
     const VALID_LOCATIONS: &[&str] = &["auto", "us", "eu", "asia"];
 
@@ -371,7 +468,37 @@ pub async fn put_dnscrypt(
         }
         nf.dnscrypt.location = loc.to_string();
     }
+    if let Some(stamp) = req.custom_stamp {
+        let s = stamp.trim();
+        // Minimal validation: sdns:// scheme + reject anything with newlines
+        // or a torrc-injection-y character. The actual stamp parsing
+        // happens inside dnscrypt-proxy when it starts.
+        if !s.is_empty() && (!s.starts_with("sdns://") || s.contains('\n') || s.contains('\r')) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "custom_stamp must be an sdns:// URL"})),
+            )
+                .into_response();
+        }
+        nf.dnscrypt.custom_stamp = s.to_string();
+    }
+    if let Some(label) = req.custom_label {
+        // Strip control chars to avoid trashing the TOML / log lines.
+        let cleaned: String = label.chars().filter(|c| !c.is_control()).take(64).collect();
+        nf.dnscrypt.custom_label = cleaned;
+    }
     if let Some(enabled) = req.enabled {
+        // Don't allow enabling a custom provider that has no stamp.
+        if enabled
+            && nf.dnscrypt.provider == "custom"
+            && nf.dnscrypt.custom_stamp.is_empty()
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "custom provider requires a custom_stamp"})),
+            )
+                .into_response();
+        }
         nf.dnscrypt.enabled = enabled;
     }
 

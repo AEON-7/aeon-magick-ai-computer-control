@@ -107,13 +107,19 @@
   }
 </script>
 
-<details class="mt-8 bg-ink-900/50 border border-ink-800 rounded-xl group">
+<details open class="mt-8 bg-gradient-to-br from-cursed-900/40 via-ink-900/70 to-fuchsia-900/30
+                     border border-cursed-500/40 rounded-xl group
+                     shadow-[0_0_25px_rgba(217,70,239,0.18)]
+                     hover:shadow-[0_0_35px_rgba(217,70,239,0.30)]
+                     transition-shadow">
   <summary
     class="cursor-pointer select-none px-5 py-3 flex items-center justify-between
-           text-zinc-500 hover:text-zinc-300 transition-colors"
+           text-cursed-200 hover:text-cursed-100 transition-colors"
   >
-    <span class="font-mono text-xs uppercase tracking-wider">
-      ♥ tip the developer
+    <span class="font-mono text-sm uppercase tracking-wider flex items-center gap-2">
+      <span class="text-cursed-400 text-lg animate-pulse">♥</span>
+      tip the developer
+      <span class="text-[10px] text-zinc-400 normal-case font-sans">— one person, spare time, no VC</span>
     </span>
     <span class="text-[10px] font-mono opacity-70 group-open:hidden">
       expand

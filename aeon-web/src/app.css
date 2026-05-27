@@ -36,4 +36,10 @@
   .pill-offline {
     @apply pill bg-red-500/20 text-red-400 border border-red-500/40;
   }
+  /* Network status pill — used on the main page header to surface VPN /
+     Tor / DNSCrypt state at a glance. Click-target back to /network. */
+  .pill-net {
+    @apply pill bg-cursed-500/15 text-cursed-300 border border-cursed-500/40
+           font-mono uppercase tracking-wider hover:bg-cursed-500/25 transition;
+  }
 }
