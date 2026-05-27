@@ -219,6 +219,29 @@
     }
   }
 
+  /// One-click enable from the Tor section's "DNSCrypt recommended"
+  /// warning banner. Picks Cloudflare auto-region as a sensible default
+  /// + commits immediately (no second "save" step needed). After this
+  /// runs the warning auto-disappears because dnsEnabled flips true.
+  async function enableCloudflareDnscrypt() {
+    dnsSaving = true;
+    error = '';
+    try {
+      await api.setDnscrypt({
+        enabled: true,
+        provider: 'cloudflare',
+        location: 'auto',
+      });
+      dnsMsg = '✓ DNSCrypt enabled — Cloudflare via Tor';
+      setTimeout(() => (dnsMsg = ''), 4000);
+      await refresh();
+    } catch (e: any) {
+      error = e?.message ?? 'enable failed';
+    } finally {
+      dnsSaving = false;
+    }
+  }
+
   // Map machine tags to human-readable lozenges. Keeps the radio rows
   // scannable rather than dumping "log_policy: anonymized" raw at the
   // user.
@@ -774,6 +797,43 @@ AllowedIPs = 0.0.0.0/0`}
 
             {#if vpnEnabled && vpnProvider === 'tor'}
               <div class="space-y-3 pl-7">
+
+                <!-- Hard-to-miss warning: Tor + plain DNS = a bad time.
+                     Tor's TransPort only carries TCP, so UDP DNS gets
+                     dropped. Tor's own DNSPort can resolve A/AAAA but
+                     not MX/TXT/SRV/etc., which breaks plenty of apps.
+                     DoH/DoT over Tor — via DNSCrypt — is the fix.
+                     One click installs the recommended default. -->
+                {#if !dnsEnabled}
+                  <div class="p-4 rounded-lg border border-amber-500/40
+                              bg-amber-500/10 space-y-3">
+                    <div class="flex items-start gap-3">
+                      <span class="text-amber-400 text-lg leading-none mt-0.5">⚠</span>
+                      <div class="space-y-1">
+                        <div class="text-amber-200 text-sm font-medium">
+                          DNSCrypt is recommended when Tor is active
+                        </div>
+                        <p class="text-xs text-amber-100/70 leading-relaxed">
+                          Tor can't carry UDP, so plain DNS-over-UDP gets dropped.
+                          Tor's own resolver only handles A/AAAA/CNAME — many apps
+                          (mail clients, browsers, certificate validators) also need
+                          TXT, MX, SRV, DNSSEC. Enabling DNSCrypt routes
+                          <strong>DoH over Tor's TCP TransPort</strong>, which makes
+                          generic DNS work reliably end-to-end. Cloudflare's
+                          zero-log resolver is the default — change it any time in
+                          the Encrypted DNS panel above.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      class="btn-primary text-xs ml-7"
+                      on:click={enableCloudflareDnscrypt}
+                      disabled={dnsSaving}>
+                      {dnsSaving ? 'enabling…' : '✓ enable Cloudflare DNSCrypt'}
+                    </button>
+                  </div>
+                {/if}
+
                 <!-- Bridge preset selector -->
                 <div class="space-y-2" role="radiogroup" aria-label="Tor bridge preset">
                   <p class="text-xs uppercase tracking-wider text-zinc-500">
