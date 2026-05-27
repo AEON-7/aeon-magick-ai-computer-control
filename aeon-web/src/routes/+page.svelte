@@ -177,9 +177,8 @@
 
   function onMouseDown(ev: MouseEvent) {
     canvas.focus();
-    // Two click-modes:
-    //   - Not captured: click → click. Drag-to-move (legacy behavior).
-    //   - Captured: click → click. movementX/Y handles motion.
+    // Click fires immediately for both modes. last_x/y was already set on
+    // mouseenter (casual) or doesn't matter (captured uses movementX/Y).
     if (!captured) {
       dragging = true;
       last_x = ev.clientX;
@@ -189,9 +188,27 @@
     api.click(button, ev.detail || 1).catch(console.warn);
   }
 
+  // Set the baseline coordinate when the cursor enters the canvas. Without
+  // this, the first delta after entering would be huge (from 0,0 or
+  // whatever the previous in-canvas position was).
+  function onMouseEnter(ev: MouseEvent) {
+    if (!captured) {
+      last_x = ev.clientX;
+      last_y = ev.clientY;
+    }
+  }
+
+  function onMouseLeave() {
+    // No active drag once the cursor leaves — and no implicit hover-
+    // tracking either, so moving over the header/sidebar doesn't push
+    // bogus deltas at the target.
+    dragging = false;
+  }
+
   function onMouseMove(ev: MouseEvent) {
-    // Captured: pointer is locked. movementX/Y are deltas; coords are
-    // meaningless. Forward every move so the remote pointer tracks ours.
+    // Captured: pointer is locked. movementX/Y are deltas; absolute
+    // coords are meaningless. Forward every move so the remote pointer
+    // tracks ours.
     if (captured) {
       const dx = ev.movementX;
       const dy = ev.movementY;
@@ -200,8 +217,12 @@
       }
       return;
     }
-    // Drag-to-move when not captured.
-    if (!dragging) return;
+    // Casual mode: hover-track. As the cursor moves over the canvas,
+    // send the relative delta so the target cursor follows 1:1. Without
+    // this, the target cursor only updates while you're dragging — so
+    // wheel-scrolling "in the middle" worked (because that's where the
+    // last click left the target cursor) but "in the corner" felt broken.
+    // Throttle at ≥2px so micro-jitter doesn't flood the HID API.
     const dx = ev.clientX - last_x;
     const dy = ev.clientY - last_y;
     if (Math.abs(dx) + Math.abs(dy) >= 2) {
@@ -216,8 +237,11 @@
   }
 
   function onWheel(ev: WheelEvent) {
-    // Always forward wheel events when interacting with the canvas, so
-    // capture-mode and casual-mode both scroll the remote.
+    // Forward wheel events from anywhere on the canvas. The target's
+    // cursor has already been synced to our position by onMouseMove
+    // (in casual mode) or pointer-lock movementX/Y (in captured mode),
+    // so scrolling scrolls under wherever you're hovering — no need to
+    // click-into-center first.
     ev.preventDefault();
     const dy = -Math.sign(ev.deltaY) * 3;
     api.scroll(dy).catch(console.warn);
@@ -569,6 +593,8 @@
       on:mousedown={onMouseDown}
       on:mousemove={onMouseMove}
       on:mouseup={onMouseUp}
+      on:mouseenter={onMouseEnter}
+      on:mouseleave={onMouseLeave}
       on:wheel={onWheel}
       on:touchstart={onTouchStart}
       on:touchmove={onTouchMove}
