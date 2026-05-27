@@ -54,6 +54,19 @@ pub struct PersonaDescriptors {
     /// host sees this device as a USB-C dock with networking. Built from
     /// `/etc/aeon/network.toml` at gadget-setup time.
     pub ecm: Option<EcmConfig>,
+    /// If `Some`, add a USB mass-storage (CDROM-class) function alongside
+    /// HID so the host sees a bootable disk drive on the dock. Used for
+    /// loading installer ISOs into the target Mac's boot picker.
+    /// Built from `/etc/aeon/storage.toml` at gadget-setup time.
+    pub mass_storage: Option<MassStorageConfig>,
+}
+
+/// USB mass-storage (CDROM) gadget function config.
+#[derive(Debug, Clone)]
+pub struct MassStorageConfig {
+    /// Path on the Pi to the ISO/IMG file exposed as the CDROM.
+    /// Must be readable by the aeon-hid process at gadget-bind time.
+    pub iso_path: String,
 }
 
 /// CDC ECM (USB ethernet) gadget function config.
@@ -234,6 +247,7 @@ fn generic() -> PersonaDescriptors {
         // Filled in at runtime by main.rs from /etc/aeon/usb-serial.state
         serial: String::new(),
         ecm: None,
+        mass_storage: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -266,6 +280,7 @@ fn logitech_mx() -> PersonaDescriptors {
         product: "USB Receiver",
         serial: String::new(), // injected by main.rs
         ecm: None,
+        mass_storage: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -325,6 +340,7 @@ fn apple_magic() -> PersonaDescriptors {
         product: "Magic Keyboard with Trackpad",
         serial: String::new(), // injected by main.rs
         ecm: None,
+        mass_storage: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -387,6 +403,7 @@ fn apple_magic_stable() -> PersonaDescriptors {
         product: "Magic Keyboard with Trackpad",
         serial: String::new(), // injected by main.rs
         ecm: None,
+        mass_storage: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",

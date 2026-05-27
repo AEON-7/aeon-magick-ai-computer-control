@@ -1,0 +1,15 @@
+# Aeon Magick — mass-storage (USB CDROM) configuration.
+#
+# When `active` is set to a non-empty ISO slug AND the corresponding
+# file exists at /var/lib/aeon/iso/<slug>.iso, the USB gadget composite
+# adds a CDROM-class mass_storage function alongside HID + ECM. The
+# connected host sees a bootable disk drive — macOS's Option-key boot
+# picker recognises it as install media.
+#
+# Setting `active` requires aeon-hid to restart (gadget composite is
+# rebuilt). The supervisor's /api/storage/active endpoint triggers
+# this automatically. From the host's perspective: brief USB blip
+# (~1 sec), then the new disk appears.
+
+[mass_storage]
+active = ""

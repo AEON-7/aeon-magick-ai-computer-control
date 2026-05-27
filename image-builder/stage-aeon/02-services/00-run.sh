@@ -27,6 +27,7 @@ install -m 0644 "${THIS_DIR}/files/streamer.toml"      "${ROOTFS_DIR}/etc/aeon/s
 install -m 0644 "${THIS_DIR}/files/hid.toml"           "${ROOTFS_DIR}/etc/aeon/hid.toml"
 install -m 0644 "${THIS_DIR}/files/supervisor.toml"    "${ROOTFS_DIR}/etc/aeon/supervisor.toml"
 install -m 0644 "${THIS_DIR}/files/network.toml"       "${ROOTFS_DIR}/etc/aeon/network.toml"
+install -m 0644 "${THIS_DIR}/files/storage.toml"       "${ROOTFS_DIR}/etc/aeon/storage.toml"
 install -m 0755 "${THIS_DIR}/files/aeon-usb-net.sh"    "${ROOTFS_DIR}/usr/local/bin/aeon-usb-net"
 install -m 0755 "${THIS_DIR}/files/aeon-net-services.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-net-services"
 
@@ -38,6 +39,12 @@ install -d "${ROOTFS_DIR}/etc/tmpfiles.d"
 cat > "${ROOTFS_DIR}/etc/tmpfiles.d/aeon.conf" <<'EOF'
 d /run/aeon 0755 aeon aeon -
 d /run/aeon/snapshots 0755 aeon aeon -
+# Persistent ISO library for the USB-CDROM mass-storage gadget.
+# Lives in /var so uploaded ISOs survive reboots. Owned by root because
+# the supervisor (which writes here via /api/storage/upload) runs as
+# root for port-80 binding.
+d /var/lib/aeon 0755 root root -
+d /var/lib/aeon/iso 0755 root root -
 EOF
 
 # Helper scripts

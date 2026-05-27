@@ -331,3 +331,64 @@ export const rotateVpnIdentity = () =>
     'POST',
     '/network/vpn/rotate',
   );
+
+// ── Mass storage (USB-CDROM library) ───────────────────────────────────
+
+export interface IsoMeta {
+  slug: string;
+  display: string;
+  size_bytes: number;
+  sha256?: string | null;
+  uploaded_at_ms: number;
+}
+
+export interface StorageState {
+  ok: boolean;
+  active: string;
+  isos: IsoMeta[];
+  free_bytes: number;
+  iso_dir: string;
+}
+
+export const getStorage = () => req<StorageState>('GET', '/storage');
+
+export const setActiveIso = (slug: string) =>
+  req<{ ok: boolean; active: string; note: string }>(
+    'PUT', '/storage/active', { slug });
+
+export const deleteIso = (slug: string) =>
+  req<{ ok: boolean }>('DELETE', `/storage/${encodeURIComponent(slug)}`);
+
+/// Upload an ISO. The browser File goes into the request body directly;
+/// the server streams it to disk so multi-GB files don't blow up RAM.
+/// Returns the meta when the upload completes (or fails).
+export async function uploadIso(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<IsoMeta> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/storage/upload');
+    xhr.setRequestHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.withCredentials = true;
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    });
+    xhr.addEventListener('load', () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
+          resolve(data as IsoMeta);
+        } else {
+          reject(new Error(data.err || `HTTP ${xhr.status}`));
+        }
+      } catch (e: any) {
+        reject(new Error(`bad response: ${e?.message ?? 'unknown'}`));
+      }
+    });
+    xhr.addEventListener('error', () => reject(new Error('network error')));
+    xhr.addEventListener('abort', () => reject(new Error('upload aborted')));
+    xhr.send(file);
+  });
+}

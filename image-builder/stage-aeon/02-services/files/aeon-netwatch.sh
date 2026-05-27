@@ -10,10 +10,13 @@
 set -u
 PRIMARY_CON_FILTER="!Eye-Setup,!aeon-setup"
 AP_CON="aeon-setup"
+AP_IFACE="wlan0"
+AP_GATEWAY="192.168.50.1"
 MAX_DOWN_SECONDS=90
 AP_RETRY_SECONDS=300
 STATE_FILE=/var/lib/aeon/netwatch.state
 PING_TARGET="1.1.1.1"
+DNSMASQ_CAPTIVE=/etc/NetworkManager/dnsmasq-shared.d/01-aeon-captive.conf
 
 mkdir -p "$(dirname "$STATE_FILE")"
 [[ -f "$STATE_FILE" ]] || echo "0" > "$STATE_FILE"
@@ -22,6 +25,66 @@ log() { logger -t aeon-netwatch -- "$*"; }
 
 ap_active() {
     nmcli -t -f NAME con show --active 2>/dev/null | grep -qx "$AP_CON"
+}
+
+# ── Captive-portal hijack ──
+#
+# When the device is in AP-setup mode, any client connecting to it gets
+# captured by these two mechanisms:
+#
+#   1. dnsmasq drop-in resolves every hostname to the Pi's gateway
+#      (192.168.50.1) — `address=/#/...` is dnsmasq's wildcard.
+#      Effect: OS probes for captive.apple.com, generate_204, ncsi.txt
+#      get answered with the Pi's IP, triggering the captive sheet on
+#      iOS/macOS/Android/Windows.
+#
+#   2. iptables PREROUTING redirects all HTTP/HTTPS from wlan0 (where
+#      AP clients live) to the Pi's web UI on port 443. The TLS cert is
+#      self-signed for the Pi's IP so the browser shows a warning, but
+#      the OS captive sheet handles that gracefully by accepting it.
+#
+# Both pieces are tagged "aeon-captive" so apply_off can sweep them
+# precisely.
+
+apply_captive_portal_hijack() {
+    log "AP-up: enabling captive portal hijack"
+    # dnsmasq wildcard
+    install -d -m 0755 /etc/NetworkManager/dnsmasq-shared.d
+    cat > "$DNSMASQ_CAPTIVE" <<EOF
+# Managed by aeon-netwatch — auto-removed when AP goes down.
+# Resolve every hostname to the Pi's gateway IP, capturing OS
+# captive-portal probes and triggering the popup on client devices.
+address=/#/$AP_GATEWAY
+EOF
+    # Force the shared dnsmasq to re-read its drop-ins.
+    nmcli con down "$AP_CON" >/dev/null 2>&1 || true
+    nmcli con up "$AP_CON" >/dev/null 2>&1 || true
+
+    # iptables: redirect TCP 80 + 443 from AP clients to the Pi web UI.
+    # 80 is handled by a small HTTP listener inside the supervisor (it
+    # responds to OS probe URLs with the right body to trigger the
+    # captive popup, and redirects everything else to /setup/wifi).
+    # 443 hits the supervisor's main HTTPS listener directly.
+    iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 80 \
+        -j DNAT --to-destination "$AP_GATEWAY:80" \
+        -m comment --comment "aeon-captive"
+    iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 443 \
+        -j DNAT --to-destination "$AP_GATEWAY:443" \
+        -m comment --comment "aeon-captive"
+}
+
+remove_captive_portal_hijack() {
+    log "AP-down: removing captive portal hijack"
+    rm -f "$DNSMASQ_CAPTIVE"
+    # Sweep our captive iptables rules — line-number based for reliability.
+    for chain in PREROUTING OUTPUT INPUT FORWARD; do
+        local lines
+        lines=$(iptables -t nat -L "$chain" --line-numbers -n 2>/dev/null \
+            | awk '/aeon-captive/{print $1}' | sort -rn)
+        for n in $lines; do
+            iptables -t nat -D "$chain" "$n" 2>/dev/null || true
+        done
+    done
 }
 
 primary_active() {
@@ -54,6 +117,11 @@ if have_internet; then
     if ap_active; then
         log "primary online, deactivating AP"
         nmcli con down "$AP_CON" >/dev/null 2>&1 || true
+        remove_captive_portal_hijack
+    else
+        # Defensive: if AP is down for any reason, also sweep any
+        # lingering captive rules (e.g. after a reboot mid-AP-session).
+        [[ -f "$DNSMASQ_CAPTIVE" ]] && remove_captive_portal_hijack
     fi
     exit 0
 fi
@@ -103,6 +171,10 @@ if (( now - down_since >= MAX_DOWN_SECONDS )); then
     # mode, iface busy, etc.).
     if ! AP_ERR=$(nmcli con up "$AP_CON" 2>&1); then
         log "AP activation failed: ${AP_ERR}"
+    else
+        # AP is up — enable the captive portal hijack so clients that
+        # connect immediately see the setup page.
+        apply_captive_portal_hijack
     fi
     echo "$now" > "$STATE_FILE"
 fi

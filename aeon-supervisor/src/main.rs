@@ -16,12 +16,15 @@ use tracing::info;
 
 mod api;
 mod auth;
+mod captive;
 mod macros;
 mod mcp;
 mod network;
 mod proxy;
+mod storage;
 mod tls;
 mod webui;
+mod wifi;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -58,6 +61,17 @@ async fn main() -> Result<()> {
     info!(listen = cfg.listen, "starting HTTPS");
     let app = api::build_router(cfg.clone());
     let addr: std::net::SocketAddr = cfg.listen.parse()?;
+
+    // Spawn the captive-portal listener on port 80. It serves OS
+    // captive-probe URLs (Apple/Android/Microsoft/etc.) with responses
+    // that trigger the device's "this network needs sign-in" sheet,
+    // and redirects everything else to https://gateway/setup/wifi.
+    // Only relevant when aeon-netwatch has installed the iptables
+    // PREROUTING redirect from wlan0 80/443 → gateway, but binding
+    // unconditionally is cheap and means we don't need a separate
+    // service lifecycle.
+    tokio::spawn(captive::serve());
+
     axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service()).await?;
     Ok(())
 }

@@ -174,6 +174,23 @@ pub fn build_router(cfg: Config) -> Router {
         // Identity rotation — Tor SIGNAL NEWNYM, Tailscale reset, WG/OVPN
         // reconnect. POST with no body.
         .route("/network/vpn/rotate", post(crate::network::post_vpn_rotate))
+        // WiFi management — scan, connect, current state. Used by the
+        // /setup-wifi captive-portal page during AP-fallback mode and
+        // by the authenticated WiFi panel for ongoing management.
+        .route("/wifi/scan", get(crate::wifi::scan))
+        .route("/wifi/connect", post(crate::wifi::connect))
+        .route("/wifi/state", get(crate::wifi::state))
+        .route("/wifi/disconnect", post(crate::wifi::disconnect))
+        // Mass storage — manage ISOs uploaded for the USB-CDROM
+        // gadget function. Upload endpoint streams to disk; max body
+        // limit is raised below.
+        .route("/storage", get(crate::storage::list))
+        .route("/storage/active", axum::routing::put(crate::storage::put_active))
+        .route("/storage/upload",
+            post(crate::storage::upload)
+                // Disable axum's default 2MB body limit — ISOs are GB-scale
+                .layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/storage/:slug", axum::routing::delete(crate::storage::delete))
         // MCP (Model Context Protocol) — Streamable HTTP transport
         .route("/mcp", post(crate::mcp::handle));
 
@@ -270,6 +287,16 @@ async fn auth_middleware(
         || path == "/logout"
         || path == "/setup/password"
     {
+        return next.run(req).await;
+    }
+
+    // 1b. WiFi endpoints are public in Open state ONLY. During first-
+    //     boot from the captive portal, the user hasn't set a password
+    //     yet, so they need to be able to configure WiFi before they
+    //     even reach the password-setup wizard. Once the device is
+    //     Locked (a password has been set), WiFi management requires
+    //     auth like everything else.
+    if state.auth.is_open() && path.starts_with("/wifi/") {
         return next.run(req).await;
     }
 

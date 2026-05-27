@@ -140,6 +140,10 @@ fn try_setup_persona(cfg: &config::Config) -> Result<()> {
         info!(host_mac=%ecm.host_mac, dev_mac=%ecm.dev_mac, "ECM enabled (USB ethernet passthrough)");
         desc.ecm = Some(ecm);
     }
+    if let Some(ms) = load_mass_storage_config() {
+        info!(iso = %ms.iso_path, "mass-storage CDROM enabled");
+        desc.mass_storage = Some(ms);
+    }
     gadget::setup(cfg, &desc)
 }
 
@@ -208,4 +212,45 @@ fn load_ecm_config() -> Option<persona::EcmConfig> {
         host_mac: usb.get("host_mac").and_then(|s| s.as_str())?.to_string(),
         dev_mac: usb.get("dev_mac").and_then(|s| s.as_str())?.to_string(),
     })
+}
+
+/// Read /etc/aeon/storage.toml. Returns a MassStorageConfig if an ISO
+/// is marked active AND the file exists at /var/lib/aeon/iso/<slug>.iso,
+/// else None.
+///
+/// Storage config schema:
+/// ```toml
+/// [mass_storage]
+/// active = "debian-12-netinst"   # slug, or "" to detach
+/// ```
+///
+/// Setting `active` to a non-empty slug requires aeon-hid to restart
+/// for the change to take effect — the supervisor's /api/storage/active
+/// endpoint triggers `systemctl restart aeon-hid` after writing the
+/// new state. From the host's perspective this is a brief USB
+/// re-enumerate (~1s blip), then the new disk appears in the boot menu.
+fn load_mass_storage_config() -> Option<persona::MassStorageConfig> {
+    let raw = std::fs::read_to_string("/etc/aeon/storage.toml").ok()?;
+    let v: toml::Value = toml::from_str(&raw).ok()?;
+    let ms = v.get("mass_storage")?;
+    let active = ms.get("active").and_then(|s| s.as_str())?;
+    if active.is_empty() {
+        return None;
+    }
+    // Sanitise the slug — no path traversal, alphanumerics + hyphens
+    // + underscores + dots only.
+    if !active.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        tracing::warn!(active, "storage.toml: active slug contains invalid characters, ignoring");
+        return None;
+    }
+    let iso_path = format!("/var/lib/aeon/iso/{}.iso", active);
+    if !std::path::Path::new(&iso_path).exists() {
+        tracing::warn!(
+            slug = active,
+            path = %iso_path,
+            "storage.toml: active ISO file missing — disk drive not attached"
+        );
+        return None;
+    }
+    Some(persona::MassStorageConfig { iso_path })
 }

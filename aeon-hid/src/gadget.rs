@@ -125,10 +125,59 @@ pub fn setup(cfg: &Config, p: &PersonaDescriptors) -> Result<()> {
         add_ecm_function(&root, &config_dir, ecm)?;
     }
 
+    // ── Optional Mass Storage (USB CDROM) function — "dock with disk drive" ──
+    // When /etc/aeon/storage.toml has an active ISO, attach it as a
+    // bootable CDROM device alongside HID + ECM. The host sees a
+    // multi-function USB-C dock with a disk drive — same composite
+    // class, no extra negotiation. macOS's Option-key boot picker
+    // recognises it as bootable install media.
+    if let Some(ms) = &p.mass_storage {
+        add_mass_storage_function(&root, &config_dir, ms)?;
+    }
+
     // ── Bind to the UDC (USB Device Controller) — this enables the gadget ──
     write_str(&root.join("UDC"), &cfg.udc)?;
     info!(udc = %cfg.udc, "gadget bound");
 
+    Ok(())
+}
+
+fn add_mass_storage_function(
+    root: &Path,
+    config_dir: &Path,
+    ms: &crate::persona::MassStorageConfig,
+) -> Result<()> {
+    // ConfigFS layout for the g_mass_storage function:
+    //   functions/mass_storage.0/
+    //       stall=0          (USB stall on data underrun — disable for
+    //                         compatibility with some host stacks)
+    //       lun.0/
+    //           file=<path>  (path to the ISO/IMG to expose; can be
+    //                         empty at bind time and set later for
+    //                         eject/insert semantics)
+    //           cdrom=1      (claim CDROM-class; macOS boot-picker
+    //                         only shows CDROM-class devices)
+    //           removable=1  (let the host see eject/load as legal ops)
+    //           ro=1         (read-only — ISO + safety)
+    let fn_dir = root.join("functions/mass_storage.0");
+    mkdir(&fn_dir)?;
+    write_str(&fn_dir.join("stall"), "0")?;
+
+    let lun = fn_dir.join("lun.0");
+    mkdir(&lun)?;
+    write_str(&lun.join("cdrom"), "1")?;
+    write_str(&lun.join("removable"), "1")?;
+    write_str(&lun.join("ro"), "1")?;
+    // file LAST — host sees the disk appear as soon as the bind
+    // completes, and a real file path here means "media loaded".
+    write_str(&lun.join("file"), &ms.iso_path)?;
+
+    let link = config_dir.join("mass_storage.0");
+    if !link.exists() {
+        unix::fs::symlink(&fn_dir, &link)
+            .with_context(|| format!("symlink {} → {}", link.display(), fn_dir.display()))?;
+    }
+    info!(iso = %ms.iso_path, "added mass_storage (CDROM) function");
     Ok(())
 }
 

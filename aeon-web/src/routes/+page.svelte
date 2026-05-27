@@ -283,6 +283,7 @@
         </button>
       {/if}
       <a href="/network" class="btn text-xs">network</a>
+      <a href="/storage" class="btn text-xs">disk&nbsp;drive</a>
       <a href="/tokens" class="btn text-xs">API&nbsp;tokens</a>
       <button class="btn" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
       <button class="btn" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
