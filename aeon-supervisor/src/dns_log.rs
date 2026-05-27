@@ -465,9 +465,9 @@ pub fn curated_presets() -> Value {
         },
         {
             "name": "Ultimate Hosts Blacklist",
-            "url": "https://raw.githubusercontent.com/ultimate-hosts-blacklist/ultimate.hosts.blacklist/master/hosts0",
+            "url": "https://hosts.ubuntu101.co.za/hosts",
             "format": "hosts",
-            "blurb": "Aggregated from 100+ source lists. Very thorough (~1.4M). Heavier RAM footprint.",
+            "blurb": "Aggregated from 100+ source lists via the maintainer's published mirror (consolidated, daily-rebuilt). Very thorough (~1.4M). Heavier RAM footprint.",
             "category": "comprehensive"
         },
         {
@@ -500,9 +500,9 @@ pub fn curated_presets() -> Value {
         },
         {
             "name": "AdGuard — DNS filter",
-            "url": "https://raw.githubusercontent.com/AdguardTeam/AdGuardSDNSFilter/master/Filters/filter.txt",
+            "url": "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt",
             "format": "adblock",
-            "blurb": "AdGuard's own DNS filter in Adblock-Plus syntax. ~70k. Modest, well-maintained.",
+            "blurb": "AdGuard's own DNS filter in Adblock-Plus syntax, via their GitHub Pages distribution. ~70k. Modest, well-maintained.",
             "category": "general"
         },
         {
