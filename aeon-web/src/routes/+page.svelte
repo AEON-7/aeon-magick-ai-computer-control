@@ -14,6 +14,29 @@
   let dnscryptOn = false;
   let net_poll_iv: ReturnType<typeof setInterval>;
 
+  // ── Mobile / fullscreen state ──
+  // We track fullscreen separately from `captured` because on mobile the
+  // pointer-lock pattern doesn't apply (no mouse to lock) — we run a
+  // touch-mapping mode instead.
+  let fullscreen = false;
+  let isTouchDevice = false;
+  let kbdInput: HTMLInputElement | undefined;
+  // Touch-tracking state — populated in onTouch*. Times are ms epoch.
+  let touchStartTs = 0;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchLastX = 0;
+  let touchLastY = 0;
+  let touchMoved = false;
+  let touchCount = 0;
+  let twoFingerStartY = 0;
+  let twoFingerLastY = 0;
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  // When the user taps the on-screen keyboard button, we focus a hidden
+  // input that triggers iOS/Android's soft keyboard. `kbdVisible` is the
+  // hint to the UI to show the close-keyboard button instead.
+  let kbdVisible = false;
+
   let canvas: HTMLDivElement;
   let dragging = false;
   let last_x = 0;
@@ -63,6 +86,13 @@
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
     document.addEventListener('pointerlockchange', onPointerLockChange);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+    // Touch detection — used to gate touch handlers + auto-show the
+    // mobile-friendly UX hints. `ontouchstart` is the most reliable
+    // single-signal feature check for "this device has touch".
+    isTouchDevice = 'ontouchstart' in window
+      || (navigator.maxTouchPoints ?? 0) > 0;
     mounted = true;
   });
 
@@ -72,6 +102,8 @@
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKey);
     document.removeEventListener('pointerlockchange', onPointerLockChange);
+    document.removeEventListener('fullscreenchange', onFullscreenChange);
+    document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
     if (document.pointerLockElement) document.exitPointerLock();
   });
 
@@ -189,6 +221,192 @@
     ev.preventDefault();
     const dy = -Math.sign(ev.deltaY) * 3;
     api.scroll(dy).catch(console.warn);
+  }
+
+  // ── Touch input mapping (iPhone / iPad / Android) ─────────────────────
+  // Gestures map to HID ops:
+  //   single short tap  → left click
+  //   single long press → right click (>= 500 ms, minimal motion)
+  //   two-finger tap    → right click
+  //   single drag       → mouse move (relative delta)
+  //   two-finger drag   → scroll
+  //   double tap        → double-click (browser-native dblclick on tap)
+  //
+  // We deliberately don't implement pinch — the remote target has no
+  // concept of pinch via boot-mouse HID.
+
+  const LONG_PRESS_MS = 500;
+  const TAP_MOVE_THRESHOLD = 8;       // px before a tap is reclassified as a drag
+  const TOUCH_MOVE_THROTTLE = 4;      // px before we send a /move event
+
+  function onTouchStart(ev: TouchEvent) {
+    ev.preventDefault();
+    touchCount = ev.touches.length;
+    touchStartTs = Date.now();
+    touchMoved = false;
+    if (touchCount === 1) {
+      const t = ev.touches[0];
+      touchStartX = touchLastX = t.clientX;
+      touchStartY = touchLastY = t.clientY;
+      // Long-press → right click. Schedule, cancelled by move or end.
+      longPressTimer = setTimeout(() => {
+        if (!touchMoved) {
+          api.click('right').catch(console.warn);
+          // Subsequent touchend should NOT also fire a left-click — flip
+          // touchMoved so onTouchEnd treats this as already-consumed.
+          touchMoved = true;
+        }
+      }, LONG_PRESS_MS);
+    } else if (touchCount === 2) {
+      // Cancel any pending long-press from the first finger.
+      cancelLongPress();
+      const mid = (ev.touches[0].clientY + ev.touches[1].clientY) / 2;
+      twoFingerStartY = twoFingerLastY = mid;
+    }
+  }
+
+  function onTouchMove(ev: TouchEvent) {
+    ev.preventDefault();
+    if (ev.touches.length === 1 && touchCount === 1) {
+      const t = ev.touches[0];
+      const dx = t.clientX - touchLastX;
+      const dy = t.clientY - touchLastY;
+      const totalDx = t.clientX - touchStartX;
+      const totalDy = t.clientY - touchStartY;
+      if (!touchMoved &&
+          Math.abs(totalDx) + Math.abs(totalDy) > TAP_MOVE_THRESHOLD) {
+        touchMoved = true;
+        cancelLongPress();
+      }
+      if (touchMoved && (Math.abs(dx) + Math.abs(dy) >= TOUCH_MOVE_THROTTLE)) {
+        api.moveMouse(Math.trunc(dx), Math.trunc(dy)).catch(console.warn);
+        touchLastX = t.clientX;
+        touchLastY = t.clientY;
+      }
+    } else if (ev.touches.length === 2) {
+      const mid = (ev.touches[0].clientY + ev.touches[1].clientY) / 2;
+      const dy = mid - twoFingerLastY;
+      if (Math.abs(dy) >= 6) {
+        // Negative deltaY in our wheel handler scrolls UP. Here we make
+        // dragging two fingers DOWN scroll DOWN (natural scrolling).
+        api.scroll(-Math.sign(dy) * 2).catch(console.warn);
+        twoFingerLastY = mid;
+      }
+      touchMoved = true;
+      cancelLongPress();
+    }
+  }
+
+  function onTouchEnd(ev: TouchEvent) {
+    ev.preventDefault();
+    const duration = Date.now() - touchStartTs;
+    cancelLongPress();
+    if (touchCount === 1 && !touchMoved && duration < LONG_PRESS_MS) {
+      api.click('left').catch(console.warn);
+    } else if (touchCount === 2 && !touchMoved && duration < LONG_PRESS_MS) {
+      api.click('right').catch(console.warn);
+    }
+    // Reset state regardless.
+    touchCount = ev.touches.length;
+    touchMoved = false;
+  }
+
+  function cancelLongPress() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
+
+  // ── Fullscreen (mobile + desktop) ─────────────────────────────────────
+
+  async function enterFullscreen() {
+    if (!canvas) return;
+    try {
+      // Prefer the standard fullscreen API; Safari/iOS uses webkit prefix.
+      const el = document.documentElement as any;
+      if (el.requestFullscreen) {
+        await el.requestFullscreen({ navigationUI: 'hide' as any });
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      }
+      // Lock orientation to landscape on capable devices — much better
+      // aspect ratio for desktop streaming. Best-effort; ignore if not
+      // supported (iOS Safari doesn't, but landscape-rotated iPhone
+      // already gives a good experience.)
+      try {
+        if ((screen as any).orientation?.lock) {
+          await (screen as any).orientation.lock('landscape').catch(() => {});
+        }
+      } catch { /* fine */ }
+      fullscreen = true;
+    } catch (e) {
+      console.warn('fullscreen failed', e);
+    }
+  }
+
+  async function exitFullscreen() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else if ((document as any).webkitFullscreenElement) {
+        (document as any).webkitExitFullscreen();
+      }
+    } catch (e) { console.warn('exit fullscreen failed', e); }
+    hideKeyboard();
+    fullscreen = false;
+  }
+
+  function onFullscreenChange() {
+    fullscreen = !!(document.fullscreenElement || (document as any).webkitFullscreenElement);
+    if (!fullscreen) hideKeyboard();
+  }
+
+  // ── On-screen keyboard bridge (iOS / Android) ─────────────────────────
+  // OS keyboards on mobile only appear when a text input is focused. We
+  // park a hidden input on the page; tapping the "keyboard" overlay
+  // button focuses it, which triggers the soft keyboard. Each typed
+  // character fires an `input` event with the inserted text — we forward
+  // it to /api/hid/type then clear the input so the next char arrives
+  // cleanly. Special keys (Enter, Backspace, Tab, arrows, Esc) still
+  // fire keydown on most mobile keyboards and go through the normal
+  // onKey path when captured.
+
+  function showKeyboard() {
+    if (!kbdInput) return;
+    kbdInput.value = '';
+    kbdInput.focus();
+    // iOS Safari sometimes needs a second hit before the keyboard pops.
+    setTimeout(() => kbdInput?.focus(), 50);
+    kbdVisible = true;
+    // Enable capture so keyboard events get forwarded.
+    captured = true;
+  }
+  function hideKeyboard() {
+    if (kbdInput) {
+      kbdInput.blur();
+      kbdInput.value = '';
+    }
+    kbdVisible = false;
+  }
+  function onKbdInput(ev: Event) {
+    const target = ev.target as HTMLInputElement;
+    const text = target.value;
+    if (text) {
+      api.typeText(text).catch(console.warn);
+      // Clear so the next character arrives as a fresh `input` event.
+      target.value = '';
+    }
+  }
+  function onKbdKeydown(ev: KeyboardEvent) {
+    // Special keys → forward via /api/hid/key. We DON'T do this for
+    // printable characters because the `input` event already handled
+    // them via typeText.
+    const k = ev.key;
+    if (k === 'Enter' || k === 'Backspace' || k === 'Tab' || k === 'Escape'
+        || k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight') {
+      ev.preventDefault();
+      api.sendKey([translateKeyName(k)], 30).catch(console.warn);
+    }
   }
 
   async function onReleaseAll() {
@@ -322,6 +540,10 @@
           ⌨ capture&nbsp;input
         </button>
       {/if}
+      <button class="btn text-xs" on:click={enterFullscreen}
+              title="Fullscreen control mode — best on phones / tablets">
+        ⛶ fullscreen
+      </button>
       <a href="/network" class="btn text-xs">network</a>
       <a href="/security" class="btn text-xs">security</a>
       <a href="/dns" class="btn text-xs">DNS</a>
@@ -340,13 +562,17 @@
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       bind:this={canvas}
-      class="absolute inset-0 outline-none"
+      class="absolute inset-0 outline-none touch-none"
       class:cursor-none={captured}
       tabindex="-1"
       on:mousedown={onMouseDown}
       on:mousemove={onMouseMove}
       on:mouseup={onMouseUp}
       on:wheel={onWheel}
+      on:touchstart={onTouchStart}
+      on:touchmove={onTouchMove}
+      on:touchend={onTouchEnd}
+      on:touchcancel={onTouchEnd}
       role="application"
     >
       <img
@@ -357,11 +583,35 @@
       />
     </div>
 
-    <!-- Capture-mode overlay. Floats at the top of the canvas in the
-         pillarbox area so it doesn't cover content. object-contain
-         leaves blank space above/below or left/right of the stream;
-         this banner uses it. Click anywhere on the banner to release. -->
-    {#if mounted && captured}
+    <!-- Hidden text input parked at top-left as a 1px transparent target.
+         Focused by the floating "show keyboard" button so iOS / Android
+         pop their soft keyboards. Each typed char fires an `input` event
+         we forward to /api/hid/type.
+         autocomplete/spellcheck/autocapitalize OFF so the OS doesn't eat
+         single characters or auto-capitalize sentences.
+         iOS Safari refuses to focus truly-off-screen inputs, so we keep
+         this 1px+opacity-0 trick (visible to the browser, invisible to
+         the user) instead of -top-96 hiding. -->
+    <input
+      bind:this={kbdInput}
+      type="text"
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+      inputmode="text"
+      aria-label="Remote keyboard input"
+      on:input={onKbdInput}
+      on:keydown={onKbdKeydown}
+      on:blur={() => (kbdVisible = false)}
+      style="position: fixed; top: 0; left: 0; width: 1px; height: 1px;
+             opacity: 0.001; z-index: -1; border: 0; padding: 0; margin: 0;
+             font-size: 16px;"
+    />
+
+    <!-- Capture-mode banner — only shown when NOT in fullscreen, since
+         fullscreen has its own overlay buttons. -->
+    {#if mounted && captured && !fullscreen}
       <div class="pointer-events-none absolute top-0 left-0 right-0 z-10
                   flex justify-center pt-2">
         <button
@@ -375,6 +625,115 @@
           ● INPUT CAPTURED &nbsp;·&nbsp; Ctrl+Alt+Esc to release
         </button>
       </div>
+    {/if}
+
+    <!-- ───────────────────────────────────────────────────────────────── -->
+    <!-- Fullscreen mobile overlay — floating semi-transparent controls    -->
+    <!-- pinned to corners so they don't obstruct the stream center.       -->
+    <!-- Tap the ⏏ to escape out completely, ⌨ to pop the soft keyboard,   -->
+    <!-- ⏎ for Enter, ⌫ for Backspace, ⎋ for Esc.                          -->
+    <!-- ───────────────────────────────────────────────────────────────── -->
+    {#if fullscreen}
+      <!-- Top-right: escape (the always-visible "I want out" button).
+           Bigger touch target than desktop buttons; safe-area-aware so
+           it stays inside the notch on iPhones. -->
+      <div class="absolute top-0 right-0 z-20 p-3"
+           style="padding-top: max(0.75rem, env(safe-area-inset-top));">
+        <button
+          class="px-4 py-2.5 rounded-full
+                 bg-red-900/80 border border-red-500/60 backdrop-blur-md
+                 text-red-100 font-mono text-sm tracking-wider
+                 shadow-lg active:scale-95 transition-transform"
+          on:click={exitFullscreen}
+          aria-label="Exit fullscreen + release capture"
+        >
+          ⏏ escape
+        </button>
+      </div>
+
+      <!-- Top-left: persona pill + name. Tap nothing — just a status hint
+           so you remember which keyboard the target is seeing. -->
+      {#if hid}
+        <div class="absolute top-0 left-0 z-20 p-3 pointer-events-none"
+             style="padding-top: max(0.75rem, env(safe-area-inset-top));">
+          <span class="px-3 py-1.5 rounded-full
+                       bg-ink-900/70 border border-ink-700 backdrop-blur-md
+                       text-zinc-300 font-mono text-xs tracking-wider">
+            {hid.persona}
+          </span>
+        </div>
+      {/if}
+
+      <!-- Bottom-right: keyboard toggle + special-key shortcuts.
+           Stacked column so each button is finger-sized. -->
+      <div class="absolute bottom-0 right-0 z-20 p-3 flex flex-col gap-2 items-end"
+           style="padding-bottom: max(0.75rem, env(safe-area-inset-bottom));">
+        {#if kbdVisible}
+          <button class="px-4 py-2.5 rounded-full
+                         bg-cursed-900/80 border border-cursed-500/60 backdrop-blur-md
+                         text-cursed-100 font-mono text-sm
+                         shadow-lg active:scale-95 transition-transform"
+                  on:click={hideKeyboard}
+                  aria-label="Hide on-screen keyboard">
+            ⌨ ⏷ hide
+          </button>
+        {:else}
+          <button class="px-4 py-2.5 rounded-full
+                         bg-ink-900/80 border border-cursed-500/40 backdrop-blur-md
+                         text-cursed-200 font-mono text-sm
+                         shadow-lg active:scale-95 transition-transform"
+                  on:click={showKeyboard}
+                  aria-label="Show on-screen keyboard">
+            ⌨ keyboard
+          </button>
+        {/if}
+        <!-- Special-keys row. Saves a keyboard-toggle round-trip for
+             the most common non-text keys. Only shown when keyboard is up. -->
+        {#if kbdVisible}
+          <div class="flex gap-1.5">
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+                           backdrop-blur-md text-zinc-300 active:scale-95"
+                    on:click={() => api.sendKey(['ESC'])} aria-label="Send Esc">⎋</button>
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+                           backdrop-blur-md text-zinc-300 active:scale-95"
+                    on:click={() => api.sendKey(['TAB'])} aria-label="Send Tab">⇥</button>
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+                           backdrop-blur-md text-zinc-300 active:scale-95"
+                    on:click={() => api.sendKey(['BACKSPACE'])} aria-label="Send Backspace">⌫</button>
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+                           backdrop-blur-md text-zinc-300 active:scale-95"
+                    on:click={() => api.sendKey(['ENTER'])} aria-label="Send Enter">⏎</button>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Bottom-left: release-all-keys panic button + a help hint on
+           first entry. The hint disappears after a tap or 6s. -->
+      <div class="absolute bottom-0 left-0 z-20 p-3"
+           style="padding-bottom: max(0.75rem, env(safe-area-inset-bottom));">
+        <button class="px-4 py-2.5 rounded-full
+                       bg-amber-900/70 border border-amber-500/40 backdrop-blur-md
+                       text-amber-100 font-mono text-xs
+                       shadow-lg active:scale-95 transition-transform"
+                on:click={onReleaseAll}
+                aria-label="Release all held keys + buttons">
+          ⌨ release&nbsp;keys
+        </button>
+      </div>
+
+      <!-- One-time gesture hint on first entry (fades after 6s) -->
+      {#if isTouchDevice}
+        <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 z-10
+                    flex justify-center pointer-events-none">
+          <div class="px-4 py-2 rounded-lg
+                      bg-ink-900/40 border border-cursed-500/30 backdrop-blur-sm
+                      text-zinc-400 font-mono text-[11px] text-center
+                      max-w-[260px] animate-pulse"
+               style="animation-iteration-count: 3; animation-duration: 2s;">
+            tap = click · long-press = right · two-finger tap = right · drag = move · two-finger drag = scroll
+          </div>
+        </div>
+      {/if}
     {/if}
   </main>
 
