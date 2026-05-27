@@ -22,6 +22,7 @@ use tracing::info;
 
 mod capture;
 mod config;
+mod jpeg_pipe;
 mod state;
 mod supervise;
 mod watchdog;

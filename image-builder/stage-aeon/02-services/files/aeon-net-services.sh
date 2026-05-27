@@ -519,6 +519,52 @@ EOF
     # 6. All other TCP → Tor TransPort.
     iptables -t nat -A OUTPUT -p tcp --syn \
         -j REDIRECT --to-ports "$trans_port" -m comment --comment "aeon-vpn"
+
+    # ── Forwarded-traffic hijack: route USB ethernet clients through Tor ──
+    #
+    # The OUTPUT chain only sees packets originating ON the Pi. USB
+    # clients' traffic enters via usb0, hits PREROUTING → FORWARD →
+    # POSTROUTING → eth0 egress — OUTPUT is never touched. Without
+    # PREROUTING DNAT rules, client TCP escapes Tor entirely and goes
+    # straight out the Pi's WAN connection. v24-prior bakes had this
+    # gap; v25 closes it.
+    #
+    # Two pieces:
+    #   (a) route_localnet=1 sysctl on usb0 — allows the kernel to
+    #       route packets DNAT'd to 127.0.0.1 even though they arrived
+    #       on a non-loopback interface. Disabled by default for
+    #       safety; this is exactly the use-case it was added for.
+    #   (b) PREROUTING DNAT for usb0 TCP, EXEMPTING port 53 (already
+    #       DNAT'd to dnsmasq by aeon-usb-net) and the Pi's own usb0
+    #       IP (so clients can still reach the local web UI).
+    local usb_enabled; usb_enabled="$(toml_get usb_ethernet enabled false)"
+    if [ "$usb_enabled" = "true" ]; then
+        local pi_addr; pi_addr="$(toml_get usb_ethernet pi_addr 10.55.0.1)"
+        # (a) sysctl — quiet because newer kernels print a deprecation
+        # warning even though the knob still works.
+        sysctl -w net.ipv4.conf.usb0.route_localnet=1 >/dev/null 2>&1 || true
+        # (b1) Exempt Pi's own usb0 IP — keep web UI reachable from clients.
+        iptables -t nat -A PREROUTING -i usb0 -d "$pi_addr" \
+            -j RETURN -m comment --comment "aeon-vpn"
+        # (b2) DNAT all other client TCP (except port 53, which the
+        # aeon-usb-net DNS-hijack rule already DNATs to dnsmasq) to
+        # Tor's TransPort on localhost.
+        iptables -t nat -A PREROUTING -i usb0 -p tcp \
+            ! --dport 53 --syn \
+            -j DNAT --to-destination "127.0.0.1:$trans_port" \
+            -m comment --comment "aeon-vpn"
+        # Drop forwarded UDP from usb0 (Tor can't carry UDP). DHCP
+        # (67/68) and NTP (123) and mDNS (5353) stay accepted in
+        # FORWARD so clients can still bootstrap their network. The
+        # rest of the world's UDP — QUIC, WebRTC, gaming, BitTorrent
+        # — is dropped to prevent privacy leakage around Tor.
+        iptables -A FORWARD -i usb0 -p udp --dport 67   -j ACCEPT -m comment --comment "aeon-vpn"
+        iptables -A FORWARD -i usb0 -p udp --dport 68   -j ACCEPT -m comment --comment "aeon-vpn"
+        iptables -A FORWARD -i usb0 -p udp --dport 123  -j ACCEPT -m comment --comment "aeon-vpn"
+        iptables -A FORWARD -i usb0 -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
+        iptables -A FORWARD -i usb0 -p udp              -j DROP   -m comment --comment "aeon-vpn"
+        log "tor: USB client traffic hijacked through TransPort:$trans_port (TCP); UDP dropped except DHCP/NTP/mDNS"
+    fi
     # UDP can't traverse Tor — drop it BUT exempt:
     #  - Loopback (allows local UDP to DNSCrypt 127.0.2.1:53, Tor's
     #    own DNSPort, and any future on-host UDP services). Without

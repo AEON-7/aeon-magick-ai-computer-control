@@ -8,7 +8,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamerSnapshot {
@@ -39,6 +39,18 @@ pub struct Shared {
     /// into AppState). This is the same pattern, applied to the
     /// streamer→ustreamer hop.
     pub uds_client: Client<hyperlocal::UnixConnector, Empty<bytes::Bytes>>,
+    /// Latest complete JPEG frame captured from ffmpeg's stdout pipe.
+    /// `None` until the first frame arrives. Single producer (the
+    /// jpeg_pipe_reader task spawned by supervise.rs), unbounded
+    /// consumers (every /snapshot and /stream request).
+    ///
+    /// tokio::sync::watch is the canonical "latest value, fan-out to
+    /// many readers" channel — readers can either grab the current
+    /// value immediately via `frame_rx.borrow()` (for /snapshot) or
+    /// `.await` the next change via `frame_rx.changed()` (for /stream's
+    /// multipart emission). No locking, no filesystem, no torn reads.
+    pub frame_tx: watch::Sender<Option<bytes::Bytes>>,
+    pub frame_rx: watch::Receiver<Option<bytes::Bytes>>,
 }
 
 #[derive(Clone)]
@@ -48,12 +60,15 @@ impl SharedState {
     pub fn new(cfg: Config) -> Self {
         let uds_client: Client<_, Empty<bytes::Bytes>> =
             Client::builder(TokioExecutor::new()).build(hyperlocal::UnixConnector);
+        let (frame_tx, frame_rx) = watch::channel(None);
         Self(Arc::new(Shared {
             cfg,
             snap: Mutex::new(StreamerSnapshot::default()),
             relaunch_signal: Notify::new(),
             shutdown_signal: Notify::new(),
             uds_client,
+            frame_tx,
+            frame_rx,
         }))
     }
 

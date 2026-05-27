@@ -108,11 +108,12 @@ async fn stream_proxy(State(state): State<SharedState>) -> Response<Body> {
     proxy_to_ustreamer(&state, "/stream").await
 }
 
-/// Read the single-frame JPEG that ffmpeg's `-update 1` sink keeps fresh.
+/// Serve the latest JPEG frame from the in-memory watch channel populated
+/// by jpeg_pipe::run (which reads ffmpeg's stdout pipe). Zero filesystem.
 async fn serve_snapshot_file(state: &SharedState) -> Response<Body> {
-    let path = &state.0.cfg.output.snapshot_path;
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Response::builder()
+    let current = state.0.frame_rx.borrow().clone();
+    match current {
+        Some(bytes) => Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "image/jpeg")
             .header("Cache-Control", "no-store")
@@ -120,79 +121,78 @@ async fn serve_snapshot_file(state: &SharedState) -> Response<Body> {
             .unwrap_or_else(|_| {
                 (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response()
             }),
-        Err(_) => (
+        None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "ffmpeg snapshot file not ready yet",
+            "no frame captured yet — ffmpeg still starting up",
         )
             .into_response(),
     }
 }
 
-/// Synthesize a multipart MJPEG stream by polling the snapshot JPEG file
-/// at the configured target fps. This avoids ffmpeg's `-f mpjpeg -listen 1`
-/// behavior (which blocks all sibling outputs until a client connects).
+/// Synthesize a multipart MJPEG stream straight from the in-memory
+/// frame watch channel that jpeg_pipe::run keeps current. Each browser
+/// connection gets a clone of state.frame_rx and emits on every change.
 ///
-/// Client gets a normal `multipart/x-mixed-replace; boundary=aeonframe`
-/// stream of JPEG parts at ~30fps (or whatever `output.fps` is). Streams
-/// terminate when either the client disconnects or the file goes stale.
+/// v24 design: zero filesystem. The watch channel publishes complete
+/// JPEG frames (validated by SOI/EOI parser in jpeg_pipe), so there's
+/// no possibility of forwarding a torn / partial frame. The previous
+/// v23 design polled a tmpfs file's mtime and read its contents — it
+/// worked once -atomic_writing was set, but this path eliminates the
+/// race entirely and drops latency from ~1-2ms (file round-trip) to
+/// the watch channel's wake-up cost (~50µs).
+///
+/// Browsers and multipart parsers interpret "no part received for 3-5
+/// seconds" as "stream ended", so we still re-emit the last frame as a
+/// heartbeat every 1.5s when the source goes idle.
 async fn proxy_to_ffmpeg_tcp(state: &SharedState, _path: &str) -> Response<Body> {
     use axum::body::Body;
     use futures::stream::StreamExt;
     use std::time::Duration;
 
-    let path = state.0.cfg.output.snapshot_path.clone();
-    let fps = state.0.cfg.output.fps.max(1);
-    let frame_interval = Duration::from_millis(1000 / (fps as u64).max(1));
     let boundary = "aeonframe";
-
-    // Heartbeat interval: re-emit the latest frame every ~1.5s when the
-    // source goes idle. Browsers and multipart-MJPEG decoders interpret
-    // "no part received for 3-5 seconds" as "stream ended" and show the
-    // broken-image icon, forcing the user to refresh. Re-yielding the
-    // current frame keeps the TCP/multipart parser alive even when
-    // ffmpeg isn't producing new data (target screen static, frame
-    // dedup, brief ffmpeg respawn during reconfigure, etc.).
     let heartbeat = Duration::from_millis(1500);
+
+    // Each client gets its OWN receiver. watch::Receiver::clone()
+    // creates a fresh subscription with its own seen-version counter,
+    // so concurrent /stream requests don't steal each other's wake-ups.
+    let mut rx = state.0.frame_rx.clone();
+
     let body_stream = async_stream::stream! {
-        let mut last_mtime: Option<std::time::SystemTime> = None;
-        let mut last_emit = std::time::Instant::now();
         let mut last_bytes: Option<bytes::Bytes> = None;
-        loop {
-            let meta = tokio::fs::metadata(&path).await;
-            let mtime = meta.as_ref().ok().and_then(|m| m.modified().ok());
 
-            let new_frame = matches!(
-                (last_mtime, mtime),
-                (None, Some(_)) | (Some(_), Some(_)) if last_mtime != mtime
+        // Helper closure to grab the current frame and IMMEDIATELY drop
+        // the watch::Ref before any potential .await. Holding a Ref
+        // across an await point would force the async_stream future to
+        // be !Send.
+        let snapshot = |rx: &tokio::sync::watch::Receiver<Option<bytes::Bytes>>| -> Option<bytes::Bytes> {
+            rx.borrow().clone()
+        };
+
+        // Send the current frame immediately if there is one (otherwise
+        // a brand-new connection has to wait for the next ffmpeg frame,
+        // and that's awkward UX).
+        let initial = snapshot(&rx);
+        if let Some(b) = initial {
+            let header = format!(
+                "\r\n--{boundary}\r\n\
+                 Content-Type: image/jpeg\r\n\
+                 Content-Length: {}\r\n\r\n",
+                b.len()
             );
+            yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
+            yield Ok::<_, std::io::Error>(b.clone());
+            last_bytes = Some(b);
+        }
 
-            // Either: source advanced (emit new frame) OR
-            //         heartbeat is due (re-emit the previous frame).
-            let due_heartbeat = !new_frame
-                && last_bytes.is_some()
-                && last_emit.elapsed() >= heartbeat;
-
-            if new_frame {
-                if let Ok(bytes) = tokio::fs::read(&path).await {
-                    // Validate JPEG integrity before emitting. ffmpeg
-                    // writes live.jpg non-atomically (O_TRUNC + write),
-                    // so we sometimes catch the file mid-write — short
-                    // file, missing EOI marker, or in the worst case
-                    // zero bytes immediately after the truncate. If we
-                    // forward a corrupt JPEG, Chrome's image decoder
-                    // in a multipart/x-mixed-replace stream eventually
-                    // gives up and TEARS DOWN the entire connection
-                    // after a few bad frames — which is exactly the
-                    // "screen dies after a few dozen frames" symptom
-                    // we've been chasing across v15+. Skip corrupt
-                    // frames; the heartbeat path will keep the
-                    // connection alive with the last-good frame until
-                    // a clean read comes through.
-                    let valid = bytes.len() >= 4
-                        && bytes[0..2] == [0xFF, 0xD8]              // SOI
-                        && bytes[bytes.len()-2..] == [0xFF, 0xD9];  // EOI
-                    if valid {
-                        let b = bytes::Bytes::from(bytes);
+        loop {
+            // Wait for the next frame, OR fire the heartbeat timer if
+            // no new frame arrives within 1.5s.
+            let next = tokio::time::timeout(heartbeat, rx.changed()).await;
+            match next {
+                Ok(Ok(())) => {
+                    // New frame published by jpeg_pipe::run.
+                    let current = snapshot(&rx);
+                    if let Some(b) = current {
                         let header = format!(
                             "\r\n--{boundary}\r\n\
                              Content-Type: image/jpeg\r\n\
@@ -202,33 +202,28 @@ async fn proxy_to_ffmpeg_tcp(state: &SharedState, _path: &str) -> Response<Body>
                         yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
                         yield Ok::<_, std::io::Error>(b.clone());
                         last_bytes = Some(b);
-                        last_mtime = mtime;
-                        last_emit = std::time::Instant::now();
-                    } else {
-                        // Bad read — don't update last_mtime so the
-                        // next iteration retries. Don't yield. The
-                        // browser will see this as a brief stall, not
-                        // a corrupt frame.
-                        tracing::trace!(
-                            len = bytes.len(),
-                            "skipping malformed live.jpg (mid-write?)"
-                        );
                     }
                 }
-            } else if due_heartbeat {
-                if let Some(b) = &last_bytes {
-                    let header = format!(
-                        "\r\n--{boundary}\r\n\
-                         Content-Type: image/jpeg\r\n\
-                         Content-Length: {}\r\n\r\n",
-                        b.len()
-                    );
-                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
-                    yield Ok::<_, std::io::Error>(b.clone());
-                    last_emit = std::time::Instant::now();
+                Ok(Err(_)) => {
+                    // Sender dropped — only happens if state is being
+                    // torn down. End the stream cleanly.
+                    return;
+                }
+                Err(_) => {
+                    // Heartbeat timer fired — re-emit the last frame so
+                    // the browser's multipart parser stays alive.
+                    if let Some(b) = &last_bytes {
+                        let header = format!(
+                            "\r\n--{boundary}\r\n\
+                             Content-Type: image/jpeg\r\n\
+                             Content-Length: {}\r\n\r\n",
+                            b.len()
+                        );
+                        yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
+                        yield Ok::<_, std::io::Error>(b.clone());
+                    }
                 }
             }
-            tokio::time::sleep(frame_interval).await;
         }
     };
 

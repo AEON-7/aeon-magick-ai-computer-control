@@ -100,6 +100,28 @@ pub async fn run(state: SharedState) -> Result<()> {
             Pipeline::FfmpegRescale { .. } => "ffmpeg",
         };
 
+        // ── ffmpeg-mode: capture stdout and parse JPEG frames ──
+        // Take ffmpeg's stdout pipe (set by spawn_ffmpeg with
+        // Stdio::piped()) and hand it to the JPEG parser, which
+        // publishes each complete frame on state.0.frame_tx. The
+        // webapi reads from the matching watch::Receiver, so /snapshot
+        // and /stream serve frames straight from memory with no
+        // filesystem in the path.
+        //
+        // The parser task lives only as long as this ffmpeg instance —
+        // when the child exits / is killed / signals relaunch, the
+        // stdout pipe closes and jpeg_pipe::run returns. A new task
+        // gets spawned on the next iteration.
+        if matches!(pipeline, Pipeline::FfmpegRescale { .. }) {
+            if let Some(stdout) = child.stdout.take() {
+                let tx = state.0.frame_tx.clone();
+                tokio::spawn(crate::jpeg_pipe::run(stdout, tx));
+                info!("jpeg_pipe reader spawned for this ffmpeg run");
+            } else {
+                warn!("ffmpeg child has no stdout pipe — frames won't reach webapi");
+            }
+        }
+
         tokio::select! {
             status = child.wait() => {
                 warn!(target = label, ?status, "capture child exited; relaunching");
@@ -320,10 +342,8 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     let mut cmd = Command::new(&cfg.ffmpeg_bin);
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
-        // -y: overwrite the output file without prompting. Without this,
-        // every restart of ffmpeg sees the previous run's live.jpg and
-        // bails on a y/N prompt with no tty attached — and live.jpg never
-        // gets refreshed past the first frame.
+        // -y: overwrite the output file without prompting. Kept for the
+        // (now-disabled) file output path; harmless with image2pipe.
         .arg("-y")
         // Input
         .arg("-f").arg("v4l2")
@@ -333,28 +353,34 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
         .arg("-i").arg(&cfg.device)
         // Filter — scale to target resolution
         .arg("-vf").arg(&scale_filter)
-        // Output: single JPEG file, atomically updated every frame.
+        // Output: JPEG frames to stdout via image2pipe.
         //
-        // -atomic_writing 1 (image2 muxer): write to a temp file, then
-        // rename() — atomic at the kernel level. Without this, ffmpeg
-        // does O_TRUNC + write which exposes a window where the file
-        // is short or empty. The streamer's webapi previously read
-        // mid-write JPEGs and forwarded them to the browser; Chrome's
-        // image decoder in a multipart/x-mixed-replace stream
-        // eventually tears down the whole connection after a few
-        // corrupt frames. This was the "screen dies after a few dozen
-        // frames" bug we chased across v15-v22.
+        // v24 architectural change: the previous v3-v23 design wrote
+        // each frame to /run/aeon/snapshots/live.jpg (tmpfs file) and
+        // the webapi polled the file. That had a race between ffmpeg's
+        // truncate+write and the webapi's read — partially-written
+        // JPEGs were forwarded to the browser, and Chrome's image
+        // decoder in a multipart/x-mixed-replace stream eventually
+        // tore down the whole connection after a few corrupt frames.
+        // v23 worked around it with `-atomic_writing 1` (rename-based)
+        // plus client-side SOI/EOI validation; v24 closes the race
+        // entirely by skipping the filesystem.
+        //
+        // image2pipe: write each frame to stdout as a back-to-back
+        // sequence of JPEG bytes. No filesystem, no atomic-write
+        // gymnastics. The jpeg_pipe::run task reads stdout, parses
+        // SOI/EOI boundaries, and publishes complete frames on a
+        // tokio::sync::watch channel. The webapi serves /snapshot and
+        // /stream directly from the channel — sub-millisecond
+        // latency from ffmpeg → wire, zero tmpfs traffic, zero race.
         .arg("-r").arg(target_fps.to_string())
         .arg("-c:v").arg("mjpeg")
         .arg("-q:v").arg(&qv)
-        .arg("-update").arg("1")
-        .arg("-atomic_writing").arg("1")
-        .arg("-f").arg("image2")
-        .arg(&out.snapshot_path)
-        // Pipe ffmpeg's own stdout/stderr through to ours so we can see
-        // its warnings + errors in our journal. Without this and with
-        // Stdio::piped(), ffmpeg can block writing to a pipe nobody reads.
-        .stdout(Stdio::inherit())
+        .arg("-f").arg("image2pipe")
+        .arg("pipe:1")
+        // Pipe stdout so jpeg_pipe::run can read frames. stderr stays
+        // inherited so ffmpeg's warnings/errors land in our journal.
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
     Ok(cmd.spawn()?)

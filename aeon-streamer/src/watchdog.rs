@@ -18,6 +18,14 @@ const POLL: Duration = Duration::from_secs(2);
 pub async fn run(state: SharedState) -> Result<()> {
     let mut last_hash: Option<String> = None;
     let mut offline_streak: u32 = 0;
+    // v24: track ffmpeg liveness via the frame watch channel instead
+    // of `live.jpg` mtime (the file no longer exists — jpeg_pipe::run
+    // publishes frames directly from ffmpeg's stdout pipe). Each poll,
+    // we call has_changed() / borrow_and_update() to detect whether
+    // any new frame arrived since last poll. N consecutive false =
+    // ffmpeg stalled.
+    let mut frame_rx = state.0.frame_rx.clone();
+    let _ = frame_rx.borrow_and_update();
 
     loop {
         tokio::select! {
@@ -53,17 +61,21 @@ pub async fn run(state: SharedState) -> Result<()> {
 
         // 2. Online check — different signal source per pipeline.
         if in_ffmpeg_mode {
-            // ffmpeg-rescale mode: "online" = live.jpg is being kept
-            // fresh. If mtime hasn't advanced in 5 polls (~10s), ffmpeg
-            // has hung; signal a relaunch.
-            let snapshot_path = &state.0.cfg.output.snapshot_path;
-            let fresh = tokio::fs::metadata(snapshot_path)
-                .await
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-                .map(|age| age < Duration::from_secs(3))
-                .unwrap_or(false);
+            // ffmpeg-pipeline mode (v24): "online" = jpeg_pipe::run
+            // published at least one new frame since the last poll.
+            // The watch channel's has_changed() flag is set by the
+            // sender on every send(); borrow_and_update() clears it.
+            // 5 consecutive polls with no change (~10s at 2s poll) =
+            // ffmpeg stalled, signal a relaunch.
+            let fresh = match frame_rx.has_changed() {
+                Ok(true) => {
+                    // Mark as seen for next iteration.
+                    let _ = frame_rx.borrow_and_update();
+                    true
+                }
+                Ok(false) => false,
+                Err(_) => false,  // sender dropped — treated as stalled
+            };
             if fresh {
                 offline_streak = 0;
                 state.mutate(|s| s.online = true);
@@ -71,8 +83,10 @@ pub async fn run(state: SharedState) -> Result<()> {
                 offline_streak += 1;
                 state.mutate(|s| s.online = false);
                 if offline_streak >= 5 {
-                    info!(streak = offline_streak, "ffmpeg live.jpg stale, relaunching");
-                    state.signal_relaunch("ffmpeg stalled");
+                    info!(streak = offline_streak,
+                        "no new frame from ffmpeg pipe in {} polls, relaunching",
+                        offline_streak);
+                    state.signal_relaunch("ffmpeg pipe stalled");
                     offline_streak = 0;
                 }
             }
