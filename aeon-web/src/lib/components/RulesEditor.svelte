@@ -31,6 +31,7 @@
     table: 'filter',
     direction: 'inbound',
     interface: '',
+    out_iface: '',
     proto: 'tcp',
     src: '',
     dst: '',
@@ -70,6 +71,7 @@
         if (sp.has('action'))  newRule.action = sp.get('action')!;
         if (sp.has('proto'))   newRule.proto = sp.get('proto')!;
         if (sp.has('iface'))   newRule.interface = sp.get('iface')!;
+        if (sp.has('out_iface')) newRule.out_iface = sp.get('out_iface')!;
         if (sp.has('src'))     newRule.src = sp.get('src')!;
         if (sp.has('dst'))     newRule.dst = sp.get('dst')!;
         if (sp.has('sport'))   newRule.sport = sp.get('sport')!;
@@ -97,7 +99,7 @@
     try {
       await api.addFirewallRule(newRule);
       await refresh();
-      newRule = { ...newRule, src: '', dst: '', sport: '', dport: '', comment: '' };
+      newRule = { ...newRule, src: '', dst: '', sport: '', dport: '', comment: '', out_iface: '' };
     } catch (e: any) {
       error = e?.message ?? 'failed to add rule';
     } finally {
@@ -222,10 +224,22 @@
         </select>
       </label>
       <label class="space-y-1">
-        <span class="text-zinc-500">Interface (e.g. usb0)</span>
+        <span class="text-zinc-500">In iface ({newRule.chain === 'OUTPUT' || newRule.chain === 'POSTROUTING' ? '-o' : '-i'} e.g. usb0)</span>
         <input type="text" bind:value={newRule.interface} placeholder="any"
                class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
       </label>
+      {#if newRule.chain === 'FORWARD'}
+        <!-- FORWARD chains have both an input and output interface match;
+             pairing -i and -o makes the rule strictly narrower than -i
+             alone (e.g. "allow this exact usb0→eth0 hop, not any other
+             egress"). Hidden for non-FORWARD chains where -o is already
+             handled by the single `iface` field above. -->
+        <label class="space-y-1">
+          <span class="text-zinc-500">Out iface (-o e.g. eth0)</span>
+          <input type="text" bind:value={newRule.out_iface} placeholder="any"
+                 class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+        </label>
+      {/if}
       <label class="space-y-1">
         <span class="text-zinc-500">Source IP/subnet</span>
         <input type="text" bind:value={newRule.src} placeholder="any"
@@ -234,6 +248,11 @@
       <label class="space-y-1">
         <span class="text-zinc-500">Dest IP/subnet</span>
         <input type="text" bind:value={newRule.dst} placeholder="any"
+               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+      </label>
+      <label class="space-y-1">
+        <span class="text-zinc-500">Source port(s)</span>
+        <input type="text" bind:value={newRule.sport} placeholder="any"
                class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
       </label>
       <label class="space-y-1">

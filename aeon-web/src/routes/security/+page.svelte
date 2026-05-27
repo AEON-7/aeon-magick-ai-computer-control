@@ -40,19 +40,40 @@
   }
 
   /// Build a /network deep-link that pre-populates the firewall rule
-  /// form to ALLOW the observed traffic. The RulesEditor reads the
-  /// query params on mount.
+  /// form to ALLOW the observed traffic. Every field the kernel logged
+  /// is forwarded so the resulting rule is as narrow as we can make it
+  /// from a single observed packet:
+  ///   chain   = FORWARD (if the kernel logged OUT=, it was forwarded;
+  ///                      otherwise INPUT — local-host-bound)
+  ///   iface   = inbound interface (-i)
+  ///   out_iface = outbound interface (-o, FORWARD only)
+  ///   proto   = exact protocol
+  ///   src/dst = single hosts (iptables treats as /32 by default)
+  ///   sport/dport = exact ports
+  /// The user can broaden any field in the form after they review it.
   function allowLink(p: api.BlockedPacket): string {
     const params = new URLSearchParams();
     params.set('createRule', '1');
-    params.set('chain', 'FORWARD');                       // packet was forwarded
+    // OUT= empty in the log means the kernel was about to deliver
+    // locally (INPUT chain). Anything else was being forwarded.
+    const chain = p.out_iface ? 'FORWARD' : 'INPUT';
+    params.set('chain', chain);
     params.set('action', 'ACCEPT');
     if (p.proto) params.set('proto', p.proto.toLowerCase());
     if (p.in_iface) params.set('iface', p.in_iface);
+    if (p.out_iface && chain === 'FORWARD') params.set('out_iface', p.out_iface);
     if (p.src) params.set('src', p.src);
     if (p.dst) params.set('dst', p.dst);
+    if (p.sport) params.set('sport', p.sport);
     if (p.dport) params.set('dport', p.dport);
-    params.set('comment', `Allow ${p.proto || 'traffic'} from ${p.src || 'any'} to ${p.dst || 'any'}${p.dport ? ':' + p.dport : ''}`);
+    const portTag = p.dport ? `:${p.dport}` : '';
+    const ifaceTag = p.in_iface && p.out_iface
+      ? ` (${p.in_iface}→${p.out_iface})`
+      : p.in_iface ? ` (${p.in_iface})` : '';
+    params.set(
+      'comment',
+      `Allow ${p.proto || 'traffic'}${ifaceTag} from ${p.src || 'any'} to ${p.dst || 'any'}${portTag}`,
+    );
     return `/network?${params.toString()}#advanced`;
   }
 

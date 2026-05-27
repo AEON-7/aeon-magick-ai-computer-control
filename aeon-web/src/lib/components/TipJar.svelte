@@ -55,8 +55,38 @@
     },
   ];
 
+  // The bare URI scheme (BIP21 / Solana Pay / Monero URI / EIP-681).
+  // Used as the QR-encoded payload (every standards-compliant wallet
+  // scanner consumes this form).
   function uriFor(w: Wallet): string {
     return `${w.uriScheme}:${w.address}`;
+  }
+
+  // What the "open" button should navigate to. For chains where the URI
+  // scheme has a widely-registered desktop handler (Bitcoin Core / Trezor
+  // Suite / Sparrow for BTC; Monero GUI / Cake / Feather for XMR), the
+  // bare scheme works fine — every modern OS dispatches it to the wallet.
+  //
+  // Ethereum and Solana are typically held in browser-extension wallets
+  // (MetaMask, Phantom) with no OS-level scheme handler, so clicking
+  // `ethereum:0x...` on Safari just throws "address is invalid". For
+  // those, we use the wallet's universal/app link which:
+  //   • opens the wallet directly if installed (deep link)
+  //   • falls back to the wallet's web page if not (downloads / wallet
+  //     connect QR), so the user never hits a dead-end error dialog.
+  function openUrlFor(w: Wallet): string {
+    switch (w.id) {
+      case 'eth':
+        // MetaMask universal link — `@1` pins to Ethereum mainnet.
+        // Works on desktop + mobile + as a web-page fallback.
+        return `https://metamask.app.link/send/${w.address}@1`;
+      case 'sol':
+        // Phantom's universal link "send" route. Recipient pre-fills
+        // the destination address; user picks amount + token.
+        return `https://phantom.app/ul/v1/send?recipient=${encodeURIComponent(w.address)}`;
+      default:
+        return uriFor(w);
+    }
   }
 
   // Build an inline SVG <path> from qrcode-generator's module map.
@@ -174,8 +204,14 @@
               class="text-[10px] font-mono px-2 py-1 rounded
                      border border-ink-700 hover:border-cursed-500
                      text-zinc-400 hover:text-cursed-300 transition-colors"
-              href={uriFor(w)}
-              title="Open in installed wallet"
+              href={openUrlFor(w)}
+              target={w.id === 'eth' || w.id === 'sol' ? '_blank' : undefined}
+              rel={w.id === 'eth' || w.id === 'sol' ? 'noreferrer' : undefined}
+              title={w.id === 'eth'
+                ? 'Opens MetaMask if installed; otherwise the MetaMask web page (pre-filled recipient).'
+                : w.id === 'sol'
+                ? 'Opens Phantom if installed; otherwise the Phantom web page (pre-filled recipient).'
+                : 'Open in installed wallet'}
             >
               open
             </a>

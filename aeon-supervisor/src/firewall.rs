@@ -41,6 +41,12 @@ pub struct Rule {
     pub direction: String,
     #[serde(default)]
     pub iface: String,
+    /// Outbound interface match (`-o <name>`). Only meaningful in FORWARD
+    /// (where both `-i` and `-o` qualify the rule), OUTPUT, and
+    /// POSTROUTING chains. Ignored on INPUT / PREROUTING (no concept of
+    /// "out interface" before routing).
+    #[serde(default)]
+    pub out_iface: String,
     #[serde(default)]
     pub proto: String,
     #[serde(default)]
@@ -148,6 +154,14 @@ fn rule_to_args(r: &Rule) -> Vec<String> {
         };
         args.push(flag.into());
         args.push(r.iface.clone());
+    }
+    // FORWARD rules can additionally pin the outbound interface (e.g.
+    // -i usb0 -o eth0 to match exactly the USB-client-to-WAN path).
+    // Lets the /security "allow this traffic" deep-link emit a rule
+    // that's as narrow as the blocked-log entry it came from.
+    if !r.out_iface.is_empty() && r.chain == "FORWARD" {
+        args.push("-o".into());
+        args.push(r.out_iface.clone());
     }
     if !r.proto.is_empty() {
         args.push("-p".into());
@@ -347,6 +361,7 @@ pub async fn list_rules(State(_state): State<AppState>) -> Json<Value> {
                 "table": r.table,
                 "direction": r.direction,
                 "iface": r.iface,
+                "out_iface": r.out_iface,
                 "proto": r.proto,
                 "src": r.src,
                 "dst": r.dst,
@@ -373,6 +388,8 @@ pub struct RuleDraft {
     pub direction: Option<String>,
     #[serde(rename = "interface", default)]
     pub iface: Option<String>,
+    #[serde(default)]
+    pub out_iface: Option<String>,
     #[serde(default)]
     pub proto: Option<String>,
     #[serde(default)]
@@ -465,6 +482,7 @@ pub async fn add_rule(
         table,
         direction: req.direction.unwrap_or_else(default_direction),
         iface: req.iface.unwrap_or_default(),
+        out_iface: req.out_iface.unwrap_or_default(),
         proto: req.proto.unwrap_or_default(),
         src: req.src.unwrap_or_default(),
         dst: req.dst.unwrap_or_default(),

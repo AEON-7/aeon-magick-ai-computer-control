@@ -418,7 +418,8 @@ export interface FirewallRule {
   chain: string;                  // INPUT / OUTPUT / FORWARD / PREROUTING / POSTROUTING
   table: string;                  // filter / nat / mangle
   direction: 'inbound' | 'outbound' | 'forward';
-  iface: string;                  // empty = any
+  iface: string;                  // -i match (inbound), or -o on OUTPUT/POSTROUTING
+  out_iface: string;              // -o match — FORWARD only (paired with iface as -i)
   proto: string;                  // tcp / udp / icmp / "" (any)
   src: string;                    // CIDR or empty
   dst: string;                    // CIDR or empty
@@ -436,6 +437,7 @@ export interface FirewallRuleDraft {
   table: string;
   direction: 'inbound' | 'outbound' | 'forward';
   interface: string;
+  out_iface: string;
   proto: string;
   src: string;
   dst: string;
