@@ -477,6 +477,15 @@ pub struct LoginReq {
 
 pub async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl IntoResponse {
     if !state.auth.verify_password(&req.username, &req.password) {
+        // Audit failed login — actor is the *attempted* username. Useful
+        // for spotting brute-force attempts from a particular client.
+        crate::audit::log(
+            &format!("{} (attempt)", req.username),
+            "login_fail",
+            "bad credentials",
+            "fail",
+            Some("invalid username or password"),
+        );
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"ok": false, "err": "bad credentials"})),
@@ -484,6 +493,13 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> 
             .into_response();
     }
     let session = state.auth.issue_session(&req.username);
+    crate::audit::log(
+        &format!("{} (session)", req.username),
+        "login_ok",
+        "new session issued",
+        "ok",
+        None,
+    );
     let cookie = format!(
         "aeon_session={session}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=86400"
     );
@@ -493,7 +509,12 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> 
     resp
 }
 
-pub async fn logout() -> impl IntoResponse {
+pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    // Best-effort: capture WHO is logging out by identifying first.
+    let who = identify(&state.auth, &headers)
+        .map(|id| crate::audit::actor_for(&id))
+        .unwrap_or_else(|| "anonymous".into());
+    crate::audit::log(&who, "logout", "session ended", "ok", None);
     let cookie = "aeon_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
     let mut resp = Json(json!({"ok": true})).into_response();
     resp.headers_mut()
@@ -572,6 +593,13 @@ pub async fn setup_password(
         )
             .into_response();
     }
+    crate::audit::log(
+        &format!("{} (setup)", req.username),
+        "password_set",
+        "initial admin password configured",
+        "ok",
+        None,
+    );
     // Auto-login: issue a session cookie so the wizard flows straight into the
     // main UI without forcing a second prompt.
     let session = state.auth.issue_session(&req.username);
@@ -618,6 +646,13 @@ pub async fn change_password(
     if let Err(e) = state.auth.set_password(&id.user, &req.new_password) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
+    crate::audit::log(
+        &crate::audit::actor_for(&id),
+        "password_change",
+        "admin password updated",
+        "ok",
+        None,
+    );
     Json(json!({"ok": true})).into_response()
 }
 
@@ -640,28 +675,63 @@ fn default_scope() -> TokenScope {
 
 pub async fn create_token(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateTokenReq>,
 ) -> impl IntoResponse {
+    let actor = identify(&state.auth, &headers)
+        .map(|id| crate::audit::actor_for(&id))
+        .unwrap_or_else(|| "anonymous".into());
     match state.auth.create_token(&req.name, req.scope) {
-        Ok((id, plain)) => Json(json!({
-            "ok": true,
-            "id": id,
-            "name": req.name,
-            "scope": req.scope.as_str(),
-            // SHOWN ONCE — caller must store this. Server keeps only the argon2 hash.
-            "token": plain,
-        }))
-        .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok((id, plain)) => {
+            crate::audit::log(
+                &actor,
+                "token_create",
+                &format!("name={} scope={} id={}", req.name, req.scope.as_str(), id),
+                "ok",
+                None,
+            );
+            Json(json!({
+                "ok": true,
+                "id": id,
+                "name": req.name,
+                "scope": req.scope.as_str(),
+                // SHOWN ONCE — caller must store this. Server keeps only the argon2 hash.
+                "token": plain,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            crate::audit::log(
+                &actor,
+                "token_create",
+                &format!("name={}", req.name),
+                "fail",
+                Some(&e.to_string()),
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 
 pub async fn revoke_token(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    let actor = identify(&state.auth, &headers)
+        .map(|id| crate::audit::actor_for(&id))
+        .unwrap_or_else(|| "anonymous".into());
     match state.auth.revoke_token(&id) {
-        Ok(true) => Json(json!({"ok": true, "revoked": id})).into_response(),
+        Ok(true) => {
+            crate::audit::log(
+                &actor,
+                "token_revoke",
+                &format!("id={}", id),
+                "ok",
+                None,
+            );
+            Json(json!({"ok": true, "revoked": id})).into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "no such token").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

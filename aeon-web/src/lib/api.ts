@@ -549,6 +549,39 @@ export const refreshDnsSource = (id: string) =>
     `/dns/sources/${encodeURIComponent(id)}/refresh`,
   );
 
+// ── Audit log ─────────────────────────────────────────────────────────
+
+export interface AuditEntry {
+  ts_ms: number;
+  actor: string;
+  action: string;
+  detail: string;
+  result: 'ok' | 'fail' | string;
+  err: string;
+}
+
+export interface AuditState {
+  ok: boolean;
+  entries: AuditEntry[];
+  total_lines: number;
+  max_bytes: number;
+  current_bytes: number;
+}
+
+export const getAudit = (
+  filters: { limit?: number; actor?: string; action?: string } = {},
+) => {
+  const q = new URLSearchParams();
+  if (filters.limit != null) q.set('limit', String(filters.limit));
+  if (filters.actor) q.set('actor', filters.actor);
+  if (filters.action) q.set('action', filters.action);
+  const qs = q.toString();
+  return req<AuditState>('GET', `/audit${qs ? `?${qs}` : ''}`);
+};
+
+export const clearAudit = () =>
+  req<{ ok: boolean }>('DELETE', '/audit');
+
 // ── SSH key management ────────────────────────────────────────────────
 
 export interface SshKey {

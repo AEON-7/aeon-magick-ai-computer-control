@@ -550,6 +550,7 @@
       <a href="/storage" class="btn text-xs">disk&nbsp;drive</a>
       <a href="/ssh-keys" class="btn text-xs">SSH&nbsp;keys</a>
       <a href="/tokens" class="btn text-xs">API&nbsp;tokens</a>
+      <a href="/audit" class="btn text-xs">audit&nbsp;log</a>
       <button class="btn" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
       <button class="btn" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
       <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>

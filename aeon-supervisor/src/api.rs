@@ -225,6 +225,10 @@ pub fn build_router(cfg: Config) -> Router {
         // Security console — throughput + blocked counters + top clients.
         .route("/security/metrics",
             get(crate::security_metrics::get_metrics))
+        // Audit log — recent admin actions and authentication events.
+        .route("/audit",
+            get(crate::audit::list)
+                .delete(crate::audit::clear))
         // MCP (Model Context Protocol) — Streamable HTTP transport
         .route("/mcp", post(crate::mcp::handle));
 
@@ -363,6 +367,13 @@ async fn auth_middleware(
     // so the rules can refer to the canonical /api/auth/tokens etc.
     let full_path = format!("/api{}", path);
     if !crate::auth::scope_allows(&identity, &method, &full_path) {
+        crate::audit::log(
+            &crate::audit::actor_for(&identity),
+            "scope_denied",
+            &format!("{} {}", method, full_path),
+            "fail",
+            Some("scope insufficient"),
+        );
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -374,5 +385,57 @@ async fn auth_middleware(
             .into_response();
     }
 
-    next.run(req).await
+    // 5. Decide if this request should land in the audit log. Major
+    // mutations only — never GETs, never the chatty HID surface
+    // (/hid/click, /hid/move, /hid/type, /hid/scroll, /hid/key,
+    // /hid/release_all), never the snapshot/stream feed. Things we DO
+    // audit: any non-GET on /network, /storage, /firewall, /ssh,
+    // /dns, /wifi, plus persona swaps.
+    let auditable_action = if method == axum::http::Method::GET {
+        None
+    } else if path.starts_with("/network/")
+        || path.starts_with("/storage")
+        || path.starts_with("/firewall/")
+        || path.starts_with("/ssh/")
+        || path.starts_with("/dns/")
+        || path.starts_with("/wifi/")
+    {
+        // Construct a stable action label from method + path leaf.
+        // e.g. "PUT /api/network/vpn" → "network_vpn_set"
+        let leaf = full_path.trim_start_matches("/api/").replace('/', "_");
+        Some(format!("{}_{}", method_verb(&method), leaf))
+    } else if path == "/hid/persona" && method == axum::http::Method::POST {
+        Some("hid_persona_set".to_string())
+    } else {
+        None
+    };
+
+    let actor = crate::audit::actor_for(&identity);
+    let detail = format!("{} {}", method, full_path);
+
+    let resp = next.run(req).await;
+
+    if let Some(action) = auditable_action {
+        let status = resp.status();
+        let (result, err) = if status.is_success() {
+            ("ok", None)
+        } else {
+            ("fail", Some(format!("HTTP {}", status.as_u16())))
+        };
+        crate::audit::log(&actor, &action, &detail, result, err.as_deref());
+    }
+
+    resp
+}
+
+/// Map HTTP verb to an audit-action prefix. PUT/POST → "set", DELETE →
+/// "delete", POST → "set" / "create" depending on path — we pick the
+/// generic "set" for PUT, "create" for POST.
+fn method_verb(m: &axum::http::Method) -> &'static str {
+    match *m {
+        axum::http::Method::PUT => "set",
+        axum::http::Method::POST => "set",
+        axum::http::Method::DELETE => "delete",
+        _ => "call",
+    }
 }

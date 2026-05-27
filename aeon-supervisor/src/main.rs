@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 mod api;
+mod audit;
 mod auth;
 mod captive;
 mod dns_log;

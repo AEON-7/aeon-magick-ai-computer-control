@@ -159,6 +159,13 @@ fn tools_catalog() -> Value {
             tool("ssh_keys",
                  "List trusted SSH public keys (fingerprint + comment).",
                  json!({"type":"object","properties":{}})),
+            tool("audit_log",
+                 "Recent audit-log entries (logins, logouts, token CRUD, network/firewall/dns/ssh/wifi/storage/persona mutations). Returns newest-first, capped at the supplied limit.",
+                 json!({"type":"object","properties":{
+                    "limit":{"type":"integer","default":200,"description":"Max entries to return (1..2000)"},
+                    "actor":{"type":"string","description":"Filter by exact actor string."},
+                    "action":{"type":"string","description":"Filter by action prefix (e.g. \"login\" matches login_ok + login_fail)."}
+                 }})),
         ]
     })
 }
@@ -292,6 +299,28 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
         "ssh_keys" => {
             let k = crate::ssh_keys::list_keys(axum::extract::State(state.clone())).await;
             Ok(text_result(&serde_json::to_string_pretty(&k.0).unwrap_or_default()))
+        }
+        "audit_log" => {
+            let q = crate::audit::AuditQuery {
+                limit: args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize),
+                actor: args.get("actor").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                action: args.get("action").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            };
+            let resp = crate::audit::list(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(q),
+            ).await.into_response();
+            // resp is a 200 with JSON body; serialize body bytes back to text.
+            // Simpler: re-call the list helper but it doesn't expose the
+            // pre-IntoResponse value. We collect the body here.
+            use http_body_util::BodyExt;
+            let (parts, body) = resp.into_parts();
+            let _ = parts; // status is always 200 in success path
+            let bytes = body.collect().await
+                .map_err(|e| format!("collect body: {e}"))?
+                .to_bytes();
+            let s = String::from_utf8_lossy(&bytes).to_string();
+            Ok(text_result(&s))
         }
         other => Err(format!("unknown tool: {other}")),
     }
