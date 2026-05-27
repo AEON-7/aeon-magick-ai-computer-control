@@ -1,0 +1,42 @@
+# Default aeon-streamer config.
+
+device = "/dev/kvmd-video"
+api_sock = "/run/aeon/streamer.sock"
+ustreamer_sock = "/run/aeon/ustreamer.sock"
+jpeg_quality = 80
+drop_same_frames = 30
+ustreamer_bin = "/usr/bin/ustreamer"
+ffmpeg_bin = "/usr/bin/ffmpeg"
+run_as = "aeon"
+# platform = "Pi4"   # auto-detected, override if needed
+
+# The [output] block kicks in ONLY when the capture device offers a
+# format ustreamer can't ingest natively (Cam Link at 4K = NV12/YU12 only).
+# In that case aeon-streamer spawns ffmpeg to ingest the source, rescale
+# to width × height below, and serve the result.
+#
+# When the source already offers YUYV / UYVY / MJPG (Cam Link at ≤1080p),
+# the ustreamer fast path runs and these knobs are ignored — frames flow
+# through at the source resolution.
+[output]
+# Pick width × height to match your host's *logical* (post-Retina) screen
+# size so agent pointer coords map 1:1 with what the human sees:
+#   M1 MBP 13" default scale  → 1440x900
+#   M2/M3 MBA 13"             → 1470x956
+#   M2/M3 MBP 14" default     → 1512x982
+#   M2/M3 MBP 16" default     → 1728x1117
+#   Pure 1080p host           → 1920x1080
+width = 1920
+height = 1080
+fps = 30
+format = "mjpeg"               # "mjpeg" or "h264"
+scale_algorithm = "bicubic"    # "lanczos" (best) | "bicubic" (default) | "neighbor" (fastest)
+snapshot_path = "/run/aeon/snapshots/live.jpg"
+mjpeg_tcp_port = 8002
+
+# Use Pi 4 GPU hardware scaler (scale_v4l2m2m) instead of CPU scale.
+# Saves ~300-500 mA under active streaming. Default false — flip to true
+# after confirming basic streaming works; if frames stop arriving, flip
+# back. (Some pixel formats aren't supported by the m2m scaler on every
+# kernel version.)
+hw_accel = false

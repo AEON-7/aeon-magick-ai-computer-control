@@ -1,0 +1,23 @@
+[Unit]
+Description=DNSCrypt-proxy client (encrypted DNS forwarder)
+Documentation=https://github.com/DNSCrypt/dnscrypt-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy/dnscrypt-proxy.toml
+Restart=on-failure
+RestartSec=5
+User=_dnscrypt-proxy
+Group=_dnscrypt-proxy
+# Listen on 127.0.2.1:53 — needs CAP_NET_BIND_SERVICE because <1024.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/cache/dnscrypt-proxy
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,920 @@
+<script lang="ts">
+  // USB ethernet passthrough + DNSCrypt + VPN.
+  //
+  // The "simple" surface up top covers what 90% of users want: turn USB
+  // ethernet on/off, pick an isolation mode. The "Advanced" expander
+  // hides DNSCrypt and VPN controls so the main page stays uncluttered.
+
+  import { onMount, onDestroy } from 'svelte';
+  import * as api from '$lib/api';
+  import TipJar from '$lib/components/TipJar.svelte';
+
+  // ── USB ethernet ──
+  let usbState: api.UsbNetState | null = null;
+  let usbEnabled = false;
+  let usbMode: api.UsbNetMode = 'isolation';
+  let usbSaving = false;
+  let usbMsg = '';
+
+  // ── DNSCrypt ──
+  let dnsState: api.DnscryptState | null = null;
+  let dnsEnabled = false;
+  let dnsProvider = 'cloudflare';
+  let dnsLocation = 'auto';
+  let dnsSaving = false;
+  let dnsMsg = '';
+
+  // ── VPN ──
+  let vpnState: api.VpnState | null = null;
+  let vpnStatus: api.VpnStatus | null = null;
+  let vpnStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+  let rotating = false;
+  let rotateMsg = '';
+  let vpnEnabled = false;
+  let vpnProvider: api.VpnProvider = 'none';
+  let vpnKillSwitch = false;
+  let vpnLanBypass = '192.168.0.0/16';
+  let tsAuthKey = '';
+  let tsHostname = '';
+  let tsExitNode = false;
+  let tsAdvertiseExit = false;
+  let wgConfig = '';
+  let ovConfig = '';
+  let ovUser = '';
+  let ovPass = '';
+  let torBridges = '';
+  let i2pOutproxy = '';
+  let vpnSaving = false;
+  let vpnMsg = '';
+
+  let loading = true;
+  let error = '';
+  let advancedOpen = false;
+
+  async function refresh() {
+    loading = true;
+    error = '';
+    try {
+      const [u, d, v] = await Promise.all([
+        api.getUsbNet(),
+        api.getDnscrypt(),
+        api.getVpn(),
+      ]);
+      usbState = u;
+      usbEnabled = u.enabled;
+      usbMode = u.mode;
+      dnsState = d;
+      dnsEnabled = d.enabled;
+      dnsProvider = d.provider;
+      dnsLocation = d.location;
+      vpnState = v;
+      vpnEnabled = v.enabled;
+      vpnProvider = v.provider;
+      vpnKillSwitch = v.kill_switch;
+      vpnLanBypass = v.lan_bypass;
+      tsHostname = v.tailscale.hostname;
+      tsExitNode = v.tailscale.exit_node;
+      tsAdvertiseExit = v.tailscale.advertise_exit_node;
+      ovUser = v.openvpn.auth_username;
+      i2pOutproxy = v.i2p.outproxy;
+      // Secrets are NOT echoed by the GET — start with empty inputs;
+      // user types only what they want to change.
+      tsAuthKey = '';
+      wgConfig = '';
+      ovConfig = '';
+      ovPass = '';
+      torBridges = '';
+    } catch (e: any) {
+      error = e?.message ?? 'failed to load network state';
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function pollVpnStatus() {
+    try {
+      vpnStatus = await api.getVpnStatus();
+    } catch (e) {
+      // Silent on poll errors — surfacing a banner every 3s would be noisy
+      console.warn('vpn status poll failed', e);
+    }
+  }
+
+  async function rotateIdentity() {
+    if (rotating) return;
+    rotating = true;
+    rotateMsg = 'rotating…';
+    try {
+      const result = await api.rotateVpnIdentity();
+      rotateMsg = result.ok
+        ? `✓ ${result.action}`
+        : `✗ ${result.detail || 'rotate failed'}`;
+      // Force a fresh status poll right after the rotation completes
+      setTimeout(pollVpnStatus, 1500);
+    } catch (e: any) {
+      rotateMsg = `✗ ${e?.message ?? 'rotate failed'}`;
+    } finally {
+      rotating = false;
+      setTimeout(() => (rotateMsg = ''), 4000);
+    }
+  }
+
+  onMount(() => {
+    refresh();
+    // Poll status every 4s. Slower than once-a-second to keep the
+    // public-IP curl from hammering ifconfig.co; fast enough to track
+    // bootstrap progress smoothly.
+    vpnStatusPollTimer = setInterval(pollVpnStatus, 4000);
+    pollVpnStatus();
+  });
+
+  onDestroy(() => {
+    if (vpnStatusPollTimer) clearInterval(vpnStatusPollTimer);
+  });
+
+  async function saveUsb() {
+    if (!usbState) return;
+    if (usbEnabled === usbState.enabled && usbMode === usbState.mode) {
+      usbMsg = 'no changes';
+      setTimeout(() => (usbMsg = ''), 2000);
+      return;
+    }
+    if (
+      usbEnabled !== usbState.enabled &&
+      !confirm(
+        `${usbEnabled ? 'Enable' : 'Disable'} USB ethernet?\n\n` +
+        `This rebuilds the USB gadget composite — the connected host ` +
+        `will see a brief USB disconnect/reconnect (~1 second).`,
+      )
+    ) {
+      usbEnabled = usbState.enabled;
+      return;
+    }
+    if (
+      usbMode === 'restricted' &&
+      usbState.mode !== 'restricted' &&
+      !confirm(
+        `Switch to RESTRICTED mode?\n\n` +
+        `In restricted mode the connected host has WAN access only — ` +
+        `it CANNOT reach this Pi's web UI, SSH, or any other service ` +
+        `over the USB-C link. You will need WiFi or LAN access to ` +
+        `manage this device from now on.`,
+      )
+    ) {
+      usbMode = usbState.mode;
+      return;
+    }
+    usbSaving = true;
+    error = '';
+    try {
+      await api.setUsbNet({ enabled: usbEnabled, mode: usbMode });
+      usbMsg = '✓ saved + applied';
+      setTimeout(() => (usbMsg = ''), 3000);
+      await refresh();
+    } catch (e: any) {
+      error = e?.message ?? 'save failed';
+    } finally {
+      usbSaving = false;
+    }
+  }
+
+  async function saveDns() {
+    dnsSaving = true;
+    error = '';
+    try {
+      await api.setDnscrypt({
+        enabled: dnsEnabled,
+        provider: dnsProvider,
+        location: dnsLocation,
+      });
+      dnsMsg = '✓ saved + applied';
+      setTimeout(() => (dnsMsg = ''), 3000);
+      await refresh();
+    } catch (e: any) {
+      error = e?.message ?? 'save failed';
+    } finally {
+      dnsSaving = false;
+    }
+  }
+
+  async function saveVpn() {
+    if (
+      vpnKillSwitch &&
+      !vpnState?.kill_switch &&
+      !confirm(
+        `Enable VPN kill-switch?\n\n` +
+        `Non-VPN outbound traffic will be DROPPED whenever the tunnel is ` +
+        `down or stalled. Loopback and the LAN bypass subnet ` +
+        `(${vpnLanBypass || 'none'}) stay reachable so you can still ` +
+        `manage this device from your LAN.\n\n` +
+        `If you change network providers or the tunnel fails to come up, ` +
+        `the device will appear offline from anything outside ${vpnLanBypass || 'the LAN'}.`,
+      )
+    ) {
+      vpnKillSwitch = vpnState?.kill_switch ?? false;
+      return;
+    }
+    vpnSaving = true;
+    error = '';
+    try {
+      const patch: api.VpnPatch = {
+        enabled: vpnEnabled,
+        provider: vpnProvider,
+        kill_switch: vpnKillSwitch,
+        lan_bypass: vpnLanBypass,
+      };
+      if (vpnProvider === 'tailscale') {
+        patch.tailscale = {
+          hostname: tsHostname,
+          exit_node: tsExitNode,
+          advertise_exit_node: tsAdvertiseExit,
+        };
+        if (tsAuthKey) patch.tailscale.auth_key = tsAuthKey;
+      } else if (vpnProvider === 'wireguard' && wgConfig) {
+        patch.wireguard = { config: wgConfig };
+      } else if (vpnProvider === 'openvpn') {
+        patch.openvpn = { auth_username: ovUser };
+        if (ovConfig) patch.openvpn.config = ovConfig;
+        if (ovPass) patch.openvpn.auth_password = ovPass;
+      } else if (vpnProvider === 'tor' && torBridges) {
+        patch.tor = { bridges: torBridges };
+      } else if (vpnProvider === 'i2p') {
+        patch.i2p = { outproxy: i2pOutproxy };
+      }
+      await api.setVpn(patch);
+      vpnMsg = '✓ saved + applied (tunnel may take a few seconds)';
+      setTimeout(() => (vpnMsg = ''), 4000);
+      await refresh();
+    } catch (e: any) {
+      error = e?.message ?? 'save failed';
+    } finally {
+      vpnSaving = false;
+    }
+  }
+</script>
+
+<div class="h-full flex flex-col">
+  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
+    <div class="flex items-center gap-3">
+      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
+        ← AEON MAGICK
+      </a>
+      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">network</span>
+    </div>
+  </header>
+
+  <main class="flex-1 overflow-auto p-6 max-w-3xl mx-auto w-full space-y-6">
+    {#if loading}
+      <p class="text-zinc-500 text-sm">loading…</p>
+    {:else if error}
+      <p class="text-red-400 text-sm">{error}</p>
+    {/if}
+
+    {#if usbState}
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <!-- USB ethernet passthrough                                      -->
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-5">
+        <header class="space-y-1">
+          <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            USB ethernet passthrough
+          </h2>
+          <p class="text-zinc-400 text-sm">
+            Present this device to the connected USB-C host as a USB
+            ethernet adapter alongside the HID functions. The host gets a
+            DHCP lease in the <code class="text-cursed-300">{usbState.subnet}</code> range
+            and reaches this device at <code class="text-cursed-300">{usbState.pi_addr}</code>
+            (unless restricted mode is on — see below).
+          </p>
+        </header>
+
+        <!-- Enable toggle -->
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" bind:checked={usbEnabled}
+                 class="w-4 h-4 accent-cursed-500" />
+          <span class="text-zinc-200 text-sm">Enable USB ethernet</span>
+        </label>
+
+        <!-- Mode selector -->
+        <div class="space-y-3 pl-7" class:opacity-40={!usbEnabled} class:pointer-events-none={!usbEnabled}>
+          <p class="text-xs uppercase tracking-wider text-zinc-500">Network mode</p>
+
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="radio" bind:group={usbMode} value="isolation"
+                   class="mt-1 w-4 h-4 accent-cursed-500" />
+            <div class="space-y-1">
+              <div class="text-zinc-200 text-sm font-medium">
+                Isolation
+                <span class="text-xs text-cursed-400 ml-1">(recommended)</span>
+              </div>
+              <p class="text-xs text-zinc-500">
+                Host can reach this device + internet (NAT'd through this
+                device's upstream + any Tailscale routes). Host CANNOT see
+                other devices on the LAN. Use for guest laptops, untrusted
+                machines, or any time you want hard separation between the
+                USB-connected host and your home network.
+              </p>
+            </div>
+          </label>
+
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="radio" bind:group={usbMode} value="restricted"
+                   class="mt-1 w-4 h-4 accent-cursed-500" />
+            <div class="space-y-1">
+              <div class="text-zinc-200 text-sm font-medium">
+                Restricted
+                <span class="text-xs text-red-400 ml-1">(hardened)</span>
+              </div>
+              <p class="text-xs text-zinc-500">
+                Host has WAN access only. CANNOT see this device at all —
+                no web UI, no SSH, no ping, no port scan. Only DHCP and
+                DNS pass through to the Pi (the bare minimum to get an
+                address and resolve names). Use when the connected host
+                should treat this device as an invisible network gateway
+                with zero management surface.
+                <span class="block mt-1 text-red-300/80">
+                  You will need WiFi or LAN access to manage this device
+                  when in restricted mode.
+                </span>
+              </p>
+            </div>
+          </label>
+
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="radio" bind:group={usbMode} value="sharing"
+                   class="mt-1 w-4 h-4 accent-cursed-500" />
+            <div class="space-y-1">
+              <div class="text-zinc-200 text-sm font-medium">Sharing</div>
+              <p class="text-xs text-zinc-500">
+                Host has full LAN access through this device. Use only on
+                trusted networks. The host effectively gains all the
+                routing privileges this Pi has.
+              </p>
+            </div>
+          </label>
+        </div>
+
+        <!-- Save row -->
+        <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+          <button class="btn-primary" on:click={saveUsb} disabled={usbSaving}>
+            {usbSaving ? 'applying…' : 'save & apply'}
+          </button>
+          {#if usbMsg}
+            <span class="text-xs text-live-400 font-mono">{usbMsg}</span>
+          {/if}
+        </div>
+      </section>
+
+      <!-- Status -->
+      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-2 text-sm">
+        <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-500">Current</h3>
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs font-mono">
+          <dt class="text-zinc-500">enabled</dt>
+          <dd class="text-zinc-200">{usbState.enabled}</dd>
+          <dt class="text-zinc-500">mode</dt>
+          <dd class="text-zinc-200">{usbState.mode}</dd>
+          <dt class="text-zinc-500">subnet</dt>
+          <dd class="text-zinc-200">{usbState.subnet}</dd>
+          <dt class="text-zinc-500">pi address</dt>
+          <dd class="text-zinc-200">{usbState.pi_addr}</dd>
+          <dt class="text-zinc-500">DHCP range</dt>
+          <dd class="text-zinc-200">{usbState.dhcp_range}</dd>
+          {#if dnsState}
+            <dt class="text-zinc-500">DNSCrypt</dt>
+            <dd class="text-zinc-200">
+              {dnsState.enabled ? `${dnsState.provider} (${dnsState.location})` : 'off'}
+            </dd>
+          {/if}
+          {#if vpnState}
+            <dt class="text-zinc-500">VPN</dt>
+            <dd class="text-zinc-200">
+              {vpnState.enabled && vpnState.provider !== 'none' ? vpnState.provider : 'off'}
+            </dd>
+          {/if}
+        </dl>
+      </section>
+
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <!-- Advanced: DNSCrypt + VPN                                      -->
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <details class="bg-ink-900 border border-ink-700 rounded-xl"
+               bind:open={advancedOpen}>
+        <summary class="cursor-pointer select-none px-6 py-4 flex items-center justify-between">
+          <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            Advanced network
+          </span>
+          <span class="text-xs text-zinc-500">
+            {advancedOpen ? 'hide' : 'show'} DNSCrypt &amp; VPN
+          </span>
+        </summary>
+
+        <div class="border-t border-ink-700 p-6 space-y-8">
+
+          <!-- ─── DNSCrypt ─── -->
+          <section class="space-y-4">
+            <header class="space-y-1">
+              <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+                Encrypted DNS (DNSCrypt)
+              </h3>
+              <p class="text-zinc-400 text-sm">
+                Route this device's DNS — and any DHCP client's DNS over
+                USB ethernet — through a local <code class="text-cursed-300">dnscrypt-proxy</code>
+                instance that talks DoH/DNSCrypt to your chosen upstream.
+                Your LAN sees only encrypted DNS traffic; the upstream sees
+                a single anycast resolver.
+              </p>
+            </header>
+
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" bind:checked={dnsEnabled}
+                     class="w-4 h-4 accent-cursed-500" />
+              <span class="text-zinc-200 text-sm">Enable DNSCrypt</span>
+            </label>
+
+            <div class="space-y-3 pl-7" class:opacity-40={!dnsEnabled} class:pointer-events-none={!dnsEnabled}>
+              <div class="space-y-2" role="radiogroup" aria-label="DNSCrypt provider">
+                <p class="text-xs uppercase tracking-wider text-zinc-500">
+                  Provider
+                </p>
+                <div class="space-y-2">
+                  {#if dnsState}
+                    {#each dnsState.providers as p}
+                      <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="radio" bind:group={dnsProvider} value={p.id}
+                               class="mt-1 w-4 h-4 accent-cursed-500" />
+                        <div class="space-y-1">
+                          <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
+                          <p class="text-xs text-zinc-500">{p.blurb}</p>
+                        </div>
+                      </label>
+                    {/each}
+                  {/if}
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <p class="text-xs text-zinc-500 leading-relaxed">
+                  <span class="text-zinc-400">Geo routing:</span> the
+                  curated resolvers above all use <strong>anycast</strong> —
+                  one global IP per provider, BGP sends your query to the
+                  nearest Point-of-Presence regardless of preference.
+                  There's no DNS-layer knob that overrides this. For real
+                  geo control, route DNS through a VPN exit in your
+                  target country (WireGuard/OpenVPN/Tailscale to a peer
+                  there) or Tor with an exit-country pin — both are in
+                  the VPN section below.
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+              <button class="btn-primary" on:click={saveDns} disabled={dnsSaving}>
+                {dnsSaving ? 'applying…' : 'save & apply'}
+              </button>
+              {#if dnsMsg}
+                <span class="text-xs text-live-400 font-mono">{dnsMsg}</span>
+              {/if}
+            </div>
+          </section>
+
+          <!-- ─── VPN ─── -->
+          <section class="space-y-4">
+            <header class="space-y-1">
+              <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+                VPN (WAN tunnel)
+              </h3>
+              <p class="text-zinc-400 text-sm">
+                Route this device's WAN traffic — including anything
+                NAT'd through the USB ethernet — over an outbound VPN
+                tunnel. Combine with <em>restricted</em> mode to make the
+                tunnel the only exit path for the connected host.
+              </p>
+            </header>
+
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" bind:checked={vpnEnabled}
+                     class="w-4 h-4 accent-cursed-500" />
+              <span class="text-zinc-200 text-sm">Enable VPN</span>
+            </label>
+
+            <div class="space-y-3 pl-7" class:opacity-40={!vpnEnabled} class:pointer-events-none={!vpnEnabled}>
+              <p class="text-xs uppercase tracking-wider text-zinc-500">Provider</p>
+              {#if vpnState}
+                {#each vpnState.providers as p}
+                  <label class="flex items-start gap-3 cursor-pointer">
+                    <input type="radio" bind:group={vpnProvider} value={p.id}
+                           class="mt-1 w-4 h-4 accent-cursed-500" />
+                    <div class="space-y-1">
+                      <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
+                      <p class="text-xs text-zinc-500">{p.blurb}</p>
+                    </div>
+                  </label>
+                {/each}
+              {/if}
+            </div>
+
+            {#if vpnEnabled && vpnProvider === 'tailscale'}
+              <div class="space-y-3 pl-7">
+                <div class="space-y-1">
+                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-auth">
+                    Auth key
+                    {#if vpnState?.tailscale.has_auth_key}
+                      <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                        (one already saved — leave blank to keep it)
+                      </span>
+                    {/if}
+                  </label>
+                  <input id="ts-auth" type="password" bind:value={tsAuthKey}
+                         placeholder="tskey-auth-…"
+                         autocomplete="off"
+                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  <p class="text-xs text-zinc-500">
+                    Generate from
+                    <a class="text-cursed-300 hover:underline"
+                       href="https://login.tailscale.com/admin/settings/keys"
+                       target="_blank" rel="noreferrer">login.tailscale.com</a>
+                    — Settings → Keys → Generate auth key. One-time use is
+                    fine; we run <code>tailscale up</code> once with it
+                    and the daemon keeps the resulting node key.
+                  </p>
+                </div>
+
+                <div class="space-y-1">
+                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-host">
+                    Hostname (optional)
+                  </label>
+                  <input id="ts-host" type="text" bind:value={tsHostname}
+                         placeholder="aeon-magick"
+                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  <p class="text-xs text-zinc-500">
+                    Name this device shows up as in your tailnet. Defaults
+                    to the Pi's hostname.
+                  </p>
+                </div>
+
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" bind:checked={tsAdvertiseExit}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-1">
+                    <div class="text-zinc-200 text-sm font-medium">Advertise as exit node</div>
+                    <p class="text-xs text-zinc-500">
+                      Make this Pi available as a tailnet exit node so
+                      <em>other</em> machines on your tailnet can route their
+                      WAN through it. You'll still need to approve the
+                      offer from the Tailscale admin UI.
+                    </p>
+                  </div>
+                </label>
+
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" bind:checked={tsExitNode}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-1">
+                    <div class="text-zinc-200 text-sm font-medium">Use a tailnet exit node</div>
+                    <p class="text-xs text-zinc-500">
+                      Route <em>this</em> Pi's outbound traffic through
+                      another tailnet exit node. After saving, SSH in and
+                      run <code>tailscale set --exit-node=&lt;host&gt;</code>
+                      to pick which one.
+                    </p>
+                  </div>
+                </label>
+              </div>
+            {/if}
+
+            {#if vpnEnabled && vpnProvider === 'wireguard'}
+              <div class="space-y-2 pl-7">
+                <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="wg-conf">
+                  WireGuard config
+                  {#if vpnState?.wireguard.has_config}
+                    <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                      (one saved — paste to replace, leave blank to keep)
+                    </span>
+                  {/if}
+                </label>
+                <textarea id="wg-conf" bind:value={wgConfig} rows="10"
+                          placeholder={`[Interface]
+PrivateKey = …
+Address = 10.0.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = …
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0`}
+                          class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                <p class="text-xs text-zinc-500">
+                  Paste the full contents of a working
+                  <code>.conf</code> file. We run it via
+                  <code>wg-quick@aeon0</code>. AllowedIPs of
+                  <code>0.0.0.0/0</code> sends everything through the tunnel.
+                </p>
+              </div>
+            {/if}
+
+            {#if vpnEnabled && vpnProvider === 'openvpn'}
+              <div class="space-y-3 pl-7">
+                <div class="space-y-1">
+                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ov-conf">
+                    OpenVPN config (.ovpn)
+                    {#if vpnState?.openvpn.has_config}
+                      <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                        (one saved — paste to replace, leave blank to keep)
+                      </span>
+                    {/if}
+                  </label>
+                  <textarea id="ov-conf" bind:value={ovConfig} rows="10"
+                            placeholder="client&#10;dev tun&#10;proto udp&#10;remote …&#10;…"
+                            class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="space-y-1">
+                    <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ov-user">
+                      Username (optional)
+                    </label>
+                    <input id="ov-user" type="text" bind:value={ovUser}
+                           autocomplete="off"
+                           class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  </div>
+                  <div class="space-y-1">
+                    <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ov-pass">
+                      Password (optional)
+                      {#if vpnState?.openvpn.has_auth_password}
+                        <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                          (saved — leave blank to keep)
+                        </span>
+                      {/if}
+                    </label>
+                    <input id="ov-pass" type="password" bind:value={ovPass}
+                           autocomplete="off"
+                           class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  </div>
+                </div>
+                <p class="text-xs text-zinc-500">
+                  Only needed if your .ovpn references
+                  <code>auth-user-pass</code> without inline credentials.
+                </p>
+              </div>
+            {/if}
+
+            {#if vpnEnabled && vpnProvider === 'tor'}
+              <div class="space-y-2 pl-7">
+                <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="tor-br">
+                  Obfs4 bridges (optional)
+                  {#if vpnState?.tor.has_bridges}
+                    <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                      (saved — paste to replace, leave blank to keep)
+                    </span>
+                  {/if}
+                </label>
+                <textarea id="tor-br" bind:value={torBridges} rows="4"
+                          placeholder={`obfs4 12.34.56.78:443 BB6E…1A2B cert=…  iat-mode=0
+obfs4 …`}
+                          class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                <p class="text-xs text-zinc-500">
+                  Only set bridges if your local network blocks plain Tor.
+                  Get bridge lines from
+                  <a class="text-cursed-300 hover:underline"
+                     href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">
+                    bridges.torproject.org</a>. One bridge per line.
+                  Tor will run a transparent proxy on <code>127.0.0.1:9040</code>
+                  and DNS on <code>127.0.0.1:5353</code>; iptables redirects
+                  all outbound TCP + DNS through it. UDP is dropped (Tor
+                  doesn't carry UDP).
+                </p>
+              </div>
+            {/if}
+
+            {#if vpnEnabled && vpnProvider === 'i2p'}
+              <div class="space-y-2 pl-7">
+                <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="i2p-out">
+                  Outproxy (optional)
+                </label>
+                <input id="i2p-out" type="text" bind:value={i2pOutproxy}
+                       placeholder="exit.stormycloud.i2p"
+                       autocomplete="off"
+                       class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                <p class="text-xs text-zinc-500">
+                  Without an outproxy, i2pd only reaches <code>.i2p</code>
+                  sites (the safest default). Set an outproxy to also reach
+                  the regular internet through I2P — slower than Tor, less
+                  anonymous than a real VPN. HTTP proxy on
+                  <code>127.0.0.1:4444</code>, SOCKS on
+                  <code>127.0.0.1:4447</code>. <em>Apps must opt in by
+                  pointing at those proxies</em> — I2P is not transparently
+                  routed (unlike Tor here) because i2pd doesn't support
+                  TPROXY cleanly.
+                </p>
+              </div>
+            {/if}
+
+            <!-- Kill-switch + LAN bypass — applies to all providers -->
+            {#if vpnEnabled && vpnProvider !== 'none'}
+              <div class="space-y-3 pl-7 pt-3 border-t border-ink-800">
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" bind:checked={vpnKillSwitch}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-1">
+                    <div class="text-zinc-200 text-sm font-medium">
+                      Kill-switch
+                      <span class="text-xs text-red-400 ml-1">(strict)</span>
+                    </div>
+                    <p class="text-xs text-zinc-500">
+                      Drop all outbound traffic that doesn't go through the
+                      VPN. If the tunnel is down or fails to come up, the
+                      device stops talking to the WAN entirely. Loopback
+                      and the LAN-bypass subnet below stay reachable so
+                      you can still manage the device from your LAN.
+                    </p>
+                  </div>
+                </label>
+
+                <div class="space-y-1 pl-7">
+                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="lan-byp">
+                    LAN bypass subnet
+                  </label>
+                  <input id="lan-byp" type="text" bind:value={vpnLanBypass}
+                         placeholder="192.168.0.0/16"
+                         class="w-full max-w-xs bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  <p class="text-xs text-zinc-500">
+                    Traffic to this CIDR is allowed even with the
+                    kill-switch on. Leave it pointed at your home LAN so
+                    you can always reach the device's web UI / SSH from
+                    inside the network. Blank string = no bypass (you'd
+                    need to manage exclusively via Tailscale or the USB-C
+                    link).
+                  </p>
+                </div>
+              </div>
+            {/if}
+
+            <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+              <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
+                {vpnSaving ? 'applying…' : 'save & apply'}
+              </button>
+              {#if vpnMsg}
+                <span class="text-xs text-live-400 font-mono">{vpnMsg}</span>
+              {/if}
+            </div>
+
+            <!-- ────────────────────────────────────────────────────── -->
+            <!-- Live VPN status panel — polled every 4 s             -->
+            <!-- ────────────────────────────────────────────────────── -->
+            {#if vpnStatus && vpnStatus.enabled && vpnStatus.provider !== 'none'}
+              <div class="mt-4 pt-4 border-t border-ink-700 space-y-3">
+                <header class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-xs uppercase tracking-wider text-zinc-400">
+                      Status
+                    </span>
+                    <!-- State pill -->
+                    {#if vpnStatus.state === 'connected'}
+                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                   bg-live-900/40 border border-live-500/40
+                                   text-live-300 text-[10px] font-mono uppercase">
+                        <span class="h-1.5 w-1.5 rounded-full bg-live-400 animate-pulse"></span>
+                        connected
+                      </span>
+                    {:else if vpnStatus.state === 'establishing'}
+                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                   bg-amber-900/40 border border-amber-500/40
+                                   text-amber-300 text-[10px] font-mono uppercase">
+                        <span class="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                        establishing
+                      </span>
+                    {:else if vpnStatus.state === 'reconnecting'}
+                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                   bg-amber-900/40 border border-amber-500/40
+                                   text-amber-300 text-[10px] font-mono uppercase">
+                        reconnecting
+                      </span>
+                    {:else}
+                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                   bg-red-900/40 border border-red-500/40
+                                   text-red-300 text-[10px] font-mono uppercase">
+                        <span class="h-1.5 w-1.5 rounded-full bg-red-400"></span>
+                        {vpnStatus.state}
+                      </span>
+                    {/if}
+                  </div>
+
+                  <button class="btn text-xs" on:click={rotateIdentity}
+                          disabled={rotating || vpnStatus.state !== 'connected'}
+                          title="Refresh identity / circuits / keys">
+                    {rotating ? 'rotating…' : '↻ change identity'}
+                  </button>
+                </header>
+
+                {#if rotateMsg}
+                  <p class="text-xs font-mono text-zinc-400">{rotateMsg}</p>
+                {/if}
+
+                <p class="text-xs text-zinc-400">{vpnStatus.summary}</p>
+
+                <!-- Bootstrap progress bar (Tor / I2P) -->
+                {#if vpnStatus.bootstrap_percent !== null && vpnStatus.bootstrap_percent < 100}
+                  <div class="space-y-1">
+                    <div class="flex justify-between text-[10px] font-mono text-zinc-500">
+                      <span>BOOTSTRAP</span>
+                      <span>{vpnStatus.bootstrap_percent}%</span>
+                    </div>
+                    <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
+                      <div class="h-full bg-cursed-500 transition-all duration-300"
+                           style="width: {vpnStatus.bootstrap_percent}%"></div>
+                    </div>
+                  </div>
+                {/if}
+
+                <!-- Public IP + country -->
+                {#if vpnStatus.public_ip}
+                  <div class="flex items-center gap-3 text-xs font-mono">
+                    <span class="text-zinc-500">Public IP:</span>
+                    <span class="text-zinc-200">{vpnStatus.public_ip}</span>
+                    {#if vpnStatus.public_country}
+                      <span class="text-cursed-300 uppercase tracking-wider">
+                        {vpnStatus.public_country}
+                      </span>
+                    {/if}
+                  </div>
+                {/if}
+
+                <!-- Tor circuit list -->
+                {#if vpnStatus.detail.circuits && vpnStatus.detail.circuits.length > 0}
+                  <div class="space-y-1">
+                    <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                      Active circuits ({vpnStatus.detail.circuits.length})
+                    </p>
+                    <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px] text-zinc-400">
+                      {#each vpnStatus.detail.circuits.slice(0, 6) as c}
+                        <div class="truncate">
+                          <span class="text-zinc-600">#{c.id}</span>
+                          {c.hops.join(' → ')}
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+
+                <!-- Tailscale peer list -->
+                {#if vpnStatus.detail.peers && vpnStatus.detail.peers.length > 0}
+                  <div class="space-y-1">
+                    <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                      Tailnet peers ({vpnStatus.detail.peers.length})
+                    </p>
+                    <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px]">
+                      {#each vpnStatus.detail.peers as p}
+                        <div class="flex items-center gap-2 truncate">
+                          <span class={p.online ? 'text-live-400' : 'text-zinc-600'}>●</span>
+                          <span class="text-zinc-300">{p.host}</span>
+                          <span class="text-zinc-500">{p.ips?.[0]}</span>
+                          {#if p.exit_node}
+                            <span class="text-cursed-400 text-[9px]">[exit]</span>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+
+                <!-- I2P peer count -->
+                {#if vpnStatus.detail.active_peers !== undefined}
+                  <p class="text-xs font-mono text-zinc-400">
+                    <span class="text-zinc-500">Active peers:</span>
+                    {vpnStatus.detail.active_peers}
+                  </p>
+                {/if}
+
+                <!-- WireGuard handshake age -->
+                {#if vpnStatus.detail.handshake_age_s !== undefined && vpnStatus.detail.handshake_age_s !== null}
+                  <p class="text-xs font-mono text-zinc-400">
+                    <span class="text-zinc-500">Last handshake:</span>
+                    {vpnStatus.detail.handshake_age_s}s ago
+                  </p>
+                {/if}
+              </div>
+            {/if}
+          </section>
+
+        </div>
+      </details>
+
+      <section class="text-xs text-zinc-500">
+        <p class="mb-2">
+          Once enabled and a host connects:
+        </p>
+        <ul class="ml-4 list-disc space-y-1">
+          <li>The host sees a USB-C ethernet adapter (CDC ECM)</li>
+          <li>
+            Web UI reachable at <code>https://{usbState.pi_addr}/</code>
+            over USB <em>unless</em> in restricted mode (then only over
+            WiFi/LAN)
+          </li>
+          <li>Persona selector continues to work — re-enumerating the gadget temporarily drops the USB ethernet (~1s)</li>
+          <li>Toggling <strong>enabled</strong> requires an <code>aeon-hid</code> restart (gadget composite needs rebuilding)</li>
+        </ul>
+      </section>
+
+      <TipJar />
+    {/if}
+  </main>
+</div>

@@ -1,0 +1,12 @@
+[Unit]
+Description=Aeon Magick — sample under-voltage state every minute
+Requires=aeon-undervolt-watchdog.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=aeon-undervolt-watchdog.service
+
+[Install]
+WantedBy=timers.target

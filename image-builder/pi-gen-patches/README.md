@@ -13,7 +13,7 @@ environment.
 ```bash
 cd ~/pi-gen
 git checkout -B bookworm-arm64 origin/bookworm-arm64
-git apply /path/to/aeon-cursed-kvm/image-builder/pi-gen-patches/*.patch
+git apply /path/to/aeon-magick-ai-computer-control/image-builder/pi-gen-patches/*.patch
 ```
 
 ## What each patch does

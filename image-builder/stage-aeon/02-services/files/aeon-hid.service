@@ -1,0 +1,22 @@
+[Unit]
+Description=Aeon Magick AI Computer Control — USB HID gadget + input API
+After=local-fs.target
+# We need configfs mounted and the UDC available.
+ConditionPathExistsGlob=/sys/class/udc/*
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aeon-hid --config /etc/aeon/hid.toml
+ExecStopPost=/usr/local/bin/aeon-hid --config /etc/aeon/hid.toml --teardown
+# `Restart=always` (not on-failure) — POST /api/hid/persona writes the new
+# persona to /etc/aeon/persona.state then exits with code 0. systemd
+# respawns us; the new process reads persona.state on startup and binds
+# the gadget under the new descriptor. That's how persona changes survive
+# without an in-process configfs hot-swap.
+Restart=always
+RestartSec=2
+# ConfigFS writes require root.
+User=root
+
+[Install]
+WantedBy=multi-user.target

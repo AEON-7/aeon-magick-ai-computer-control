@@ -1,0 +1,7 @@
+name = "cmd-tab"
+description = "macOS app switcher — Cmd+Tab once = switch to previous app."
+
+[[steps]]
+type = "key"
+keys = ["GUI", "TAB"]
+hold_ms = 60

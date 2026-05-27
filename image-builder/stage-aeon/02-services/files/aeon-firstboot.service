@@ -1,0 +1,12 @@
+[Unit]
+Description=Aeon Magick AI Computer Control — first-boot setup
+After=local-fs.target
+ConditionPathExists=!/var/lib/aeon/firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aeon-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

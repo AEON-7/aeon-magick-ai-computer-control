@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "acursed-streamer",
-    "acursed-hid",
-    "acursed-supervisor",
+    "aeon-streamer",
+    "aeon-hid",
+    "aeon-supervisor",
 ]
 
 [workspace.package]
@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Albert"]
-repository = "https://github.com/albert/aeon-cursed-kvm"
+repository = "https://github.com/albert/aeon-magick-ai-computer-control"
 
 [workspace.dependencies]
 # Runtime

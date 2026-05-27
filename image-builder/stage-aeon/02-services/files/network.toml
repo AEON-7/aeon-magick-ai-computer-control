@@ -1,0 +1,152 @@
+# Aeon Magick — network configuration.
+#
+# Three sections cover three layers, in increasing order of advancedness:
+#
+#   [usb_ethernet] — the USB-C composite device's optional ethernet
+#                    function. When enabled, the host PC sees a CDC ECM
+#                    USB ethernet adapter alongside HID. `mode` controls
+#                    what the host can reach through it.
+#
+#   [dnscrypt]     — optional encrypted DNS resolver. When enabled,
+#                    aeon's dnsmasq forwards to a local dnscrypt-proxy
+#                    instance instead of the LAN's plaintext resolver.
+#                    Plaintext DNS on usb0 is then never seen on the wire.
+#
+#   [vpn]          — optional WAN-side tunnel. One of Tailscale / WireGuard
+#                    / OpenVPN. When set, all WAN-bound traffic (including
+#                    the NAT'd USB ethernet host) routes through the tunnel.
+#
+# All three are independent — you can use any subset.
+
+# ──────────────────────────────────────────────────────────────────────
+# USB ethernet passthrough
+# ──────────────────────────────────────────────────────────────────────
+#
+# `mode` controls what the connected host can reach:
+#   "isolation"  — host can reach this Pi's services + internet (NAT'd
+#                  through Pi's upstream). CANNOT reach LAN devices
+#                  (192.168.x, 10.x, 172.16.x). DEFAULT. Use this for
+#                  guest laptops or any time you want hard separation
+#                  between the USB-connected host and your home LAN.
+#   "sharing"    — host gets full LAN access. Use only on trusted networks.
+#   "restricted" — host has WAN access only. Cannot see this Pi AT ALL —
+#                  no KVM web UI, no SSH, no ping. Only DHCP + DNS pass
+#                  through to the Pi (the bare minimum to get an IP and
+#                  resolve names). Use when you want the Pi to be a
+#                  completely invisible network gateway with no
+#                  management surface from the host side.
+#
+# All three modes still serve DHCP + (optionally) DNSCrypt to the host.
+
+[usb_ethernet]
+enabled = false
+mode = "isolation"
+
+# Subnet the Pi serves to the connected host. Pick something unlikely to
+# collide with the host's other interfaces. 10.55.0.0/24 is the default
+# because it rarely conflicts with home LANs.
+subnet = "10.55.0.0/24"
+pi_addr = "10.55.0.1"
+dhcp_start = "10.55.0.10"
+dhcp_end = "10.55.0.50"
+
+# MAC addresses for the gadget's two endpoints. Locally-administered (the
+# 02:XX prefix is the LAA bit). Stable across reboots so the host's DHCP
+# lease for usb0 stays consistent.
+host_mac = "02:42:ae:00:55:01"
+dev_mac  = "02:42:ae:00:55:02"
+
+# ──────────────────────────────────────────────────────────────────────
+# Encrypted DNS (DNSCrypt v2 / DoH)
+# ──────────────────────────────────────────────────────────────────────
+#
+# When enabled, a local dnscrypt-proxy listens on 127.0.2.1:53 and the
+# Pi's dnsmasq (which serves DHCP clients on usb0) forwards to it. The
+# upstream provider sees encrypted DoH/DoT requests, the local network
+# sees only encrypted DoH/DoT traffic from the Pi — never plaintext DNS.
+#
+# `provider` picks the upstream. Curated short-list of well-known
+# privacy-respecting resolvers:
+#   "cloudflare"     — Cloudflare 1.1.1.1 (DoH, no logging claimed)
+#   "cloudflare-fam" — Cloudflare for Families (malware + adult filter)
+#   "quad9"          — Quad9 9.9.9.9 (DNSCrypt, malware filter, Swiss-based)
+#   "adguard"        — AdGuard (DoH, ad + tracker block)
+#   "nextdns"        — NextDNS anycast (DoH, free tier, per-user dashboard)
+#   "mullvad"        — Mullvad (DoH, no-logging stance)
+#
+# `location` is the preferred server region — dnscrypt-proxy will weight
+# resolver selection. "auto" lets it pick by latency.
+#   "auto" | "us" | "eu" | "asia"
+
+[dnscrypt]
+enabled = false
+provider = "cloudflare"
+location = "auto"
+
+# ──────────────────────────────────────────────────────────────────────
+# VPN — WAN-side tunnel / anonymity overlay
+# ──────────────────────────────────────────────────────────────────────
+#
+# `provider` is one of:
+#   "none"      — no tunnel
+#   "tailscale" — WireGuard mesh; provide a one-time auth key
+#   "wireguard" — paste a working .conf
+#   "openvpn"   — paste a working .ovpn
+#   "tor"       — install + run system tor; transparently route all TCP
+#                 + DNS through it via iptables REDIRECT. UDP can't go
+#                 through Tor and is dropped while this is active.
+#   "i2p"       — install + run i2pd; HTTP/SOCKS gateway on localhost.
+#                 Only TCP via the proxy; UDP dropped.
+#
+# `kill_switch = true` forces ALL WAN traffic through the active tunnel.
+# Without the tunnel up, traffic is dropped. Loopback + the configured
+# LAN management subnet always stay reachable so you can SSH/web-UI in
+# even when the tunnel is down. For Tor/I2P the transparent-redirect
+# rules ARE the kill-switch (nothing escapes), and this flag controls
+# whether to additionally block UDP (so a leaky app can't sneak around
+# Tor via DNS-over-UDP, etc.).
+
+[vpn]
+enabled = false
+provider = "none"
+# Lock down traffic when tunnel is up — see explanation above.
+kill_switch = false
+# Subnet whose traffic is exempt from kill-switch — used so you can
+# always reach the Pi's web UI / SSH from the LAN. Set empty string to
+# disable the exemption (no LAN bypass at all).
+lan_bypass = "192.168.0.0/16"
+
+[vpn.tailscale]
+auth_key = ""
+hostname = ""
+exit_node = false
+advertise_exit_node = false
+
+[vpn.wireguard]
+config = ""
+
+[vpn.openvpn]
+config = ""
+auth_username = ""
+auth_password = ""
+
+# Tor: transparent-proxy + DNS-over-Tor.
+#   bridges       — paste obfs4 lines, one per line, if your local
+#                   network blocks plain Tor. Leave empty for direct.
+#   exit_country  — ISO-3166 country code for forced exit nodes (e.g.
+#                   "us", "de", "nl"). Empty = let Tor pick by
+#                   performance.
+#   meek_mode     — true = also enable meek-azure bridge (looks like
+#                   HTTPS to Microsoft cloud-front; works in countries
+#                   where plain obfs4 is blocked or detected).
+
+[vpn.tor]
+bridges = ""
+exit_country = ""
+meek_mode = false
+
+# I2P (i2pd): outproxy lets your I2P-routed traffic reach the regular
+# internet via a public outproxy. Empty = .i2p sites only (the safest
+# default; outproxies are inherently less private than VPN endpoints).
+[vpn.i2p]
+outproxy = ""

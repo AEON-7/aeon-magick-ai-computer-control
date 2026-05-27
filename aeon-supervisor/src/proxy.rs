@@ -1,0 +1,241 @@
+//! Thin proxies that translate `/api/streamer/*` → streamer unix socket
+//! and `/api/hid/*` → hid unix socket.
+
+use crate::api::AppState;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Method, Response, StatusCode};
+use axum::response::IntoResponse;
+use axum::Json;
+use http_body_util::BodyExt;
+use http_body_util::Empty;
+use http_body_util::Full;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
+use serde_json::Value;
+use std::path::Path;
+
+async fn proxy(
+    state: &AppState,
+    sock: &Path,
+    method: Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Response<Body> {
+    if !sock.exists() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "daemon socket missing").into_response();
+    }
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, path).into();
+
+    let mut req_builder = hyper::Request::builder().method(method).uri(uri);
+    if body.is_some() {
+        req_builder = req_builder.header("Content-Type", "application/json");
+    }
+
+    // Use long-lived AppState clients — see api.rs for the rationale.
+    // Per-request Clients drop their connection pool when the function
+    // returns, killing in-flight streaming response bodies a few seconds
+    // later (after the buffered head of the stream drains). Most
+    // visible on /api/streamer/stream which is a long-lived multipart
+    // MJPEG.
+    let req_result = match body {
+        Some(b) => {
+            state
+                .uds_client_full
+                .request(req_builder.body(Full::new(b.into())).unwrap())
+                .await
+        }
+        None => {
+            state
+                .uds_client_empty
+                .request(req_builder.body(Empty::new()).unwrap())
+                .await
+        }
+    };
+
+    match req_result {
+        Ok(resp) => {
+            let (parts, body) = resp.into_parts();
+            let mut b = Response::builder().status(parts.status);
+            for (k, v) in parts.headers.iter() {
+                b = b.header(k, v);
+            }
+            b.body(Body::new(body)).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response()
+            })
+        }
+        Err(_) => (StatusCode::BAD_GATEWAY, "daemon unreachable").into_response(),
+    }
+}
+
+// ── unified system status (combines streamer + hid) ─────────────────────
+
+pub async fn supervisor_state(State(state): State<AppState>) -> Response<Body> {
+    let streamer = fetch_json(&state.cfg.streamer_sock, "/state").await;
+    let hid = fetch_json(&state.cfg.hid_sock, "/status").await;
+    let combined = serde_json::json!({
+        "ok": true,
+        "streamer": streamer,
+        "hid": hid,
+    });
+    Json(combined).into_response()
+}
+
+async fn fetch_json(sock: &Path, path: &str) -> Value {
+    if !sock.exists() {
+        return Value::Null;
+    }
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, path).into();
+    let connector = hyperlocal::UnixConnector;
+    let client = Client::builder(TokioExecutor::new())
+        .build::<_, Empty<bytes::Bytes>>(connector);
+    let Ok(req) = hyper::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Empty::new())
+    else {
+        return Value::Null;
+    };
+    let Ok(resp) = client.request(req).await else {
+        return Value::Null;
+    };
+    let Ok(bytes) = resp.into_body().collect().await else {
+        return Value::Null;
+    };
+    serde_json::from_slice(&bytes.to_bytes()).unwrap_or(Value::Null)
+}
+
+// ── streamer endpoints ──────────────────────────────────────────────────
+
+pub async fn streamer_state(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, "/state", None).await
+}
+pub async fn streamer_snapshot(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, "/snapshot", None).await
+}
+pub async fn streamer_stream(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, "/stream", None).await
+}
+pub async fn streamer_relaunch(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::POST, "/relaunch", Some(vec![])).await
+}
+
+// ── HID endpoints ───────────────────────────────────────────────────────
+
+pub async fn hid_status(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::GET, "/status", None).await
+}
+pub async fn hid_type(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/type", Some(body.to_vec())).await
+}
+pub async fn hid_key(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/key", Some(body.to_vec())).await
+}
+pub async fn hid_click(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/click", Some(body.to_vec())).await
+}
+pub async fn hid_move(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/move", Some(body.to_vec())).await
+}
+pub async fn hid_scroll(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/scroll", Some(body.to_vec())).await
+}
+pub async fn hid_release_all(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/release_all", Some(vec![])).await
+}
+pub async fn hid_persona(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/persona", Some(body.to_vec())).await
+}
+
+// ── Helpers used by the macro runner and the MCP server ─────────────────
+
+/// POST one JSON body to the HID daemon. Returns Err with a short
+/// human-readable reason on transport failure or non-2xx status.
+pub async fn post_hid(state: &AppState, path: &str, body: Vec<u8>) -> Result<(), String> {
+    let sock = &state.cfg.hid_sock;
+    if !sock.exists() {
+        return Err("hid socket missing".into());
+    }
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, path).into();
+    let connector = hyperlocal::UnixConnector;
+    let client = Client::builder(TokioExecutor::new())
+        .build::<_, Full<bytes::Bytes>>(connector);
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .body(Full::new(body.into()))
+        .map_err(|e| e.to_string())?;
+    let resp = client.request(req).await.map_err(|e| format!("hid: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("hid status {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// Fetch one snapshot from the streamer and write it to `out`.
+pub async fn write_snapshot(state: &AppState, out: &std::path::Path) -> Result<(), String> {
+    let sock = &state.cfg.streamer_sock;
+    if !sock.exists() {
+        return Err("streamer socket missing".into());
+    }
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, "/snapshot").into();
+    let connector = hyperlocal::UnixConnector;
+    let client = Client::builder(TokioExecutor::new())
+        .build::<_, Empty<bytes::Bytes>>(connector);
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Empty::new())
+        .map_err(|e| e.to_string())?;
+    let resp = client.request(req).await.map_err(|e| format!("snap: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("snap status {}", resp.status()));
+    }
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("snap body: {e}"))?
+        .to_bytes();
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("snap mkdir: {e}"))?;
+    }
+    std::fs::write(out, &bytes).map_err(|e| format!("snap write: {e}"))?;
+    Ok(())
+}
+
+/// Fetch one snapshot and return the raw JPEG bytes (for MCP image responses).
+pub async fn fetch_snapshot_bytes(state: &AppState) -> Result<bytes::Bytes, String> {
+    let sock = &state.cfg.streamer_sock;
+    if !sock.exists() {
+        return Err("streamer socket missing".into());
+    }
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, "/snapshot").into();
+    let connector = hyperlocal::UnixConnector;
+    let client = Client::builder(TokioExecutor::new())
+        .build::<_, Empty<bytes::Bytes>>(connector);
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Empty::new())
+        .map_err(|e| e.to_string())?;
+    let resp = client.request(req).await.map_err(|e| format!("snap: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("snap status {}", resp.status()));
+    }
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("snap body: {e}"))?
+        .to_bytes();
+    Ok(bytes)
+}
+
+/// GET combined supervisor state as a `serde_json::Value` (for MCP).
+pub async fn fetch_supervisor_state(state: &AppState) -> Value {
+    let streamer = fetch_json(&state.cfg.streamer_sock, "/state").await;
+    let hid = fetch_json(&state.cfg.hid_sock, "/status").await;
+    serde_json::json!({ "ok": true, "streamer": streamer, "hid": hid })
+}

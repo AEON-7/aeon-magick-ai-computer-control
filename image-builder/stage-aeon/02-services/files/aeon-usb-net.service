@@ -1,0 +1,16 @@
+[Unit]
+Description=Aeon Magick — USB ethernet passthrough config applier
+After=NetworkManager.service aeon-hid.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/aeon-usb-net
+# Allow `systemctl reload aeon-usb-net` from the supervisor to re-apply
+# config without a full unit restart.
+ExecReload=/usr/local/bin/aeon-usb-net
+User=root
+
+[Install]
+WantedBy=multi-user.target

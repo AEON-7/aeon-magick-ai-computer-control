@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="aarch64-unknown-linux-gnu"
-OUT="${REPO}/image-builder/stage-acursed/01-base/files/bin"
+OUT="${REPO}/image-builder/stage-aeon/01-base/files/bin"
 
 mkdir -p "${OUT}"
 
@@ -25,9 +25,9 @@ fi
 cd "${REPO}"
 ${BUILDER} build --release --target "${TARGET}" \
     --manifest-path Cargo.toml \
-    -p acursed-streamer -p acursed-hid -p acursed-supervisor
+    -p aeon-streamer -p aeon-hid -p aeon-supervisor
 
-for b in acursed-streamer acursed-hid acursed-supervisor; do
+for b in aeon-streamer aeon-hid aeon-supervisor; do
     install -m 0755 "target/${TARGET}/release/${b}" "${OUT}/${b}"
 done
 

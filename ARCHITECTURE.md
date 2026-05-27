@@ -7,7 +7,7 @@ reachable from a SvelteKit web UI.
 
 ```
                           ┌───────────────────────────────┐
-                          │   acursed-supervisor          │
+                          │   aeon-supervisor          │
                           │   :8443 HTTPS                 │  ← Web UI + REST
                           │   Auth, session, routing      │     + Agent API
                           └───────────────┬───────────────┘
@@ -15,7 +15,7 @@ reachable from a SvelteKit web UI.
                 ┌─────────────────────────┼─────────────────────────┐
                 ▼                         ▼                         ▼
    ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
-   │ acursed-streamer    │   │ acursed-hid         │   │ acursed-netd        │
+   │ aeon-streamer    │   │ aeon-hid         │   │ aeon-netd        │
    │ unix:streamer.sock  │   │ unix:hid.sock       │   │ (systemd-networkd + │
    │                     │   │                     │   │  wpa_supplicant +   │
    │ Capture /dev/video0 │   │ ConfigFS USB        │   │  hostapd watchdog)  │
@@ -34,7 +34,7 @@ reachable from a SvelteKit web UI.
 ## Why split into separate daemons
 
 1. **Failure isolation** — streamer can crash and HID stays up (and vice versa).
-2. **Sandboxing** — `acursed-hid` runs as root (configfs needs it), streamer as `kvm:video`, supervisor as `kvm`. Smaller blast radius.
+2. **Sandboxing** — `aeon-hid` runs as root (configfs needs it), streamer as `kvm:video`, supervisor as `kvm`. Smaller blast radius.
 3. **Independent restarts** — bouncing the streamer (e.g., after a Cam Link
    format change) doesn't drop active HID input.
 
@@ -44,7 +44,7 @@ These came from the eye-Pi build that preceded this project:
 
 - **Cam Link 4K UVC enumeration changes with the source signal.** At 4K it
   ONLY offers NV12 (which ustreamer can't capture in stock builds); at lower
-  res it offers YUYV + YU12 + NV12. Solution baked into `acursed-streamer`:
+  res it offers YUYV + YU12 + NV12. Solution baked into `aeon-streamer`:
   swscale-based NV12 native support + a "always-pick-YU12-when-uncertain"
   rule (Cam Link offers it at every resolution).
 - **USB UVC devices don't support V4L2 DV-timings.** Adaptive resolution
@@ -60,7 +60,7 @@ These came from the eye-Pi build that preceded this project:
 
 ## HID personas
 
-`acursed-hid` builds a USB composite device via ConfigFS. The function set
+`aeon-hid` builds a USB composite device via ConfigFS. The function set
 and HID descriptors are pinned by the active *persona*. Personas:
 
 | Name | Devices | VID/PID basis |
@@ -109,7 +109,7 @@ fan-out
    └─ JPEG memsink (single-frame snapshot, cheap polling)
 ```
 
-`acursed-streamer` watches the v4l2 device:
+`aeon-streamer` watches the v4l2 device:
 - Polls `--list-formats-ext` hash every 2s; if it changes, reconfigure capture.
 - Polls own capture-fps; if 0 for 4+s, reset device.
 
@@ -118,7 +118,7 @@ fan-out
 SvelteKit + TailwindCSS. WebRTC video in a `<canvas>` for pixel-accurate
 display. Input capture overlays the canvas and posts to `/api/hid/*`.
 
-First-boot mode: when `acursed-netd` is in AP fallback, the web UI shows a
+First-boot mode: when `aeon-netd` is in AP fallback, the web UI shows a
 WiFi setup wizard instead of the KVM session. After WiFi joins, full UI.
 
 ## Tailscale

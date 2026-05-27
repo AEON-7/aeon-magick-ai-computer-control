@@ -1,9 +1,0 @@
-# Default acursed-supervisor config.
-
-listen = "0.0.0.0:443"
-web_root = "/usr/share/acursed/web"
-streamer_sock = "/run/acursed/streamer.sock"
-hid_sock = "/run/acursed/hid.sock"
-cert_path = "/etc/acursed/cert.pem"
-key_path = "/etc/acursed/key.pem"
-auth_path = "/etc/acursed/auth.toml"

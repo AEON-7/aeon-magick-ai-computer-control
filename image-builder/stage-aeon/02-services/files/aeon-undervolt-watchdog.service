@@ -1,0 +1,8 @@
+[Unit]
+Description=Aeon Magick — under-voltage / throttle watchdog
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aeon-undervolt-watchdog
+User=root

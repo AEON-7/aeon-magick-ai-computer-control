@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic check: are we online; should we fall back to AP mode?
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=20s
+Unit=aeon-netwatch.service
+
+[Install]
+WantedBy=timers.target

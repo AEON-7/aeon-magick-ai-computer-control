@@ -1,0 +1,19 @@
+name = "see-then-click"
+description = "Take a snapshot, wait a beat, click once at current cursor. Building block for vision loops — call `snapshot` from inside the macro so the JPEG lands in /run/aeon/snapshots/ and its path comes back in the result for the agent to Read."
+
+[[params]]
+name = "button"
+default = "left"
+required = false
+
+[[steps]]
+type = "snapshot"
+
+[[steps]]
+type = "wait"
+ms = 50
+
+[[steps]]
+type = "click"
+button = "{{button}}"
+count = 1

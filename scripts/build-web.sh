@@ -3,9 +3,9 @@
 
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WEB_OUT="${REPO}/image-builder/stage-acursed/01-base/files/web"
+WEB_OUT="${REPO}/image-builder/stage-aeon/01-base/files/web"
 
-cd "${REPO}/acursed-web"
+cd "${REPO}/aeon-web"
 [ -d node_modules ] || npm install
 npm run build
 

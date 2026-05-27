@@ -1,0 +1,28 @@
+name = "open-spotlight"
+description = "Open macOS Spotlight, type a query, hit Enter to launch the top hit."
+
+[[params]]
+name = "query"
+required = true
+
+[[steps]]
+type = "key"
+keys = ["GUI", "SPACE"]
+hold_ms = 30
+
+[[steps]]
+type = "wait"
+ms = 350
+
+[[steps]]
+type = "type"
+text = "{{query}}"
+
+[[steps]]
+type = "wait"
+ms = 200
+
+[[steps]]
+type = "key"
+keys = ["ENTER"]
+hold_ms = 30

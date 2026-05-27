@@ -1,0 +1,83 @@
+#!/bin/bash
+# Aeon Magick AI Computer Control — first-boot bootstrap.
+#
+#   1. Initialize auth.toml in OPEN state (session key, no password yet).
+#      The web UI's setup wizard collects the password on first visit.
+#   2. If /boot/firmware/aeon-setup.toml is present, copy WiFi creds + Tailscale
+#      auth key out of it and apply.
+#   3. Mark firstboot done so we don't re-run.
+
+set -e
+exec > >(tee -a /var/log/aeon-firstboot.log) 2>&1
+echo "=== aeon-firstboot $(date -Iseconds) ==="
+
+mkdir -p /var/lib/aeon
+mkdir -p /etc/aeon
+
+# ── 1. Auth bootstrap ──
+# Initialize the auth file in OPEN state: random session key gets baked in,
+# but NO password — the user creates that via the web UI's setup wizard at
+# first visit. This means no static creds ever sit on the public boot
+# partition. The Linux 'admin' user keeps its pi-gen default password
+# (aeon-default-change-me) until the user runs `passwd` over SSH.
+if [ ! -f /etc/aeon/auth.toml ]; then
+    /usr/local/bin/aeon-supervisor --generate-auth /etc/aeon/auth.toml >/dev/null 2>&1 || true
+    cat > /boot/firmware/aeon-credentials.txt <<'EOF'
+# Aeon Magick AI Computer Control — first-boot setup
+#
+# Your device is in SETUP mode. Open the web UI to create your password:
+#
+#     https://aeon-magick.local/
+#     (or use the device's LAN IP if mDNS isn't resolving)
+#
+# The first page is the setup wizard. After you set a password, that's
+# what you'll use for the web UI, the REST API, and MCP clients.
+#
+# SSH login (separate from the web UI password):
+#     ssh admin@aeon-magick.local
+#     default password: aeon-default-change-me
+#     change it with `passwd` once you're in.
+#
+# Delete this file once you've completed setup.
+EOF
+    chmod 600 /boot/firmware/aeon-credentials.txt
+    echo "wrote /boot/firmware/aeon-credentials.txt (setup-mode pointer)"
+fi
+
+# ── 2. Setup TOML on the boot partition ──
+if [ -f /boot/firmware/aeon-setup.toml ]; then
+    echo "found /boot/firmware/aeon-setup.toml, applying..."
+    # We use a tiny inline Python parser to avoid pulling in `tomlq`.
+    eval "$(python3 -c '
+import tomllib, sys
+with open("/boot/firmware/aeon-setup.toml", "rb") as f:
+    d = tomllib.load(f)
+wifi = d.get("wifi", {})
+print(f"WIFI_SSID={wifi.get(\"ssid\", \"\")!r}")
+print(f"WIFI_PSK={wifi.get(\"password\", \"\")!r}")
+ts = d.get("tailscale", {})
+print(f"TS_KEY={ts.get(\"auth_key\", \"\")!r}")
+print(f"TS_HOSTNAME={ts.get(\"hostname\", \"aeon-magick\")!r}")
+')"
+    if [ -n "${WIFI_SSID:-}" ]; then
+        nmcli con add type wifi con-name "$WIFI_SSID" ifname wlan0 ssid "$WIFI_SSID" 2>/dev/null || true
+        nmcli con mod "$WIFI_SSID" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$WIFI_PSK"
+        nmcli con mod "$WIFI_SSID" connection.autoconnect yes connection.autoconnect-priority 100
+        echo "wifi $WIFI_SSID configured"
+    fi
+    if [ -n "${TS_KEY:-}" ]; then
+        tailscale up --authkey="$TS_KEY" --hostname="$TS_HOSTNAME" --ssh || \
+            echo "tailscale up failed (will retry on reboot)"
+    fi
+    # Don't leave a file with secrets on the public boot partition.
+    rm -f /boot/firmware/aeon-setup.toml
+fi
+
+# Set hostname (idempotent)
+HOSTNAME_FILE=/etc/hostname
+if [ "$(cat $HOSTNAME_FILE 2>/dev/null)" != "aeon-magick" ]; then
+    hostnamectl set-hostname aeon-magick || echo "aeon-magick" > $HOSTNAME_FILE
+fi
+
+touch /var/lib/aeon/firstboot-done
+echo "=== firstboot done $(date -Iseconds) ==="

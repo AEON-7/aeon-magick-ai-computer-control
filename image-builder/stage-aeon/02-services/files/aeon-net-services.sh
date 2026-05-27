@@ -1,0 +1,666 @@
+#!/bin/bash
+# aeon-net-services — apply DNSCrypt and VPN configuration based on
+# /etc/aeon/network.toml. Runs at boot and on PUT /api/network/dnscrypt
+# or /api/network/vpn.
+#
+# Reads:   dnscrypt.{enabled,provider,location}
+#          vpn.{enabled,provider}
+#          vpn.tailscale.{auth_key,hostname,exit_node,advertise_exit_node}
+#          vpn.wireguard.config
+#          vpn.openvpn.{config,auth_username,auth_password}
+#
+# Each function (dnscrypt / vpn) is idempotent and tolerates the others
+# being absent — safe to invoke on every config change.
+
+set -u
+NETTOML=/etc/aeon/network.toml
+LOG=/var/log/aeon-net-services.log
+DNSCRYPT_CONF=/etc/dnscrypt-proxy/dnscrypt-proxy.toml
+DNSCRYPT_BACKUP=/etc/dnscrypt-proxy/dnscrypt-proxy.toml.aeon-orig
+WG_CONF=/etc/wireguard/aeon0.conf
+OVPN_CONF=/etc/openvpn/client/aeon.conf
+OVPN_AUTH=/etc/openvpn/client/aeon.auth
+
+log() { echo "$(date -Iseconds) $*" | tee -a "$LOG"; }
+
+toml_get() {
+    # $1=section  $2=key  $3=default
+    python3 -c "
+import tomllib
+try:
+    with open('$NETTOML','rb') as f:
+        d = tomllib.load(f)
+    section = d
+    for part in '$1'.split('.'):
+        section = section.get(part, {})
+    v = section.get('$2', '$3') if isinstance(section, dict) else '$3'
+    if isinstance(v, bool):
+        print('true' if v else 'false')
+    else:
+        print(v)
+except Exception:
+    print('$3')
+"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# DNSCrypt
+# ──────────────────────────────────────────────────────────────────────
+#
+# Provider → resolver name(s) in dnscrypt-proxy's public resolvers list
+# (https://github.com/DNSCrypt/dnscrypt-resolvers). We pick well-known
+# anycast resolvers that work without registration.
+
+dnscrypt_resolvers_for() {
+    case "$1" in
+        cloudflare)     echo "cloudflare cloudflare-ipv6" ;;
+        cloudflare-fam) echo "cloudflare-family cloudflare-family-ipv6" ;;
+        quad9)          echo "quad9-dnscrypt-ip4-filter-pri quad9-dnscrypt-ip4-filter-alt" ;;
+        adguard)        echo "adguard-dns-doh adguard-dns-unfiltered" ;;
+        nextdns)        echo "nextdns" ;;
+        mullvad)        echo "mullvad-doh mullvad-base-doh" ;;
+        *)              echo "cloudflare" ;;
+    esac
+}
+
+apply_dnscrypt() {
+    local enabled="$(toml_get dnscrypt enabled false)"
+    local provider="$(toml_get dnscrypt provider cloudflare)"
+    local location="$(toml_get dnscrypt location auto)"
+
+    log "dnscrypt: enabled=$enabled provider=$provider location=$location"
+
+    if [ ! -x /usr/local/bin/dnscrypt-proxy ] \
+        && [ ! -x /usr/sbin/dnscrypt-proxy ] \
+        && [ ! -x /usr/bin/dnscrypt-proxy ]; then
+        log "dnscrypt-proxy binary not installed — skipping"
+        return 0
+    fi
+
+    if [ "$enabled" != "true" ]; then
+        systemctl stop dnscrypt-proxy.service 2>/dev/null || true
+        systemctl disable dnscrypt-proxy.service 2>/dev/null || true
+        # Restore the package's default config if we had stomped on it.
+        if [ -f "$DNSCRYPT_BACKUP" ]; then
+            cp "$DNSCRYPT_BACKUP" "$DNSCRYPT_CONF"
+        fi
+        # Undo the NM per-connection override (restore DHCP-provided DNS)
+        local uuids; uuids=$(nmcli -t -f UUID,TYPE con show 2>/dev/null \
+            | awk -F: '$2 ~ /ethernet|wifi/ {print $1}')
+        for uuid in $uuids; do
+            nmcli con modify "$uuid" ipv4.ignore-auto-dns no 2>/dev/null || true
+            nmcli con modify "$uuid" ipv4.dns "" 2>/dev/null || true
+        done
+        # Reactivate so /etc/resolv.conf gets rewritten with DHCP DNS
+        for uuid in $(nmcli -t -f UUID con show --active 2>/dev/null); do
+            nmcli con up "$uuid" 2>/dev/null || true
+        done
+        log "dnscrypt disabled — service stopped, NM DNS restored to DHCP defaults"
+        return 0
+    fi
+
+    # Stash the original config once so toggling off can restore it.
+    if [ ! -f "$DNSCRYPT_BACKUP" ] && [ -f "$DNSCRYPT_CONF" ]; then
+        cp "$DNSCRYPT_CONF" "$DNSCRYPT_BACKUP"
+    fi
+
+    local resolvers; resolvers=$(dnscrypt_resolvers_for "$provider")
+    # Build server_names = ['a', 'b', ...]
+    local server_list=""
+    for r in $resolvers; do
+        if [ -z "$server_list" ]; then
+            server_list="'$r'"
+        else
+            server_list="$server_list, '$r'"
+        fi
+    done
+
+    # Geo preference (best-effort). dnscrypt-proxy supports a
+    # `disabled_server_names` list but no positive geo filter — we lean
+    # on the resolver short-list itself which is already region-curated
+    # for Cloudflare/Quad9. Location is therefore informational only;
+    # we just log it and let dnscrypt-proxy's latency probe pick.
+    log "selected resolvers: $server_list (location hint: $location)"
+
+    # If Tor VPN is active, route DNSCrypt's bootstrap (the initial
+    # DNS lookup to find the DoH/DoT server's IP) through Tor's own
+    # DNSPort on localhost. Subsequent DoH/DoT traffic to the upstream
+    # (TCP) then rides through Tor's TransPort via the iptables
+    # redirect chain. End result: all DNS — bootstrap + queries —
+    # leaves the device via Tor only. ISP sees Tor traffic, no DoH
+    # fingerprint, no plaintext DNS.
+    local vpn_provider; vpn_provider="$(toml_get vpn provider none)"
+    local vpn_enabled; vpn_enabled="$(toml_get vpn enabled false)"
+    local bootstrap_line
+    if [ "$vpn_enabled" = "true" ] && [ "$vpn_provider" = "tor" ]; then
+        bootstrap_line="bootstrap_resolvers = ['127.0.0.1:5353']  # Tor DNSPort"
+        log "dnscrypt: Tor is active — bootstrapping via Tor DNSPort (127.0.0.1:5353)"
+    else
+        bootstrap_line="bootstrap_resolvers = ['9.9.9.11:53', '1.1.1.1:53', '8.8.8.8:53']"
+    fi
+
+    install -d -m 0755 /etc/dnscrypt-proxy
+    cat > "$DNSCRYPT_CONF" <<EOF
+# Managed by aeon-net-services — do not edit by hand.
+# Toggle/configure via PUT /api/network/dnscrypt.
+
+server_names = [$server_list]
+listen_addresses = ['127.0.2.1:53', '[::1]:53']
+max_clients = 250
+
+ipv4_servers = true
+ipv6_servers = false
+dnscrypt_servers = true
+doh_servers = true
+odoh_servers = false
+
+require_dnssec = true
+require_nolog = true
+require_nofilter = false
+
+# Bootstrap: where to send the FIRST DNS query that resolves the
+# upstream DoH/DoT server's hostname. After bootstrap, that IP is
+# cached and all subsequent queries go straight to the upstream.
+$bootstrap_line
+ignore_system_dns = true
+
+cache = true
+cache_size = 4096
+cache_min_ttl = 600
+cache_max_ttl = 86400
+cache_neg_min_ttl = 60
+cache_neg_max_ttl = 600
+
+[sources]
+  [sources.'public-resolvers']
+    urls = [
+      'https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md',
+      'https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md',
+    ]
+    cache_file = '/var/cache/dnscrypt-proxy/public-resolvers.md'
+    minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+    refresh_delay = 73
+    prefix = ''
+EOF
+    chmod 0644 "$DNSCRYPT_CONF"
+
+    install -d -m 0755 /var/cache/dnscrypt-proxy
+    chown -R _dnscrypt-proxy:_dnscrypt-proxy /var/cache/dnscrypt-proxy 2>/dev/null || true
+    chown -R _dnscrypt-proxy:_dnscrypt-proxy /etc/dnscrypt-proxy 2>/dev/null || true
+
+    systemctl enable --now dnscrypt-proxy.service 2>/dev/null \
+        || systemctl restart dnscrypt-proxy.service 2>/dev/null \
+        || log "WARN: dnscrypt-proxy.service failed to start (check journalctl)"
+    log "dnscrypt active — listening on 127.0.2.1:53"
+
+    # Point NetworkManager's shared-mode dnsmasq at 127.0.2.1 so DHCP
+    # clients on usb0 get DNS via the encrypted upstream. The shared
+    # method's embedded dnsmasq picks up these drop-ins.
+    install -d -m 0755 /etc/NetworkManager/dnsmasq-shared.d
+    cat > /etc/NetworkManager/dnsmasq-shared.d/00-aeon-dnscrypt.conf <<'EOF'
+# Forward all DNS through local dnscrypt-proxy.
+no-resolv
+server=127.0.2.1
+EOF
+    # Re-up usb0 connection so the shared dnsmasq re-reads its conf.
+    nmcli con up aeon-usb0 >/dev/null 2>&1 || true
+
+    # ── System-wide DNS override ──
+    # Make the Pi's OWN resolution go through DNSCrypt too — not just
+    # USB clients. Without this, /etc/resolv.conf still points at the
+    # LAN router (DHCP-provided), so any tool running on the Pi
+    # (curl, apt, the supervisor, MCP) bypasses the encrypted resolver.
+    #
+    # Mechanism: override each ethernet/wifi NetworkManager connection
+    # to ignore DHCP-provided DNS and use 127.0.2.1 instead. NM then
+    # rewrites /etc/resolv.conf with that nameserver. This survives
+    # reboots (per-connection setting is persisted).
+    local uuids; uuids=$(nmcli -t -f UUID,TYPE con show 2>/dev/null \
+        | awk -F: '$2 ~ /ethernet|wifi/ {print $1}')
+    local count=0
+    for uuid in $uuids; do
+        nmcli con modify "$uuid" ipv4.ignore-auto-dns yes 2>/dev/null || continue
+        nmcli con modify "$uuid" ipv4.dns "127.0.2.1" 2>/dev/null || continue
+        count=$((count + 1))
+    done
+    log "dnscrypt: overrode DNS on $count NetworkManager connection(s) to 127.0.2.1"
+
+    # Reactivate active connections so /etc/resolv.conf gets rewritten
+    # immediately (rather than on next reconnect). Brief network blip.
+    for uuid in $(nmcli -t -f UUID con show --active 2>/dev/null); do
+        nmcli con up "$uuid" >/dev/null 2>&1 || true
+    done
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# VPN
+# ──────────────────────────────────────────────────────────────────────
+
+stop_all_vpns() {
+    # Idempotent — silently tolerate "service not active".
+    systemctl stop wg-quick@aeon0.service 2>/dev/null || true
+    systemctl disable wg-quick@aeon0.service 2>/dev/null || true
+    systemctl stop openvpn-client@aeon.service 2>/dev/null || true
+    systemctl disable openvpn-client@aeon.service 2>/dev/null || true
+    systemctl stop tor@default.service 2>/dev/null || true
+    systemctl stop tor.service 2>/dev/null || true
+    systemctl disable tor.service 2>/dev/null || true
+    systemctl stop i2pd.service 2>/dev/null || true
+    systemctl disable i2pd.service 2>/dev/null || true
+    # Tailscale: we don't fully stop tailscaled (it's the gateway daemon
+    # itself), just `tailscale down`. That removes the tailnet IP without
+    # killing the daemon.
+    /usr/bin/tailscale down 2>/dev/null || true
+    # Sweep iptables rules we own. The v19 version used
+    # `iptables-save | grep -v | iptables-restore` which is brittle:
+    # one parse-rejected line and iptables-restore silently bails,
+    # leaving the original rules intact — but the next apply path
+    # then APPENDS a new set on top. Result: doubled / tripled rule
+    # sets accumulating across toggles, eventually bricking the box.
+    #
+    # v20 fix: list line numbers of every rule whose comment contains
+    # "aeon-vpn", then delete them in reverse order (so deletion of
+    # rule N doesn't shift the numbers of rules >N we still want to
+    # delete). iptables -D <chain> <n> by line number always works
+    # and never fails partially.
+    for table in filter nat; do
+        for chain in OUTPUT INPUT FORWARD PREROUTING POSTROUTING; do
+            # `iptables -L --line-numbers` includes the chain even if
+            # it doesn't exist; suppress stderr in case the chain is
+            # absent in this table.
+            local lines
+            lines=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+                | awk '/aeon-vpn/{print $1}' | sort -rn)
+            for n in $lines; do
+                iptables -t "$table" -D "$chain" "$n" 2>/dev/null || true
+            done
+        done
+    done
+}
+
+apply_vpn_tailscale() {
+    local auth_key="$(toml_get vpn.tailscale auth_key '')"
+    local hostname="$(toml_get vpn.tailscale hostname '')"
+    local exit_node="$(toml_get vpn.tailscale exit_node false)"
+    local advertise_exit="$(toml_get vpn.tailscale advertise_exit_node false)"
+
+    if [ ! -x /usr/bin/tailscale ]; then
+        log "tailscale binary not present — skipping"
+        return 0
+    fi
+
+    systemctl enable --now tailscaled.service 2>/dev/null || true
+
+    local args=("--reset")
+    if [ -n "$auth_key" ]; then
+        args+=("--auth-key=$auth_key")
+    fi
+    if [ -n "$hostname" ]; then
+        args+=("--hostname=$hostname")
+    fi
+    if [ "$advertise_exit" = "true" ]; then
+        args+=("--advertise-exit-node")
+    fi
+    if [ "$exit_node" = "true" ]; then
+        # Pick the first available exit node automatically.
+        args+=("--exit-node-allow-lan-access=true")
+        # `--exit-node` requires a specific node — we set it to a magic
+        # "auto" sentinel that tailscale's exit-node-list-pick supports:
+        # actually, the canonical approach is to use `--exit-node=<ip>`.
+        # For "any" we leave it unset and the caller picks via the
+        # tailscale-up CLI; on the Pi without a UI the best we can do
+        # is enable LAN-bypass — full exit-node activation requires the
+        # user to call `tailscale set --exit-node=<host>` separately.
+        log "tailscale exit-node mode requested — set --exit-node=<host> with: tailscale set --exit-node=<host>"
+    fi
+    /usr/bin/tailscale up "${args[@]}" 2>&1 | tee -a "$LOG" || true
+    log "tailscale up applied"
+}
+
+apply_vpn_wireguard() {
+    local cfg="$(python3 -c "
+import tomllib
+try:
+    with open('$NETTOML','rb') as f:
+        d = tomllib.load(f)
+    print(d.get('vpn',{}).get('wireguard',{}).get('config',''))
+except Exception:
+    print('')
+")"
+
+    if [ -z "$cfg" ]; then
+        log "wireguard selected but config is empty — bailing"
+        return 0
+    fi
+
+    install -d -m 0700 /etc/wireguard
+    printf '%s\n' "$cfg" > "$WG_CONF"
+    chmod 0600 "$WG_CONF"
+    systemctl enable --now wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    log "wireguard up via wg-quick@aeon0"
+}
+
+apply_vpn_openvpn() {
+    local cfg="$(python3 -c "
+import tomllib
+try:
+    with open('$NETTOML','rb') as f:
+        d = tomllib.load(f)
+    print(d.get('vpn',{}).get('openvpn',{}).get('config',''))
+except Exception:
+    print('')
+")"
+    local user="$(toml_get vpn.openvpn auth_username '')"
+    local pass="$(toml_get vpn.openvpn auth_password '')"
+
+    if [ -z "$cfg" ]; then
+        log "openvpn selected but config is empty — bailing"
+        return 0
+    fi
+
+    install -d -m 0755 /etc/openvpn/client
+    printf '%s\n' "$cfg" > "$OVPN_CONF"
+    chmod 0600 "$OVPN_CONF"
+
+    if [ -n "$user" ] && [ -n "$pass" ]; then
+        printf '%s\n%s\n' "$user" "$pass" > "$OVPN_AUTH"
+        chmod 0600 "$OVPN_AUTH"
+        # Inject auth-user-pass directive if not present.
+        if ! grep -q "^auth-user-pass" "$OVPN_CONF"; then
+            echo "auth-user-pass $OVPN_AUTH" >> "$OVPN_CONF"
+        else
+            sed -i "s|^auth-user-pass.*|auth-user-pass $OVPN_AUTH|" "$OVPN_CONF"
+        fi
+    fi
+
+    systemctl enable --now openvpn-client@aeon.service 2>&1 | tee -a "$LOG" || true
+    log "openvpn up via openvpn-client@aeon"
+}
+
+apply_vpn_tor() {
+    # Bridges: optional newline-separated obfs4 bridge lines.
+    local bridges="$(python3 -c "
+import tomllib
+try:
+    with open('$NETTOML','rb') as f:
+        d = tomllib.load(f)
+    print(d.get('vpn',{}).get('tor',{}).get('bridges',''))
+except Exception:
+    print('')
+")"
+
+    if [ ! -x /usr/bin/tor ] && [ ! -x /usr/sbin/tor ]; then
+        log "tor binary not installed — skipping"
+        return 0
+    fi
+
+    install -d -m 0755 /etc/tor
+    # Write a minimal torrc that adds transparent-proxy + DNS-port lines
+    # alongside the Debian default. We append into a drop-in so the
+    # package's default torrc keeps shipping the SOCKS port too (useful
+    # for in-Pi apps that prefer SOCKS).
+    install -d -m 0755 /etc/tor/torrc.d
+    cat > /etc/tor/torrc.d/aeon.conf <<EOF
+# Managed by aeon-net-services.
+# Transparent proxy port for iptables REDIRECT.
+TransPort 127.0.0.1:9040 IsolateClientAddr IsolateDestPort IsolateDestAddr
+# DNS resolver — iptables redirects UDP/53 here.
+DNSPort 127.0.0.1:5353
+# Automap onion addresses so apps resolving .onion get a real IP.
+AutomapHostsOnResolve 1
+AutomapHostsSuffixes .onion,.exit
+# Don't run a SOCKS port on a privileged interface.
+SOCKSPort 127.0.0.1:9050
+EOF
+    if [ -n "$bridges" ]; then
+        cat >> /etc/tor/torrc.d/aeon.conf <<EOF
+UseBridges 1
+ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy managed
+EOF
+        # Append each bridge line.
+        printf '%s\n' "$bridges" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "Bridge $line" >> /etc/tor/torrc.d/aeon.conf
+        done
+        log "tor: $(printf '%s\n' "$bridges" | wc -l) bridge(s) configured"
+    fi
+
+    # Make sure /etc/tor/torrc includes drop-ins. Debian's default does
+    # (`%include /etc/tor/torrc.d/*.conf`) but be defensive.
+    if ! grep -q "torrc.d" /etc/tor/torrc 2>/dev/null; then
+        echo "%include /etc/tor/torrc.d/*.conf" >> /etc/tor/torrc
+    fi
+
+    # Open the control port + cookie auth so the supervisor can query
+    # status (bootstrap %, circuits, NEWNYM identity refresh).
+    if ! grep -q "^ControlPort" /etc/tor/torrc.d/aeon.conf 2>/dev/null; then
+        cat >> /etc/tor/torrc.d/aeon.conf <<EOF
+ControlPort 9051
+CookieAuthentication 1
+CookieAuthFileGroupReadable 1
+EOF
+    fi
+
+    # Optional: exit-node country pin. v19's status panel writes this.
+    local exit_country; exit_country="$(toml_get vpn.tor exit_country '')"
+    if [ -n "$exit_country" ]; then
+        # Strip any existing ExitNodes line + add the new one
+        sed -i '/^ExitNodes/d' /etc/tor/torrc.d/aeon.conf
+        echo "ExitNodes {$exit_country}" >> /etc/tor/torrc.d/aeon.conf
+        echo "StrictNodes 1" >> /etc/tor/torrc.d/aeon.conf
+    fi
+
+    systemctl enable --now tor.service 2>&1 | tee -a "$LOG" || true
+
+    # Wait for Tor's TransPort to actually start listening before
+    # applying the iptables REDIRECTs. If we redirect to a port that
+    # isn't accepting yet, every TCP connection on the box drops until
+    # tor finishes bootstrap (30-90s, longer with bridges). Better to
+    # let traffic continue uncovered for a few seconds than to black-
+    # hole everything.
+    local trans_port=9040
+    local dns_port=5353
+    local wait_max=60
+    local wait_n=0
+    log "waiting for tor TransPort:$trans_port to listen (up to ${wait_max}s)…"
+    while ! ss -tln 2>/dev/null | grep -q ":$trans_port "; do
+        wait_n=$((wait_n + 1))
+        if [ "$wait_n" -ge "$wait_max" ]; then
+            log "WARN: tor never opened TransPort:$trans_port after ${wait_max}s — NOT installing iptables redirects (traffic stays untunneled)"
+            return 1
+        fi
+        sleep 1
+    done
+    log "tor TransPort up after ${wait_n}s — installing iptables redirects"
+
+    # iptables: transparent redirect of all TCP + DNS to Tor. Tag with
+    # comment "aeon-vpn" so stop_all_vpns can sweep them out (across
+    # both filter AND nat tables).
+    #
+    # RULE ORDER IS CRITICAL. The default /etc/resolv.conf on Pi OS
+    # with NetworkManager points at the LAN router (e.g. 192.168.1.1).
+    # If the LAN-bypass rule (RETURN -d 192.168.0.0/16) is evaluated
+    # before the DNS-redirect rule, all DNS queries go to the LAN
+    # router *outside Tor* — apps see NXDOMAIN (LAN router doesn't
+    # resolve external hosts when Tor's iptables intercepts the
+    # response path) and connectivity breaks despite Tor being
+    # bootstrapped and TransPort working. Fix is to insert DNS
+    # redirects BEFORE LAN bypass.
+    local lan_bypass; lan_bypass="$(toml_get vpn lan_bypass '192.168.0.0/16')"
+
+    # 1. Loopback always exempt.
+    iptables -t nat -A OUTPUT -o lo -j RETURN -m comment --comment "aeon-vpn"
+    # 2. Tor's own traffic exempt (otherwise it'd redirect itself).
+    iptables -t nat -A OUTPUT -m owner --uid-owner debian-tor \
+        -j RETURN -m comment --comment "aeon-vpn"
+    # 3. NOTE: we deliberately do NOT exempt DNSCrypt-proxy's UID.
+    #    When DNSCrypt is ALSO active alongside Tor, we want its
+    #    DoH/DoT traffic (TCP) to ride through Tor's TransPort too —
+    #    that way the ISP sees only Tor traffic (not encrypted-but-
+    #    distinctively-DoH packets). This is the privacy-strict
+    #    behavior. The chicken-and-egg deadlock that the earlier
+    #    exemption fixed is now solved a different way: when both Tor
+    #    and DNSCrypt are on, apply_dnscrypt sets dnscrypt-proxy's
+    #    bootstrap_resolvers to 127.0.0.1:5353 (Tor's own DNSPort) +
+    #    ignore_system_dns=true. So DNSCrypt's bootstrap stays local
+    #    (loopback exempts it from redirect), while its DoH/DoT
+    #    upstream traffic goes through Tor.
+    # 4. ALL DNS — including queries destined for the LAN router —
+    #    goes to Tor's DNSPort. MUST be before LAN bypass.
+    iptables -t nat -A OUTPUT -p udp --dport 53 \
+        -j REDIRECT --to-ports "$dns_port" -m comment --comment "aeon-vpn"
+    iptables -t nat -A OUTPUT -p tcp --dport 53 \
+        -j REDIRECT --to-ports "$dns_port" -m comment --comment "aeon-vpn"
+    # 5. LAN bypass for non-DNS (web UI / SSH / other LAN services).
+    if [ -n "$lan_bypass" ]; then
+        iptables -t nat -A OUTPUT -d "$lan_bypass" \
+            -j RETURN -m comment --comment "aeon-vpn"
+    fi
+    # 6. All other TCP → Tor TransPort.
+    iptables -t nat -A OUTPUT -p tcp --syn \
+        -j REDIRECT --to-ports "$trans_port" -m comment --comment "aeon-vpn"
+    # UDP can't traverse Tor — drop it BUT exempt:
+    #  - Loopback (allows local UDP to DNSCrypt 127.0.2.1:53, Tor's
+    #    own DNSPort, and any future on-host UDP services). Without
+    #    this, the catch-all DROP below kills legitimate localhost
+    #    UDP — including the Pi's own DNS queries to DNSCrypt —
+    #    making the whole privacy-strict DNS chain unusable.
+    #  - DHCP (67/68): the host gets an address from upstream
+    #  - NTP (123): clock sync (NTP-over-Tor exists but is fragile)
+    #  - mDNS (5353): .local hostnames on the LAN
+    iptables -A OUTPUT -o lo -p udp -j ACCEPT -m comment --comment "aeon-vpn"
+    iptables -A OUTPUT -p udp --dport 67 -j ACCEPT -m comment --comment "aeon-vpn"
+    iptables -A OUTPUT -p udp --dport 68 -j ACCEPT -m comment --comment "aeon-vpn"
+    iptables -A OUTPUT -p udp --dport 123 -j ACCEPT -m comment --comment "aeon-vpn"
+    iptables -A OUTPUT -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
+    iptables -A OUTPUT -p udp -j DROP -m comment --comment "aeon-vpn"
+    log "tor active — TCP + DNS via tor; DHCP/NTP/mDNS UDP allowed; other UDP dropped"
+}
+
+apply_vpn_i2p() {
+    local outproxy="$(toml_get vpn.i2p outproxy '')"
+
+    if [ ! -x /usr/sbin/i2pd ] && [ ! -x /usr/bin/i2pd ]; then
+        log "i2pd binary not installed — skipping"
+        return 0
+    fi
+
+    install -d -m 0755 /etc/i2pd
+    # The Debian package ships a default /etc/i2pd/i2pd.conf with HTTP
+    # proxy on 4444 and SOCKS on 4447 already enabled. We leave that
+    # alone and only manage the optional outproxy override.
+    if [ -n "$outproxy" ]; then
+        # Append outproxy directive to the [httpproxy] section if not
+        # already present; replace it in-place otherwise.
+        if grep -q "^outproxy" /etc/i2pd/i2pd.conf 2>/dev/null; then
+            sed -i "s|^outproxy.*|outproxy = $outproxy|" /etc/i2pd/i2pd.conf
+        else
+            cat >> /etc/i2pd/i2pd.conf <<EOF
+
+# aeon outproxy override
+[httpproxy]
+outproxy = $outproxy
+EOF
+        fi
+        log "i2p: outproxy set to $outproxy"
+    fi
+
+    systemctl enable --now i2pd.service 2>&1 | tee -a "$LOG" || true
+    log "i2p (i2pd) active — HTTP proxy on 127.0.0.1:4444, SOCKS on 127.0.0.1:4447"
+    log "    (apps must opt in by configuring those proxies — not transparently routed)"
+}
+
+apply_kill_switch() {
+    local enabled="$(toml_get vpn kill_switch false)"
+    local provider="$(toml_get vpn provider none)"
+
+    if [ "$enabled" != "true" ]; then
+        log "kill-switch: disabled"
+        return 0
+    fi
+
+    # If no VPN is even active, refuse — the kill-switch would orphan
+    # the device entirely.
+    if [ "$provider" = "none" ] || [ -z "$provider" ]; then
+        log "kill-switch: refusing to apply because no VPN provider is selected"
+        return 0
+    fi
+
+    local lan_bypass; lan_bypass="$(toml_get vpn lan_bypass '192.168.0.0/16')"
+    log "kill-switch: ENABLED — VPN-only outbound; lan_bypass=$lan_bypass"
+
+    # Allow loopback.
+    iptables -A OUTPUT -o lo -j ACCEPT -m comment --comment "aeon-vpn"
+    # Allow established/related (return traffic for inbound conns).
+    iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "aeon-vpn"
+    # Allow LAN bypass.
+    if [ -n "$lan_bypass" ]; then
+        iptables -A OUTPUT -d "$lan_bypass" -j ACCEPT -m comment --comment "aeon-vpn"
+    fi
+
+    case "$provider" in
+        tailscale)
+            iptables -A OUTPUT -o tailscale0 -j ACCEPT -m comment --comment "aeon-vpn"
+            ;;
+        wireguard)
+            iptables -A OUTPUT -o aeon0 -j ACCEPT -m comment --comment "aeon-vpn"
+            ;;
+        openvpn)
+            iptables -A OUTPUT -o tun0 -j ACCEPT -m comment --comment "aeon-vpn"
+            iptables -A OUTPUT -o tun1 -j ACCEPT -m comment --comment "aeon-vpn"
+            ;;
+        tor|i2p)
+            # For Tor + I2P the transparent-redirect rules already
+            # enforce "everything goes through them". Allow connections
+            # originated by the proxy daemons themselves.
+            iptables -A OUTPUT -m owner --uid-owner debian-tor -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true
+            iptables -A OUTPUT -m owner --uid-owner i2pd -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true
+            ;;
+    esac
+
+    # Drop everything else outbound.
+    iptables -A OUTPUT -j DROP -m comment --comment "aeon-vpn"
+    log "kill-switch applied — non-VPN outbound traffic is now dropped"
+}
+
+apply_vpn() {
+    local enabled="$(toml_get vpn enabled false)"
+    local provider="$(toml_get vpn provider none)"
+
+    log "vpn: enabled=$enabled provider=$provider"
+
+    # Always start by stopping all VPNs — this gives us a clean slate
+    # (also sweeps any prior iptables rules tagged "aeon-vpn").
+    stop_all_vpns
+
+    if [ "$enabled" != "true" ] || [ "$provider" = "none" ] || [ -z "$provider" ]; then
+        log "vpn disabled — all tunnels down"
+        return 0
+    fi
+
+    case "$provider" in
+        tailscale) apply_vpn_tailscale ;;
+        wireguard) apply_vpn_wireguard ;;
+        openvpn)   apply_vpn_openvpn ;;
+        tor)       apply_vpn_tor ;;
+        i2p)       apply_vpn_i2p ;;
+        *)         log "WARN: unknown vpn provider '$provider' — leaving all tunnels down" ;;
+    esac
+
+    # Kill-switch is layered on TOP of the chosen provider so the rules
+    # see the VPN's interface already up.
+    apply_kill_switch
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────
+
+# Order matters: VPN first so the tunnel + iptables redirects are
+# established BEFORE DNSCrypt tries to bootstrap. When Tor is the active
+# VPN, DNSCrypt's bootstrap_resolvers point at Tor's DNSPort
+# (127.0.0.1:5353) — that port must exist before DNSCrypt's first
+# query, so we set up Tor first.
+apply_vpn
+apply_dnscrypt
+log "aeon-net-services done"

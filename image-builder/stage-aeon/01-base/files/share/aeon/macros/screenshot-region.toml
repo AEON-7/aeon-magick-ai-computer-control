@@ -1,0 +1,7 @@
+name = "screenshot-region"
+description = "macOS region-select screenshot. Cmd+Shift+4 then user drags. Useful before a `snapshot` step if you want a host-side file too."
+
+[[steps]]
+type = "key"
+keys = ["GUI", "SHIFT", "4"]
+hold_ms = 50

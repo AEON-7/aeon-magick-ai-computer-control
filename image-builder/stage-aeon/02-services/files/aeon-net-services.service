@@ -1,0 +1,16 @@
+[Unit]
+Description=Aeon Magick — DNSCrypt + VPN config applier
+After=NetworkManager.service aeon-usb-net.service network-online.target
+Wants=NetworkManager.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/aeon-net-services
+# Allow `systemctl reload aeon-net-services` from the supervisor to
+# re-apply config without a full unit restart.
+ExecReload=/usr/local/bin/aeon-net-services
+User=root
+
+[Install]
+WantedBy=multi-user.target

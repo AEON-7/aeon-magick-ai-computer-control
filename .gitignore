@@ -1,34 +1,30 @@
-# Rust
+# Build artifacts
 target/
-Cargo.lock.bak
-*.rs.bk
-
-# Node / SvelteKit
 node_modules/
 .svelte-kit/
 build/
-dist/
-.env
-.env.local
-.env.*.local
+*.tsbuildinfo
 
-# pi-gen
-work/
-deploy/
-*.img
-*.img.xz
-*.img.zip
+# Cross-build outputs (we keep the bake-staged copies under image-builder/stage-aeon)
+image-builder/stage-aeon/01-base/files/bin/aeon-*
+image-builder/stage-aeon/01-base/files/web/
 
-# editor / OS
+# Local pi-gen artifacts (not part of this repo)
+pi-gen/
+
+# Editor + OS
 .DS_Store
+*.swp
 .vscode/
 .idea/
-*.swp
-*~
 
-# project-local
-config.local.toml
-secrets.toml
-*.predeploy-*
-*.bak
-*.bak2
+# Logs
+*.log
+
+# Secrets / personal device state
+.env
+.env.local
+auth.toml
+tokens.toml
+usb-serial.state
+persona.state

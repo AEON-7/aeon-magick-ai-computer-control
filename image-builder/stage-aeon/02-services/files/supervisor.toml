@@ -1,0 +1,10 @@
+# Default aeon-supervisor config.
+
+listen = "0.0.0.0:443"
+web_root = "/usr/share/aeon/web"
+streamer_sock = "/run/aeon/streamer.sock"
+hid_sock = "/run/aeon/hid.sock"
+cert_path = "/etc/aeon/cert.pem"
+key_path = "/etc/aeon/key.pem"
+auth_path = "/etc/aeon/auth.toml"
+tokens_path = "/etc/aeon/tokens.toml"
