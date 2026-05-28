@@ -309,23 +309,50 @@ stop_all_vpns() {
     done
 }
 
-# Ensure the AEON_DROP chain exists, is current, and contains the
-# rate-limited LOG-then-DROP pair. Called at every apply so a fresh
-# boot lands with a working chain even before the supervisor (which
-# also creates it on startup) is up.
+# Per-rule LOG-then-DROP helper. Each "kind" of system drop carries
+# its own tag in the LOG prefix, so /security can show *which* rule
+# blocked a given packet ("Blocked by: VPN UDP catchall — browsers
+# will fall back to TCP automatically", etc.) rather than the
+# unhelpful "something dropped this".
 #
-# AEON_DROP is what every -j DROP rule in this script (and every
-# user-created DROP rule from /api/firewall) jumps to. Result: each
-# dropped packet emits one journal line prefixed "AEON-DROP: ", which
-# the security console reads on demand to populate the "blocked
-# traffic" panel + the per-row "allow this traffic" action.
-ensure_aeon_drop_chain() {
-    iptables -N AEON_DROP 2>/dev/null || true
-    iptables -F AEON_DROP 2>/dev/null || true
-    iptables -A AEON_DROP \
+# `aeon_drop_pair <chain> <tag> <predicate-args...>`
+#
+# Emits two iptables rules with identical predicates:
+#   1. LOG (rate-limited 5/sec) with prefix "AEON-DROP[<tag>]: "
+#   2. DROP
+# Both tagged with the standard "aeon-vpn" / "aeon-usb-net" comment
+# so the sweep code in `stop_all_vpns` / the usb-net cleanup catches
+# them as a pair.
+aeon_drop_pair() {
+    local chain="$1"
+    local tag="$2"
+    local comment="$3"
+    shift 3
+    # The remaining args are the predicate (-i usb0 -p udp -d ...)
+    iptables -A "$chain" "$@" \
         -m limit --limit 5/sec --limit-burst 10 \
-        -j LOG --log-prefix "AEON-DROP: " --log-level 4
-    iptables -A AEON_DROP -j DROP
+        -j LOG --log-prefix "AEON-DROP[${tag}]: " --log-level 4 \
+        -m comment --comment "$comment"
+    iptables -A "$chain" "$@" \
+        -j DROP \
+        -m comment --comment "$comment"
+}
+
+# Same helper but for `iptables -I <chain> 1 ...` (insert-at-top).
+# Inserts DROP first then LOG so LOG ends up *above* DROP (so the
+# packet hits LOG before being dropped).
+aeon_drop_pair_insert() {
+    local chain="$1"
+    local tag="$2"
+    local comment="$3"
+    shift 3
+    iptables -I "$chain" 1 "$@" \
+        -j DROP \
+        -m comment --comment "$comment"
+    iptables -I "$chain" 1 "$@" \
+        -m limit --limit 5/sec --limit-burst 10 \
+        -j LOG --log-prefix "AEON-DROP[${tag}]: " --log-level 4 \
+        -m comment --comment "$comment"
 }
 
 apply_vpn_tailscale() {
@@ -695,7 +722,12 @@ EOF
         iptables -A FORWARD -i usb0 -p udp --dport 68   -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 123  -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
-        iptables -A FORWARD -i usb0 -p udp              -j AEON_DROP -m comment --comment "aeon-vpn"
+        # Drop forwarded UDP from usb0 clients when Tor is active. This
+        # is what makes the QUIC/HTTP3 fallback work — browsers detect
+        # the UDP black-hole, give up, and reconnect over TCP HTTPS
+        # which IS carried by Tor's TransPort. Tag: vpn-udp-forward.
+        aeon_drop_pair FORWARD "vpn-udp-forward" "aeon-vpn" \
+            -i usb0 -p udp
         # (e) Make sure the INPUT chain accepts the redirected TCP on
         # the usb0 IP. Default Debian INPUT is ACCEPT but NetworkManager
         # / hardening profiles sometimes flip it. Add an explicit rule
@@ -719,7 +751,7 @@ EOF
     iptables -A OUTPUT -p udp --dport 68 -j ACCEPT -m comment --comment "aeon-vpn"
     iptables -A OUTPUT -p udp --dport 123 -j ACCEPT -m comment --comment "aeon-vpn"
     iptables -A OUTPUT -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
-    iptables -A OUTPUT -p udp -j AEON_DROP -m comment --comment "aeon-vpn"
+    aeon_drop_pair OUTPUT "vpn-udp-output" "aeon-vpn" -p udp
     log "tor active — TCP + DNS via tor; DHCP/NTP/mDNS UDP allowed; other UDP dropped"
 }
 
@@ -805,7 +837,7 @@ apply_kill_switch() {
     esac
 
     # Drop everything else outbound.
-    iptables -A OUTPUT -j AEON_DROP -m comment --comment "aeon-vpn"
+    aeon_drop_pair OUTPUT "vpn-killswitch" "aeon-vpn"
     log "kill-switch applied — non-VPN outbound traffic is now dropped"
 }
 
@@ -815,10 +847,9 @@ apply_vpn() {
 
     log "vpn: enabled=$enabled provider=$provider"
 
-    # AEON_DROP must exist before any rule jumps to it — both our own
-    # rules below AND any user firewall rules (the supervisor also calls
-    # ensure_drop_chain on startup, but we may run earlier than that).
-    ensure_aeon_drop_chain
+    # v39+: dropped the central AEON_DROP chain in favor of inline
+    # LOG-then-DROP pairs per call site (aeon_drop_pair helper above).
+    # No setup needed here — pairs are emitted on the fly.
 
     # Always start by stopping all VPNs — this gives us a clean slate
     # (also sweeps any prior iptables rules tagged "aeon-vpn").

@@ -644,6 +644,15 @@ export const getSecurityMetrics = () =>
 
 export interface BlockedPacket {
   ts_ms: number;
+  /// Identifies the rule that caused the block. Known tags:
+  ///   "vpn-udp-forward"           VPN active: UDP from usb0 clients
+  ///   "vpn-udp-output"            VPN active: local-host UDP
+  ///   "vpn-killswitch"            Kill-switch: tunnel down
+  ///   "usbnet-iso-rfc1918"        Isolation mode: RFC1918 destination
+  ///   "usbnet-iso-pi-rfc1918"     Isolation mode: usb→Pi via private IPs
+  ///   "usbnet-restricted-input"   Restricted mode: blocks Pi services
+  ///   "fw-<id>"                   User firewall rule with that id
+  cause_tag: string;
   in_iface: string;
   out_iface: string;
   proto: string;        // TCP / UDP / ICMP

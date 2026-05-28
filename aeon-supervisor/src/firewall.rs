@@ -99,53 +99,28 @@ fn write_rules(rf: &RulesFile) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Ensure the `AEON_DROP` chain exists and is populated. Every DROP
-/// rule we apply (user-created or system) jumps to this chain instead
-/// of `-j DROP` directly, so we get a rate-limited LOG entry per
-/// blocked packet. blocked_log.rs reads those via journalctl.
-///
-/// Safe to call repeatedly — the `-N` is idempotent (returns code 1
-/// if already exists, which we ignore), and we flush+rewrite the
-/// chain's contents each time so any operator-edited rules get reset
-/// to our canonical form.
+/// v39+: the central AEON_DROP chain is gone. Each DROP point in the
+/// system (aeon-net-services.sh, aeon-usb-net.sh, user firewall
+/// rules) now emits its own inline LOG + DROP pair with a unique
+/// log prefix tag `AEON-DROP[<tag>]:` so blocked_log.rs can attribute
+/// the block to a specific rule. We keep this function as a no-op
+/// for ABI stability with anything that called it from main.rs etc.
 pub fn ensure_drop_chain() {
+    // Best-effort flush + delete of any lingering AEON_DROP chain
+    // from a pre-v39 image, so it doesn't sit there confusingly with
+    // no references. Safe — iptables errors if the chain is still
+    // referenced or doesn't exist, both of which we ignore.
     use std::process::Command;
-    // Create the chain (no-op if it exists; iptables prints an error to
-    // stderr but exits 1 — we ignore both).
-    let _ = Command::new("iptables")
-        .args(["-N", "AEON_DROP"])
-        .status();
-    // Wipe whatever was in it; we re-add our canonical LOG + DROP pair.
     let _ = Command::new("iptables").args(["-F", "AEON_DROP"]).status();
-    // LOG (rate-limited so a chatty broadcast storm can't flood the
-    // journal). burst 10 absorbs short spikes. --log-prefix is what
-    // blocked_log.rs greps for.
-    let _ = Command::new("iptables")
-        .args([
-            "-A", "AEON_DROP",
-            "-m", "limit",
-            "--limit", "5/sec",
-            "--limit-burst", "10",
-            "-j", "LOG",
-            "--log-prefix", "AEON-DROP: ",
-            "--log-level", "4",
-        ])
-        .status();
-    let _ = Command::new("iptables").args(["-A", "AEON_DROP", "-j", "DROP"]).status();
+    let _ = Command::new("iptables").args(["-X", "AEON_DROP"]).status();
 }
 
-/// Build the iptables CLI arguments for one rule. User rules use
-/// `-I <chain> 1` (insert at position 1) so they evaluate BEFORE
-/// system-installed rules (aeon-vpn / aeon-usb-net), which append to
-/// the same chains. This is what makes the "allow this traffic"
-/// button on /security actually work — without it, a user ACCEPT
-/// rule lands after the system DROP and never fires.
-///
-/// To preserve the on-disk rule order within the user-rule space:
-/// apply_rules iterates the array in REVERSE and calls iptables -I 1
-/// on each, so the first rule in firewall.toml ends up at position 1,
-/// the second at position 2, and so on.
-fn rule_to_args(r: &Rule) -> Vec<String> {
+/// Build just the predicate prefix of an iptables -I command:
+/// `[-t table] -I chain 1 [-i|-o iface] [-o out_iface] [-p proto]
+///  [-s src] [-d dst] [--sport sp] [--dport dp]`
+/// Used as the common prefix for both the DROP invocation AND its
+/// paired LOG invocation, so they match the same packets.
+fn predicate_prefix(r: &Rule) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if !r.table.is_empty() && r.table != "filter" {
         args.push("-t".into());
@@ -155,9 +130,6 @@ fn rule_to_args(r: &Rule) -> Vec<String> {
     args.push(r.chain.clone());
     args.push("1".into());
     if !r.iface.is_empty() {
-        // Inbound rules use -i, outbound use -o; PREROUTING/INPUT/FORWARD
-        // see packets on the inbound interface; OUTPUT/POSTROUTING see
-        // them on outbound. We pick based on chain.
         let flag = match r.chain.as_str() {
             "OUTPUT" | "POSTROUTING" => "-o",
             _ => "-i",
@@ -165,10 +137,6 @@ fn rule_to_args(r: &Rule) -> Vec<String> {
         args.push(flag.into());
         args.push(r.iface.clone());
     }
-    // FORWARD rules can additionally pin the outbound interface (e.g.
-    // -i usb0 -o eth0 to match exactly the USB-client-to-WAN path).
-    // Lets the /security "allow this traffic" deep-link emit a rule
-    // that's as narrow as the blocked-log entry it came from.
     if !r.out_iface.is_empty() && r.chain == "FORWARD" {
         args.push("-o".into());
         args.push(r.out_iface.clone());
@@ -193,39 +161,91 @@ fn rule_to_args(r: &Rule) -> Vec<String> {
         args.push("--dport".into());
         args.push(r.dport.clone());
     }
-    // DROP routes through the AEON_DROP chain so the packet gets logged
-    // (rate-limited) before being dropped — that's how the security
-    // console's "Blocked traffic" panel gets populated. Direct -j DROP
-    // would silently kill the packet with nothing to show in the UI.
-    if r.action == "DROP" {
-        args.push("-j".into());
-        args.push("AEON_DROP".into());
-    } else {
-        args.push("-j".into());
-        args.push(r.action.clone());
-    }
-    if !r.target_arg.is_empty() {
-        match r.action.as_str() {
-            "REDIRECT" => {
-                args.push("--to-ports".into());
-                args.push(r.target_arg.clone());
-            }
-            "DNAT" | "SNAT" => {
-                args.push("--to-destination".into());
-                args.push(r.target_arg.clone());
-            }
-            _ => { /* MASQUERADE / ACCEPT / DROP / REJECT take no arg */ }
-        }
-    }
-    // Tag every aeon-fw rule with a comment so we can match it to disk
-    // state later. iptables -m comment requires the match module.
-    args.push("-m".into());
-    args.push("comment".into());
-    args.push("--comment".into());
-    args.push(format!("aeon-fw {} {}", r.id,
-        // Keep the user comment as part of the tag but sanitize whitespace.
-        r.comment.replace(['\n', '\r'], " ").chars().take(100).collect::<String>()));
     args
+}
+
+fn comment_args(r: &Rule, suffix: &str) -> Vec<String> {
+    let sanitized: String = r
+        .comment
+        .replace(['\n', '\r'], " ")
+        .chars()
+        .take(100)
+        .collect();
+    vec![
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
+        format!("aeon-fw {} {} {}", r.id, suffix, sanitized).trim_end().to_string(),
+    ]
+}
+
+/// Build the iptables invocation(s) for one rule. User rules use
+/// `-I <chain> 1` (insert at position 1) so they evaluate BEFORE
+/// system-installed rules (aeon-vpn / aeon-usb-net) — that's what
+/// makes the "allow this traffic" button actually take effect.
+///
+/// DROP rules emit TWO invocations (LOG + DROP) with identical
+/// predicates. Each LOG carries a unique prefix `AEON-DROP[fw-<id>]:`
+/// so blocked_log.rs can attribute the block to a specific rule. To
+/// land both at the top in the right order, apply_rules calls them in
+/// reverse: DROP gets inserted first (lands at pos 1), then LOG gets
+/// inserted (lands at pos 1, pushing DROP to pos 2). End: [LOG, DROP].
+///
+/// To preserve user rule order within the user-rule space: apply_rules
+/// iterates the on-disk array in REVERSE, so the first rule in
+/// firewall.toml ends up at the topmost position after all inserts.
+fn rule_to_invocations(r: &Rule) -> Vec<Vec<String>> {
+    let prefix = predicate_prefix(r);
+    let target_args = |action: &str, target_arg: &str| -> Vec<String> {
+        let mut a = vec!["-j".into(), action.to_string()];
+        match action {
+            "REDIRECT" if !target_arg.is_empty() => {
+                a.push("--to-ports".into());
+                a.push(target_arg.to_string());
+            }
+            "DNAT" | "SNAT" if !target_arg.is_empty() => {
+                a.push("--to-destination".into());
+                a.push(target_arg.to_string());
+            }
+            _ => { /* nothing */ }
+        }
+        a
+    };
+
+    if r.action == "DROP" || r.action == "REJECT" {
+        // Two invocations: DROP first, LOG second. apply_rules calls
+        // them in array order; both use -I 1 so the SECOND one ends
+        // up above the first. That puts LOG above DROP in the chain
+        // — which is what we want (log then drop).
+        let mut drop_inv = prefix.clone();
+        drop_inv.extend(target_args(&r.action, &r.target_arg));
+        drop_inv.extend(comment_args(r, "drop"));
+
+        let mut log_inv = prefix.clone();
+        log_inv.extend_from_slice(&[
+            "-m".into(),
+            "limit".into(),
+            "--limit".into(),
+            "5/sec".into(),
+            "--limit-burst".into(),
+            "10".into(),
+            "-j".into(),
+            "LOG".into(),
+            "--log-prefix".into(),
+            format!("AEON-DROP[fw-{}]: ", r.id),
+            "--log-level".into(),
+            "4".into(),
+        ]);
+        log_inv.extend(comment_args(r, "log"));
+
+        vec![drop_inv, log_inv]
+    } else {
+        // Single invocation for ACCEPT / REDIRECT / DNAT / SNAT / etc.
+        let mut inv = prefix;
+        inv.extend(target_args(&r.action, &r.target_arg));
+        inv.extend(comment_args(r, ""));
+        vec![inv]
+    }
 }
 
 /// Sweep any existing "aeon-fw"-tagged rules from the kernel (so we
@@ -261,21 +281,24 @@ fn apply_rules(rf: &RulesFile) -> Result<(), String> {
             }
         }
     }
-    // 2. Re-apply in REVERSE order. Each rule is inserted at position 1
-    //    (top of chain). Inserting them in reverse means the first rule
-    //    on disk ends up at the topmost position after all inserts —
-    //    matching the order the user sees in the editor.
+    // 2. Re-apply in REVERSE order. Each invocation is `iptables -I <chain> 1 ...`
+    //    so inserting in reverse puts the first rule on disk at the topmost
+    //    position. For DROP/REJECT rules each emits TWO invocations
+    //    (DROP first, LOG second) — both use -I 1, so LOG lands above
+    //    DROP in the chain. End-to-end ordering: [r1-LOG, r1-DROP,
+    //    r2-LOG, r2-DROP, ..., system rules].
     for r in rf.rules.iter().rev() {
-        let args = rule_to_args(r);
-        let st = Command::new("iptables")
-            .args(args.iter().map(|s| s.as_str()))
-            .status()
-            .map_err(|e| format!("spawn iptables: {e}"))?;
-        if !st.success() {
-            return Err(format!(
-                "iptables exited non-zero applying rule '{}'",
-                r.id
-            ));
+        for inv in rule_to_invocations(r) {
+            let st = Command::new("iptables")
+                .args(inv.iter().map(|s| s.as_str()))
+                .status()
+                .map_err(|e| format!("spawn iptables: {e}"))?;
+            if !st.success() {
+                return Err(format!(
+                    "iptables exited non-zero applying rule '{}'",
+                    r.id
+                ));
+            }
         }
     }
     Ok(())

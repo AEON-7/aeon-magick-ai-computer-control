@@ -80,12 +80,30 @@ pub async fn list(
 
 /// Parse one journalctl line into a structured entry. Returns None if
 /// the line doesn't look like an AEON-DROP entry.
+///
+/// The log prefix is `AEON-DROP[<tag>]: ` where <tag> identifies the
+/// rule that dropped the packet — vpn-udp-forward, usbnet-iso-rfc1918,
+/// fw-<id> for user rules, etc. blocked_log surfaces the tag so the
+/// UI can show "Blocked by: <human-readable>" + link to the rule.
 fn parse_log_line(raw: &str) -> Option<Value> {
-    // Skip lines without our prefix (journalctl --grep already filters,
-    // but be defensive — kernel-msg lines from other LOG rules might
-    // sneak in if a user adds their own LOG with a similar prefix).
-    let drop_idx = raw.find("AEON-DROP:")?;
-    let body = &raw[drop_idx + "AEON-DROP:".len()..];
+    let drop_idx = raw.find("AEON-DROP")?;
+    let after_prefix = &raw[drop_idx + "AEON-DROP".len()..];
+
+    // Read the optional [tag] portion.
+    let (cause_tag, body) = if let Some(after_lbracket) = after_prefix.strip_prefix('[') {
+        match after_lbracket.find("]:") {
+            Some(end) => (
+                after_lbracket[..end].to_string(),
+                &after_lbracket[end + 2..], // skip "]:"
+            ),
+            None => (String::new(), after_prefix),
+        }
+    } else {
+        // v37 and earlier used "AEON-DROP: " with no tag. Keep parsing
+        // those entries so the panel doesn't go blank right after an
+        // upgrade.
+        (String::new(), after_prefix)
+    };
 
     // Timestamp is the first whitespace-separated token on the line.
     let ts_ms = raw
@@ -116,6 +134,7 @@ fn parse_log_line(raw: &str) -> Option<Value> {
 
     Some(json!({
         "ts_ms": ts_ms,
+        "cause_tag": cause_tag,
         "in_iface": in_if,
         "out_iface": out_if,
         "proto": proto,

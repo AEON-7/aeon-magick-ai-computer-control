@@ -39,6 +39,67 @@
     return `${Math.floor(dt / 3_600_000)}h ago`;
   }
 
+  /// Map a blocked-packet cause_tag to a human label + one-line
+  /// explanation. Returns null for unknown tags so we don't show a
+  /// useless "fw-abc123" pill. severity=expected means "this is
+  /// intended behavior, the system did this on purpose"; everything
+  /// else is "you may want to inspect this".
+  function describeCause(tag: string):
+      { label: string; note: string; severity: 'expected' | 'user' } | null {
+    if (!tag) return null;
+    if (tag.startsWith('fw-')) {
+      return {
+        label: 'User firewall rule',
+        note: `Rule ${tag.slice(3)} — open /network → Advanced to edit or remove.`,
+        severity: 'user',
+      };
+    }
+    switch (tag) {
+      case 'vpn-udp-forward':
+        return {
+          label: 'VPN: UDP catchall',
+          note: 'UDP (incl. QUIC/HTTP-3 on :443) cannot traverse Tor. Browsers will fall back to TCP HTTPS automatically — the next page load is what proves it works.',
+          severity: 'expected',
+        };
+      case 'vpn-udp-output':
+        return {
+          label: 'VPN: local-host UDP',
+          note: 'Pi-originating UDP (other than DHCP/NTP/mDNS) when Tor is active.',
+          severity: 'expected',
+        };
+      case 'vpn-killswitch':
+        return {
+          label: 'VPN: kill-switch',
+          note: 'Tunnel is down or disabled — kill-switch is preventing leak through the WAN.',
+          severity: 'expected',
+        };
+      case 'usbnet-iso-rfc1918':
+        return {
+          label: 'Isolation: LAN destination',
+          note: 'USB-mode is "isolation" or "restricted" — the client can\'t reach RFC1918 LAN destinations.',
+          severity: 'expected',
+        };
+      case 'usbnet-iso-pi-rfc1918':
+        return {
+          label: 'Isolation: Pi via LAN IP',
+          note: 'Client tried to reach the Pi via a non-usb0 IP — blocked to prevent isolation bypass.',
+          severity: 'expected',
+        };
+      case 'usbnet-restricted-input':
+        return {
+          label: 'Restricted: Pi services',
+          note: 'USB-mode is "restricted" — the client only gets DHCP + DNS; no other Pi service is reachable.',
+          severity: 'expected',
+        };
+      default:
+        return {
+          label: tag,
+          note: '',
+          severity: 'user',
+        };
+    }
+  }
+
   /// Build a /network deep-link that pre-populates the firewall rule
   /// form to ALLOW the observed traffic. Every field the kernel logged
   /// is forwarded so the resulting rule is as narrow as we can make it
@@ -245,34 +306,52 @@
           <div class="max-h-[420px] overflow-auto rounded border border-ink-800
                       divide-y divide-ink-800 bg-ink-950">
             {#each blocked as b (b.ts_ms + b.src + b.dst + b.dport + b.proto)}
-              <div class="flex items-center gap-3 p-2 text-[11px] font-mono
+              {@const cause = describeCause(b.cause_tag)}
+              <div class="flex flex-col gap-1 p-2 text-[11px] font-mono
                           hover:bg-ink-900/60">
-                <span class="text-zinc-600 w-20 shrink-0" title={fmtTime(b.ts_ms)}>
-                  {fmtAgo(b.ts_ms)}
-                </span>
-                <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0
-                             {b.proto === 'TCP' ? 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40'
-                               : b.proto === 'UDP' ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40'
-                               : 'bg-ink-700 text-zinc-300 border-ink-600'}">
-                  {b.proto || '?'}
-                </span>
-                <span class="text-zinc-500 w-12 shrink-0 truncate">
-                  {b.in_iface || '?'}
-                </span>
-                <span class="text-zinc-300 flex-1 truncate"
-                      title={`${b.src}${b.sport ? ':' + b.sport : ''} → ${b.dst}${b.dport ? ':' + b.dport : ''}`}>
-                  {b.src}{b.sport ? ':' + b.sport : ''}
-                  <span class="text-zinc-600">→</span>
-                  {b.dst}{b.dport ? ':' + b.dport : ''}
-                </span>
-                <a href={allowLink(b)}
-                   class="text-[10px] px-2 py-1 rounded shrink-0
-                          border border-live-500/40 text-live-300
-                          hover:bg-live-500/15 hover:text-live-200
-                          transition-colors"
-                   title="Open firewall rule editor pre-filled to ACCEPT this traffic">
-                  ✓ allow this traffic
-                </a>
+                <div class="flex items-center gap-3">
+                  <span class="text-zinc-600 w-20 shrink-0" title={fmtTime(b.ts_ms)}>
+                    {fmtAgo(b.ts_ms)}
+                  </span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0
+                               {b.proto === 'TCP' ? 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40'
+                                 : b.proto === 'UDP' ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40'
+                                 : 'bg-ink-700 text-zinc-300 border-ink-600'}">
+                    {b.proto || '?'}
+                  </span>
+                  <span class="text-zinc-500 w-12 shrink-0 truncate">
+                    {b.in_iface || '?'}
+                  </span>
+                  <span class="text-zinc-300 flex-1 truncate"
+                        title={`${b.src}${b.sport ? ':' + b.sport : ''} → ${b.dst}${b.dport ? ':' + b.dport : ''}`}>
+                    {b.src}{b.sport ? ':' + b.sport : ''}
+                    <span class="text-zinc-600">→</span>
+                    {b.dst}{b.dport ? ':' + b.dport : ''}
+                  </span>
+                  <a href={allowLink(b)}
+                     class="text-[10px] px-2 py-1 rounded shrink-0
+                            border border-live-500/40 text-live-300
+                            hover:bg-live-500/15 hover:text-live-200
+                            transition-colors"
+                     title="Open firewall rule editor pre-filled to ACCEPT this traffic">
+                    ✓ allow this traffic
+                  </a>
+                </div>
+                {#if cause}
+                  <!-- Cause attribution: which rule blocked the packet
+                       and a one-liner explaining what to do about it. -->
+                  <div class="flex items-start gap-2 pl-[5.75rem] text-[10px]">
+                    <span class="px-1.5 py-0.5 rounded border shrink-0 normal-case
+                                 {cause.severity === 'expected'
+                                   ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                   : 'bg-red-500/10 text-red-300 border-red-500/30'}">
+                      {cause.label}
+                    </span>
+                    {#if cause.note}
+                      <span class="text-zinc-500 normal-case">{cause.note}</span>
+                    {/if}
+                  </div>
+                {/if}
               </div>
             {/each}
           </div>
