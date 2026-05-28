@@ -48,18 +48,24 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────
 #
 # Provider → resolver name(s) in dnscrypt-proxy's public resolvers list
-# (https://github.com/DNSCrypt/dnscrypt-resolvers). We pick well-known
-# anycast resolvers that work without registration.
+# (https://github.com/DNSCrypt/dnscrypt-resolvers). v50: every name
+# here MUST point to a true DNSCrypt v2 resolver (sdns://AQ... stamp).
+# DoH-only providers (Cloudflare / NextDNS / Mullvad / etc.) were
+# dropped because they leak the resolver's hostname via TLS SNI on
+# every query. Users who still want them can paste their sdns://
+# stamp into the Custom slot — the protocol is then labelled honestly
+# in the UI.
 
 dnscrypt_resolvers_for() {
     case "$1" in
-        cloudflare)     echo "cloudflare cloudflare-ipv6" ;;
-        cloudflare-fam) echo "cloudflare-family cloudflare-family-ipv6" ;;
-        quad9)          echo "quad9-dnscrypt-ip4-filter-pri quad9-dnscrypt-ip4-filter-alt" ;;
-        adguard)        echo "adguard-dns-doh adguard-dns-unfiltered" ;;
-        nextdns)        echo "nextdns" ;;
-        mullvad)        echo "mullvad-doh mullvad-base-doh" ;;
-        *)              echo "cloudflare" ;;
+        quad9)             echo "quad9-dnscrypt-ip4-filter-pri quad9-dnscrypt-ip4-filter-ecs-pri" ;;
+        quad9-unfiltered)  echo "quad9-dnscrypt-ip4-nofilter-pri quad9-dnscrypt-ip4-nofilter-ecs-pri" ;;
+        adguard)           echo "adguard-dns" ;;
+        adguard-family)    echo "adguard-dns-family" ;;
+        adguard-unfiltered) echo "adguard-dns-unfiltered" ;;
+        opendns)           echo "cisco" ;;
+        cleanbrowsing)     echo "cleanbrowsing-security" ;;
+        *)                 echo "quad9-dnscrypt-ip4-filter-pri" ;;  # safe default
     esac
 }
 
@@ -169,6 +175,16 @@ EOF
         bootstrap_line="bootstrap_resolvers = ['9.9.9.11:53', '1.1.1.1:53', '8.8.8.8:53']"
     fi
 
+    # v50: lock down protocol selection to DNSCrypt for all named
+    # providers (their resolver names are guaranteed DNSCrypt v2 in
+    # the public-resolvers list). For the Custom slot we leave DoH/DoT
+    # enabled so a user-pasted stamp using those protocols still
+    # works — but the UI calls that out honestly.
+    local allow_doh="false"
+    if [ "$provider" = "custom" ]; then
+        allow_doh="true"
+    fi
+
     install -d -m 0755 /etc/dnscrypt-proxy
     cat > "$DNSCRYPT_CONF" <<EOF
 # Managed by aeon-net-services — do not edit by hand.
@@ -181,7 +197,7 @@ max_clients = 250
 ipv4_servers = true
 ipv6_servers = false
 dnscrypt_servers = true
-doh_servers = true
+doh_servers = ${allow_doh}
 odoh_servers = false
 
 require_dnssec = true

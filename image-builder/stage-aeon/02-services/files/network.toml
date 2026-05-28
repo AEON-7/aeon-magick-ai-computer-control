@@ -57,30 +57,37 @@ host_mac = "02:42:ae:00:55:01"
 dev_mac  = "02:42:ae:00:55:02"
 
 # ──────────────────────────────────────────────────────────────────────
-# Encrypted DNS (DNSCrypt v2 / DoH)
+# Encrypted DNS (DNSCrypt v2)
 # ──────────────────────────────────────────────────────────────────────
 #
 # When enabled, a local dnscrypt-proxy listens on 127.0.2.1:53 and the
 # Pi's dnsmasq (which serves DHCP clients on usb0) forwards to it. The
-# upstream provider sees encrypted DoH/DoT requests, the local network
-# sees only encrypted DoH/DoT traffic from the Pi — never plaintext DNS.
+# upstream provider sees encrypted DNSCrypt queries; the local network
+# sees only encrypted DNSCrypt traffic from the Pi — no plaintext DNS,
+# and (unlike DoH) no resolver hostname leaking via TLS SNI.
 #
-# `provider` picks the upstream. Curated short-list of well-known
-# privacy-respecting resolvers:
-#   "cloudflare"     — Cloudflare 1.1.1.1 (DoH, no logging claimed)
-#   "cloudflare-fam" — Cloudflare for Families (malware + adult filter)
-#   "quad9"          — Quad9 9.9.9.9 (DNSCrypt, malware filter, Swiss-based)
-#   "adguard"        — AdGuard (DoH, ad + tracker block)
-#   "nextdns"        — NextDNS anycast (DoH, free tier, per-user dashboard)
-#   "mullvad"        — Mullvad (DoH, no-logging stance)
+# v50: provider list is DNSCrypt-native only. Cloudflare / NextDNS /
+# Mullvad don't run DNSCrypt v2 servers — only DoH/DoT — so they were
+# removed. Users who want them can paste an sdns:// stamp into the
+# Custom slot at runtime.
 #
-# `location` is the preferred server region — dnscrypt-proxy will weight
+# `provider` picks the upstream:
+#   "quad9"              — Quad9 (DNSCrypt, malware filter, Swiss no-log)
+#   "quad9-unfiltered"   — Quad9 (DNSCrypt, no filter, no-log)
+#   "adguard"            — AdGuard (DNSCrypt, ad + tracker filter)
+#   "adguard-family"     — AdGuard (DNSCrypt, ad+tracker+adult filter)
+#   "adguard-unfiltered" — AdGuard (DNSCrypt, no filter, anonymized stats)
+#   "opendns"            — Cisco OpenDNS (DNSCrypt, malware filter)
+#   "cleanbrowsing"      — CleanBrowsing Security (DNSCrypt, malware filter)
+#   "custom"             — paste an sdns:// stamp via the API
+#
+# `location` is the preferred server region — dnscrypt-proxy weights
 # resolver selection. "auto" lets it pick by latency.
 #   "auto" | "us" | "eu" | "asia"
 
 [dnscrypt]
 enabled = false
-provider = "cloudflare"
+provider = "quad9"
 location = "auto"
 
 # ──────────────────────────────────────────────────────────────────────

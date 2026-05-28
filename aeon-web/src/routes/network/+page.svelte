@@ -20,7 +20,7 @@
   // ── DNSCrypt ──
   let dnsState: api.DnscryptState | null = null;
   let dnsEnabled = false;
-  let dnsProvider = 'cloudflare';
+  let dnsProvider = 'quad9';
   let dnsLocation = 'auto';
   let dnsCustomStamp = '';
   let dnsCustomLabel = '';
@@ -223,16 +223,20 @@
   /// warning banner. Picks Cloudflare auto-region as a sensible default
   /// + commits immediately (no second "save" step needed). After this
   /// runs the warning auto-disappears because dnsEnabled flips true.
-  async function enableCloudflareDnscrypt() {
+  async function enableDefaultDnscrypt() {
     dnsSaving = true;
     error = '';
     try {
       await api.setDnscrypt({
         enabled: true,
-        provider: 'cloudflare',
+        // v50: Quad9 is the only safe one-click default — it's a true
+        // DNSCrypt v2 resolver with no SNI to leak, audited zero-log
+        // policy, and a malware filter. Cloudflare/NextDNS/Mullvad
+        // were removed from the list because they only run DoH.
+        provider: 'quad9',
         location: 'auto',
       });
-      dnsMsg = '✓ DNSCrypt enabled — Cloudflare via Tor';
+      dnsMsg = '✓ DNSCrypt enabled — Quad9 via Tor';
       setTimeout(() => (dnsMsg = ''), 4000);
       await refresh();
     } catch (e: any) {
@@ -483,9 +487,12 @@
               <p class="text-zinc-400 text-sm">
                 Route this device's DNS — and any DHCP client's DNS over
                 USB ethernet — through a local <code class="text-cursed-300">dnscrypt-proxy</code>
-                instance that talks DoH/DNSCrypt to your chosen upstream.
-                Your LAN sees only encrypted DNS traffic; the upstream sees
-                a single anycast resolver.
+                instance that talks <strong>true DNSCrypt v2</strong> to your chosen upstream.
+                The Pi sees only encrypted DNS traffic; the local network sees
+                no resolver hostname (DNSCrypt has no TLS layer, so there's no
+                SNI to leak the way DoH would). Custom-slot users can paste a
+                DoH/DoT stamp if they want — the protocol is then labelled
+                honestly.
               </p>
             </header>
 
@@ -571,6 +578,14 @@
                     DoH (DNS-over-HTTPS), DoT (DNS-over-TLS), or ODoH endpoints
                     along with their public key + hash pin. The label is
                     cosmetic, used only in dnscrypt-proxy's log output.
+                  </p>
+                  <p class="text-[11px] text-amber-200/80 leading-relaxed">
+                    ⚠ <strong>Heads-up:</strong> if your stamp is a DoH/DoT URL
+                    (prefix <code>sdns://Ag…</code> or <code>sdns://Aw…</code>),
+                    the resolver's hostname will be exposed via the TLS SNI
+                    extension on every query. The curated provider list above
+                    uses true DNSCrypt v2 stamps (prefix <code>sdns://AQ…</code>)
+                    which have no SNI to leak.
                   </p>
                 </div>
               {/if}
@@ -802,7 +817,8 @@ AllowedIPs = 0.0.0.0/0`}
                      Tor's TransPort only carries TCP, so UDP DNS gets
                      dropped. Tor's own DNSPort can resolve A/AAAA but
                      not MX/TXT/SRV/etc., which breaks plenty of apps.
-                     DoH/DoT over Tor — via DNSCrypt — is the fix.
+                     DNSCrypt-over-Tor is the fix — true DNSCrypt v2
+                     is TCP-friendly and leaks no resolver SNI.
                      One click installs the recommended default. -->
                 {#if !dnsEnabled}
                   <div class="p-4 rounded-lg border border-amber-500/40
@@ -817,9 +833,10 @@ AllowedIPs = 0.0.0.0/0`}
                           Tor can't carry UDP, so plain DNS-over-UDP gets dropped.
                           Tor's own resolver only handles A/AAAA/CNAME — many apps
                           (mail clients, browsers, certificate validators) also need
-                          TXT, MX, SRV, DNSSEC. Enabling DNSCrypt routes
-                          <strong>DoH over Tor's TCP TransPort</strong>, which makes
-                          generic DNS work reliably end-to-end. Cloudflare's
+                          TXT, MX, SRV, DNSSEC. Enabling DNSCrypt routes encrypted
+                          DNS over Tor's TCP TransPort, which makes generic DNS work
+                          reliably end-to-end <em>without</em> leaking the resolver's
+                          hostname via TLS SNI (the way DoH would). Quad9's audited
                           zero-log resolver is the default — change it any time in
                           the Encrypted DNS panel above.
                         </p>
@@ -827,9 +844,9 @@ AllowedIPs = 0.0.0.0/0`}
                     </div>
                     <button
                       class="btn-primary text-xs ml-7"
-                      on:click={enableCloudflareDnscrypt}
+                      on:click={enableDefaultDnscrypt}
                       disabled={dnsSaving}>
-                      {dnsSaving ? 'enabling…' : '✓ enable Cloudflare DNSCrypt'}
+                      {dnsSaving ? 'enabling…' : '✓ enable Quad9 DNSCrypt'}
                     </button>
                   </div>
                 {/if}
@@ -884,9 +901,10 @@ obfs4 …`}
                   and DNS on <code>127.0.0.1:5353</code>; iptables redirects
                   all outbound TCP + DNS through it, including traffic from
                   USB-connected client devices. UDP is dropped (Tor doesn't
-                  carry UDP). When DNSCrypt is also enabled,
-                  DNSCrypt's DoH queries ride through Tor's TransPort too —
-                  ISP sees only Tor traffic.
+                  carry UDP). When DNSCrypt is also enabled, encrypted DNS
+                  queries ride through Tor's TransPort too — your ISP sees
+                  only Tor traffic, and there's no DoH SNI giving away the
+                  resolver brand.
                 </p>
               </div>
             {/if}

@@ -335,30 +335,21 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
         "location": s.dnscrypt.location,
         "custom_stamp": s.dnscrypt.custom_stamp,
         "custom_label": s.dnscrypt.custom_label,
+        // ── DNSCrypt-only provider list (v49+) ──────────────────────
+        //
+        // Why no Cloudflare / NextDNS / Mullvad here: those providers
+        // run DoH/DoT only — they don't operate native DNSCrypt v2
+        // servers. The old list ran them as DoH-via-dnscrypt-proxy,
+        // which meant SNI of the resolver was leaking on every query
+        // (defeating most of the "encrypted DNS" benefit). True
+        // DNSCrypt has no TLS layer and so no SNI to leak. Users who
+        // want Cloudflare anyway can paste their DoH sdns:// stamp
+        // into the Custom slot below — the protocol field stays
+        // honest.
         "providers": [
             {
-                "id": "cloudflare", "label": "Cloudflare 1.1.1.1",
-                "blurb": "Anycast DoH. Fast everywhere; advertised zero-log.",
-                "transport": "DoH",
-                "log_policy": "anonymized",
-                "log_detail": "24-hour transient logs; no IP retention per their published policy.",
-                "security": "basic",
-                "jurisdiction": "US",
-                "homepage": "https://1.1.1.1/",
-            },
-            {
-                "id": "cloudflare-fam", "label": "Cloudflare for Families",
-                "blurb": "Same as Cloudflare with malware + adult content filtering at the resolver.",
-                "transport": "DoH",
-                "log_policy": "anonymized",
-                "log_detail": "Same retention as 1.1.1.1; filtering happens server-side.",
-                "security": "family",
-                "jurisdiction": "US",
-                "homepage": "https://1.1.1.1/family/",
-            },
-            {
-                "id": "quad9", "label": "Quad9 9.9.9.9",
-                "blurb": "Swiss non-profit; blocks known-malicious domains via threat-intel feeds.",
+                "id": "quad9", "label": "Quad9 (filtered)",
+                "blurb": "Swiss non-profit; blocks known-malicious domains via threat-intel feeds. The default — solid pick if you want some protection.",
                 "transport": "DNSCrypt",
                 "log_policy": "no_logs",
                 "log_detail": "Publicly audited zero-log policy; Swiss data-protection law applies.",
@@ -367,9 +358,19 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
                 "homepage": "https://quad9.net/",
             },
             {
+                "id": "quad9-unfiltered", "label": "Quad9 (unfiltered)",
+                "blurb": "Same Quad9 anycast network, no malware filter. Pure encrypted DNS for users who don't want server-side filtering.",
+                "transport": "DNSCrypt",
+                "log_policy": "no_logs",
+                "log_detail": "Same zero-log policy as filtered Quad9.",
+                "security": "basic",
+                "jurisdiction": "CH",
+                "homepage": "https://quad9.net/",
+            },
+            {
                 "id": "adguard", "label": "AdGuard DNS",
-                "blurb": "DoH/DoT with ad + tracker blocklists active at the resolver layer.",
-                "transport": "DoH",
+                "blurb": "Ad + tracker blocklists applied at the resolver. Good for general-purpose privacy with light filtering.",
+                "transport": "DNSCrypt",
                 "log_policy": "anonymized",
                 "log_detail": "Aggregated query stats only; no per-user identifiers retained.",
                 "security": "ad_block",
@@ -377,28 +378,48 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
                 "homepage": "https://adguard-dns.io/",
             },
             {
-                "id": "nextdns", "label": "NextDNS",
-                "blurb": "Free tier of NextDNS anycast; per-account configurable filters via dashboard.",
-                "transport": "DoH",
-                "log_policy": "self_logs",
-                "log_detail": "Logs visible to YOU in your NextDNS dashboard (toggle-able). Defaults to anonymized.",
-                "security": "filtered",
-                "jurisdiction": "US/IE",
-                "homepage": "https://nextdns.io/",
+                "id": "adguard-family", "label": "AdGuard Family",
+                "blurb": "AdGuard with safe-search enforcement and adult-content blocking on top of the ad/tracker filter.",
+                "transport": "DNSCrypt",
+                "log_policy": "anonymized",
+                "log_detail": "Same anonymized-stats policy as AdGuard default.",
+                "security": "family",
+                "jurisdiction": "CY",
+                "homepage": "https://adguard-dns.io/",
             },
             {
-                "id": "mullvad", "label": "Mullvad DNS",
-                "blurb": "Mullvad's public resolvers; same anti-logging stance as their VPN.",
-                "transport": "DoH",
-                "log_policy": "no_logs",
-                "log_detail": "Mullvad's published zero-knowledge stance — no IP, no query content.",
-                "security": "ad_block",
-                "jurisdiction": "SE",
-                "homepage": "https://mullvad.net/help/dns-over-https-and-dns-over-tls/",
+                "id": "adguard-unfiltered", "label": "AdGuard Unfiltered",
+                "blurb": "AdGuard's encrypted DNS without any filtering — pure transport encryption.",
+                "transport": "DNSCrypt",
+                "log_policy": "anonymized",
+                "log_detail": "Same anonymized-stats policy as AdGuard default.",
+                "security": "basic",
+                "jurisdiction": "CY",
+                "homepage": "https://adguard-dns.io/",
+            },
+            {
+                "id": "opendns", "label": "OpenDNS (Cisco)",
+                "blurb": "Cisco's public DNSCrypt resolver. Mature anycast network; malware filtering enabled by default on the standard endpoint.",
+                "transport": "DNSCrypt",
+                "log_policy": "anonymized",
+                "log_detail": "Cisco retains aggregated query data for threat-intel purposes; no per-user dashboards.",
+                "security": "filtered",
+                "jurisdiction": "US",
+                "homepage": "https://www.opendns.com/",
+            },
+            {
+                "id": "cleanbrowsing", "label": "CleanBrowsing Security",
+                "blurb": "Independent operator; blocks known phishing + malware domains. Lightweight filter, US-based.",
+                "transport": "DNSCrypt",
+                "log_policy": "anonymized",
+                "log_detail": "Aggregated stats only; published privacy policy.",
+                "security": "filtered",
+                "jurisdiction": "US",
+                "homepage": "https://cleanbrowsing.org/",
             },
             {
                 "id": "custom", "label": "Custom (paste a stamp)",
-                "blurb": "Paste an sdns:// stamp from dnscrypt.info or a provider's site — supports DNSCrypt v2, DoH, DoT, ODoH.",
+                "blurb": "Paste an sdns:// stamp from dnscrypt.info or a provider's site. Supports true DNSCrypt v2 — and also DoH/DoT/ODoH if you accept that those expose the resolver via TLS SNI.",
                 "transport": "any",
                 "log_policy": "varies",
                 "log_detail": "Depends on the operator behind the stamp.",
@@ -435,13 +456,19 @@ pub async fn put_dnscrypt(
     State(_state): State<AppState>,
     Json(req): Json<DnscryptPutReq>,
 ) -> impl IntoResponse {
+    // Keep in sync with the providers list returned by GET
+    // /api/network/dnscrypt. Only DNSCrypt-native operators here —
+    // DoH-only providers (Cloudflare / NextDNS / Mullvad / etc.) were
+    // dropped in v50; users who want them can paste their sdns://
+    // stamp into the Custom slot.
     const VALID_PROVIDERS: &[&str] = &[
-        "cloudflare",
-        "cloudflare-fam",
         "quad9",
+        "quad9-unfiltered",
         "adguard",
-        "nextdns",
-        "mullvad",
+        "adguard-family",
+        "adguard-unfiltered",
+        "opendns",
+        "cleanbrowsing",
         "custom",
     ];
     const VALID_LOCATIONS: &[&str] = &["auto", "us", "eu", "asia"];
