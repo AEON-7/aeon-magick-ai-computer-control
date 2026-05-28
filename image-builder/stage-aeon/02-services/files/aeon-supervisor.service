@@ -5,15 +5,18 @@ Wants=network-online.target
 # Don't start until firstboot has generated /etc/aeon/auth.toml — otherwise
 # supervisor exits and systemd restart-storms it until journald is full.
 Requires=aeon-firstboot.service
+# After 5 fast failures in a row, give up (keeps the journal sane).
+# These keys belong in [Unit] in modern systemd; if left in [Service]
+# the unit still works but the journal gets spammed with deprecation
+# warnings on every reload.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/aeon-supervisor --config /etc/aeon/supervisor.toml
 Restart=on-failure
 RestartSec=5
-# After 5 fast failures in a row, give up (keeps the journal sane).
-StartLimitIntervalSec=60
-StartLimitBurst=5
 # Bind 443 needs root or CAP_NET_BIND_SERVICE.
 User=root
 AmbientCapabilities=CAP_NET_BIND_SERVICE

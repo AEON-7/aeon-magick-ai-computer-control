@@ -92,8 +92,15 @@
       // (not just what's persisted).
       await api.setClipboard(clipText);
       const r = await api.typeClipboardOnTarget();
-      msg = `✓ typed ${r.bytes_typed} chars on target`;
-      setTimeout(() => (msg = ''), 4000);
+      if (r.skipped > 0) {
+        // Emoji / curly quotes / em-dashes / accented letters don't have
+        // USB HID scancodes — surface the count instead of typing garbage
+        // or aborting the whole run.
+        msg = `✓ typed ${r.typed} chars (${r.skipped} skipped — no HID scancode)`;
+      } else {
+        msg = `✓ typed ${r.typed} chars on target`;
+      }
+      setTimeout(() => (msg = ''), 5000);
     } catch (e: any) {
       error = e?.message ?? 'type failed';
     } finally {

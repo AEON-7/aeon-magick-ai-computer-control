@@ -40,14 +40,31 @@ impl Hid {
 
     // ─── Keyboard ─────────────────────────────────────────────────────────
 
-    /// Type a string of printable ASCII. Each character gets a paired
-    /// press → release with a short pacing gap.
-    pub fn type_str(&self, s: &str) -> Result<()> {
+    /// Type a string. Each printable-ASCII character gets a paired
+    /// press → release with a short pacing gap. Characters that don't
+    /// map to a USB HID scancode (emoji, smart quotes, em-dashes,
+    /// accented letters, etc.) are SKIPPED — the function keeps going
+    /// rather than aborting the whole typing run. Returns
+    /// `(typed, skipped)` so the caller can surface a useful UI
+    /// message ("typed 24 chars, skipped 2 unmappable").
+    pub fn type_str(&self, s: &str) -> Result<(usize, usize)> {
+        let mut typed = 0usize;
+        let mut skipped = 0usize;
         for ch in s.chars() {
+            // ascii_to_hid returns None for anything outside the
+            // mapped printable-ASCII range — skip rather than fail.
+            if ascii_to_hid(ch).is_none() {
+                skipped += 1;
+                continue;
+            }
+            // tap_char can still fail (e.g. /dev/hidg* write error).
+            // Propagate that — it's a real device-level fault, not a
+            // user-input issue.
             self.tap_char(ch)?;
+            typed += 1;
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
-        Ok(())
+        Ok((typed, skipped))
     }
 
     /// Single character: build the HID keyboard report, send press, then

@@ -704,7 +704,18 @@ export const setClipboard = (text: string) =>
 export const clearClipboard = () =>
   req<{ ok: boolean }>('DELETE', '/clipboard');
 export const typeClipboardOnTarget = () =>
-  req<{ ok: boolean; bytes_typed: number }>('POST', '/clipboard/type-on-target');
+  req<{
+    ok: boolean;
+    // Character counts (not bytes). `typed` = chars actually sent; `skipped`
+    // = chars without a HID scancode (emoji, smart quotes, em-dash, accented
+    // letters); `input_chars` = total chars in the buffer. The `bytes_typed`
+    // alias is kept for backwards compat with older clients but reports
+    // the same value as `typed`.
+    typed: number;
+    skipped: number;
+    input_chars: number;
+    bytes_typed: number;
+  }>('POST', '/clipboard/type-on-target');
 
 // ── SSH key management ────────────────────────────────────────────────
 

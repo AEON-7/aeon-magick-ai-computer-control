@@ -30,7 +30,7 @@ use std::path::PathBuf;
 const FILES_DIR: &str = "/var/lib/aeon/files";
 const CONFIG_TOML: &str = "/etc/aeon/file-xfer.toml";
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FileXferConfig {
     /// Off by default. When on, the target-facing server listens on
     /// usb0 (and any additional interfaces in `extra_ifaces`).
@@ -46,6 +46,19 @@ pub struct FileXferConfig {
     pub allow_upload: bool,
 }
 fn default_port() -> u16 { 8080 }
+
+impl Default for FileXferConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            // Match the serde default so the UI shows port 8080 on a
+            // fresh install (where /etc/aeon/file-xfer.toml doesn't
+            // exist yet and `unwrap_or_default()` falls back here).
+            port: default_port(),
+            allow_upload: false,
+        }
+    }
+}
 
 fn read_config() -> FileXferConfig {
     std::fs::read_to_string(CONFIG_TOML)

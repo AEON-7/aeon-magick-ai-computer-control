@@ -89,8 +89,24 @@ pub async fn type_on_target(State(state): State<AppState>) -> impl IntoResponse 
             Json(json!({"ok": false, "err": "clipboard is empty"}))).into_response();
     }
     let body = serde_json::to_vec(&json!({ "text": text })).unwrap();
-    match crate::proxy::post_hid(&state, "/type", body).await {
-        Ok(_) => Json(json!({"ok": true, "bytes_typed": text.len()})).into_response(),
+    match crate::proxy::post_hid_json(&state, "/type", body).await {
+        Ok(v) => {
+            // Pass through the HID daemon's character counts so the UI
+            // can show "typed 24 chars, skipped 2 unmappable" instead
+            // of a misleading byte count.
+            let typed = v.get("typed").and_then(|x| x.as_u64()).unwrap_or(0);
+            let skipped = v.get("skipped").and_then(|x| x.as_u64()).unwrap_or(0);
+            let input_chars = v.get("input_chars").and_then(|x| x.as_u64())
+                .unwrap_or_else(|| text.chars().count() as u64);
+            Json(json!({
+                "ok": true,
+                "typed": typed,
+                "skipped": skipped,
+                "input_chars": input_chars,
+                // Keep legacy field name so older clients don't break.
+                "bytes_typed": typed,
+            })).into_response()
+        }
         Err(e) => (StatusCode::BAD_GATEWAY,
             Json(json!({"ok": false, "err": format!("hid daemon: {e}")}))).into_response(),
     }

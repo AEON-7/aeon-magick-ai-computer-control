@@ -78,8 +78,20 @@ async fn post_type(
     State(state): State<SharedState>,
     Json(req): Json<TypeReq>,
 ) -> impl IntoResponse {
+    let input_chars = req.text.chars().count();
     match state.0.hid.type_str(&req.text) {
-        Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "typed": req.text.len()}))),
+        Ok((typed, skipped)) => (
+            StatusCode::OK,
+            // `typed` and `skipped` are character counts (not bytes) — the
+            // UI message reads "typed 24 chars, skipped 2 unmappable".
+            // `input_chars` lets the caller cross-check the total.
+            Json(json!({
+                "ok": true,
+                "typed": typed,
+                "skipped": skipped,
+                "input_chars": input_chars,
+            })),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "err": e.to_string()})),

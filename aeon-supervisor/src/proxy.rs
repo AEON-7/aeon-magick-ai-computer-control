@@ -152,6 +152,18 @@ pub async fn hid_persona(State(state): State<AppState>, body: bytes::Bytes) -> R
 /// POST one JSON body to the HID daemon. Returns Err with a short
 /// human-readable reason on transport failure or non-2xx status.
 pub async fn post_hid(state: &AppState, path: &str, body: Vec<u8>) -> Result<(), String> {
+    post_hid_json(state, path, body).await.map(|_| ())
+}
+
+/// Like `post_hid`, but returns the parsed JSON response body so
+/// callers can read fields like `typed` / `skipped` from the HID
+/// daemon. Errors with a short human-readable reason on transport
+/// failure or non-2xx status.
+pub async fn post_hid_json(
+    state: &AppState,
+    path: &str,
+    body: Vec<u8>,
+) -> Result<serde_json::Value, String> {
     let sock = &state.cfg.hid_sock;
     if !sock.exists() {
         return Err("hid socket missing".into());
@@ -167,10 +179,27 @@ pub async fn post_hid(state: &AppState, path: &str, body: Vec<u8>) -> Result<(),
         .body(Full::new(body.into()))
         .map_err(|e| e.to_string())?;
     let resp = client.request(req).await.map_err(|e| format!("hid: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("hid status {}", resp.status()));
+    let status = resp.status();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("hid body: {e}"))?
+        .to_bytes();
+    if !status.is_success() {
+        // Try to extract a useful error message from the HID daemon's
+        // JSON body (it returns {"ok": false, "err": "..."}). Fall
+        // back to the raw status if parsing fails.
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_str) {
+            if let Some(e) = v.get("err").and_then(|x| x.as_str()) {
+                return Err(format!("hid status {status}: {e}"));
+            }
+        }
+        return Err(format!("hid status {status}"));
     }
-    Ok(())
+    serde_json::from_slice(&body_bytes)
+        .map_err(|e| format!("hid response parse: {e}"))
 }
 
 /// Fetch one snapshot from the streamer and write it to `out`.
