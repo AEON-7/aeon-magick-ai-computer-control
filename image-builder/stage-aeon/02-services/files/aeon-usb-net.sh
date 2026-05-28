@@ -190,11 +190,19 @@ case "$MODE" in
         # (iptables -I always inserts at position 1, pushing earlier rules
         # down). Final ordering: ACCEPT tcp/53, ACCEPT udp/53, ACCEPT udp/67,
         # DROP all.
-        # Restricted mode: Pi is invisible except DHCP/DNS. Use DROP
-        # here (not REJECT) — the point is true stealth, so the host
-        # can't even tell the Pi is on the wire beyond the bare-
-        # minimum services it needs to get an IP and resolve names.
-        aeon_block_pair_insert INPUT "usbnet-restricted-input" drop -i usb0
+        # Restricted mode: Pi accepts only DHCP + DNS from usb0; all
+        # other ports closed. REJECT with icmp-port-unreachable rather
+        # than DROP — the client is our *trusted* USB host attempting
+        # an outbound connection, and giving them a fast "port closed"
+        # signal is better UX than a silent timeout.
+        #
+        # The "stealth gateway" goal of restricted mode is a wash with
+        # DROP anyway: the Pi is responding to DHCP + DNS, so its
+        # existence on the wire is already obvious to the host. What
+        # restricted mode actually achieves is "no management surface
+        # from the host side" — and REJECT achieves that just as well
+        # while saving the host from waiting out a TCP SYN timeout.
+        aeon_block_pair_insert INPUT "usbnet-restricted-input" reject-port -i usb0
         iptables -I INPUT 1 -i usb0 -p udp --dport 67 -j ACCEPT -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p udp --dport 53 -j ACCEPT -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p tcp --dport 53 -j ACCEPT -m comment --comment "aeon-usb-net"

@@ -252,16 +252,43 @@
       <label class="space-y-1">
         <span class="text-zinc-500">Action</span>
         <select bind:value={newRule.action}
+                title={
+                  newRule.action === 'DROP'
+                    ? 'DROP: silently black-hole the packet. Best for INBOUND blocks from untrusted sources (the WAN, an attacker) — no response = no recon info.'
+                  : newRule.action === 'REJECT'
+                    ? 'REJECT: send an explicit "no" back (ICMP port-unreachable for UDP, TCP RST for TCP). Best for OUTBOUND blocks against your trusted clients — they fail-fast and try the next thing.'
+                  : 'Pick the action this rule should take.'
+                }
                 class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200">
           <option value="ACCEPT">ACCEPT</option>
-          <option value="DROP">DROP</option>
-          <option value="REJECT">REJECT</option>
+          <option value="DROP">DROP — silent (inbound stealth)</option>
+          <option value="REJECT">REJECT — explicit fail (client-facing)</option>
           <option value="REDIRECT">REDIRECT</option>
           <option value="DNAT">DNAT</option>
           <option value="SNAT">SNAT</option>
           <option value="MASQUERADE">MASQUERADE</option>
         </select>
       </label>
+      {#if newRule.action === 'DROP' || newRule.action === 'REJECT'}
+        <!-- Quick guidance on which to pick. The general rule: REJECT
+             on outbound to give your client fast fall-back; DROP on
+             inbound from outside to deny recon info. -->
+        <p class="col-span-2 sm:col-span-4 text-[10px] text-zinc-500 leading-relaxed">
+          {#if newRule.action === 'DROP'}
+            <strong class="text-zinc-400">DROP:</strong> silent black-hole.
+            Use for <em>inbound</em> blocks from untrusted sources — no
+            response means no information leaked to a port-scanner.
+            Downside: trusted clients hitting this rule will hang until
+            their TCP/UDP layer times out.
+          {:else}
+            <strong class="text-zinc-400">REJECT:</strong> explicit "no"
+            sent back (ICMP port-unreachable for UDP, TCP RST for TCP).
+            Use for <em>outbound</em> blocks of your own client — they
+            fail-fast and retry over the next allowed transport (e.g.
+            QUIC → TCP fall-back in milliseconds).
+          {/if}
+        </p>
+      {/if}
       <label class="space-y-1">
         <span class="text-zinc-500">In iface ({newRule.chain === 'OUTPUT' || newRule.chain === 'POSTROUTING' ? '-o' : '-i'} e.g. usb0)</span>
         <input type="text" bind:value={newRule.interface} placeholder="any"

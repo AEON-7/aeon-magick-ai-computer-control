@@ -88,7 +88,7 @@
       case 'usbnet-restricted-input':
         return {
           label: 'Restricted: Pi services',
-          note: 'USB-mode is "restricted" — DROP rather than REJECT here, so the Pi stays fully invisible to the host beyond DHCP + DNS.',
+          note: 'USB-mode is "restricted" — only DHCP + DNS reach the Pi. ICMP port-unreachable returned so the host fails-fast instead of timing out on SSH/HTTPS attempts.',
           severity: 'expected',
         };
       default:
