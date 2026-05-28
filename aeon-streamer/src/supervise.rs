@@ -343,9 +343,36 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     let mut cmd = Command::new(&cfg.ffmpeg_bin);
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
-        // -y: overwrite the output file without prompting. Kept for the
-        // (now-disabled) file output path; harmless with image2pipe.
         .arg("-y")
+        // ── Low-latency input flags (v46) ──
+        // Without these, ffmpeg's default behavior buffers 2-3 seconds
+        // of video for "smoothing" — devastating for a live KVM where
+        // every extra frame of latency is visible to the user typing
+        // on the target. Each flag explained:
+        //
+        //   -fflags +nobuffer    Skip frame buffering inside the
+        //                        demuxer. Each captured frame fires
+        //                        downstream immediately.
+        //   -flags  low_delay    Generic "minimize latency" mode for
+        //                        codecs that honor it.
+        //   -avioflags direct    Bypass libavformat's I/O buffering
+        //                        layer entirely.
+        //   -probesize  32       Use only 32 bytes for stream
+        //                        detection. Default is 5 MB which
+        //                        buffers ~5 seconds before producing
+        //                        the first frame.
+        //   -analyzeduration 0   Don't sample N seconds of input to
+        //                        figure out stream parameters — we
+        //                        already told ffmpeg the format /
+        //                        resolution / framerate via flags.
+        //   -thread_queue_size 4 Tiny input queue. Default is 8;
+        //                        smaller = less buffered latency.
+        .arg("-fflags").arg("nobuffer")
+        .arg("-flags").arg("low_delay")
+        .arg("-avioflags").arg("direct")
+        .arg("-probesize").arg("32")
+        .arg("-analyzeduration").arg("0")
+        .arg("-thread_queue_size").arg("4")
         // Input
         .arg("-f").arg("v4l2")
         .arg("-input_format").arg(source_format)
@@ -354,35 +381,38 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
         .arg("-i").arg(&cfg.device)
         // Filter — scale to target resolution
         .arg("-vf").arg(&scale_filter)
-        // Output: JPEG frames to stdout via image2pipe.
+        // ── Output / encoding (v46) ──
         //
-        // v24 architectural change: the previous v3-v23 design wrote
-        // each frame to /run/aeon/snapshots/live.jpg (tmpfs file) and
-        // the webapi polled the file. That had a race between ffmpeg's
-        // truncate+write and the webapi's read — partially-written
-        // JPEGs were forwarded to the browser, and Chrome's image
-        // decoder in a multipart/x-mixed-replace stream eventually
-        // tore down the whole connection after a few corrupt frames.
-        // v23 worked around it with `-atomic_writing 1` (rename-based)
-        // plus client-side SOI/EOI validation; v24 closes the race
-        // entirely by skipping the filesystem.
+        // -fps_mode passthrough  (the modern name for -vsync 0) tells
+        //   ffmpeg to emit each input frame at the time it arrives,
+        //   instead of re-timing to a fixed output framerate. Without
+        //   this, `-r 30` would force ffmpeg to BUFFER frames waiting
+        //   for the 33.3 ms tick — a frame that arrives early sits in
+        //   limbo until its scheduled slot. Passthrough mode skips
+        //   the timing layer entirely, shaving ~1-2 frames of latency
+        //   in the common case.
+        //
+        // -flush_packets 1  Make the muxer flush each frame out of
+        //   the demuxer the instant it's encoded. Default would let
+        //   ffmpeg coalesce small writes.
         //
         // image2pipe: write each frame to stdout as a back-to-back
-        // sequence of JPEG bytes. No filesystem, no atomic-write
-        // gymnastics. The jpeg_pipe::run task reads stdout, parses
-        // SOI/EOI boundaries, and publishes complete frames on a
-        // tokio::sync::watch channel. The webapi serves /snapshot and
-        // /stream directly from the channel — sub-millisecond
-        // latency from ffmpeg → wire, zero tmpfs traffic, zero race.
-        .arg("-r").arg(target_fps.to_string())
+        // sequence of JPEG bytes. The jpeg_pipe::run task reads
+        // stdout, parses SOI/EOI boundaries, and publishes complete
+        // frames on a tokio::sync::watch channel. No filesystem, no
+        // atomic-write gymnastics, no race.
+        .arg("-fps_mode").arg("passthrough")
         .arg("-c:v").arg("mjpeg")
         .arg("-q:v").arg(&qv)
+        .arg("-flush_packets").arg("1")
         .arg("-f").arg("image2pipe")
         .arg("pipe:1")
         // Pipe stdout so jpeg_pipe::run can read frames. stderr stays
         // inherited so ffmpeg's warnings/errors land in our journal.
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    let _ = target_fps; // we no longer use it; we just pass frames through
+                         // at source rate. Drop it from compile-time silence.
 
     Ok(cmd.spawn()?)
 }
