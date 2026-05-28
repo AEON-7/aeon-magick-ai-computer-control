@@ -80,7 +80,43 @@ struct Dnscrypt {
     /// Friendly label for the custom stamp (shown in the UI).
     #[serde(default)]
     custom_label: String,
+    /// Anonymized DNSCrypt: route queries through a relay so the
+    /// resolver never sees the client IP. v51+.
+    #[serde(default)]
+    anonymized: Anonymized,
 }
+
+/// Anonymized DNSCrypt configuration. Off by default — adds 30-100ms
+/// of latency per query, so opt-in. When on, the user picks either
+/// "auto" mode (system selects 3 relays matching the criteria, from
+/// 3 different operators in 3 different jurisdictions) or "specific"
+/// mode (user names the relays directly).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+struct Anonymized {
+    /// Master toggle for the whole anonymized layer.
+    #[serde(default)]
+    enabled: bool,
+    /// "auto" or "specific".
+    #[serde(default = "default_anon_mode")]
+    mode: String,
+    /// Criteria the auto-picker uses to filter the relay catalog.
+    /// Ignored when mode = "specific".
+    #[serde(default)]
+    criteria: crate::dnscrypt_relays::RelayCriteria,
+    /// User-named relays for mode="specific". Each entry must match
+    /// a name in the curated catalog (we validate on PUT).
+    #[serde(default)]
+    specific_relays: Vec<String>,
+    /// Resolved relay list — what the picker (or user, for specific
+    /// mode) actually chose. Persisted to TOML so aeon-net-services.sh
+    /// reads the same picks that the API computed. Recomputed on every
+    /// PUT that touches anonymized fields, the provider, or the
+    /// criteria.
+    #[serde(default)]
+    picked_relays: Vec<String>,
+}
+
+fn default_anon_mode() -> String { "auto".into() }
 
 impl Default for Dnscrypt {
     fn default() -> Self {
@@ -90,6 +126,7 @@ impl Default for Dnscrypt {
             location: default_dns_location(),
             custom_stamp: String::new(),
             custom_label: String::new(),
+            anonymized: Anonymized::default(),
         }
     }
 }
@@ -312,6 +349,12 @@ pub async fn put_state(
 /// GET /api/network/dnscrypt — current DNSCrypt state.
 pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
     let s = read_state();
+
+    // picked_relays is persisted (computed at PUT time) so the API
+    // and the apply script see the same selection. Empty when
+    // anonymized is off.
+    let picked_relays = s.dnscrypt.anonymized.picked_relays.clone();
+
     // Each provider carries metadata so the UI can show users what they
     // signed up for: log policy, DNSSEC validation, filtering, the
     // transport, and the jurisdiction the operator's behind. All of
@@ -335,6 +378,18 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
         "location": s.dnscrypt.location,
         "custom_stamp": s.dnscrypt.custom_stamp,
         "custom_label": s.dnscrypt.custom_label,
+        "anonymized": {
+            "enabled": s.dnscrypt.anonymized.enabled,
+            "mode": s.dnscrypt.anonymized.mode,
+            "criteria": s.dnscrypt.anonymized.criteria,
+            "specific_relays": s.dnscrypt.anonymized.specific_relays,
+            // Resolved relay names that would be applied right now.
+            // Empty Vec if anonymized.enabled = false.
+            "currently_picked": picked_relays,
+            // Full curated catalog so the UI can render filter chips +
+            // a "specific relay" multi-select.
+            "catalog": crate::dnscrypt_relays::RELAYS,
+        },
         // ── DNSCrypt-only provider list (v49+) ──────────────────────
         //
         // Why no Cloudflare / NextDNS / Mullvad here: those providers
@@ -449,6 +504,21 @@ pub struct DnscryptPutReq {
     pub custom_stamp: Option<String>,
     #[serde(default)]
     pub custom_label: Option<String>,
+    #[serde(default)]
+    pub anonymized: Option<AnonymizedPutReq>,
+}
+
+/// All fields optional — clients send only what they're changing.
+#[derive(Deserialize)]
+pub struct AnonymizedPutReq {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub criteria: Option<crate::dnscrypt_relays::RelayCriteria>,
+    #[serde(default)]
+    pub specific_relays: Option<Vec<String>>,
 }
 
 /// PUT /api/network/dnscrypt — update DNSCrypt config + apply.
@@ -528,6 +598,85 @@ pub async fn put_dnscrypt(
         }
         nf.dnscrypt.enabled = enabled;
     }
+
+    // Anonymized DNSCrypt updates
+    if let Some(anon) = req.anonymized {
+        if let Some(e) = anon.enabled {
+            nf.dnscrypt.anonymized.enabled = e;
+        }
+        if let Some(mode) = anon.mode {
+            if mode != "auto" && mode != "specific" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": "anonymized.mode must be 'auto' or 'specific'"})),
+                )
+                    .into_response();
+            }
+            nf.dnscrypt.anonymized.mode = mode;
+        }
+        if let Some(c) = anon.criteria {
+            nf.dnscrypt.anonymized.criteria = c;
+        }
+        if let Some(relays) = anon.specific_relays {
+            // Validate every relay name is in the curated catalog —
+            // unknown names would just be silently skipped by
+            // dnscrypt-proxy (via skip_incompatible=true) and the
+            // user would never know their config was a no-op.
+            let known: std::collections::HashSet<&str> =
+                crate::dnscrypt_relays::RELAYS.iter().map(|r| r.name).collect();
+            for r in &relays {
+                if !known.contains(r.as_str()) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "ok": false,
+                            "err": format!("unknown relay '{r}' — not in curated catalog"),
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+            // Cap at 8 — more than that and dnscrypt-proxy spends
+            // longer probing relays than serving DNS.
+            if relays.len() > 8 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": "specific_relays capped at 8"})),
+                )
+                    .into_response();
+            }
+            // Diversity check: warn (don't reject) if all picks are
+            // from the same operator. We return ok but include a hint.
+            nf.dnscrypt.anonymized.specific_relays = relays;
+        }
+        // Anonymized requires base DNSCrypt to be on — otherwise the
+        // [anonymized_dns] block is dead config. Auto-enable.
+        if nf.dnscrypt.anonymized.enabled && !nf.dnscrypt.enabled {
+            nf.dnscrypt.enabled = true;
+        }
+    }
+
+    // Recompute picked_relays AFTER any field changes so the TOML
+    // reflects the actual relays that will be in effect on the next
+    // aeon-net-services reload. This avoids the supervisor and the
+    // shell script disagreeing about which relays are active.
+    nf.dnscrypt.anonymized.picked_relays = if nf.dnscrypt.anonymized.enabled {
+        if nf.dnscrypt.anonymized.mode == "specific" {
+            nf.dnscrypt.anonymized.specific_relays.clone()
+        } else {
+            let resolver_op = crate::dnscrypt_relays::resolver_operator(&nf.dnscrypt.provider);
+            crate::dnscrypt_relays::auto_pick(
+                &nf.dnscrypt.anonymized.criteria,
+                resolver_op,
+                3,
+            )
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect()
+        }
+    } else {
+        Vec::new()
+    };
 
     if let Err(e) = write_state(&nf) {
         return (

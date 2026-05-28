@@ -90,6 +90,25 @@ enabled = false
 provider = "quad9"
 location = "auto"
 
+# Anonymized DNSCrypt (v51+). Off by default; opt-in via
+# PUT /api/network/dnscrypt {anonymized: {...}}. When enabled,
+# queries ride through one of several relays so the resolver never
+# sees the client IP and the relay never sees the queries. Adds
+# ~30-100ms of latency per uncached lookup but a meaningful step up
+# in privacy — especially when Tor is also active. The supervisor
+# auto-picks 3 relays from 3 different operators by default;
+# picked_relays gets rewritten on every config save.
+[dnscrypt.anonymized]
+enabled = false
+mode = "auto"
+picked_relays = []
+
+[dnscrypt.anonymized.criteria]
+no_logs = true
+outside_five_eyes = true
+outside_fourteen_eyes = false
+dnssec = true
+
 # ──────────────────────────────────────────────────────────────────────
 # VPN — WAN-side tunnel / anonymity overlay
 # ──────────────────────────────────────────────────────────────────────

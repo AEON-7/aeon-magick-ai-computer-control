@@ -20,6 +20,7 @@ mod auth;
 mod blocked_log;
 mod captive;
 mod dns_log;
+mod dnscrypt_relays;
 mod firewall;
 mod macros;
 mod mcp;

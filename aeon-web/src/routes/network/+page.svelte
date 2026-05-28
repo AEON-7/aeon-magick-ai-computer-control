@@ -27,6 +27,17 @@
   let dnsSaving = false;
   let dnsMsg = '';
 
+  // ── Anonymized DNSCrypt (v51+) ──
+  // Off by default; opt-in adds 30-100ms latency per query but routes
+  // through a relay so the resolver never sees the client IP.
+  let anonEnabled = false;
+  let anonMode: 'auto' | 'specific' = 'auto';
+  let anonNoLogs = true;
+  let anonOutsideFiveEyes = true;
+  let anonOutsideFourteenEyes = false;
+  let anonDnssec = true;
+  let anonSpecificRelays: string[] = [];
+
   // ── VPN ──
   let vpnState: api.VpnState | null = null;
   let vpnStatus: api.VpnStatus | null = null;
@@ -73,6 +84,15 @@
       dnsLocation = d.location;
       dnsCustomStamp = d.custom_stamp ?? '';
       dnsCustomLabel = d.custom_label ?? '';
+      if (d.anonymized) {
+        anonEnabled = d.anonymized.enabled;
+        anonMode = d.anonymized.mode;
+        anonNoLogs = d.anonymized.criteria.no_logs ?? true;
+        anonOutsideFiveEyes = d.anonymized.criteria.outside_five_eyes ?? true;
+        anonOutsideFourteenEyes = d.anonymized.criteria.outside_fourteen_eyes ?? false;
+        anonDnssec = d.anonymized.criteria.dnssec ?? true;
+        anonSpecificRelays = [...(d.anonymized.specific_relays ?? [])];
+      }
       vpnState = v;
       vpnEnabled = v.enabled;
       vpnProvider = v.provider;
@@ -203,6 +223,17 @@
         enabled: dnsEnabled,
         provider: dnsProvider,
         location: dnsLocation,
+        anonymized: {
+          enabled: anonEnabled,
+          mode: anonMode,
+          criteria: {
+            no_logs: anonNoLogs,
+            outside_five_eyes: anonOutsideFiveEyes,
+            outside_fourteen_eyes: anonOutsideFourteenEyes,
+            dnssec: anonDnssec,
+          },
+          specific_relays: anonSpecificRelays,
+        },
       };
       if (dnsProvider === 'custom') {
         if (dnsCustomStamp) patch.custom_stamp = dnsCustomStamp.trim();
@@ -617,6 +648,174 @@
                   control, route DNS through a VPN exit in your target
                   country (the VPN section below).
                 </p>
+              </div>
+            </div>
+
+            <!-- ─── Anonymized DNSCrypt (v51+) ─── -->
+            <!-- Separates the resolver-sees-queries half from the
+                 relay-sees-IP half. Relay never sees queries (they're
+                 encrypted to the resolver); resolver never sees client
+                 IP (queries arrive from the relay). Real privacy
+                 upgrade — and it's opt-in because each query takes one
+                 extra hop. -->
+            <div class="space-y-3 pt-4 border-t border-ink-800">
+              <header class="space-y-1">
+                <h4 class="font-mono text-xs uppercase tracking-wider text-zinc-300">
+                  Anonymized DNSCrypt
+                </h4>
+                <p class="text-xs text-zinc-500 leading-relaxed">
+                  Route queries through a relay so the resolver never
+                  sees your IP — and the relay never sees your queries
+                  (they're sealed to the resolver's key). Splits trust
+                  between two operators. Adds ~30-100ms per uncached
+                  lookup; first-load can feel slower, browsing stays
+                  snappy thanks to dnscrypt-proxy's cache.
+                </p>
+              </header>
+
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" bind:checked={anonEnabled}
+                       class="w-4 h-4 accent-cursed-500" />
+                <span class="text-zinc-200 text-sm">
+                  Enable anonymized relay routing
+                </span>
+              </label>
+
+              <div class="space-y-3 pl-7"
+                   class:opacity-40={!anonEnabled}
+                   class:pointer-events-none={!anonEnabled}>
+
+                <!-- Mode -->
+                <div class="space-y-1">
+                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                    Mode
+                  </p>
+                  <div class="flex gap-3">
+                    <label class="flex items-center gap-2 cursor-pointer text-xs">
+                      <input type="radio" bind:group={anonMode} value="auto"
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">Auto (pick 3 by criteria)</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer text-xs">
+                      <input type="radio" bind:group={anonMode} value="specific"
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">Specific relays</span>
+                    </label>
+                  </div>
+                </div>
+
+                {#if anonMode === 'auto'}
+                  <!-- Criteria -->
+                  <div class="space-y-2">
+                    <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                      Relay criteria
+                    </p>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <label class="flex items-center gap-2 cursor-pointer text-xs
+                                    p-2 rounded border border-ink-800 bg-ink-950/40
+                                    hover:border-ink-700">
+                        <input type="checkbox" bind:checked={anonNoLogs}
+                               class="w-3 h-3 accent-cursed-500" />
+                        <span class="text-zinc-300">No-logs policy</span>
+                      </label>
+                      <label class="flex items-center gap-2 cursor-pointer text-xs
+                                    p-2 rounded border border-ink-800 bg-ink-950/40
+                                    hover:border-ink-700">
+                        <input type="checkbox" bind:checked={anonDnssec}
+                               class="w-3 h-3 accent-cursed-500" />
+                        <span class="text-zinc-300">DNSSEC pass-through</span>
+                      </label>
+                      <label class="flex items-center gap-2 cursor-pointer text-xs
+                                    p-2 rounded border border-ink-800 bg-ink-950/40
+                                    hover:border-ink-700">
+                        <input type="checkbox" bind:checked={anonOutsideFiveEyes}
+                               class="w-3 h-3 accent-cursed-500" />
+                        <span class="text-zinc-300">Outside Five Eyes</span>
+                      </label>
+                      <label class="flex items-center gap-2 cursor-pointer text-xs
+                                    p-2 rounded border border-ink-800 bg-ink-950/40
+                                    hover:border-ink-700">
+                        <input type="checkbox" bind:checked={anonOutsideFourteenEyes}
+                               class="w-3 h-3 accent-cursed-500" />
+                        <span class="text-zinc-300">Outside Fourteen Eyes</span>
+                      </label>
+                    </div>
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      Auto-pick chooses 3 relays from <strong>3 different
+                      operators</strong> in <strong>3 different
+                      jurisdictions</strong>. The resolver's own operator
+                      (e.g. Quad9, AdGuard) is excluded automatically so
+                      the same org never holds both halves of the
+                      anonymization split.
+                    </p>
+                  </div>
+
+                  <!-- Currently picked (preview) -->
+                  {#if dnsState?.anonymized?.currently_picked?.length}
+                    <div class="space-y-1 p-3 rounded bg-cursed-500/5
+                                border border-cursed-500/30">
+                      <p class="text-[11px] uppercase tracking-wider text-cursed-300">
+                        Auto-picked relays
+                      </p>
+                      <div class="space-y-1">
+                        {#each dnsState.anonymized.currently_picked as relayName}
+                          {@const meta = dnsState.anonymized.catalog.find(r => r.name === relayName)}
+                          <div class="flex items-center gap-2 text-xs font-mono">
+                            <span class="text-cursed-200">{relayName}</span>
+                            {#if meta}
+                              <span class="text-zinc-500">
+                                ({meta.operator}, {meta.country})
+                              </span>
+                            {/if}
+                          </div>
+                        {/each}
+                      </div>
+                      <p class="text-[10px] text-zinc-500 pt-1">
+                        Selection updates whenever you change criteria + save.
+                        dnscrypt-proxy round-robins among them so a single
+                        relay outage doesn't break DNS.
+                      </p>
+                    </div>
+                  {/if}
+
+                {:else}
+                  <!-- Manual relay multi-select -->
+                  <div class="space-y-2">
+                    <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                      Pick 1-8 relays manually
+                    </p>
+                    <div class="max-h-60 overflow-y-auto space-y-1
+                                border border-ink-800 rounded p-2 bg-ink-950/40">
+                      {#if dnsState?.anonymized?.catalog}
+                        {#each dnsState.anonymized.catalog as r}
+                          <label class="flex items-center gap-2 cursor-pointer text-xs
+                                        p-1 rounded hover:bg-ink-800/50">
+                            <input type="checkbox"
+                                   checked={anonSpecificRelays.includes(r.name)}
+                                   on:change={(e) => {
+                                     if (e.currentTarget.checked) {
+                                       anonSpecificRelays = [...anonSpecificRelays, r.name];
+                                     } else {
+                                       anonSpecificRelays = anonSpecificRelays.filter(n => n !== r.name);
+                                     }
+                                   }}
+                                   class="w-3 h-3 accent-cursed-500" />
+                            <span class="text-zinc-300 font-mono">{r.label}</span>
+                            <span class="text-zinc-600 text-[10px] ml-auto">
+                              {r.country} · {r.eyes === 'none' ? 'no Eyes' : r.eyes + ' Eyes'}
+                            </span>
+                          </label>
+                        {/each}
+                      {/if}
+                    </div>
+                    <p class="text-[11px] text-zinc-500">
+                      {anonSpecificRelays.length} selected. Pick relays from
+                      multiple operators for real anonymization — 3 relays
+                      all run by the same outfit aren't more private than 1.
+                    </p>
+                  </div>
+                {/if}
+
               </div>
             </div>
 

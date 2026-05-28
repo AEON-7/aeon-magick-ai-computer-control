@@ -185,6 +185,54 @@ EOF
         allow_doh="true"
     fi
 
+    # v51: Anonymized DNSCrypt. The supervisor's PUT handler writes a
+    # comma-separated list of relay names to `picked_relays` in the
+    # [dnscrypt.anonymized] section whenever the user enables this.
+    # We translate that into dnscrypt-proxy's [anonymized_dns] routes
+    # block here. Off by default; the section stays empty unless the
+    # user opts in.
+    local anon_enabled; anon_enabled="$(toml_get dnscrypt.anonymized enabled false)"
+    local anonymized_section=""
+    if [ "$anon_enabled" = "true" ]; then
+        local picked; picked="$(toml_get dnscrypt.anonymized picked_relays '')"
+        # picked_relays is stored as a TOML array like ["a", "b", "c"].
+        # toml_get returns a Python repr; massage it into bare-comma-list.
+        # Easier path: hit a small Python one-liner so we don't reinvent
+        # TOML parsing in bash.
+        local relay_csv
+        relay_csv=$(python3 -c "
+import tomllib
+try:
+    cfg = tomllib.loads(open('$NETWORK_TOML').read())
+    relays = cfg.get('dnscrypt', {}).get('anonymized', {}).get('picked_relays', [])
+    # Resolver name on the right side of the route — dnscrypt-proxy
+    # uses route per server, but '*' wildcards apply to all servers.
+    # We use the configured server here so the route is unambiguous.
+    print(', '.join(\"'\" + r + \"'\" for r in relays))
+except Exception as e:
+    print('')
+")
+        if [ -n "$relay_csv" ]; then
+            # We apply the relay list to ALL configured server_names
+            # via '*' — that keeps the config concise even if the user
+            # has multiple servers active.
+            anonymized_section=$(cat <<EOF
+
+[anonymized_dns]
+routes = [
+  { server_name = '*', via = [${relay_csv}] },
+]
+# Skip incompatible (relay) ↔ (server) pairs gracefully instead of
+# refusing to start when one combination is currently offline.
+skip_incompatible = true
+EOF
+)
+            log "anonymized DNSCrypt active — relays: ${relay_csv}"
+        else
+            log "anonymized DNSCrypt enabled but no relays picked — falling back to direct DNSCrypt"
+        fi
+    fi
+
     install -d -m 0755 /etc/dnscrypt-proxy
     cat > "$DNSCRYPT_CONF" <<EOF
 # Managed by aeon-net-services — do not edit by hand.
@@ -227,7 +275,19 @@ cache_neg_max_ttl = 600
     minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
     refresh_delay = 73
     prefix = ''
+  # v51: also fetch the anonymized relay list so dnscrypt-proxy can
+  # resolve any relay names in our [anonymized_dns] routes block.
+  [sources.'relays']
+    urls = [
+      'https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/relays.md',
+      'https://download.dnscrypt.info/resolvers-list/v3/relays.md',
+    ]
+    cache_file = '/var/cache/dnscrypt-proxy/relays.md'
+    minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+    refresh_delay = 73
+    prefix = ''
 ${custom_static_section}
+${anonymized_section}
 EOF
     chmod 0644 "$DNSCRYPT_CONF"
 

@@ -220,6 +220,33 @@ export interface DnscryptLocation {
   label: string;
 }
 
+/// Curated anonymized-relay metadata (v51+). One entry per relay.
+export interface AnonymizedRelay {
+  name: string;          // matches dnscrypt-proxy resolver name
+  label: string;
+  operator: string;
+  country: string;       // ISO 3166 alpha-2
+  eyes: 'none' | 'five' | 'nine' | 'fourteen';
+  no_logs: boolean;
+  dnssec_pass_through: boolean;
+}
+
+export interface AnonymizedCriteria {
+  no_logs?: boolean;
+  outside_five_eyes?: boolean;
+  outside_fourteen_eyes?: boolean;
+  dnssec?: boolean;
+}
+
+export interface AnonymizedState {
+  enabled: boolean;
+  mode: 'auto' | 'specific';
+  criteria: AnonymizedCriteria;
+  specific_relays: string[];
+  currently_picked: string[];
+  catalog: AnonymizedRelay[];
+}
+
 export interface DnscryptState {
   ok: boolean;
   enabled: boolean;
@@ -229,6 +256,7 @@ export interface DnscryptState {
   custom_label: string;
   providers: DnscryptProvider[];
   locations: DnscryptLocation[];
+  anonymized: AnonymizedState;
 }
 
 export const getDnscrypt = () => req<DnscryptState>('GET', '/network/dnscrypt');
@@ -240,6 +268,12 @@ export const setDnscrypt = (
     location?: string;
     custom_stamp?: string;
     custom_label?: string;
+    anonymized?: {
+      enabled?: boolean;
+      mode?: 'auto' | 'specific';
+      criteria?: AnonymizedCriteria;
+      specific_relays?: string[];
+    };
   },
 ) =>
   req<{ ok: boolean; enabled: boolean; provider: string; location: string }>(
