@@ -551,74 +551,138 @@
 
 <div class="h-full flex flex-col"
      class:aeon-pseudo-fs={pseudoFullscreen}>
-  <!-- top bar. Layout adapts:
-       • desktop (md+): everything inline, three-section row
-       • mobile  (<md): brand + capture + fullscreen + hamburger; the
-                       rest collapses into the menuOpen dropdown below -->
-  <header class="flex items-center justify-between gap-2 px-3 sm:px-5 py-3
-                 border-b border-ink-700 bg-ink-900"
+  <!-- Top bar. Layout strategy:
+       • lg+ (≥1024px): TWO rows. Row 1 = status (brand, LIVE, mode,
+                       network pills, persona). Row 2 = action buttons
+                       grouped into three clusters — Input | Navigate
+                       | System — with subtle vertical dividers so the
+                       row reads as three sections instead of a wall.
+       • <lg: brand + capture + fullscreen + hamburger; everything
+              else collapses into the menuOpen dropdown.
+       Keeping all buttons visible at full-Mac sizes was the explicit
+       ask — the dividers + 2-row layout makes the cluster cohabit
+       with the status line without overlapping. -->
+  <header class="border-b border-ink-700 bg-ink-900"
           class:hidden={fullscreen}>
-    <!-- Left cluster: brand + status. On mobile we drop everything but
-         the brand + LIVE pill to keep the bar usable. -->
-    <div class="flex items-center gap-2 sm:gap-3 min-w-0">
-      <span class="text-cursed-400 font-mono text-xs sm:text-sm tracking-widest truncate">
-        <span class="hidden sm:inline">AEON MAGICK AI COMPUTER CONTROL</span>
-        <span class="sm:hidden">AEON MAGICK</span>
-      </span>
-      {#if state}
-        <span class={state.online ? 'pill-live' : 'pill-offline'}>
-          <span class="h-1.5 w-1.5 rounded-full {state.online ? 'bg-live-400' : 'bg-red-400'}"></span>
-          {state.online ? 'LIVE' : 'OFFLINE'}
+    <!-- Row 1: brand + status + persona -->
+    <div class="flex items-center justify-between gap-2 px-3 sm:px-5 pt-3 pb-2">
+      <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-wrap">
+        <span class="text-cursed-400 font-mono text-xs sm:text-sm tracking-widest truncate">
+          <span class="hidden sm:inline">AEON MAGICK AI COMPUTER CONTROL</span>
+          <span class="sm:hidden">AEON MAGICK</span>
         </span>
-      {/if}
-      <!-- Mode + status pills are inline on tablet+, hidden on phone (info shown inside menu). -->
-      {#if state?.mode}
-        <span class="hidden md:inline text-xs font-mono text-zinc-400">
-          {state.mode.resolution} · {state.mode.format} · {state.captured_fps} fps
-        </span>
-      {/if}
-      {#if vpnOn}
-        <a href="/network" class="pill-net hidden sm:inline-flex" title="Click to manage VPN">
-          <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
-          {vpnProvider === 'tor' ? 'TOR' : vpnProvider === 'tailscale' ? 'TAILSCALE'
-            : vpnProvider === 'wireguard' ? 'WIREGUARD' : vpnProvider === 'openvpn' ? 'OPENVPN'
-            : vpnProvider === 'i2p' ? 'I2P' : 'VPN'}
-        </a>
-      {/if}
-      {#if dnscryptOn}
-        <a href="/network" class="pill-net hidden sm:inline-flex" title="DNSCrypt encrypted DNS — click to configure">
-          <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
-          DNSCrypt
-        </a>
-      {/if}
-      {#if hid}
-        <!-- Persona selector: inline on lg+, in the hamburger menu on smaller. -->
-        <label class="hidden lg:flex items-center gap-1.5 text-xs font-mono text-cursed-400/80">
-          HID:
-          <select
-            value={hid.persona}
-            on:change={onPersonaChange}
-            disabled={persona_switching}
-            class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5
-                   text-cursed-300 focus:outline-none focus:ring-1 focus:ring-cursed-500
-                   disabled:opacity-50 disabled:cursor-wait"
-            title="Switch USB HID persona — triggers a 1-second re-enumeration on the target."
-          >
-            <option value="generic-composite">generic-composite</option>
-            <option value="logitech-mx">logitech-mx</option>
-            <option value="apple-magic-stable">apple-magic-stable</option>
-            <option value="apple-magic">apple-magic ⚠</option>
-          </select>
-        </label>
-        {#if persona_message}
-          <span class="hidden lg:inline text-xs font-mono text-zinc-500">{persona_message}</span>
+        {#if state}
+          <span class={state.online ? 'pill-live' : 'pill-offline'}>
+            <span class="h-1.5 w-1.5 rounded-full {state.online ? 'bg-live-400' : 'bg-red-400'}"></span>
+            {state.online ? 'LIVE' : 'OFFLINE'}
+          </span>
         {/if}
-      {/if}
+        {#if state?.mode}
+          <span class="hidden md:inline text-xs font-mono text-zinc-400">
+            {state.mode.resolution} · {state.mode.format} · {state.captured_fps} fps
+          </span>
+        {/if}
+        {#if vpnOn}
+          <a href="/network" class="pill-net hidden sm:inline-flex" title="Click to manage VPN">
+            <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
+            {vpnProvider === 'tor' ? 'TOR' : vpnProvider === 'tailscale' ? 'TAILSCALE'
+              : vpnProvider === 'wireguard' ? 'WIREGUARD' : vpnProvider === 'openvpn' ? 'OPENVPN'
+              : vpnProvider === 'i2p' ? 'I2P' : 'VPN'}
+          </a>
+        {/if}
+        {#if dnscryptOn}
+          <a href="/network" class="pill-net hidden sm:inline-flex" title="DNSCrypt encrypted DNS — click to configure">
+            <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
+            DNSCrypt
+          </a>
+        {/if}
+      </div>
+      <!-- Right side of row 1: HID persona + mobile hamburger. -->
+      <div class="flex items-center gap-2 shrink-0">
+        {#if hid}
+          <label class="hidden lg:flex items-center gap-1.5 text-xs font-mono text-cursed-400/80">
+            HID:
+            <select
+              value={hid.persona}
+              on:change={onPersonaChange}
+              disabled={persona_switching}
+              class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5
+                     text-cursed-300 focus:outline-none focus:ring-1 focus:ring-cursed-500
+                     disabled:opacity-50 disabled:cursor-wait"
+              title="Switch USB HID persona — triggers a 1-second re-enumeration on the target.">
+              <option value="generic-composite">generic-composite</option>
+              <option value="logitech-mx">logitech-mx</option>
+              <option value="apple-magic-stable">apple-magic-stable</option>
+              <option value="apple-magic">apple-magic ⚠</option>
+            </select>
+          </label>
+          {#if persona_message}
+            <span class="hidden lg:inline text-xs font-mono text-zinc-500">{persona_message}</span>
+          {/if}
+        {/if}
+        <!-- Hamburger: shown below lg, opens the mobile dropdown. -->
+        <button class="btn text-xs lg:hidden"
+                on:click={() => (menuOpen = !menuOpen)}
+                aria-label="Open menu"
+                aria-expanded={menuOpen}>
+          {menuOpen ? '✕' : '☰'}
+        </button>
+      </div>
     </div>
 
-    <!-- Right cluster: action buttons. On mobile we collapse to
-         capture + fullscreen + hamburger; the rest goes in the menu. -->
-    <div class="flex items-center gap-2">
+    <!-- Row 2: action buttons, lg+ only. Three groups with vertical
+         dividers between them so the eye reads them as logical
+         clusters rather than a wall of buttons.
+         Group A — Input control (capture, fullscreen)
+         Group B — Navigate (network, security, DNS, storage, SSH, tokens, audit)
+         Group C — System (release keys, relaunch streamer, sign out)
+    -->
+    <div class="hidden lg:flex items-center flex-wrap gap-2 px-5 pb-3">
+      <!-- Group A -->
+      <div class="flex items-center gap-2 pr-3">
+        {#if captured}
+          <button class="btn-primary text-xs animate-pulse" on:click={exitCapture}
+                  title="Release input capture (Ctrl+Alt+Esc)">
+            ⏏ release&nbsp;capture
+          </button>
+        {:else}
+          <button class="btn text-xs" on:click={enterCapture}
+                  title="Lock pointer + capture all keys for the remote system">
+            ⌨ capture&nbsp;input
+          </button>
+        {/if}
+        <button class="btn text-xs" on:click={enterFullscreen}
+                title="Fullscreen control mode — best on phones / tablets">
+          ⛶ fullscreen
+        </button>
+      </div>
+      <!-- divider -->
+      <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
+      <!-- Group B: nav -->
+      <div class="flex items-center gap-2 px-3">
+        <a href="/network"   class="btn text-xs">network</a>
+        <a href="/security"  class="btn text-xs">security</a>
+        <a href="/dns"       class="btn text-xs">DNS</a>
+        <a href="/storage"   class="btn text-xs">disk&nbsp;drive</a>
+        <a href="/ssh-keys"  class="btn text-xs">SSH&nbsp;keys</a>
+        <a href="/tokens"    class="btn text-xs">API&nbsp;tokens</a>
+        <a href="/audit"     class="btn text-xs">audit&nbsp;log</a>
+      </div>
+      <!-- divider -->
+      <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
+      <!-- Group C: system -->
+      <div class="flex items-center gap-2 pl-3">
+        <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
+        <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
+        <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>
+      </div>
+    </div>
+
+    <!-- On mobile, capture + fullscreen are the only inline action
+         buttons (in addition to the hamburger on the right of row 1).
+         Stash them in row 2 here for sm+ but pre-lg. At <sm even the
+         capture/fullscreen labels collapse to icons. -->
+    <div class="lg:hidden flex items-center gap-2 px-3 pb-3">
       {#if captured}
         <button class="btn-primary text-xs animate-pulse" on:click={exitCapture}
                 title="Release input capture (Ctrl+Alt+Esc)">
@@ -633,26 +697,6 @@
       <button class="btn text-xs" on:click={enterFullscreen}
               title="Fullscreen control mode — best on phones / tablets">
         ⛶ <span class="hidden sm:inline">fullscreen</span>
-      </button>
-      <!-- Inline nav (desktop+). The hidden/lg:inline-flex pair shows
-           these inline on large screens, hides them on small. -->
-      <a href="/network"   class="btn text-xs hidden lg:inline-flex">network</a>
-      <a href="/security"  class="btn text-xs hidden lg:inline-flex">security</a>
-      <a href="/dns"       class="btn text-xs hidden lg:inline-flex">DNS</a>
-      <a href="/storage"   class="btn text-xs hidden lg:inline-flex">disk&nbsp;drive</a>
-      <a href="/ssh-keys"  class="btn text-xs hidden lg:inline-flex">SSH&nbsp;keys</a>
-      <a href="/tokens"    class="btn text-xs hidden lg:inline-flex">API&nbsp;tokens</a>
-      <a href="/audit"     class="btn text-xs hidden lg:inline-flex">audit&nbsp;log</a>
-      <button class="btn hidden lg:inline-flex" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
-      <button class="btn hidden lg:inline-flex" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
-      <button class="btn text-xs hidden lg:inline-flex" on:click={onLogout}>sign&nbsp;out</button>
-
-      <!-- Hamburger: shown below lg, opens a dropdown panel. -->
-      <button class="btn text-xs lg:hidden relative"
-              on:click={() => (menuOpen = !menuOpen)}
-              aria-label="Open menu"
-              aria-expanded={menuOpen}>
-        {menuOpen ? '✕' : '☰'}
       </button>
     </div>
   </header>

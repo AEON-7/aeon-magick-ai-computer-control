@@ -41,12 +41,18 @@ pub async fn list(
     // Pull last ~2 hours from the kernel journal. journalctl supports
     // a grep filter natively which is much cheaper than reading the
     // whole journal and filtering client-side.
+    //
+    // Match "AEON-DROP" without the trailing colon — v39+ extended the
+    // prefix to "AEON-DROP[<tag>]: " with a bracketed tag so we can
+    // attribute drops to a specific rule. v37-era "AEON-DROP: " (no
+    // tag) still matches this prefix too, so existing post-upgrade
+    // entries don't disappear.
     let output = tokio::task::spawn_blocking(move || {
         Command::new("journalctl")
             .args([
                 "-k",
                 "--since", "-2h",
-                "--grep", "AEON-DROP:",
+                "--grep", "AEON-DROP",
                 "-o", "short-iso",
                 "--no-pager",
                 // Cap the journalctl tail so a chatty hour doesn't blow
