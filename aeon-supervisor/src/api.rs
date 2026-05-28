@@ -235,6 +235,10 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/audit",
             get(crate::audit::list)
                 .delete(crate::audit::clear))
+        // System controls — reboot / poweroff / health info. Admin scope.
+        .route("/system/info",     get(crate::system::info))
+        .route("/system/reboot",   post(crate::system::reboot))
+        .route("/system/poweroff", post(crate::system::poweroff))
         // MCP (Model Context Protocol) — Streamable HTTP transport
         .route("/mcp", post(crate::mcp::handle));
 

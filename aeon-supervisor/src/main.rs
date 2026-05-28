@@ -28,6 +28,7 @@ mod proxy;
 mod security_metrics;
 mod ssh_keys;
 mod storage;
+mod system;
 mod tls;
 mod webui;
 mod wifi;

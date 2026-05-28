@@ -605,6 +605,32 @@ export const getAudit = (
 export const clearAudit = () =>
   req<{ ok: boolean }>('DELETE', '/audit');
 
+// ── System (reboot / poweroff / health) ────────────────────────────────
+
+export interface SystemInfo {
+  ok: boolean;
+  uptime_seconds: number;
+  loadavg: { '1m': number; '5m': number; '15m': number };
+  cpu_temp_c: number;
+  cpu_count: number;
+  mem_total_kb: number;
+  mem_available_kb: number;
+}
+
+export const getSystemInfo = () => req<SystemInfo>('GET', '/system/info');
+
+export const rebootSystem = () =>
+  req<{ ok: boolean; action: string; in_seconds: number; message: string }>(
+    'POST',
+    '/system/reboot',
+  );
+
+export const poweroffSystem = () =>
+  req<{ ok: boolean; action: string; in_seconds: number; message: string }>(
+    'POST',
+    '/system/poweroff',
+  );
+
 // ── SSH key management ────────────────────────────────────────────────
 
 export interface SshKey {

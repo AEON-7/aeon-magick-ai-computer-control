@@ -501,6 +501,41 @@
     window.location.href = '/login';
   }
 
+  /// Double-confirm reboot. First prompt is "are you sure"; the second
+  /// pops a one-shot "type REBOOT to confirm" so a stray click can't
+  /// accidentally kill a session mid-AI-job. Same for poweroff but
+  /// with stronger language since wake requires a power cycle.
+  async function onReboot() {
+    if (!confirm(
+      'Reboot the Pi?\n\n' +
+      'The web UI will disconnect for ~30-60 seconds while the device ' +
+      'comes back up. Any in-flight HID input + capture will be lost.'
+    )) return;
+    const phrase = prompt('Type REBOOT to confirm:');
+    if (phrase !== 'REBOOT') return;
+    try {
+      const r = await api.rebootSystem();
+      alert(r.message);
+    } catch (e: any) {
+      alert('Reboot failed: ' + (e?.message ?? 'unknown'));
+    }
+  }
+  async function onPoweroff() {
+    if (!confirm(
+      'Power off the Pi?\n\n' +
+      'You will need to physically power-cycle the device to bring it ' +
+      'back. The web UI cannot turn it back on.'
+    )) return;
+    const phrase = prompt('Type POWEROFF to confirm:');
+    if (phrase !== 'POWEROFF') return;
+    try {
+      const r = await api.poweroffSystem();
+      alert(r.message);
+    } catch (e: any) {
+      alert('Poweroff failed: ' + (e?.message ?? 'unknown'));
+    }
+  }
+
   // ── Persona switching ──────────────────────────────────────────────────
   // Triggers a USB re-enumeration on the target — ~1s blip. The choice is
   // persisted on the device in /etc/aeon/persona.state and survives reboots.
@@ -674,6 +709,16 @@
       <div class="flex items-center gap-2 pl-3">
         <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
+        <button class="btn text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
+                on:click={onReboot}
+                title="Reboot the Pi (requires double-confirm; web UI disconnects for ~30-60 s)">
+          ⟳ reboot
+        </button>
+        <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
+                on:click={onPoweroff}
+                title="Power off the Pi (requires double-confirm; needs physical power-cycle to wake)">
+          ⏻ power&nbsp;off
+        </button>
         <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>
       </div>
     </div>
@@ -756,6 +801,10 @@
       <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
         <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
+        <button class="btn text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
+                on:click={onReboot}>⟳ reboot</button>
+        <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
+                on:click={onPoweroff}>⏻ power off</button>
         <button class="btn text-xs col-span-2" on:click={onLogout}>sign out</button>
       </div>
     </div>

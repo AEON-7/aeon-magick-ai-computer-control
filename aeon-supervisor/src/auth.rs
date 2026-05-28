@@ -426,8 +426,13 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
     if matches!(identity.scope, TokenScope::Admin) {
         return true;
     }
-    // Token management requires Admin.
-    if path.starts_with("/api/auth/tokens") || path.starts_with("/api/setup/") {
+    // Token management + reboot/poweroff require Admin. /system/info is a
+    // read-only health endpoint and is whitelisted lower in the match.
+    if path.starts_with("/api/auth/tokens")
+        || path.starts_with("/api/setup/")
+        || path == "/api/system/reboot"
+        || path == "/api/system/poweroff"
+    {
         return false;
     }
     match identity.scope {
