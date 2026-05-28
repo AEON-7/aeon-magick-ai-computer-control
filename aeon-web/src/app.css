@@ -43,3 +43,41 @@
            font-mono uppercase tracking-wider hover:bg-cursed-500/25 transition;
   }
 }
+
+/* ── Pseudo-fullscreen for iPhone Safari ─────────────────────────────
+ *
+ * The standards-compliant Element.requestFullscreen() doesn't work on
+ * iPhone Safari (only for <video> elements via the legacy webkit API).
+ * When the fullscreen function detects that, it sets the .aeon-pseudo-fs
+ * class on the page root. This CSS makes the root fill the *dynamic*
+ * viewport (100dvh — Safari's toolbar gets included or excluded as it
+ * shows/hides), pins to the top of the page over everything else, and
+ * eliminates body scroll so swipes don't bounce the page.
+ *
+ * Inside this mode the <header> is hidden (we already use the class:
+ * binding on it), and the canvas + overlay buttons take over the whole
+ * viewport — that's what makes it look like fullscreen.
+ *
+ * Real fullscreen (`requestFullscreen()`) hides the browser chrome
+ * entirely on Android Chrome and iPad Safari, so this class is a no-op
+ * there. */
+.aeon-pseudo-fs {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;       /* dynamic viewport — Safari-friendly */
+  z-index: 9999 !important;
+  background: rgb(10 10 11);
+  /* iOS bounce-scroll mitigation. The fullscreen view shouldn't scroll
+     vertically anyway, but iOS will try if the user swipes. */
+  overflow: hidden !important;
+  overscroll-behavior: none;
+  /* Help iOS realize the keyboard input is in a stable layout context
+     so it does open the soft keyboard on focus. */
+  -webkit-overflow-scrolling: auto;
+}
+.aeon-pseudo-fs body,
+body:has(.aeon-pseudo-fs) {
+  /* Prevent the body underneath from scrolling once we're fullscreened. */
+  overflow: hidden;
+}

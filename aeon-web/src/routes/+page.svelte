@@ -36,6 +36,9 @@
   // input that triggers iOS/Android's soft keyboard. `kbdVisible` is the
   // hint to the UI to show the close-keyboard button instead.
   let kbdVisible = false;
+  // Hamburger menu open state — only relevant on small screens.
+  let menuOpen = false;
+  function closeMenu() { menuOpen = false; }
 
   let canvas: HTMLDivElement;
   let dragging = false;
@@ -333,6 +336,11 @@
     // Reset state regardless.
     touchCount = ev.touches.length;
     touchMoved = false;
+    // Bring keyboard back if it was open. iOS Safari blurs the hidden
+    // input the moment the user taps anywhere else; without this,
+    // tapping a text field on the remote screen would close the soft
+    // keyboard mid-typing-session.
+    maybeReclaimKeyboard();
   }
 
   function cancelLongPress() {
@@ -343,30 +351,54 @@
   }
 
   // ── Fullscreen (mobile + desktop) ─────────────────────────────────────
+  //
+  // Two paths, transparently:
+  //
+  //   1. Real browser fullscreen (`requestFullscreen()`) — Android Chrome,
+  //      desktop, iPad Safari. Hides the browser chrome too.
+  //
+  //   2. CSS pseudo-fullscreen — used as a fallback on iPhone Safari
+  //      where the standards API throws or is unavailable. We can't
+  //      truly hide Safari's bottom toolbar, but we can fix:inset:0
+  //      the canvas to fill the dynamic viewport and ditch every
+  //      other layout element so it's *as close* to fullscreen as
+  //      iOS allows. Combined with the user dragging Safari to
+  //      "hide toolbar" mode, it's a real fullscreen experience.
+
+  let pseudoFullscreen = false;       // True when we fell back to CSS
 
   async function enterFullscreen() {
     if (!canvas) return;
-    try {
-      // Prefer the standard fullscreen API; Safari/iOS uses webkit prefix.
-      const el = document.documentElement as any;
-      if (el.requestFullscreen) {
-        await el.requestFullscreen({ navigationUI: 'hide' as any });
-      } else if (el.webkitRequestFullscreen) {
-        el.webkitRequestFullscreen();
-      }
-      // Lock orientation to landscape on capable devices — much better
-      // aspect ratio for desktop streaming. Best-effort; ignore if not
-      // supported (iOS Safari doesn't, but landscape-rotated iPhone
-      // already gives a good experience.)
+    const el = document.documentElement as any;
+    let realWorked = false;
+    if (el.requestFullscreen) {
       try {
-        if ((screen as any).orientation?.lock) {
-          await (screen as any).orientation.lock('landscape').catch(() => {});
-        }
-      } catch { /* fine */ }
-      fullscreen = true;
-    } catch (e) {
-      console.warn('fullscreen failed', e);
+        await el.requestFullscreen({ navigationUI: 'hide' as any });
+        realWorked = true;
+      } catch (e) {
+        console.warn('requestFullscreen failed, falling back to CSS', e);
+      }
+    } else if (el.webkitRequestFullscreen) {
+      try {
+        el.webkitRequestFullscreen();
+        realWorked = true;
+      } catch (e) {
+        console.warn('webkitRequestFullscreen failed, falling back to CSS', e);
+      }
     }
+    if (!realWorked) {
+      // Pseudo-fullscreen: relies on CSS in the markup below
+      // (#aeon-pseudo-fs styles). Setting `pseudoFullscreen` triggers
+      // it via class binding.
+      pseudoFullscreen = true;
+    }
+    // Best-effort landscape lock. iOS Safari ignores; Android honors.
+    try {
+      if ((screen as any).orientation?.lock) {
+        await (screen as any).orientation.lock('landscape').catch(() => {});
+      }
+    } catch { /* fine */ }
+    fullscreen = true;
   }
 
   async function exitFullscreen() {
@@ -377,12 +409,16 @@
       }
     } catch (e) { console.warn('exit fullscreen failed', e); }
     hideKeyboard();
+    pseudoFullscreen = false;
     fullscreen = false;
   }
 
   function onFullscreenChange() {
-    fullscreen = !!(document.fullscreenElement || (document as any).webkitFullscreenElement);
-    if (!fullscreen) hideKeyboard();
+    const real = !!(document.fullscreenElement || (document as any).webkitFullscreenElement);
+    // pseudoFullscreen is separate — only flips when our exitFullscreen
+    // runs. The standards API event fires only for the real path.
+    fullscreen = real || pseudoFullscreen;
+    if (!real && !pseudoFullscreen) hideKeyboard();
   }
 
   // ── On-screen keyboard bridge (iOS / Android) ─────────────────────────
@@ -395,6 +431,13 @@
   // fire keydown on most mobile keyboards and go through the normal
   // onKey path when captured.
 
+  // "kbdVisible" is the USER'S INTENT — they tapped the keyboard
+  // button, they want it open. iOS will steal focus the moment they
+  // tap somewhere else (like the canvas to click on the target), so
+  // we re-focus the hidden input on every touch in fullscreen mode
+  // until the user explicitly closes the keyboard with the ⌨ ⏷ hide
+  // button. That way "tap to click on remote" doesn't accidentally
+  // dismiss the keyboard.
   function showKeyboard() {
     if (!kbdInput) return;
     kbdInput.value = '';
@@ -411,6 +454,15 @@
       kbdInput.value = '';
     }
     kbdVisible = false;
+  }
+  /// Called whenever the user touches the canvas while in fullscreen
+  /// mode with keyboard intended open. Refocuses the hidden input on
+  /// the *next* tick so the canvas's pointer/touch handler runs first
+  /// (registering the click on the remote), then keyboard comes back.
+  function maybeReclaimKeyboard() {
+    if (kbdVisible && kbdInput && document.activeElement !== kbdInput) {
+      setTimeout(() => kbdInput?.focus(), 0);
+    }
   }
   function onKbdInput(ev: Event) {
     const target = ev.target as HTMLInputElement;
@@ -497,25 +549,36 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <!-- top bar -->
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <span class="text-cursed-400 font-mono text-sm tracking-widest">AEON MAGICK AI COMPUTER CONTROL</span>
+<div class="h-full flex flex-col"
+     class:aeon-pseudo-fs={pseudoFullscreen}>
+  <!-- top bar. Layout adapts:
+       • desktop (md+): everything inline, three-section row
+       • mobile  (<md): brand + capture + fullscreen + hamburger; the
+                       rest collapses into the menuOpen dropdown below -->
+  <header class="flex items-center justify-between gap-2 px-3 sm:px-5 py-3
+                 border-b border-ink-700 bg-ink-900"
+          class:hidden={fullscreen}>
+    <!-- Left cluster: brand + status. On mobile we drop everything but
+         the brand + LIVE pill to keep the bar usable. -->
+    <div class="flex items-center gap-2 sm:gap-3 min-w-0">
+      <span class="text-cursed-400 font-mono text-xs sm:text-sm tracking-widest truncate">
+        <span class="hidden sm:inline">AEON MAGICK AI COMPUTER CONTROL</span>
+        <span class="sm:hidden">AEON MAGICK</span>
+      </span>
       {#if state}
         <span class={state.online ? 'pill-live' : 'pill-offline'}>
           <span class="h-1.5 w-1.5 rounded-full {state.online ? 'bg-live-400' : 'bg-red-400'}"></span>
           {state.online ? 'LIVE' : 'OFFLINE'}
         </span>
       {/if}
+      <!-- Mode + status pills are inline on tablet+, hidden on phone (info shown inside menu). -->
       {#if state?.mode}
-        <span class="text-xs font-mono text-zinc-400">
+        <span class="hidden md:inline text-xs font-mono text-zinc-400">
           {state.mode.resolution} · {state.mode.format} · {state.captured_fps} fps
         </span>
       {/if}
-      <!-- Network status pills — clickable to the network page. -->
       {#if vpnOn}
-        <a href="/network" class="pill-net" title="Click to manage VPN">
+        <a href="/network" class="pill-net hidden sm:inline-flex" title="Click to manage VPN">
           <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
           {vpnProvider === 'tor' ? 'TOR' : vpnProvider === 'tailscale' ? 'TAILSCALE'
             : vpnProvider === 'wireguard' ? 'WIREGUARD' : vpnProvider === 'openvpn' ? 'OPENVPN'
@@ -523,14 +586,14 @@
         </a>
       {/if}
       {#if dnscryptOn}
-        <a href="/network" class="pill-net" title="DNSCrypt encrypted DNS — click to configure">
+        <a href="/network" class="pill-net hidden sm:inline-flex" title="DNSCrypt encrypted DNS — click to configure">
           <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
           DNSCrypt
         </a>
       {/if}
       {#if hid}
-        <!-- Persona selector — switch the HID descriptor (Generic / Logitech / Apple). -->
-        <label class="flex items-center gap-1.5 text-xs font-mono text-cursed-400/80">
+        <!-- Persona selector: inline on lg+, in the hamburger menu on smaller. -->
+        <label class="hidden lg:flex items-center gap-1.5 text-xs font-mono text-cursed-400/80">
           HID:
           <select
             value={hid.persona}
@@ -548,38 +611,111 @@
           </select>
         </label>
         {#if persona_message}
-          <span class="text-xs font-mono text-zinc-500">{persona_message}</span>
+          <span class="hidden lg:inline text-xs font-mono text-zinc-500">{persona_message}</span>
         {/if}
       {/if}
     </div>
+
+    <!-- Right cluster: action buttons. On mobile we collapse to
+         capture + fullscreen + hamburger; the rest goes in the menu. -->
     <div class="flex items-center gap-2">
       {#if captured}
         <button class="btn-primary text-xs animate-pulse" on:click={exitCapture}
                 title="Release input capture (Ctrl+Alt+Esc)">
-          ⏏ release&nbsp;capture
+          ⏏ <span class="hidden sm:inline">release&nbsp;capture</span>
         </button>
       {:else}
         <button class="btn text-xs" on:click={enterCapture}
                 title="Lock pointer + capture all keys for the remote system">
-          ⌨ capture&nbsp;input
+          ⌨ <span class="hidden sm:inline">capture&nbsp;input</span>
         </button>
       {/if}
       <button class="btn text-xs" on:click={enterFullscreen}
               title="Fullscreen control mode — best on phones / tablets">
-        ⛶ fullscreen
+        ⛶ <span class="hidden sm:inline">fullscreen</span>
       </button>
-      <a href="/network" class="btn text-xs">network</a>
-      <a href="/security" class="btn text-xs">security</a>
-      <a href="/dns" class="btn text-xs">DNS</a>
-      <a href="/storage" class="btn text-xs">disk&nbsp;drive</a>
-      <a href="/ssh-keys" class="btn text-xs">SSH&nbsp;keys</a>
-      <a href="/tokens" class="btn text-xs">API&nbsp;tokens</a>
-      <a href="/audit" class="btn text-xs">audit&nbsp;log</a>
-      <button class="btn" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
-      <button class="btn" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
-      <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>
+      <!-- Inline nav (desktop+). The hidden/lg:inline-flex pair shows
+           these inline on large screens, hides them on small. -->
+      <a href="/network"   class="btn text-xs hidden lg:inline-flex">network</a>
+      <a href="/security"  class="btn text-xs hidden lg:inline-flex">security</a>
+      <a href="/dns"       class="btn text-xs hidden lg:inline-flex">DNS</a>
+      <a href="/storage"   class="btn text-xs hidden lg:inline-flex">disk&nbsp;drive</a>
+      <a href="/ssh-keys"  class="btn text-xs hidden lg:inline-flex">SSH&nbsp;keys</a>
+      <a href="/tokens"    class="btn text-xs hidden lg:inline-flex">API&nbsp;tokens</a>
+      <a href="/audit"     class="btn text-xs hidden lg:inline-flex">audit&nbsp;log</a>
+      <button class="btn hidden lg:inline-flex" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
+      <button class="btn hidden lg:inline-flex" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
+      <button class="btn text-xs hidden lg:inline-flex" on:click={onLogout}>sign&nbsp;out</button>
+
+      <!-- Hamburger: shown below lg, opens a dropdown panel. -->
+      <button class="btn text-xs lg:hidden relative"
+              on:click={() => (menuOpen = !menuOpen)}
+              aria-label="Open menu"
+              aria-expanded={menuOpen}>
+        {menuOpen ? '✕' : '☰'}
+      </button>
     </div>
   </header>
+
+  <!-- Mobile dropdown menu (lg:hidden). Closes when any item is tapped. -->
+  {#if menuOpen}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="lg:hidden border-b border-ink-700 bg-ink-900/95 backdrop-blur-sm
+                px-3 py-3 space-y-3 z-30"
+         on:click={closeMenu}
+         role="menu"
+         tabindex="-1">
+      {#if hid}
+        <!-- HID persona dropdown — full-width in the menu. -->
+        <label class="flex items-center justify-between gap-2 text-xs font-mono text-cursed-400/80">
+          <span>HID persona:</span>
+          <select value={hid.persona} on:change={onPersonaChange}
+                  disabled={persona_switching}
+                  class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5
+                         text-cursed-300 flex-1 disabled:opacity-50">
+            <option value="generic-composite">generic-composite</option>
+            <option value="logitech-mx">logitech-mx</option>
+            <option value="apple-magic-stable">apple-magic-stable</option>
+            <option value="apple-magic">apple-magic ⚠</option>
+          </select>
+        </label>
+      {/if}
+      <!-- Status mini-grid (mode + pills) for phone view. -->
+      <div class="flex flex-wrap items-center gap-2 text-xs font-mono text-zinc-400">
+        {#if state?.mode}
+          <span>{state.mode.resolution} · {state.captured_fps} fps</span>
+        {/if}
+        {#if vpnOn}
+          <a href="/network" class="pill-net">
+            <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
+            {vpnProvider === 'tor' ? 'TOR' : vpnProvider === 'tailscale' ? 'TAILSCALE' : 'VPN'}
+          </a>
+        {/if}
+        {#if dnscryptOn}
+          <a href="/network" class="pill-net">
+            <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
+            DNSCrypt
+          </a>
+        {/if}
+      </div>
+      <!-- Nav links — two columns for thumb reach. -->
+      <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
+        <a href="/network"  class="btn text-xs">network</a>
+        <a href="/security" class="btn text-xs">security</a>
+        <a href="/dns"      class="btn text-xs">DNS</a>
+        <a href="/storage"  class="btn text-xs">disk drive</a>
+        <a href="/ssh-keys" class="btn text-xs">SSH keys</a>
+        <a href="/tokens"   class="btn text-xs">API tokens</a>
+        <a href="/audit"    class="btn text-xs col-span-2">audit log</a>
+      </div>
+      <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
+        <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
+        <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
+        <button class="btn text-xs col-span-2" on:click={onLogout}>sign out</button>
+      </div>
+    </div>
+  {/if}
 
   <!-- video canvas -->
   <main class="flex-1 relative bg-ink-950">
@@ -630,7 +766,6 @@
       aria-label="Remote keyboard input"
       on:input={onKbdInput}
       on:keydown={onKbdKeydown}
-      on:blur={() => (kbdVisible = false)}
       style="position: fixed; top: 0; left: 0; width: 1px; height: 1px;
              opacity: 0.001; z-index: -1; border: 0; padding: 0; margin: 0;
              font-size: 16px;"
