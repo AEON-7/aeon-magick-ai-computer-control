@@ -196,6 +196,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/firewall/rules",
             get(crate::firewall::list_rules)
                 .post(crate::firewall::add_rule))
+        .route("/firewall/system-rules",
+            get(crate::firewall::list_system_rules))
         .route("/firewall/rules/:id",
             axum::routing::delete(crate::firewall::delete_rule))
         .route("/firewall/rules/:id/move",

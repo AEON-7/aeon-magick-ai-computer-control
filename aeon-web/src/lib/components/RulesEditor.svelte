@@ -19,6 +19,8 @@
   import * as api from '$lib/api';
 
   let rules: api.FirewallRule[] = [];
+  let systemRules: api.SystemFirewallRule[] = [];
+  let showSystem = false;           // System rules panel hidden by default
   let loading = true;
   let error = '';
   let unlocked = false;             // rule reorder unlocked?
@@ -43,13 +45,50 @@
 
   async function refresh() {
     try {
-      const r = await api.listFirewallRules();
+      const [r, s] = await Promise.all([
+        api.listFirewallRules(),
+        api.listSystemFirewallRules(),
+      ]);
       rules = r.rules;
+      systemRules = s.rules;
       loading = false;
     } catch (e: any) {
       error = e?.message ?? 'failed to load rules';
       loading = false;
     }
+  }
+
+  /// Pre-populate the add-rule form from a system rule the user wants
+  /// to override. Flips the effect (DROP/AEON_DROP → ACCEPT) since
+  /// override is almost always "let this through". User rules now run
+  /// BEFORE system rules (v37+) so an ACCEPT here will take precedence
+  /// over the system DROP it's overriding.
+  function overrideSystem(r: api.SystemFirewallRule) {
+    newRule.chain = r.chain;
+    // Tables other than filter are rarer; keep filter as the default.
+    newRule.table = r.table;
+    // Override is almost always "allow what was being blocked".
+    newRule.action = 'ACCEPT';
+    newRule.proto = r.proto === 'any' ? '' : r.proto;
+    newRule.interface = r.iface;
+    newRule.out_iface = r.out_iface;
+    newRule.src = r.src === 'any' ? '' : r.src;
+    newRule.dst = r.dst === 'any' ? '' : r.dst;
+    newRule.sport = r.sport;
+    newRule.dport = r.dport;
+    newRule.comment = `Override ${r.source} ${r.target} on ${r.chain}`;
+    // Trigger the same highlight + scroll-into-view as the deep-link path.
+    prefilledFromUrl = true;
+    setTimeout(() => {
+      document.getElementById('fw-add-rule')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
+    setTimeout(() => (prefilledFromUrl = false), 4000);
+  }
+
+  function fmtHitsBig(n: number): string {
+    if (n < 1000) return n.toString();
+    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+    return `${(n / 1_000_000).toFixed(1)}M`;
   }
 
   // Highlight flash for the new-rule form when we arrive via a deep
@@ -334,7 +373,88 @@
   {#if !loading && rules.length === 0}
     <p class="text-zinc-500 text-sm italic">
       No custom rules yet — the system's default iptables policy is in effect.
-      Add a rule above to override.
+      Expand the panel below to see what the system installed, or add a
+      user rule above to override any of them.
     </p>
   {/if}
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- System default rules (read-only) — what aeon-net-services and    -->
+  <!-- aeon-usb-net installed at boot/apply. Click "override" to drop   -->
+  <!-- a matching ACCEPT into your user rules. User rules run BEFORE    -->
+  <!-- system rules (v37 changed user-rule application from -A to -I 1) -->
+  <!-- so an override actually takes effect.                            -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section class="space-y-2 pt-4 border-t border-ink-800">
+    <button class="flex items-center gap-2 text-xs uppercase tracking-wider
+                   text-zinc-500 hover:text-zinc-300 transition-colors"
+            on:click={() => (showSystem = !showSystem)}>
+      <span>{showSystem ? '▼' : '▶'}</span>
+      System default rules ({systemRules.length})
+      <span class="normal-case text-[10px] text-zinc-600">
+        read-only · installed by aeon-net-services + aeon-usb-net
+      </span>
+    </button>
+
+    {#if showSystem}
+      <p class="text-[11px] text-zinc-500 leading-relaxed">
+        These ship with the device and back the persona / mode / VPN behavior.
+        Your rules in the editor above run <strong>before</strong> these — to
+        let a flow through that's currently being dropped, click
+        <span class="font-mono text-cursed-300">override</span> on any row to
+        drop a matching ACCEPT into your user rules.
+      </p>
+
+      {#each Array.from(new Set(systemRules.map(r => `${r.table}:${r.chain}`))) as tableChain}
+        {@const [table, chain] = tableChain.split(':')}
+        <div class="space-y-1">
+          <p class="text-[10px] uppercase tracking-wider text-cursed-400 mt-3">
+            <span class="text-zinc-500">{table}:</span>{chain}
+          </p>
+          {#each systemRules.filter(r => `${r.table}:${r.chain}` === tableChain) as r, i (tableChain + i)}
+            <div class="flex items-center gap-2 p-2 rounded
+                        bg-ink-950/30 border border-ink-800/60 text-[11px] font-mono">
+              <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0
+                           {r.target === 'ACCEPT' ? 'bg-live-500/15 text-live-300 border-live-500/40'
+                             : r.target === 'AEON_DROP' || r.target === 'DROP' || r.target === 'REJECT'
+                               ? 'bg-red-500/15 text-red-300 border-red-500/40'
+                               : 'bg-cursed-500/10 text-cursed-300 border-cursed-500/30'}">
+                {r.effect}
+              </span>
+              <span class="text-[10px] text-zinc-500 shrink-0">{r.source}</span>
+              <span class="text-zinc-300 flex-1 truncate"
+                    title={`${r.proto} ${r.iface ? 'in=' + r.iface : ''} ${r.out_iface ? 'out=' + r.out_iface : ''} src=${r.src} dst=${r.dst} ${r.sport ? 'sport=' + r.sport : ''} ${r.dport ? 'dport=' + r.dport : ''}`}>
+                {r.proto !== 'any' ? r.proto : ''}
+                {#if r.iface}<span class="text-zinc-500">in=</span>{r.iface}{/if}
+                {#if r.out_iface}<span class="text-zinc-500">out=</span>{r.out_iface}{/if}
+                <span class="text-zinc-500">src=</span>{r.src}
+                <span class="text-zinc-500">dst=</span>{r.dst}
+                {#if r.dport}<span class="text-zinc-500">dport=</span>{r.dport}{/if}
+                {#if r.sport}<span class="text-zinc-500">sport=</span>{r.sport}{/if}
+              </span>
+              <span class="text-[10px] text-zinc-500" title="{r.packets} packets, {r.bytes} bytes">
+                {fmtHitsBig(r.packets)}
+              </span>
+              {#if r.target === 'AEON_DROP' || r.target === 'DROP' || r.target === 'REJECT'}
+                <button class="text-[10px] px-2 py-0.5 rounded shrink-0
+                               border border-live-500/40 text-live-300
+                               hover:bg-live-500/10 hover:text-live-200"
+                        on:click={() => overrideSystem(r)}
+                        title="Pre-fill an ACCEPT user rule with the same predicates">
+                  override
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/each}
+
+      {#if systemRules.length === 0}
+        <p class="text-xs text-zinc-500 italic">
+          No system rules tagged. Either nothing is installed yet, or the
+          supervisor can't shell out to iptables.
+        </p>
+      {/if}
+    {/if}
+  </section>
 </div>

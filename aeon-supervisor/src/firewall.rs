@@ -134,16 +134,26 @@ pub fn ensure_drop_chain() {
     let _ = Command::new("iptables").args(["-A", "AEON_DROP", "-j", "DROP"]).status();
 }
 
-/// Build the iptables CLI arguments for one rule.
+/// Build the iptables CLI arguments for one rule. User rules use
+/// `-I <chain> 1` (insert at position 1) so they evaluate BEFORE
+/// system-installed rules (aeon-vpn / aeon-usb-net), which append to
+/// the same chains. This is what makes the "allow this traffic"
+/// button on /security actually work — without it, a user ACCEPT
+/// rule lands after the system DROP and never fires.
+///
+/// To preserve the on-disk rule order within the user-rule space:
+/// apply_rules iterates the array in REVERSE and calls iptables -I 1
+/// on each, so the first rule in firewall.toml ends up at position 1,
+/// the second at position 2, and so on.
 fn rule_to_args(r: &Rule) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if !r.table.is_empty() && r.table != "filter" {
         args.push("-t".into());
         args.push(r.table.clone());
     }
-    // -A appends. Reorder is handled by rewriting the chain entirely.
-    args.push("-A".into());
+    args.push("-I".into());
     args.push(r.chain.clone());
+    args.push("1".into());
     if !r.iface.is_empty() {
         // Inbound rules use -i, outbound use -o; PREROUTING/INPUT/FORWARD
         // see packets on the inbound interface; OUTPUT/POSTROUTING see
@@ -251,8 +261,11 @@ fn apply_rules(rf: &RulesFile) -> Result<(), String> {
             }
         }
     }
-    // 2. Re-apply in the file's order.
-    for r in &rf.rules {
+    // 2. Re-apply in REVERSE order. Each rule is inserted at position 1
+    //    (top of chain). Inserting them in reverse means the first rule
+    //    on disk ends up at the topmost position after all inserts —
+    //    matching the order the user sees in the editor.
+    for r in rf.rules.iter().rev() {
         let args = rule_to_args(r);
         let st = Command::new("iptables")
             .args(args.iter().map(|s| s.as_str()))
@@ -375,6 +388,118 @@ pub async fn list_rules(State(_state): State<AppState>) -> Json<Value> {
             })
         })
         .collect();
+    Json(json!({"ok": true, "rules": out}))
+}
+
+/// GET /api/firewall/system-rules — read-only view of every rule that
+/// aeon-net-services.sh, aeon-usb-net.sh, or the AEON_DROP chain
+/// installed. Parsed live from `iptables -nvL` so it always reflects
+/// the actual kernel state. The UI uses this to show users what the
+/// device is enforcing under the hood + lets them click "override"
+/// to create a user ACCEPT with the same predicates flipped to allow.
+pub async fn list_system_rules(State(_state): State<AppState>) -> Json<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for table in &["filter", "nat", "mangle"] {
+        let cmd = Command::new("iptables")
+            .args(["-t", table, "-nvL", "--line-numbers"])
+            .output();
+        let Ok(cmd) = cmd else { continue };
+        let text = String::from_utf8_lossy(&cmd.stdout);
+        let mut current_chain = String::new();
+        for line in text.lines() {
+            // Chain headers look like "Chain INPUT (policy ACCEPT 0 packets, 0 bytes)"
+            if let Some(rest) = line.strip_prefix("Chain ") {
+                if let Some(name) = rest.split_whitespace().next() {
+                    current_chain = name.to_string();
+                }
+                continue;
+            }
+            // We want rules tagged aeon-vpn / aeon-usb-net (system) but
+            // NOT aeon-fw (user) — user rules already show up in the
+            // editable list.
+            let source = if line.contains("aeon-vpn") {
+                "aeon-net-services"
+            } else if line.contains("aeon-usb-net") {
+                "aeon-usb-net"
+            } else {
+                continue;
+            };
+            // Parse iptables -nvL columns:
+            // num  pkts bytes target  prot  opt in   out  source dest   [match-options] /* comment */
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 9 {
+                continue;
+            }
+            // Skip the AEON_DROP chain's own internal LOG/DROP rules
+            // (they're plumbing, not policy).
+            if current_chain == "AEON_DROP" {
+                continue;
+            }
+            let _num = cols[0];
+            let pkts: u64 = cols[1].parse().unwrap_or(0);
+            let bts: u64 = cols[2].parse().unwrap_or(0);
+            let target = cols[3].to_string();
+            let proto = cols[4].to_string();
+            // opt = cols[5]
+            let in_if = cols[6].to_string();
+            let out_if = cols[7].to_string();
+            let src = cols[8].to_string();
+            let dst = cols.get(9).copied().unwrap_or("").to_string();
+            // Capture useful match options the user might want to see:
+            // dpt, spt, etc. They show up as tokens like "dpt:53" or
+            // "udp dpt:53". The comment is in /* */ delimiters.
+            let mut extras: Vec<String> = Vec::new();
+            let mut dport = String::new();
+            let mut sport = String::new();
+            for tok in &cols[10..] {
+                if let Some(p) = tok.strip_prefix("dpt:") {
+                    dport = p.to_string();
+                    extras.push((*tok).to_string());
+                } else if let Some(p) = tok.strip_prefix("spt:") {
+                    sport = p.to_string();
+                    extras.push((*tok).to_string());
+                } else if let Some(p) = tok.strip_prefix("dpts:") {
+                    dport = p.to_string();
+                    extras.push((*tok).to_string());
+                } else if !tok.starts_with("/*") && !tok.starts_with("*/") {
+                    extras.push((*tok).to_string());
+                }
+                if tok.starts_with("*/") {
+                    break;
+                }
+            }
+            // 0.0.0.0/0 → "any" for cleaner display
+            let pretty = |s: String| -> String {
+                if s == "0.0.0.0/0" || s == "::/0" {
+                    "any".to_string()
+                } else {
+                    s
+                }
+            };
+            // Map kernel target to the user-facing "effect" label:
+            // AEON_DROP → drop (with logging), AEON_USER_X → ignore, etc.
+            let effect = if target == "AEON_DROP" { "DROP (logged)".to_string() }
+                else { target.clone() };
+
+            out.push(json!({
+                "source": source,
+                "table": table,
+                "chain": current_chain,
+                "target": target,
+                "effect": effect,
+                "proto": if proto == "all" || proto == "0" { "any".to_string() } else { proto },
+                "iface": if in_if == "*" { String::new() } else { in_if.clone() },
+                "out_iface": if out_if == "*" { String::new() } else { out_if.clone() },
+                "src": pretty(src),
+                "dst": pretty(dst),
+                "sport": sport,
+                "dport": dport,
+                "packets": pkts,
+                "bytes": bts,
+                "match_options": extras.join(" "),
+            }));
+        }
+    }
     Json(json!({"ok": true, "rules": out}))
 }
 

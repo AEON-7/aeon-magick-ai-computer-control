@@ -450,6 +450,27 @@ export interface FirewallRuleDraft {
 export const listFirewallRules = () =>
   req<{ ok: boolean; rules: FirewallRule[] }>('GET', '/firewall/rules');
 
+export interface SystemFirewallRule {
+  source: string;          // aeon-net-services / aeon-usb-net
+  table: string;
+  chain: string;
+  target: string;          // ACCEPT / AEON_DROP / DNAT / REDIRECT / ...
+  effect: string;          // human-readable target ("DROP (logged)" / "ACCEPT" / etc.)
+  proto: string;
+  iface: string;
+  out_iface: string;
+  src: string;
+  dst: string;
+  sport: string;
+  dport: string;
+  packets: number;
+  bytes: number;
+  match_options: string;   // free-form trailing match tokens (e.g. limit, comment)
+}
+
+export const listSystemFirewallRules = () =>
+  req<{ ok: boolean; rules: SystemFirewallRule[] }>('GET', '/firewall/system-rules');
+
 export const addFirewallRule = (rule: FirewallRuleDraft) =>
   req<{ ok: boolean; id: string }>('POST', '/firewall/rules', rule);
 
