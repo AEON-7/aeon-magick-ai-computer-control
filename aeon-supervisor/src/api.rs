@@ -239,6 +239,27 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/system/info",     get(crate::system::info))
         .route("/system/reboot",   post(crate::system::reboot))
         .route("/system/poweroff", post(crate::system::poweroff))
+        // File transfer to/from target via /var/lib/aeon/files/.
+        // Target-facing public server (off by default) spawned in main.rs.
+        .route("/files",
+            get(crate::file_xfer::list_files))
+        .route("/files/config",
+            get(crate::file_xfer::get_config)
+                .put(crate::file_xfer::put_config))
+        .route("/files/upload",
+            post(crate::file_xfer::upload)
+                .layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/files/:name",
+            get(crate::file_xfer::download)
+                .delete(crate::file_xfer::delete_file))
+        // Shared clipboard — single text snippet stored on the Pi,
+        // type-on-target button calls /api/hid/type with the buffer.
+        .route("/clipboard",
+            get(crate::clipboard::get_clipboard)
+                .put(crate::clipboard::put_clipboard)
+                .delete(crate::clipboard::delete_clipboard))
+        .route("/clipboard/type-on-target",
+            post(crate::clipboard::type_on_target))
         // MCP (Model Context Protocol) — Streamable HTTP transport
         .route("/mcp", post(crate::mcp::handle));
 

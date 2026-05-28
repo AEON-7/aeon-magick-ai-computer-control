@@ -631,6 +631,81 @@ export const poweroffSystem = () =>
     '/system/poweroff',
   );
 
+// ── File transfer (HTTP server on usb0) ────────────────────────────────
+
+export interface FileEntry {
+  name: string;
+  size_bytes: number;
+  modified_ms: number;
+}
+
+export interface FileXferConfig {
+  ok: boolean;
+  enabled: boolean;
+  port: number;
+  allow_upload: boolean;
+}
+
+export const listFiles = () =>
+  req<{ ok: boolean; files: FileEntry[]; dir: string }>('GET', '/files');
+
+export const getFileXferConfig = () =>
+  req<FileXferConfig>('GET', '/files/config');
+
+export const setFileXferConfig = (
+  patch: { enabled?: boolean; port?: number; allow_upload?: boolean },
+) =>
+  req<{ ok: boolean; needs_restart: boolean }>('PUT', '/files/config', patch);
+
+export const deleteFile = (name: string) =>
+  req<{ ok: boolean }>('DELETE', `/files/${encodeURIComponent(name)}`);
+
+export function uploadFile(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<{ ok: boolean; name: string; size_bytes: number }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/files/upload');
+    xhr.setRequestHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.withCredentials = true;
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    });
+    xhr.addEventListener('load', () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300 && data.ok) resolve(data);
+        else reject(new Error(data.err || `HTTP ${xhr.status}`));
+      } catch (e: any) {
+        reject(new Error(`bad response: ${e?.message ?? 'unknown'}`));
+      }
+    });
+    xhr.addEventListener('error', () => reject(new Error('network error')));
+    xhr.addEventListener('abort', () => reject(new Error('upload aborted')));
+    xhr.send(file);
+  });
+}
+
+// ── Shared clipboard ───────────────────────────────────────────────────
+
+export interface ClipboardState {
+  ok: boolean;
+  text: string;
+  size_bytes: number;
+  max_bytes: number;
+}
+
+export const getClipboard = () =>
+  req<ClipboardState>('GET', '/clipboard');
+export const setClipboard = (text: string) =>
+  req<{ ok: boolean; size_bytes: number; trimmed: boolean }>('PUT', '/clipboard', { text });
+export const clearClipboard = () =>
+  req<{ ok: boolean }>('DELETE', '/clipboard');
+export const typeClipboardOnTarget = () =>
+  req<{ ok: boolean; bytes_typed: number }>('POST', '/clipboard/type-on-target');
+
 // ── SSH key management ────────────────────────────────────────────────
 
 export interface SshKey {

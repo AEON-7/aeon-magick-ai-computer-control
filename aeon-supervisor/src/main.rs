@@ -26,6 +26,8 @@ mod mcp;
 mod network;
 mod proxy;
 mod security_metrics;
+mod clipboard;
+mod file_xfer;
 mod ssh_keys;
 mod storage;
 mod system;
@@ -85,6 +87,13 @@ async fn main() -> Result<()> {
     // DROP rule we apply (user or system) gets logged on the way down.
     // This is what populates the "Blocked traffic" panel.
     firewall::ensure_drop_chain();
+
+    // If the operator has enabled the target-facing HTTP file server,
+    // spawn it now. Listener binds 0.0.0.0:<configured-port>; the
+    // iptables INPUT rules from aeon-usb-net (in isolation/restricted
+    // modes) gate which clients can actually reach it. Off by default;
+    // toggle via PUT /api/files/config.
+    file_xfer::maybe_spawn_target_server().await;
 
     axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service()).await?;
     Ok(())

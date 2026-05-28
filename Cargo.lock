@@ -79,6 +79,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml",
  "tower-http",
  "tracing",

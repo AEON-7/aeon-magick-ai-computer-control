@@ -344,35 +344,28 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
         .arg("-y")
-        // ── Low-latency input flags (v46) ──
-        // Without these, ffmpeg's default behavior buffers 2-3 seconds
-        // of video for "smoothing" — devastating for a live KVM where
-        // every extra frame of latency is visible to the user typing
-        // on the target. Each flag explained:
+        // ── Latency-cutting INPUT flags (kept from v46) ──
+        // These attack ffmpeg's start-up and steady-state buffering
+        // without altering the encoder/muxer side. They're safe.
         //
-        //   -fflags +nobuffer    Skip frame buffering inside the
-        //                        demuxer. Each captured frame fires
-        //                        downstream immediately.
-        //   -flags  low_delay    Generic "minimize latency" mode for
-        //                        codecs that honor it.
-        //   -avioflags direct    Bypass libavformat's I/O buffering
-        //                        layer entirely.
-        //   -probesize  32       Use only 32 bytes for stream
-        //                        detection. Default is 5 MB which
-        //                        buffers ~5 seconds before producing
-        //                        the first frame.
-        //   -analyzeduration 0   Don't sample N seconds of input to
-        //                        figure out stream parameters — we
-        //                        already told ffmpeg the format /
-        //                        resolution / framerate via flags.
-        //   -thread_queue_size 4 Tiny input queue. Default is 8;
-        //                        smaller = less buffered latency.
+        //   -fflags nobuffer    Skip frame buffering inside the
+        //                       demuxer.
+        //   -flags  low_delay   Generic "minimize latency" hint.
+        //   -avioflags direct   Bypass libavformat's I/O buffering.
+        //   -probesize  32      Skip stream auto-detection (we know
+        //                       the format already). Saves ~5s of
+        //                       startup latency.
+        //   -analyzeduration 0  Ditto.
+        //
+        // (v46's `-thread_queue_size 4` removed — default 8 is fine
+        // and 4 caused back-pressure into the v4l2 demuxer when the
+        // software MJPEG encoder couldn't keep up, dropping the
+        // visible fps to ~7. Default is the right call.)
         .arg("-fflags").arg("nobuffer")
         .arg("-flags").arg("low_delay")
         .arg("-avioflags").arg("direct")
         .arg("-probesize").arg("32")
         .arg("-analyzeduration").arg("0")
-        .arg("-thread_queue_size").arg("4")
         // Input
         .arg("-f").arg("v4l2")
         .arg("-input_format").arg(source_format)
@@ -381,38 +374,33 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
         .arg("-i").arg(&cfg.device)
         // Filter — scale to target resolution
         .arg("-vf").arg(&scale_filter)
-        // ── Output / encoding (v46) ──
+        // ── Output / encoding ──
         //
-        // -fps_mode passthrough  (the modern name for -vsync 0) tells
-        //   ffmpeg to emit each input frame at the time it arrives,
-        //   instead of re-timing to a fixed output framerate. Without
-        //   this, `-r 30` would force ffmpeg to BUFFER frames waiting
-        //   for the 33.3 ms tick — a frame that arrives early sits in
-        //   limbo until its scheduled slot. Passthrough mode skips
-        //   the timing layer entirely, shaving ~1-2 frames of latency
-        //   in the common case.
+        // -r 30 (NOT -fps_mode passthrough): force ffmpeg to emit at
+        // a steady 30 fps. v46 tried `-fps_mode passthrough` to skip
+        // re-timing — that exposed the real source rate (sometimes
+        // 7-8 fps when the Cam Link delivers slowly) and resulted in
+        // visible stutter. Steady 30 fps with frame duplication on
+        // slow input is smoother for the human eye + agent screen-
+        // grabs at the cost of a few extra bytes per second over the
+        // LAN (which is plenty fast).
         //
-        // -flush_packets 1  Make the muxer flush each frame out of
-        //   the demuxer the instant it's encoded. Default would let
-        //   ffmpeg coalesce small writes.
-        //
-        // image2pipe: write each frame to stdout as a back-to-back
-        // sequence of JPEG bytes. The jpeg_pipe::run task reads
-        // stdout, parses SOI/EOI boundaries, and publishes complete
-        // frames on a tokio::sync::watch channel. No filesystem, no
-        // atomic-write gymnastics, no race.
-        .arg("-fps_mode").arg("passthrough")
+        // -flush_packets removed: it was causing the muxer to split
+        // JPEG frames across multiple writes more aggressively, which
+        // exposed a latent bug in the SOI/EOI parser when ffmpeg
+        // wrote partial frames AND it interacted with `nobuffer` to
+        // produce torn frames on the wire ("top segment only" was the
+        // symptom). image2pipe's default behavior emits one whole
+        // JPEG per write — which is what jpeg_pipe::run expects.
+        .arg("-r").arg(target_fps.to_string())
         .arg("-c:v").arg("mjpeg")
         .arg("-q:v").arg(&qv)
-        .arg("-flush_packets").arg("1")
         .arg("-f").arg("image2pipe")
         .arg("pipe:1")
         // Pipe stdout so jpeg_pipe::run can read frames. stderr stays
         // inherited so ffmpeg's warnings/errors land in our journal.
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    let _ = target_fps; // we no longer use it; we just pass frames through
-                         // at source rate. Drop it from compile-time silence.
 
     Ok(cmd.spawn()?)
 }

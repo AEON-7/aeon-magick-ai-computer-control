@@ -33,6 +33,7 @@ hex = "0.4"
 libc = "0.2"
 urlencoding = "2.1"
 futures = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
 
 [[bin]]
 name = "aeon-supervisor"

@@ -699,6 +699,7 @@
         <a href="/security"  class="btn text-xs">security</a>
         <a href="/dns"       class="btn text-xs">DNS</a>
         <a href="/storage"   class="btn text-xs">disk&nbsp;drive</a>
+        <a href="/files"     class="btn text-xs">files&nbsp;+&nbsp;clip</a>
         <a href="/ssh-keys"  class="btn text-xs">SSH&nbsp;keys</a>
         <a href="/tokens"    class="btn text-xs">API&nbsp;tokens</a>
         <a href="/audit"     class="btn text-xs">audit&nbsp;log</a>
@@ -794,6 +795,7 @@
         <a href="/security" class="btn text-xs">security</a>
         <a href="/dns"      class="btn text-xs">DNS</a>
         <a href="/storage"  class="btn text-xs">disk drive</a>
+        <a href="/files"    class="btn text-xs">files + clip</a>
         <a href="/ssh-keys" class="btn text-xs">SSH keys</a>
         <a href="/tokens"   class="btn text-xs">API tokens</a>
         <a href="/audit"    class="btn text-xs col-span-2">audit log</a>

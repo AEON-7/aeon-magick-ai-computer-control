@@ -48,6 +48,10 @@ d /var/lib/aeon/iso 0755 root root -
 # DNS blacklist subscription caches — one file per source, populated by
 # the supervisor's background refresh task.
 d /var/lib/aeon/dns-sources 0755 root root -
+# File-transfer staging dir: HTTP file server on usb0 reads/writes here.
+# Off by default — only the directory exists; the target-facing
+# listener doesn't bind until /etc/aeon/file-xfer.toml enables it.
+d /var/lib/aeon/files 0755 root root -
 # Audit log file is created on first append by the supervisor; only the
 # parent dir needs to exist. (Covered by /var/lib/aeon above.)
 EOF
