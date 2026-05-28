@@ -1,212 +1,94 @@
-//! Curated metadata for Anonymized DNSCrypt relays.
+//! Metadata for Anonymized DNSCrypt relays.
 //!
-//! `dnscrypt-proxy` already maintains a public list of all relays
-//! (https://github.com/DNSCrypt/dnscrypt-resolvers v3 / relays.md), but
-//! that list is a few hundred entries deep, has no structured metadata
-//! beyond operator-name-and-city, and includes huge single-operator
-//! pools (CryptoStorm: ~35 relays, DNSCry.pt: ~150). The whole point
-//! of anonymized DNSCrypt is OPERATOR DIVERSITY — three relays all
-//! run by the same outfit are no more private than one, because that
-//! operator can still correlate your queries across them.
+//! The full upstream relays.md catalog has ~270 IPv4 anon-DNS relays
+//! (https://github.com/DNSCrypt/dnscrypt-resolvers v3 / relays.md).
+//! That list ships unannotated — only operator-name and city embedded
+//! in freeform descriptions. We parse it at build time via
+//! `scripts/regenerate-anon-relays.py` into a structured JSON file
+//! at `data/anon-relays.json` that this module embeds via
+//! `include_str!` and parses once on startup.
 //!
-//! So we keep our own short-list with:
-//!   - explicit operator attribution
-//!   - jurisdiction (ISO country code)
-//!   - intelligence-sharing-alliance tier (5/9/14 Eyes; "none" if outside)
-//!   - log policy
+//! Each entry carries:
+//!   - operator (inferred from name prefix)
+//!   - country (ISO 3166 alpha-2, derived from description+name)
+//!   - eyes tier (5/9/14 Eyes; "none" if outside)
+//!   - no_logs flag (defaults to true; v3 list curates for this)
 //!
-//! Auto-pick logic groups by operator and selects one relay per operator
+//! Auto-pick groups by operator and selects one relay per operator
 //! preferring different jurisdictions — so a 3-relay auto-pick always
 //! covers 3 distinct operators in 3 distinct countries (when feasible).
+//! This matters: three relays from the same outfit are no more private
+//! than one, because that operator can still correlate your queries
+//! across them.
 //!
-//! Every name here MUST exist in the upstream relays.md and resolve to
-//! an active sdns:// stamp at apply time. If a name goes stale, drop
-//! it from this list; dnscrypt-proxy will gracefully skip unknown
-//! names via `skip_incompatible = true`.
+//! When a relay name goes stale upstream, dnscrypt-proxy skips it
+//! gracefully via `skip_incompatible = true`. Refresh the catalog by
+//! re-running `regenerate-anon-relays.py` and rebuilding.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// Five Eyes: US, UK, CA, AU, NZ.
 /// Nine Eyes adds: FR, DK, NL, NO.
 /// Fourteen Eyes adds: DE, BE, IT, ES, SE.
 /// "none" means outside any of these alliances.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+/// "unknown" means our parser couldn't pin down the country (shouldn't
+/// happen with the v52 generator but kept as a defensive fallback).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EyesTier {
     None,
     Five,
     Nine,
     Fourteen,
+    Unknown,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Relay {
     /// dnscrypt-proxy resolver name. Must match an entry in
     /// the public relays.md list.
-    pub name: &'static str,
+    pub name: String,
     /// Short human-friendly label for the UI.
-    pub label: &'static str,
+    pub label: String,
     /// Who operates this relay. Critical for the diversity check —
     /// auto-pick will never select two relays from the same operator.
-    pub operator: &'static str,
-    /// ISO 3166 alpha-2 country code.
-    pub country: &'static str,
+    pub operator: String,
+    /// ISO 3166 alpha-2 country code (empty if unknown).
+    pub country: String,
     /// Most aggressive intel-sharing alliance the country belongs to.
     pub eyes: EyesTier,
     /// Whether the operator publicly commits to keeping no logs.
-    /// All entries here SHOULD be true — we only include relays whose
-    /// operators publish a no-logs policy.
+    /// Defaults to true; v3 list curates for this.
     pub no_logs: bool,
-    /// Whether the relay's path validates DNSSEC. (All currently-listed
-    /// relays pass through, validation happens at the resolver.)
-    pub dnssec_pass_through: bool,
+    /// First ~200 chars of the description (for the UI tooltip).
+    #[serde(default)]
+    pub description: String,
 }
 
-/// Curated relay short-list. Hand-picked for operator + jurisdiction
-/// diversity. Order doesn't matter — auto-pick groups by operator
-/// and chooses within a group.
-pub const RELAYS: &[Relay] = &[
-    // ─── Operator: jedisct1 (Frank Denis, dnscrypt-proxy maintainer) ───
-    // Run on Scaleway VPS; jedisct1 is the author of dnscrypt-proxy
-    // itself — high trust signal but jurisdictionally inside 9 Eyes.
-    Relay {
-        name: "anon-scaleway", label: "Scaleway France (jedisct1)",
-        operator: "jedisct1", country: "FR", eyes: EyesTier::Nine,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-scaleway-ams", label: "Scaleway Amsterdam (jedisct1)",
-        operator: "jedisct1", country: "NL", eyes: EyesTier::Nine,
-        no_logs: true, dnssec_pass_through: true,
-    },
+impl Relay {
+    /// Most relays pass DNSSEC through — the relay just forwards the
+    /// encrypted blob, validation happens at the resolver. Kept as a
+    /// helper rather than a field so the JSON stays slim.
+    pub fn dnssec_pass_through(&self) -> bool { true }
+}
 
-    // ─── Operator: CryptoStorm ───
-    // Privacy-focused VPN provider; ~35 relays worldwide. Pick
-    // jurisdictionally diverse ones with low Eyes exposure.
-    Relay {
-        name: "anon-cs-ch", label: "Switzerland (CryptoStorm)",
-        operator: "CryptoStorm", country: "CH", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-md", label: "Moldova (CryptoStorm)",
-        operator: "CryptoStorm", country: "MD", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-ro", label: "Romania (CryptoStorm)",
-        operator: "CryptoStorm", country: "RO", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-serbia", label: "Serbia (CryptoStorm)",
-        operator: "CryptoStorm", country: "RS", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-singapore", label: "Singapore (CryptoStorm)",
-        operator: "CryptoStorm", country: "SG", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-tokyo", label: "Tokyo (CryptoStorm)",
-        operator: "CryptoStorm", country: "JP", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-poland", label: "Poland (CryptoStorm)",
-        operator: "CryptoStorm", country: "PL", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-hungary", label: "Hungary (CryptoStorm)",
-        operator: "CryptoStorm", country: "HU", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-cs-czech", label: "Czech Republic (CryptoStorm)",
-        operator: "CryptoStorm", country: "CZ", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
+/// Catalog loaded once from the embedded JSON snapshot.
+static CATALOG: OnceLock<Vec<Relay>> = OnceLock::new();
 
-    // ─── Operator: FlokiNET ───
-    // Independent privacy host based in Iceland; this relay is in
-    // their Romanian PoP.
-    Relay {
-        name: "anon-flokinet-ro", label: "Romania (FlokiNET)",
-        operator: "FlokiNET", country: "RO", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
+const EMBEDDED_RELAYS_JSON: &str = include_str!("../data/anon-relays.json");
 
-    // ─── Operator: Restena (Luxembourg academic) ───
-    Relay {
-        name: "anon-restena", label: "Luxembourg (Restena)",
-        operator: "Restena", country: "LU", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-
-    // ─── Operator: Quad9 (Swiss non-profit) ───
-    // Same outfit as the Quad9 resolver — DO NOT pair this relay
-    // with a Quad9 server (the same org sees both halves). The
-    // diversity check handles that automatically.
-    Relay {
-        name: "anon-quad9", label: "Switzerland (Quad9)",
-        operator: "Quad9", country: "CH", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-
-    // ─── Operator: dnswarden (privacy ops, Switzerland) ───
-    Relay {
-        name: "anon-dnswarden-swiss", label: "Switzerland (dnswarden)",
-        operator: "dnswarden", country: "CH", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-
-    // ─── Operator: independent (single-relay community ops) ───
-    Relay {
-        name: "anon-tiarap", label: "Singapore (tiarap)",
-        operator: "tiarap", country: "SG", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-meganerd", label: "Netherlands (meganerd)",
-        operator: "meganerd", country: "NL", eyes: EyesTier::Nine,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "anon-kama", label: "France (kama)",
-        operator: "kama", country: "FR", eyes: EyesTier::Nine,
-        no_logs: true, dnssec_pass_through: true,
-    },
-
-    // ─── Operator: DNSCry.pt (independent infra, ~150 PoPs) ───
-    // We pick a small jurisdiction-diverse subset.
-    Relay {
-        name: "dnscry.pt-anon-zurich-ipv4", label: "Zürich (DNSCry.pt)",
-        operator: "DNSCry.pt", country: "CH", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "dnscry.pt-anon-tallinn-ipv4", label: "Tallinn (DNSCry.pt)",
-        operator: "DNSCry.pt", country: "EE", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "dnscry.pt-anon-bucharest-ipv4", label: "Bucharest (DNSCry.pt)",
-        operator: "DNSCry.pt", country: "RO", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "dnscry.pt-anon-saopaulo-ipv4", label: "São Paulo (DNSCry.pt)",
-        operator: "DNSCry.pt", country: "BR", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-    Relay {
-        name: "dnscry.pt-anon-johannesburg-ipv4", label: "Johannesburg (DNSCry.pt)",
-        operator: "DNSCry.pt", country: "ZA", eyes: EyesTier::None,
-        no_logs: true, dnssec_pass_through: true,
-    },
-];
+pub fn catalog() -> &'static [Relay] {
+    CATALOG
+        .get_or_init(|| {
+            serde_json::from_str::<Vec<Relay>>(EMBEDDED_RELAYS_JSON)
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to parse embedded anon-relays.json: {e}");
+                    Vec::new()
+                })
+        })
+        .as_slice()
+}
 
 // ── Resolver operator mapping ────────────────────────────────────────
 
@@ -267,7 +149,7 @@ impl RelayCriteria {
         if self.no_logs && !r.no_logs {
             return false;
         }
-        if self.dnssec && !r.dnssec_pass_through {
+        if self.dnssec && !r.dnssec_pass_through() {
             return false;
         }
         if self.outside_five_eyes && r.eyes == EyesTier::Five {
@@ -293,9 +175,9 @@ pub fn auto_pick(
     criteria: &RelayCriteria,
     exclude_operator: Option<&str>,
     desired_count: usize,
-) -> Vec<&'static str> {
+) -> Vec<String> {
     // Filter step
-    let mut pool: Vec<&'static Relay> = RELAYS
+    let mut pool: Vec<&'static Relay> = catalog()
         .iter()
         .filter(|r| {
             // HARD: exclude same operator as the resolver
@@ -317,23 +199,23 @@ pub fn auto_pick(
     //   - one per country (best-effort; if we can't satisfy both
     //     constraints we relax country before operator)
     let mut picked: Vec<&'static Relay> = Vec::new();
-    let mut seen_operators: Vec<&'static str> = Vec::new();
-    let mut seen_countries: Vec<&'static str> = Vec::new();
+    let mut seen_operators: Vec<&str> = Vec::new();
+    let mut seen_countries: Vec<&str> = Vec::new();
 
     // First pass: strict country + operator uniqueness
     for r in &pool {
         if picked.len() >= desired_count {
             break;
         }
-        if seen_operators.contains(&r.operator) {
+        if seen_operators.iter().any(|op| *op == r.operator) {
             continue;
         }
-        if seen_countries.contains(&r.country) {
+        if seen_countries.iter().any(|c| *c == r.country) {
             continue;
         }
         picked.push(r);
-        seen_operators.push(r.operator);
-        seen_countries.push(r.country);
+        seen_operators.push(&r.operator);
+        seen_countries.push(&r.country);
     }
 
     // Second pass: if we still don't have enough, allow same country
@@ -343,11 +225,11 @@ pub fn auto_pick(
             if picked.len() >= desired_count {
                 break;
             }
-            if seen_operators.contains(&r.operator) {
+            if seen_operators.iter().any(|op| *op == r.operator) {
                 continue;
             }
             picked.push(r);
-            seen_operators.push(r.operator);
+            seen_operators.push(&r.operator);
         }
     }
 
@@ -367,7 +249,7 @@ pub fn auto_pick(
         }
     }
 
-    picked.into_iter().map(|r| r.name).collect()
+    picked.into_iter().map(|r| r.name.clone()).collect()
 }
 
 fn eyes_rank(e: EyesTier) -> u8 {
@@ -376,6 +258,7 @@ fn eyes_rank(e: EyesTier) -> u8 {
         EyesTier::Fourteen => 1,
         EyesTier::Nine => 2,
         EyesTier::Five => 3,
+        EyesTier::Unknown => 4, // unknown ranks last so we prefer attributed relays
     }
 }
 
@@ -392,9 +275,10 @@ mod tests {
         assert_eq!(picked.len(), 3, "should pick 3 relays");
 
         // No two picks from the same operator
+        let cat = catalog();
         let operators: Vec<_> = picked
             .iter()
-            .map(|name| RELAYS.iter().find(|r| r.name == *name).unwrap().operator)
+            .map(|name| cat.iter().find(|r| r.name == *name).unwrap().operator.as_str())
             .collect();
         let mut sorted = operators.clone();
         sorted.sort();
@@ -416,8 +300,9 @@ mod tests {
             dnssec: true,
         };
         let picked = auto_pick(&crit, None, 5);
+        let cat = catalog();
         for name in &picked {
-            let r = RELAYS.iter().find(|r| r.name == *name).unwrap();
+            let r = cat.iter().find(|r| r.name == *name).unwrap();
             assert_eq!(r.eyes, EyesTier::None, "{name} should be outside 14 Eyes");
         }
     }

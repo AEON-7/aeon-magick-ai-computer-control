@@ -37,6 +37,31 @@
   let anonOutsideFourteenEyes = false;
   let anonDnssec = true;
   let anonSpecificRelays: string[] = [];
+  // Search box for the full ~190-relay catalog (specific mode only).
+  let anonSearch = '';
+  let anonShowOnlySelected = false;
+
+  // Reactive derived state for the specific-mode multi-select.
+  // Svelte 4 forbids non-assignment expressions in {@const} so we
+  // compute these in a reactive block instead of inline in the template.
+  $: anonCatalog = dnsState?.anonymized?.catalog ?? [];
+  $: anonFiltered = anonCatalog.filter((r) => {
+    if (anonShowOnlySelected && !anonSpecificRelays.includes(r.name)) return false;
+    if (!anonSearch.trim()) return true;
+    const q = anonSearch.toLowerCase().trim();
+    return r.name.toLowerCase().includes(q)
+        || r.operator.toLowerCase().includes(q)
+        || r.country.toLowerCase().includes(q)
+        || r.label.toLowerCase().includes(q)
+        || (r.description ?? '').toLowerCase().includes(q);
+  });
+  $: anonGrouped = anonFiltered.reduce<Record<string, typeof anonFiltered>>(
+    (acc, r) => {
+      (acc[r.operator] ??= []).push(r);
+      return acc;
+    },
+    {},
+  );
 
   // ── VPN ──
   let vpnState: api.VpnState | null = null;
@@ -779,39 +804,109 @@
                   {/if}
 
                 {:else}
-                  <!-- Manual relay multi-select -->
+                  <!-- Manual relay multi-select — full upstream catalog -->
                   <div class="space-y-2">
-                    <p class="text-[11px] uppercase tracking-wider text-zinc-500">
-                      Pick 1-8 relays manually
-                    </p>
-                    <div class="max-h-60 overflow-y-auto space-y-1
-                                border border-ink-800 rounded p-2 bg-ink-950/40">
-                      {#if dnsState?.anonymized?.catalog}
-                        {#each dnsState.anonymized.catalog as r}
-                          <label class="flex items-center gap-2 cursor-pointer text-xs
-                                        p-1 rounded hover:bg-ink-800/50">
-                            <input type="checkbox"
-                                   checked={anonSpecificRelays.includes(r.name)}
-                                   on:change={(e) => {
-                                     if (e.currentTarget.checked) {
-                                       anonSpecificRelays = [...anonSpecificRelays, r.name];
-                                     } else {
-                                       anonSpecificRelays = anonSpecificRelays.filter(n => n !== r.name);
-                                     }
-                                   }}
-                                   class="w-3 h-3 accent-cursed-500" />
-                            <span class="text-zinc-300 font-mono">{r.label}</span>
-                            <span class="text-zinc-600 text-[10px] ml-auto">
-                              {r.country} · {r.eyes === 'none' ? 'no Eyes' : r.eyes + ' Eyes'}
-                            </span>
-                          </label>
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                        Pick 1-8 relays manually
+                      </p>
+                      <p class="text-[11px] font-mono
+                                {anonSpecificRelays.length === 0 ? 'text-amber-400' :
+                                 anonSpecificRelays.length > 8 ? 'text-red-400' :
+                                 'text-cursed-300'}">
+                        {anonSpecificRelays.length} / 8 selected
+                      </p>
+                    </div>
+
+                    <!-- Search + filter toggle -->
+                    <div class="flex flex-wrap items-center gap-2">
+                      <input type="text" bind:value={anonSearch}
+                             placeholder="search: name, operator, country code…"
+                             class="flex-1 min-w-0 bg-ink-800 border border-ink-700
+                                    rounded px-3 py-1.5 text-xs text-zinc-200 font-mono" />
+                      <label class="flex items-center gap-1.5 cursor-pointer text-[11px]
+                                    text-zinc-400 hover:text-zinc-200">
+                        <input type="checkbox" bind:checked={anonShowOnlySelected}
+                               class="w-3 h-3 accent-cursed-500" />
+                        only selected
+                      </label>
+                      {#if anonSpecificRelays.length > 0}
+                        <button class="text-[10px] text-zinc-500 hover:text-red-400
+                                       border border-ink-700 hover:border-red-500/50
+                                       rounded px-2 py-1 transition-colors"
+                                on:click={() => { anonSpecificRelays = []; }}>
+                          clear all
+                        </button>
+                      {/if}
+                    </div>
+
+                    <!-- Grouped relay list (by operator) -->
+                    <div class="max-h-96 overflow-y-auto space-y-3
+                                border border-ink-800 rounded p-3 bg-ink-950/40">
+                      {#if anonFiltered.length === 0}
+                        <p class="text-xs text-zinc-500 italic text-center py-4">
+                          {anonSearch ? `no relays match “${anonSearch}”` : 'no relays'}
+                        </p>
+                      {:else}
+                        {#each Object.entries(anonGrouped) as [op, relays]}
+                          <div class="space-y-1">
+                            <div class="flex items-baseline gap-2 sticky top-0
+                                        bg-ink-950/95 py-1 -mx-1 px-1">
+                              <span class="font-mono text-[10px] uppercase tracking-wider
+                                           text-cursed-300">{op}</span>
+                              <span class="text-[10px] text-zinc-600">
+                                {relays.length} {relays.length === 1 ? 'relay' : 'relays'}
+                              </span>
+                            </div>
+                            {#each relays as r}
+                              <label class="flex items-center gap-2 cursor-pointer text-xs
+                                            p-1.5 rounded hover:bg-ink-800/50
+                                            {anonSpecificRelays.includes(r.name) ? 'bg-cursed-500/10' : ''}"
+                                     title={r.description}>
+                                <input type="checkbox"
+                                       checked={anonSpecificRelays.includes(r.name)}
+                                       on:change={(e) => {
+                                         if (e.currentTarget.checked) {
+                                           anonSpecificRelays = [...anonSpecificRelays, r.name];
+                                         } else {
+                                           anonSpecificRelays = anonSpecificRelays.filter(n => n !== r.name);
+                                         }
+                                       }}
+                                       class="w-3 h-3 accent-cursed-500 flex-shrink-0" />
+                                <span class="text-zinc-300 font-mono truncate flex-1">{r.label}</span>
+                                <span class="text-[10px] flex items-center gap-1.5 flex-shrink-0">
+                                  <span class="text-zinc-500 font-mono">{r.country || '??'}</span>
+                                  <span class="px-1.5 py-0.5 rounded
+                                               {r.eyes === 'none' ? 'bg-live-500/15 text-live-300' :
+                                                r.eyes === 'fourteen' ? 'bg-amber-500/15 text-amber-300' :
+                                                r.eyes === 'nine' ? 'bg-orange-500/15 text-orange-300' :
+                                                r.eyes === 'five' ? 'bg-red-500/15 text-red-300' :
+                                                'bg-zinc-500/15 text-zinc-400'}">
+                                    {r.eyes === 'none' ? 'no eyes' :
+                                     r.eyes === 'unknown' ? '?' : r.eyes + ' eyes'}
+                                  </span>
+                                  {#if r.no_logs}
+                                    <span class="px-1.5 py-0.5 rounded bg-zinc-700/30 text-zinc-400">
+                                      no-logs
+                                    </span>
+                                  {/if}
+                                </span>
+                              </label>
+                            {/each}
+                          </div>
                         {/each}
                       {/if}
                     </div>
-                    <p class="text-[11px] text-zinc-500">
-                      {anonSpecificRelays.length} selected. Pick relays from
-                      multiple operators for real anonymization — 3 relays
-                      all run by the same outfit aren't more private than 1.
+
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      {anonFiltered.length} of {anonCatalog.length} relays shown. Eyes tier
+                      colors: <span class="text-live-300">no eyes</span> &gt;
+                      <span class="text-amber-300">14 eyes</span> &gt;
+                      <span class="text-orange-300">9 eyes</span> &gt;
+                      <span class="text-red-300">5 eyes</span>. Pick relays from
+                      <strong>multiple operators</strong> for real anonymization
+                      — 3 relays all run by the same outfit aren't more private
+                      than 1.
                     </p>
                   </div>
                 {/if}

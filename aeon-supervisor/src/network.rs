@@ -388,7 +388,7 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
             "currently_picked": picked_relays,
             // Full curated catalog so the UI can render filter chips +
             // a "specific relay" multi-select.
-            "catalog": crate::dnscrypt_relays::RELAYS,
+            "catalog": crate::dnscrypt_relays::catalog(),
         },
         // ── DNSCrypt-only provider list (v49+) ──────────────────────
         //
@@ -623,7 +623,7 @@ pub async fn put_dnscrypt(
             // dnscrypt-proxy (via skip_incompatible=true) and the
             // user would never know their config was a no-op.
             let known: std::collections::HashSet<&str> =
-                crate::dnscrypt_relays::RELAYS.iter().map(|r| r.name).collect();
+                crate::dnscrypt_relays::catalog().iter().map(|r| r.name.as_str()).collect();
             for r in &relays {
                 if !known.contains(r.as_str()) {
                     return (
@@ -670,9 +670,6 @@ pub async fn put_dnscrypt(
                 resolver_op,
                 3,
             )
-            .into_iter()
-            .map(|n| n.to_string())
-            .collect()
         }
     } else {
         Vec::new()

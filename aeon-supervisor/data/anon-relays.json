@@ -1,0 +1,1685 @@
+[
+  {
+    "name": "anon-cs-austria",
+    "label": "Austria (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "AT",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Wien, Austria Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-sydney",
+    "label": "Sydney (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "AU",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "Sydney, Australia Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-belgium",
+    "label": "Belgium (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "BE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Brussels, Belgium Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-montreal",
+    "label": "Montreal (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "Montreal, Canada Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-vancouver",
+    "label": "Vancouver (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "Vancouver, Canada Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-ch",
+    "label": "Ch (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "CH",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Switzerland Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-czech",
+    "label": "Czech (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "CZ",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Prague, Czech Republic Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-berlin",
+    "label": "Berlin (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Berlin, Germany Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-de",
+    "label": "De (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Frankfurt, Germany Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-dus",
+    "label": "Dus (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Dusseldorf, Germany Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-barcelona",
+    "label": "Barcelona (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "ES",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Barcelona, Spain Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-finland",
+    "label": "Finland (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "FI",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Finland Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-fr",
+    "label": "Fr (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "FR",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "France Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-london",
+    "label": "London (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "London, England Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-manchester",
+    "label": "Manchester (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "Manchester, England Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-hungary",
+    "label": "Hungary (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "HU",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Budapest, Hungary Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-milan",
+    "label": "Milan (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "IT",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Milan, Italy Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-tokyo",
+    "label": "Tokyo (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "JP",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Tokyo, Japan Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-md",
+    "label": "Md (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "MD",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Moldova Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-nl",
+    "label": "Nl (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Netherlands Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-norway",
+    "label": "Norway (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "NO",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Oslo, Norway Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-poland",
+    "label": "Poland (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "PL",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Warsaw, Poland Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-pt",
+    "label": "Pt (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "PT",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Portugal Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-ro",
+    "label": "Ro (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "RO",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Romania Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-serbia",
+    "label": "Serbia (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "RS",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Belgrade, Serbia Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-swe",
+    "label": "Swe (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "SE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "Sweden Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-singapore",
+    "label": "Singapore (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "SG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Singapore Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-dc",
+    "label": "Dc (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Washington, DC Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-fl",
+    "label": "Fl (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Miami, FL Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-ga",
+    "label": "Ga (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Atlanta, GA Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-il",
+    "label": "Il (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Chicago, IL Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-la",
+    "label": "La (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Los Angeles, CA Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-nv",
+    "label": "Nv (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Las Vegas, NV Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-nyc",
+    "label": "Nyc (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - New York City, NY Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-ore",
+    "label": "Ore (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Oregon Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-sea",
+    "label": "Sea (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Seattle, WA Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "anon-cs-tx",
+    "label": "Tx (CryptoStorm)",
+    "operator": "CryptoStorm",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "US - Dallas, TX Anonymized DNS relay server provided by https://cryptostorm.is/"
+  },
+  {
+    "name": "dnscry.pt-anon-fujairah-ipv4",
+    "label": "Fujairah (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AE",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Fujairah - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-tirana-ipv4",
+    "label": "Tirana (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AL",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Tirana - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-yerevan-ipv4",
+    "label": "Yerevan (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AM",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Yerevan - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-adelaide-ipv4",
+    "label": "Adelaide (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AU",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Adelaide - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-brisbane-ipv4",
+    "label": "Brisbane (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AU",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Brisbane - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-melbourne-ipv4",
+    "label": "Melbourne (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AU",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Melbourne - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-perth-ipv4",
+    "label": "Perth (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AU",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Perth - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-sydney02-ipv4",
+    "label": "Sydney02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AU",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Sydney 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-baku-ipv4",
+    "label": "Baku (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "AZ",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Baku - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-dhaka-ipv4",
+    "label": "Dhaka (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "BD",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Dhaka - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-brussels-ipv4",
+    "label": "Brussels (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "BE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Brussels - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-sofia-ipv4",
+    "label": "Sofia (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "BG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Sofia - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-saopaulo-ipv4",
+    "label": "Saopaulo (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "BR",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Sao Paulo - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-calgary-ipv4",
+    "label": "Calgary (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Calgary - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-halifax-ipv4",
+    "label": "Halifax (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Halifax - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-montreal-ipv4",
+    "label": "Montreal (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Montreal - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-toronto-ipv4",
+    "label": "Toronto (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Toronto - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-toronto02-ipv4",
+    "label": "Toronto02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Toronto 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-vancouver-ipv4",
+    "label": "Vancouver (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CA",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Vancouver - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-geneva-ipv4",
+    "label": "Geneva (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CH",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Geneva - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-zurich-ipv4",
+    "label": "Zurich (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CH",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Zürich - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-valdivia-ipv4",
+    "label": "Valdivia (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CL",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Valdivia - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-bogota-ipv4",
+    "label": "Bogota (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CO",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Bogotá - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-prague-ipv4",
+    "label": "Prague (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "CZ",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Prague - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-bremen-ipv4",
+    "label": "Bremen (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Bremen - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-dusseldorf-ipv4",
+    "label": "Dusseldorf (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Düsseldorf - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-dusseldorf02-ipv4",
+    "label": "Dusseldorf02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Düsseldorf 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-dusseldorf03-ipv4",
+    "label": "Dusseldorf03 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Düsseldorf 03 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-frankfurt02-ipv4",
+    "label": "Frankfurt02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Frankfurt 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-jena-ipv4",
+    "label": "Jena (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Jena - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-molln-ipv4",
+    "label": "Molln (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Mölln - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-munich-ipv4",
+    "label": "Munich (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Munich - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-nuremberg-ipv4",
+    "label": "Nuremberg (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Nuremberg - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-copenhagen-ipv4",
+    "label": "Copenhagen (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "DK",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Copenhagen - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-guayaquil-ipv4",
+    "label": "Guayaquil (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "EC",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Guayaquil - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-tallinn-ipv4",
+    "label": "Tallinn (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "EE",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Tallinn - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-barcelona-ipv4",
+    "label": "Barcelona (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ES",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Barcelona - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-madrid-ipv4",
+    "label": "Madrid (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ES",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Madrid - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-helsinki-ipv4",
+    "label": "Helsinki (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "FI",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Helsinki - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-tuusula-ipv4",
+    "label": "Tuusula (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "FI",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Tuusula - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-marseille-ipv4",
+    "label": "Marseille (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "FR",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Marseille - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-paris-ipv4",
+    "label": "Paris (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "FR",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Paris - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-coventry-ipv4",
+    "label": "Coventry (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Coventry - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-london-ipv4",
+    "label": "London (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt London - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-manchester-ipv4",
+    "label": "Manchester (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Manchester - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-newcastle-ipv4",
+    "label": "Newcastle (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Newcastle - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-redditch-ipv4",
+    "label": "Redditch (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GB",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Redditch - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-athens-ipv4",
+    "label": "Athens (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GR",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Athens - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-thessaloniki-ipv4",
+    "label": "Thessaloniki (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "GR",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Thessaloniki - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-hongkong-ipv4",
+    "label": "Hongkong (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "HK",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Hong Kong - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-hongkong02-ipv4",
+    "label": "Hongkong02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "HK",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Hong Kong 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-hongkong03-ipv4",
+    "label": "Hongkong03 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "HK",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Hong Kong 03 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-budapest-ipv4",
+    "label": "Budapest (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "HU",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Budapest - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-jakarta-ipv4",
+    "label": "Jakarta (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ID",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Jakarta - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-dublin-ipv4",
+    "label": "Dublin (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IE",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Dublin - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-telaviv-ipv4",
+    "label": "Telaviv (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IL",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Tel Aviv - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-bengaluru-ipv4",
+    "label": "Bengaluru (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IN",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Bengaluru - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-mumbai-ipv4",
+    "label": "Mumbai (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IN",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Mumbai - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-mumbai02-ipv4",
+    "label": "Mumbai02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IN",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Mumbai 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-hafnarfjordur-ipv4",
+    "label": "Hafnarfjordur (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IS",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Hafnarfjordur - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-milan-ipv4",
+    "label": "Milan (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IT",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Milan - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-palermo-ipv4",
+    "label": "Palermo (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "IT",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Palermo - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-tokyo-ipv4",
+    "label": "Tokyo (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "JP",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Tokyo - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-tokyo02-ipv4",
+    "label": "Tokyo02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "JP",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Tokyo 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-seoul-ipv4",
+    "label": "Seoul (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "KR",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Seoul - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-seoul02-ipv4",
+    "label": "Seoul02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "KR",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Seoul 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-vilnius-ipv4",
+    "label": "Vilnius (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "LT",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Vilnius - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-luxembourg-ipv4",
+    "label": "Luxembourg (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "LU",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Luxembourg - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-riga-ipv4",
+    "label": "Riga (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "LV",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Riga - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-chisinau-ipv4",
+    "label": "Chisinau (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "MD",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Chișinău - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ebenecity-ipv4",
+    "label": "Ebenecity (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "MU",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Ebène City - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ebenecity02-ipv4",
+    "label": "Ebenecity02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "MU",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Ebène City 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-queretaro-ipv4",
+    "label": "Queretaro (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "MX",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Querétaro - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ikeja-ipv4",
+    "label": "Ikeja (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Ikeja - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-lagos-ipv4",
+    "label": "Lagos (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Lagos - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-amsterdam-ipv4",
+    "label": "Amsterdam (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Amsterdam - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-amsterdam02-ipv4",
+    "label": "Amsterdam02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Amsterdam 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-amsterdam03-ipv4",
+    "label": "Amsterdam03 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Amsterdam 03 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-eygelshoven-ipv4",
+    "label": "Eygelshoven (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Eygelshoven - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-naaldwijk-ipv4",
+    "label": "Naaldwijk (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "DNSCry.pt Naaldwijk - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-auckland-ipv4",
+    "label": "Auckland (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "NZ",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Auckland - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-lima02-ipv4",
+    "label": "Lima02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PE",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Lima 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-manila-ipv4",
+    "label": "Manila (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PH",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Manila - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-islamabad-ipv4",
+    "label": "Islamabad (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PK",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Islamabad - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-gdansk-ipv4",
+    "label": "Gdansk (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PL",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Gdańsk - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-warsaw-ipv4",
+    "label": "Warsaw (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PL",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Warsaw - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-lisbon-ipv4",
+    "label": "Lisbon (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PT",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Lisbon - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-lisbon02-ipv4",
+    "label": "Lisbon02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "PT",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Lisbon 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-bucharest-ipv4",
+    "label": "Bucharest (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "RO",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Bucharest - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-oradea-ipv4",
+    "label": "Oradea (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "RO",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Oradea - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-timisoara-ipv4",
+    "label": "Timisoara (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "RO",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Timișoara - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-moscow-ipv4",
+    "label": "Moscow (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "RU",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Moscow - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-hudiksvall-ipv4",
+    "label": "Hudiksvall (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "SE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Hudiksvall - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-sandefjord-ipv4",
+    "label": "Sandefjord (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "SE",
+    "eyes": "fourteen",
+    "no_logs": true,
+    "description": "DNSCry.pt Sandefjord - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-singapore-ipv4",
+    "label": "Singapore (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "SG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Singapore - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-singapore02-ipv4",
+    "label": "Singapore02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "SG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Singapore 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ljubljana-ipv4",
+    "label": "Ljubljana (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "SI",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Ljubljana - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-bratislava-ipv4",
+    "label": "Bratislava (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "SK",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Bratislava - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-bangkok-ipv4",
+    "label": "Bangkok (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "TH",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Bangkok - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-kyiv-ipv4",
+    "label": "Kyiv (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "UA",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Kyiv - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-allentown-ipv4",
+    "label": "Allentown (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Allentown - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ashburn-ipv4",
+    "label": "Ashburn (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Ashburn - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-atlanta-ipv4",
+    "label": "Atlanta (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Atlanta - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-berkeleysprings-ipv4",
+    "label": "Berkeleysprings (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Berkeley Springs - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-chicago-ipv4",
+    "label": "Chicago (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Chicago - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-denver-ipv4",
+    "label": "Denver (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Denver - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-detroit-ipv4",
+    "label": "Detroit (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Detroit - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-durham-ipv4",
+    "label": "Durham (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Durham - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-flint-ipv4",
+    "label": "Flint (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Flint - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-fremont02-ipv4",
+    "label": "Fremont02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Fremont 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-grandrapids-ipv4",
+    "label": "Grandrapids (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Grand Rapids - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-houston-ipv4",
+    "label": "Houston (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Houston - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-indianapolis-ipv4",
+    "label": "Indianapolis (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Indianapolis - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-jacksonville-ipv4",
+    "label": "Jacksonville (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Jacksonville - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-kansascity-ipv4",
+    "label": "Kansascity (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Kansas City - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-lasvegas-ipv4",
+    "label": "Lasvegas (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Las Vegas - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-libertylake-ipv4",
+    "label": "Libertylake (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Liberty Lake - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-losangeles-ipv4",
+    "label": "Losangeles (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Los Angeles - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-losangeles02-ipv4",
+    "label": "Losangeles02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Los Angeles 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-miami-ipv4",
+    "label": "Miami (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Miami - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-newyork-ipv4",
+    "label": "Newyork (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt New York - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ogden-ipv4",
+    "label": "Ogden (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Ogden - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-ottoville-ipv4",
+    "label": "Ottoville (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Ottoville - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-philadelphia-ipv4",
+    "label": "Philadelphia (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Philadelphia - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-phoenix-ipv4",
+    "label": "Phoenix (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Phoenix - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-portedwards-ipv4",
+    "label": "Portedwards (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Port Edwards - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-portland-ipv4",
+    "label": "Portland (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Portland - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-saltlakecity-ipv4",
+    "label": "Saltlakecity (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Salt Lake City - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-sanjose-ipv4",
+    "label": "Sanjose (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt San Jose - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-santaclara-ipv4",
+    "label": "Santaclara (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Santa Clara - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-seattle-ipv4",
+    "label": "Seattle (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Seattle - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-spokane-ipv4",
+    "label": "Spokane (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Spokane - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-tampa-ipv4",
+    "label": "Tampa (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Tampa - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-taos-ipv4",
+    "label": "Taos (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "DNSCry.pt Taos - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-hanoi-ipv4",
+    "label": "Hanoi (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "VN",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Hanoi - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-capetown-ipv4",
+    "label": "Capetown (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ZA",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Cape Town - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-capetown02-ipv4",
+    "label": "Capetown02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ZA",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Cape Town 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-johannesburg-ipv4",
+    "label": "Johannesburg (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ZA",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Johannesburg - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "dnscry.pt-anon-johannesburg02-ipv4",
+    "label": "Johannesburg02 (DNSCry.pt)",
+    "operator": "DNSCry.pt",
+    "country": "ZA",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "DNSCry.pt Johannesburg 02 - DNSCrypt, no filter, no logs, DNSSEC support (IPv4 server) https://www.dnscry.pt"
+  },
+  {
+    "name": "anon-dnswarden-swiss",
+    "label": "CH (dnswarden)",
+    "operator": "dnswarden",
+    "country": "CH",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Relay hosted in Switzerland. For more information look at https://github.com/bhanupratapys/dnswarden or https://dnswarden.com"
+  },
+  {
+    "name": "anon-inconnu",
+    "label": "US (inconnu)",
+    "operator": "inconnu",
+    "country": "US",
+    "eyes": "five",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in Seattle, WA (USA), maintained by Eric Lagergren (@ericlagergren). Running the official Docker image on Vultr."
+  },
+  {
+    "name": "anon-kama",
+    "label": "FR (jedisct1)",
+    "operator": "jedisct1",
+    "country": "FR",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in France and maintained by Frank Denis (@jedisct1)."
+  },
+  {
+    "name": "anon-scaleway",
+    "label": "FR (jedisct1)",
+    "operator": "jedisct1",
+    "country": "FR",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in France and maintained by Frank Denis (@jedisct1)."
+  },
+  {
+    "name": "anon-scaleway2",
+    "label": "FR (jedisct1)",
+    "operator": "jedisct1",
+    "country": "FR",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in France and maintained by Frank Denis (@jedisct1)."
+  },
+  {
+    "name": "anon-scaleway-ams",
+    "label": "NL (jedisct1)",
+    "operator": "jedisct1",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in Amsterdam and maintained by Frank Denis (@jedisct1)."
+  },
+  {
+    "name": "anon-serbica",
+    "label": "NL (litepay)",
+    "operator": "litepay",
+    "country": "NL",
+    "eyes": "nine",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in Netherlands by https://litepay.ch"
+  },
+  {
+    "name": "anon-tiarap",
+    "label": "SG (tiarap)",
+    "operator": "tiarap",
+    "country": "SG",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Anonymized DNS relay hosted in Singapore"
+  },
+  {
+    "name": "anon-saldns01-conoha-ipv4",
+    "label": "JP (μODNS)",
+    "operator": "μODNS",
+    "country": "JP",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Hosted on ConoHa VPS Tokyo region. No log. From experimental &mu;ODNS project https://junkurihara.github.io/dns/."
+  },
+  {
+    "name": "anon-saldns02-conoha-ipv4",
+    "label": "JP (μODNS)",
+    "operator": "μODNS",
+    "country": "JP",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Hosted on ConoHa VPS Tokyo region. No log. From experimental &mu;ODNS project https://junkurihara.github.io/dns/."
+  },
+  {
+    "name": "anon-saldns03-conoha-ipv4",
+    "label": "JP (μODNS)",
+    "operator": "μODNS",
+    "country": "JP",
+    "eyes": "none",
+    "no_logs": true,
+    "description": "Hosted on ConoHa VPS Tokyo region. No log. From experimental &mu;ODNS project https://junkurihara.github.io/dns/."
+  }
+]

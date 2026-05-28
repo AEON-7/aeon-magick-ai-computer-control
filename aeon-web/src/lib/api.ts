@@ -220,15 +220,16 @@ export interface DnscryptLocation {
   label: string;
 }
 
-/// Curated anonymized-relay metadata (v51+). One entry per relay.
+/// Anonymized-relay metadata. v52 ships the full ~190-entry upstream
+/// catalog with parsed country / operator / Eyes-tier annotations.
 export interface AnonymizedRelay {
   name: string;          // matches dnscrypt-proxy resolver name
   label: string;
   operator: string;
-  country: string;       // ISO 3166 alpha-2
-  eyes: 'none' | 'five' | 'nine' | 'fourteen';
+  country: string;       // ISO 3166 alpha-2 (empty if unknown)
+  eyes: 'none' | 'five' | 'nine' | 'fourteen' | 'unknown';
   no_logs: boolean;
-  dnssec_pass_through: boolean;
+  description?: string;  // first ~200 chars of the upstream description
 }
 
 export interface AnonymizedCriteria {
