@@ -115,7 +115,8 @@ pub async fn run(state: SharedState) -> Result<()> {
         if matches!(pipeline, Pipeline::FfmpegRescale { .. }) {
             if let Some(stdout) = child.stdout.take() {
                 let tx = state.0.frame_tx.clone();
-                tokio::spawn(crate::jpeg_pipe::run(stdout, tx));
+                let counter = std::sync::Arc::clone(&state.0.frames_published);
+                tokio::spawn(crate::jpeg_pipe::run(stdout, tx, counter));
                 info!("jpeg_pipe reader spawned for this ffmpeg run");
             } else {
                 warn!("ffmpeg child has no stdout pipe — frames won't reach webapi");

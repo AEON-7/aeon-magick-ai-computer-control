@@ -13,6 +13,8 @@
 //! complete SOI-to-EOI byte sequence.
 
 use bytes::Bytes;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::process::ChildStdout;
 use tokio::sync::watch;
@@ -30,9 +32,13 @@ const MAX_BUFFER: usize = 4 * 1024 * 1024;
 
 /// Read JPEG frames from `stdout` until EOF (or error), publishing each
 /// complete frame on `tx`. Runs until the pipe closes.
+///
+/// `frames_published` is a counter the watchdog samples to compute
+/// captured_fps. Atomic so we don't need a lock on the hot path.
 pub async fn run(
     mut stdout: ChildStdout,
     tx: watch::Sender<Option<Bytes>>,
+    frames_published: Arc<AtomicU64>,
 ) {
     let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
     let mut read_buf = vec![0u8; 64 * 1024];
@@ -64,6 +70,9 @@ pub async fn run(
                     // in normal operation. Ignore the result.
                     let _ = tx.send(Some(frame));
                     frames_emitted = frames_emitted.wrapping_add(1);
+                    // Bump the shared counter — watchdog samples this
+                    // to compute captured_fps.
+                    frames_published.fetch_add(1, Ordering::Relaxed);
                     if frames_emitted % 600 == 0 {
                         // Roughly every 20s at 30fps — keep journal noise low.
                         trace!(frames = frames_emitted, buf_len = buf.len(),

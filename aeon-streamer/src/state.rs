@@ -7,6 +7,7 @@ use http_body_util::Empty;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use parking_lot::Mutex;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{watch, Notify};
 
@@ -51,6 +52,12 @@ pub struct Shared {
     /// multipart emission). No locking, no filesystem, no torn reads.
     pub frame_tx: watch::Sender<Option<bytes::Bytes>>,
     pub frame_rx: watch::Receiver<Option<bytes::Bytes>>,
+    /// Monotonically increasing count of complete JPEG frames published
+    /// on `frame_tx`. The watchdog samples this once per tick and
+    /// computes the rate to expose as `captured_fps`. Wrapped in Arc
+    /// so jpeg_pipe::run can hold its own reference into the same
+    /// counter without the whole `Shared` having to be passed along.
+    pub frames_published: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -69,6 +76,7 @@ impl SharedState {
             uds_client,
             frame_tx,
             frame_rx,
+            frames_published: Arc::new(AtomicU64::new(0)),
         }))
     }
 

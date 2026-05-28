@@ -10,7 +10,8 @@
 use crate::capture;
 use crate::state::SharedState;
 use anyhow::Result;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 const POLL: Duration = Duration::from_secs(2);
@@ -27,10 +28,32 @@ pub async fn run(state: SharedState) -> Result<()> {
     let mut frame_rx = state.0.frame_rx.clone();
     let _ = frame_rx.borrow_and_update();
 
+    // v45: real captured_fps. jpeg_pipe::run bumps frames_published on
+    // every published frame; sample (count, instant) at each watchdog
+    // tick and compute the delta. POLL=2s gives a stable enough number
+    // for the header without burning CPU on tighter sampling.
+    let mut last_frame_count: u64 = state.0.frames_published.load(Ordering::Relaxed);
+    let mut last_sample_at = Instant::now();
+
     loop {
         tokio::select! {
             _ = tokio::time::sleep(POLL) => {}
             _ = state.0.shutdown_signal.notified() => return Ok(()),
+        }
+
+        // 0. Sample frame counter → captured_fps. Done every tick
+        // regardless of pipeline mode so the header's "X fps" is
+        // accurate. (Counter only increments in ffmpeg mode anyway —
+        // ustreamer-mode fps comes from the ustreamer query below.)
+        let now = Instant::now();
+        let count = state.0.frames_published.load(Ordering::Relaxed);
+        let dt = now.duration_since(last_sample_at).as_secs_f32();
+        if dt > 0.1 {
+            let dframes = count.saturating_sub(last_frame_count);
+            let fps = (dframes as f32 / dt).round() as u32;
+            state.mutate(|s| s.captured_fps = fps);
+            last_frame_count = count;
+            last_sample_at = now;
         }
 
         // 1. enum-hash check — ONLY in ustreamer mode.
