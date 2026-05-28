@@ -135,6 +135,17 @@
   function truncate(addr: string): string {
     return addr.length > 26 ? `${addr.slice(0, 12)}…${addr.slice(-10)}` : addr;
   }
+
+  /// Click-to-zoom for the inline QRs. The list-view codes are still
+  /// useful for desktop scanning at arm's length, but at thumbnail
+  /// size they're hard to scan from a phone's camera — opening a
+  /// full-overlay big version makes the second device's scan instant.
+  let zoomed: Wallet | null = null;
+  function openZoom(w: Wallet) { zoomed = w; }
+  function closeZoom() { zoomed = null; }
+  function onZoomKey(ev: KeyboardEvent) {
+    if (ev.key === 'Escape') closeZoom();
+  }
 </script>
 
 <details open class="mt-8 bg-gradient-to-br from-cursed-900/40 via-ink-900/70 to-fuchsia-900/30
@@ -217,11 +228,20 @@
             </a>
           </div>
 
-          <!-- QR -->
-          <div class="flex-shrink-0 w-12 h-12 rounded bg-zinc-200 p-0.5"
-               title="Scan with a wallet app">
-            {@html qrSvg(uriFor(w), 48)}
-          </div>
+          <!-- QR. Click to open a big full-modal version for easy
+               scanning from a phone camera. The list-view code is
+               still big enough to scan at arm's length on a desktop
+               monitor (88px contains all the modules with breathing
+               room), but tapping it pops a 320×320 view that's
+               unmistakable. -->
+          <button class="flex-shrink-0 w-[88px] h-[88px] rounded bg-zinc-200 p-1
+                         hover:ring-2 hover:ring-cursed-400 transition
+                         cursor-zoom-in"
+                  on:click={() => openZoom(w)}
+                  aria-label={`Show large QR code for ${w.label} address`}
+                  title="Tap to enlarge for scanning">
+            {@html qrSvg(uriFor(w), 80)}
+          </button>
         </div>
       {/each}
     </div>
@@ -230,10 +250,98 @@
       Addresses verified against the maintainer's
       <span class="font-mono text-zinc-500">AEON-7</span> profile.
       QR encodes the full payment URI — scanning with any standards-compliant
-      wallet pre-fills the recipient. Click <span class="font-mono">open</span>
-      to launch your installed wallet via the chain's URI scheme
-      (<span class="font-mono">bitcoin:</span>, <span class="font-mono">ethereum:</span>,
+      wallet pre-fills the recipient. <strong class="text-zinc-500">Tap a QR
+      code to enlarge</strong> for easier scanning from a phone. Click
+      <span class="font-mono">open</span> to launch your installed wallet
+      via the chain's URI scheme (<span class="font-mono">bitcoin:</span>,
+      <span class="font-mono">ethereum:</span>,
       <span class="font-mono">solana:</span>, <span class="font-mono">monero:</span>).
     </p>
   </div>
 </details>
+
+<!-- ─────────────────────────────────────────────────────────────────
+     Zoomed QR overlay. Tap any inline QR to open this. The big code
+     (320×320) is easy to scan with a phone camera from ~30 cm; the
+     copy button + open-in-wallet shortcut sit alongside so a desktop
+     user without a second device can still complete the donation in
+     one step. Backdrop or X button closes; Esc also closes.
+     ───────────────────────────────────────────────────────────── -->
+{#if zoomed}
+  {@const w = zoomed}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <div class="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-md
+              flex items-center justify-center p-4"
+       on:click={closeZoom}
+       on:keydown={onZoomKey}
+       role="dialog"
+       aria-modal="true"
+       aria-label={`Large QR code for ${w.label}`}
+       tabindex="-1">
+    <!-- Inner card. Stop click propagation so taps inside the card
+         don't close the overlay — only taps on the backdrop do. -->
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="bg-ink-900 border border-cursed-500/40 rounded-2xl
+                shadow-[0_0_40px_rgba(217,70,239,0.30)]
+                p-6 max-w-md w-full space-y-4"
+         on:click|stopPropagation
+         role="document">
+      <header class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl {w.color} font-bold">{w.glyph}</span>
+          <div>
+            <div class="text-zinc-100 text-sm font-medium">{w.label}</div>
+            <div class="text-[10px] font-mono text-zinc-500">
+              scan with any {w.label} wallet
+            </div>
+          </div>
+        </div>
+        <button class="text-zinc-500 hover:text-zinc-200 text-2xl leading-none
+                       w-8 h-8 flex items-center justify-center rounded
+                       hover:bg-ink-800 transition-colors"
+                on:click={closeZoom}
+                aria-label="Close">
+          ×
+        </button>
+      </header>
+
+      <!-- Big QR. 320×320 = scannable from across the room or by a
+           phone that's a foot or two away. White margin (p-3) keeps
+           the quiet zone the spec requires for reliable decoding. -->
+      <div class="bg-zinc-200 rounded-lg p-3 mx-auto w-fit">
+        {@html qrSvg(uriFor(w), 320)}
+      </div>
+
+      <!-- Address (full, copyable). Wrap-anywhere so the long Monero
+           one doesn't blow out the modal width. -->
+      <div class="space-y-1">
+        <div class="text-[10px] uppercase tracking-wider text-zinc-500">
+          Address
+        </div>
+        <div class="text-[11px] font-mono text-zinc-300 break-all
+                    bg-ink-950 border border-ink-800 rounded p-2 select-all">
+          {w.address}
+        </div>
+      </div>
+
+      <div class="flex gap-2 pt-2 border-t border-ink-800">
+        <button
+          class="flex-1 btn text-xs"
+          on:click={() => copy(w.address, w.id + '-zoom')}>
+          {copied === w.id + '-zoom' ? '✓ copied' : 'copy address'}
+        </button>
+        <a class="flex-1 btn-primary text-xs"
+           href={openUrlFor(w)}
+           target={w.id === 'eth' || w.id === 'sol' ? '_blank' : undefined}
+           rel={w.id === 'eth' || w.id === 'sol' ? 'noreferrer' : undefined}>
+          open in wallet
+        </a>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<svelte:window on:keydown={onZoomKey} />
