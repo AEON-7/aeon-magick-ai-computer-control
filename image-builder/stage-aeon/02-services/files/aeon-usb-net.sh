@@ -109,27 +109,51 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null
 #     This is standard hotspot-router behavior (every captive portal
 #     does this) and is what makes restricted mode actually meaningful
 #     for DNS privacy too.
-# Per-rule LOG-then-DROP helper. Each DROP point gets its own tag so
-# the security console can attribute the block to a specific rule
-# ("Blocked by: USB isolation RFC1918 deny" etc.) instead of a
-# generic "something dropped this".
+# Per-rule LOG-then-{DROP,REJECT} helper for isolation / restricted
+# modes. Each call site tags the LOG so /security can attribute the
+# block precisely, AND picks how fast it wants clients to give up:
 #
-# Insert-at-top variant: emits DROP first then LOG so that LOG ends
-# up *above* DROP in chain order (so packets log before getting
-# dropped). Each pair tagged with the same comment so the cleanup
-# sweep removes both atomically.
-aeon_drop_pair_insert() {
-    local chain="$1"
-    local tag="$2"
-    shift 2
-    iptables -I "$chain" 1 "$@" \
-        -j DROP \
-        -m comment --comment "aeon-usb-net"
+#   <mode> = drop        silent black-hole, slow client timeout
+#   <mode> = reject-host ICMP host-unreachable, app fails fast
+#   <mode> = reject-port ICMP port-unreachable, UDP/QUIC fall-back
+#   <mode> = reject-tcp  TCP RST, "connection refused" immediately
+#
+# Insert-at-top variant — places the block target first (pos 1) then
+# LOG (pos 1, pushing block to pos 2). End ordering: LOG → block, so
+# every blocked packet gets logged before the response.
+aeon_block_pair_insert() {
+    local chain="$1" tag="$2" mode="$3"
+    shift 3
+    case "$mode" in
+        reject-port)
+            iptables -I "$chain" 1 "$@" \
+                -j REJECT --reject-with icmp-port-unreachable \
+                -m comment --comment "aeon-usb-net"
+            ;;
+        reject-host)
+            iptables -I "$chain" 1 "$@" \
+                -j REJECT --reject-with icmp-host-unreachable \
+                -m comment --comment "aeon-usb-net"
+            ;;
+        reject-tcp)
+            iptables -I "$chain" 1 "$@" \
+                -j REJECT --reject-with tcp-reset \
+                -m comment --comment "aeon-usb-net"
+            ;;
+        drop|*)
+            iptables -I "$chain" 1 "$@" \
+                -j DROP \
+                -m comment --comment "aeon-usb-net"
+            ;;
+    esac
     iptables -I "$chain" 1 "$@" \
         -m limit --limit 5/sec --limit-burst 10 \
         -j LOG --log-prefix "AEON-DROP[${tag}]: " --log-level 4 \
         -m comment --comment "aeon-usb-net"
 }
+
+# Back-compat shim: old-style DROP-only.
+aeon_drop_pair_insert() { aeon_block_pair_insert "$1" "$2" "drop" "${@:3}"; }
 
 iptables -t nat -A PREROUTING -i usb0 -p udp --dport 53 \
     -j DNAT --to-destination "${PI_ADDR}:53" \
@@ -144,11 +168,16 @@ iptables -t nat -A PREROUTING -i usb0 -p tcp --dport 53 \
 apply_isolation_forward() {
     # Order matters: deny RFC1918 destinations FIRST. Insert at front of
     # FORWARD so they evaluate before any NM-installed ACCEPTs.
-    aeon_drop_pair_insert FORWARD "usbnet-iso-rfc1918" -i usb0 -d 192.168.0.0/16
-    aeon_drop_pair_insert FORWARD "usbnet-iso-rfc1918" -i usb0 -d 172.16.0.0/12
+    # REJECT with ICMP host-unreachable rather than DROP — apps get
+    # "destination unreachable" right away and fail cleanly instead
+    # of timing out. Tradeoff: clients can tell the LAN exists (the
+    # REJECT response leaks "this IP responds"). For isolation that's
+    # fine — the whole point is "talk to the Pi only", not stealth.
+    aeon_block_pair_insert FORWARD "usbnet-iso-rfc1918" reject-host -i usb0 -d 192.168.0.0/16
+    aeon_block_pair_insert FORWARD "usbnet-iso-rfc1918" reject-host -i usb0 -d 172.16.0.0/12
     # 10.x is tricky — block all of 10/8 EXCEPT our own usb-net subnet
     # (which contains the Pi and DHCP clients).
-    aeon_drop_pair_insert FORWARD "usbnet-iso-rfc1918" -i usb0 -d 10.0.0.0/8 ! -d "$SUBNET"
+    aeon_block_pair_insert FORWARD "usbnet-iso-rfc1918" reject-host -i usb0 -d 10.0.0.0/8 ! -d "$SUBNET"
 }
 
 case "$MODE" in
@@ -161,7 +190,11 @@ case "$MODE" in
         # (iptables -I always inserts at position 1, pushing earlier rules
         # down). Final ordering: ACCEPT tcp/53, ACCEPT udp/53, ACCEPT udp/67,
         # DROP all.
-        aeon_drop_pair_insert INPUT "usbnet-restricted-input" -i usb0
+        # Restricted mode: Pi is invisible except DHCP/DNS. Use DROP
+        # here (not REJECT) — the point is true stealth, so the host
+        # can't even tell the Pi is on the wire beyond the bare-
+        # minimum services it needs to get an IP and resolve names.
+        aeon_block_pair_insert INPUT "usbnet-restricted-input" drop -i usb0
         iptables -I INPUT 1 -i usb0 -p udp --dport 67 -j ACCEPT -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p udp --dport 53 -j ACCEPT -m comment --comment "aeon-usb-net"
         iptables -I INPUT 1 -i usb0 -p tcp --dport 53 -j ACCEPT -m comment --comment "aeon-usb-net"
@@ -189,9 +222,16 @@ case "$MODE" in
         # AP), and (b) it covers ANY future Pi interface address that
         # falls in the private space — including container bridges,
         # docker0, etc. — without enumeration drift.
-        aeon_drop_pair_insert INPUT "usbnet-iso-pi-rfc1918" -i usb0 -d 10.0.0.0/8
-        aeon_drop_pair_insert INPUT "usbnet-iso-pi-rfc1918" -i usb0 -d 172.16.0.0/12
-        aeon_drop_pair_insert INPUT "usbnet-iso-pi-rfc1918" -i usb0 -d 192.168.0.0/16
+        # Isolation: prevent usb clients from reaching the Pi via any
+        # of its non-usb0 interface IPs. REJECT host-unreachable so
+        # the client immediately learns "that path doesn't work"
+        # without waiting for a timeout. The Pi *is* reachable via
+        # its usb0 IP (the rule above this one explicitly ACCEPTs
+        # that), so this isn't a stealth defense — it's a clear
+        # "use the usb0 IP, not the LAN IP" signal.
+        aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 10.0.0.0/8
+        aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 172.16.0.0/12
+        aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 192.168.0.0/16
         # ACCEPT must be inserted LAST so it ends up at position 1
         # — first match wins, so this gets matched before any DROP.
         iptables -I INPUT -i usb0 -d "$PI_ADDR"     -j ACCEPT -m comment --comment "aeon-usb-net"

@@ -58,37 +58,37 @@
       case 'vpn-udp-forward':
         return {
           label: 'VPN: UDP catchall',
-          note: 'UDP (incl. QUIC/HTTP-3 on :443) cannot traverse Tor. Browsers will fall back to TCP HTTPS automatically — the next page load is what proves it works.',
+          note: 'UDP (incl. QUIC/HTTP-3 on :443) cannot traverse Tor. The Pi sends ICMP port-unreachable so the browser drops QUIC immediately and falls back to TCP HTTPS — much faster than waiting for the QUIC timeout.',
           severity: 'expected',
         };
       case 'vpn-udp-output':
         return {
           label: 'VPN: local-host UDP',
-          note: 'Pi-originating UDP (other than DHCP/NTP/mDNS) when Tor is active.',
+          note: 'Pi-originating UDP (other than DHCP/NTP/mDNS) when Tor is active — same ICMP-port-unreachable fast-fail.',
           severity: 'expected',
         };
       case 'vpn-killswitch':
         return {
           label: 'VPN: kill-switch',
-          note: 'Tunnel is down or disabled — kill-switch is preventing leak through the WAN.',
+          note: 'Tunnel is down or disabled — kill-switch is sending ICMP host-unreachable to fail-fast all WAN attempts.',
           severity: 'expected',
         };
       case 'usbnet-iso-rfc1918':
         return {
           label: 'Isolation: LAN destination',
-          note: 'USB-mode is "isolation" or "restricted" — the client can\'t reach RFC1918 LAN destinations.',
+          note: 'USB-mode is "isolation" or "restricted" — clients can\'t reach RFC1918 LAN destinations. ICMP host-unreachable returned so apps fail-fast.',
           severity: 'expected',
         };
       case 'usbnet-iso-pi-rfc1918':
         return {
           label: 'Isolation: Pi via LAN IP',
-          note: 'Client tried to reach the Pi via a non-usb0 IP — blocked to prevent isolation bypass.',
+          note: 'Client tried to reach the Pi via a non-usb0 IP — use the Pi\'s usb0 address instead. ICMP host-unreachable returned for fast fall-back.',
           severity: 'expected',
         };
       case 'usbnet-restricted-input':
         return {
           label: 'Restricted: Pi services',
-          note: 'USB-mode is "restricted" — the client only gets DHCP + DNS; no other Pi service is reachable.',
+          note: 'USB-mode is "restricted" — DROP rather than REJECT here, so the Pi stays fully invisible to the host beyond DHCP + DNS.',
           severity: 'expected',
         };
       default:

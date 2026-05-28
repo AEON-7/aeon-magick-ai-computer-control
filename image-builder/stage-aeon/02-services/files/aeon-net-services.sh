@@ -309,51 +309,94 @@ stop_all_vpns() {
     done
 }
 
-# Per-rule LOG-then-DROP helper. Each "kind" of system drop carries
-# its own tag in the LOG prefix, so /security can show *which* rule
-# blocked a given packet ("Blocked by: VPN UDP catchall — browsers
-# will fall back to TCP automatically", etc.) rather than the
-# unhelpful "something dropped this".
+# Per-rule LOG-then-{DROP,REJECT} helper. Each "kind" of system block
+# carries its own tag in the LOG prefix so /security can attribute the
+# block precisely ("VPN: UDP catchall — browsers will fall back to
+# TCP automatically", etc.).
 #
-# `aeon_drop_pair <chain> <tag> <predicate-args...>`
+# `aeon_block_pair <chain> <tag> <comment> <mode> <predicate-args...>`
 #
-# Emits two iptables rules with identical predicates:
-#   1. LOG (rate-limited 5/sec) with prefix "AEON-DROP[<tag>]: "
-#   2. DROP
-# Both tagged with the standard "aeon-vpn" / "aeon-usb-net" comment
-# so the sweep code in `stop_all_vpns` / the usb-net cleanup catches
-# them as a pair.
-aeon_drop_pair() {
-    local chain="$1"
-    local tag="$2"
-    local comment="$3"
-    shift 3
-    # The remaining args are the predicate (-i usb0 -p udp -d ...)
+# <mode> picks how aggressively to fail the client:
+#   drop          silently black-hole; client times out (slow).
+#   reject-port   send ICMP port-unreachable; UDP/QUIC clients fall
+#                 back to TCP almost immediately. Use for the VPN
+#                 UDP catchall — that's what makes QUIC→TCP fast.
+#   reject-host   send ICMP host-unreachable; signals "this network
+#                 destination is dead" so all higher-level transports
+#                 give up. Use for kill-switch + isolation LAN denies.
+#   reject-tcp    send TCP RST; client immediately sees "connection
+#                 refused" instead of SYN timeout. Use for TCP
+#                 catchalls.
+aeon_block_pair() {
+    local chain="$1" tag="$2" comment="$3" mode="$4"
+    shift 4
     iptables -A "$chain" "$@" \
         -m limit --limit 5/sec --limit-burst 10 \
         -j LOG --log-prefix "AEON-DROP[${tag}]: " --log-level 4 \
         -m comment --comment "$comment"
-    iptables -A "$chain" "$@" \
-        -j DROP \
+    case "$mode" in
+        reject-port)
+            iptables -A "$chain" "$@" \
+                -j REJECT --reject-with icmp-port-unreachable \
+                -m comment --comment "$comment"
+            ;;
+        reject-host)
+            iptables -A "$chain" "$@" \
+                -j REJECT --reject-with icmp-host-unreachable \
+                -m comment --comment "$comment"
+            ;;
+        reject-tcp)
+            iptables -A "$chain" "$@" \
+                -j REJECT --reject-with tcp-reset \
+                -m comment --comment "$comment"
+            ;;
+        drop|*)
+            iptables -A "$chain" "$@" \
+                -j DROP \
+                -m comment --comment "$comment"
+            ;;
+    esac
+}
+
+# Same idea but for `iptables -I <chain> 1 ...` (insert-at-top).
+# Inserts the block target first (lands at pos 1) then LOG (lands at
+# pos 1, pushing block to pos 2) — so the packet hits LOG before
+# being rejected.
+aeon_block_pair_insert() {
+    local chain="$1" tag="$2" comment="$3" mode="$4"
+    shift 4
+    case "$mode" in
+        reject-port)
+            iptables -I "$chain" 1 "$@" \
+                -j REJECT --reject-with icmp-port-unreachable \
+                -m comment --comment "$comment"
+            ;;
+        reject-host)
+            iptables -I "$chain" 1 "$@" \
+                -j REJECT --reject-with icmp-host-unreachable \
+                -m comment --comment "$comment"
+            ;;
+        reject-tcp)
+            iptables -I "$chain" 1 "$@" \
+                -j REJECT --reject-with tcp-reset \
+                -m comment --comment "$comment"
+            ;;
+        drop|*)
+            iptables -I "$chain" 1 "$@" \
+                -j DROP \
+                -m comment --comment "$comment"
+            ;;
+    esac
+    iptables -I "$chain" 1 "$@" \
+        -m limit --limit 5/sec --limit-burst 10 \
+        -j LOG --log-prefix "AEON-DROP[${tag}]: " --log-level 4 \
         -m comment --comment "$comment"
 }
 
-# Same helper but for `iptables -I <chain> 1 ...` (insert-at-top).
-# Inserts DROP first then LOG so LOG ends up *above* DROP (so the
-# packet hits LOG before being dropped).
-aeon_drop_pair_insert() {
-    local chain="$1"
-    local tag="$2"
-    local comment="$3"
-    shift 3
-    iptables -I "$chain" 1 "$@" \
-        -j DROP \
-        -m comment --comment "$comment"
-    iptables -I "$chain" 1 "$@" \
-        -m limit --limit 5/sec --limit-burst 10 \
-        -j LOG --log-prefix "AEON-DROP[${tag}]: " --log-level 4 \
-        -m comment --comment "$comment"
-}
+# Back-compat shims so existing call sites still work. They route to
+# the new helpers with mode="drop".
+aeon_drop_pair()        { aeon_block_pair        "$1" "$2" "$3" "drop" "${@:4}"; }
+aeon_drop_pair_insert() { aeon_block_pair_insert "$1" "$2" "$3" "drop" "${@:4}"; }
 
 apply_vpn_tailscale() {
     local auth_key="$(toml_get vpn.tailscale auth_key '')"
@@ -722,11 +765,14 @@ EOF
         iptables -A FORWARD -i usb0 -p udp --dport 68   -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 123  -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
-        # Drop forwarded UDP from usb0 clients when Tor is active. This
-        # is what makes the QUIC/HTTP3 fallback work — browsers detect
-        # the UDP black-hole, give up, and reconnect over TCP HTTPS
-        # which IS carried by Tor's TransPort. Tag: vpn-udp-forward.
-        aeon_drop_pair FORWARD "vpn-udp-forward" "aeon-vpn" \
+        # Block forwarded UDP from usb0 clients when Tor is active.
+        # REJECT with ICMP port-unreachable rather than DROP — that
+        # tells the client *immediately* "this transport is closed"
+        # so QUIC/HTTP-3 falls back to TCP HTTPS in milliseconds,
+        # instead of waiting out the QUIC handshake timeout (~1 sec
+        # per retry, several retries). End user impact: first page
+        # load feels normal instead of laggy.
+        aeon_block_pair FORWARD "vpn-udp-forward" "aeon-vpn" reject-port \
             -i usb0 -p udp
         # (e) Make sure the INPUT chain accepts the redirected TCP on
         # the usb0 IP. Default Debian INPUT is ACCEPT but NetworkManager
@@ -751,7 +797,9 @@ EOF
     iptables -A OUTPUT -p udp --dport 68 -j ACCEPT -m comment --comment "aeon-vpn"
     iptables -A OUTPUT -p udp --dport 123 -j ACCEPT -m comment --comment "aeon-vpn"
     iptables -A OUTPUT -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
-    aeon_drop_pair OUTPUT "vpn-udp-output" "aeon-vpn" -p udp
+    # Same idea for Pi-local UDP — REJECT with ICMP port-unreachable
+    # so local apps fall back fast instead of timing out.
+    aeon_block_pair OUTPUT "vpn-udp-output" "aeon-vpn" reject-port -p udp
     log "tor active — TCP + DNS via tor; DHCP/NTP/mDNS UDP allowed; other UDP dropped"
 }
 
@@ -837,7 +885,10 @@ apply_kill_switch() {
     esac
 
     # Drop everything else outbound.
-    aeon_drop_pair OUTPUT "vpn-killswitch" "aeon-vpn"
+    # Kill-switch catchall: tunnel is down, block everything else.
+    # ICMP host-unreachable is the right signal — tells apps the
+    # network destination itself is dead, no need to retry.
+    aeon_block_pair OUTPUT "vpn-killswitch" "aeon-vpn" reject-host
     log "kill-switch applied — non-VPN outbound traffic is now dropped"
 }
 
