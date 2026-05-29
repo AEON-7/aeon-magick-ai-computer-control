@@ -32,6 +32,7 @@ mod file_xfer;
 mod ssh_keys;
 mod storage;
 mod system;
+mod target;
 mod tls;
 mod webui;
 mod wifi;

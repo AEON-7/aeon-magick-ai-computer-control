@@ -38,6 +38,7 @@ pub async fn serve(state: SharedState) -> Result<()> {
         .route("/scroll", post(post_scroll))
         .route("/release_all", post(post_release_all))
         .route("/persona", post(post_persona))
+        .route("/consumer", post(post_consumer))
         .with_state(state);
 
     loop {
@@ -203,6 +204,53 @@ async fn post_scroll(
 async fn post_release_all(State(state): State<SharedState>) -> impl IntoResponse {
     let _ = state.0.hid.release_all();
     (StatusCode::OK, Json(json!({"ok": true, "released": true})))
+}
+
+#[derive(Deserialize)]
+struct ConsumerReq {
+    /// HID Consumer Page usage code (16-bit). Examples:
+    ///   0x0030 = Power
+    ///   0x0032 = Sleep
+    ///   0x0083 = Wake
+    ///   0x00CD = Play/Pause
+    ///   0x00E2 = Mute
+    ///   0x00E9 = Volume Up
+    ///   0x00EA = Volume Down
+    /// See HID Usage Tables §15 for the full list.
+    usage: u16,
+    /// Hold the press for this many milliseconds before releasing.
+    /// Defaults to 200ms (short tap). For force-power-off use 8000ms.
+    #[serde(default = "default_consumer_hold")]
+    hold_ms: u32,
+}
+fn default_consumer_hold() -> u32 { 200 }
+
+/// POST /consumer — emit a Consumer Page usage event over the
+/// /dev/hidg2 consumer-control function. Press, hold, release.
+///
+/// This is the primary mechanism for remote-controlling the
+/// USB-connected target machine's power button: most modern
+/// motherboards register the HID power button (usage 0x30) as
+/// equivalent to a physical power button, so a short tap triggers
+/// the OS power dialog and an 8-second hold forces hardware shutdown.
+async fn post_consumer(
+    State(state): State<SharedState>,
+    Json(req): Json<ConsumerReq>,
+) -> impl IntoResponse {
+    match state.0.hid.consumer_press(req.usage, req.hold_ms) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "usage": req.usage,
+                "hold_ms": req.hold_ms.min(30_000),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "err": e.to_string()})),
+        ),
+    }
 }
 
 #[derive(Deserialize)]

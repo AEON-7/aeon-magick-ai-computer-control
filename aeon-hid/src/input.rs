@@ -143,6 +143,42 @@ impl Hid {
         write_report(&path, &report)
     }
 
+    // ─── Consumer Control (power button, media keys, …) ──────────────────
+
+    /// Send a HID Consumer Page usage code (16-bit) and hold it for
+    /// `hold_ms` before releasing. Used for the target machine's power
+    /// button (usage 0x30), sleep (0x32), wake (0x83), and standard
+    /// media keys (vol up/down, play/pause, etc. from HID Usage Tables
+    /// §15).
+    ///
+    /// For the power button specifically:
+    ///   - short tap  (~200ms) → OS-managed: Windows shows power menu,
+    ///     macOS shows shutdown dialog, Linux usually starts shutdown.
+    ///   - hard hold  (~8000ms) → forces hardware-level power off on
+    ///     every modern motherboard.
+    ///
+    /// The release always fires even if the press write failed
+    /// mid-flight — leaving a stuck consumer key is much worse than a
+    /// failed power tap, because subsequent OS events would be
+    /// misinterpreted.
+    pub fn consumer_press(&self, usage: u16, hold_ms: u32) -> Result<()> {
+        let path = self
+            .consumer
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("consumer function not present in current persona"))?;
+        // 2-byte little-endian report matching CONSUMER_DESC.
+        let press = [(usage & 0xFF) as u8, ((usage >> 8) & 0xFF) as u8];
+        let release = [0u8, 0u8];
+        let press_result = write_report(&path, &press);
+        // Cap the hold at 30s — anything longer is almost certainly a
+        // misuse and ties up the calling thread.
+        let hold = hold_ms.min(30_000) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(hold));
+        let _ = write_report(&path, &release);
+        press_result
+    }
+
     // ─── Recovery ─────────────────────────────────────────────────────────
 
     /// Panic button. Force-release every HID interface by writing an

@@ -235,10 +235,25 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/audit",
             get(crate::audit::list)
                 .delete(crate::audit::clear))
-        // System controls — reboot / poweroff / health info. Admin scope.
-        .route("/system/info",     get(crate::system::info))
-        .route("/system/reboot",   post(crate::system::reboot))
-        .route("/system/poweroff", post(crate::system::poweroff))
+        // System controls — Pi-side reboot / poweroff / health info. Admin scope.
+        // v53: renamed reboot/poweroff to pi-reboot/pi-poweroff to disambiguate
+        // from /api/target/* (which controls the USB-connected target machine).
+        // The old paths stay as aliases for any external scripts that hit them.
+        .route("/system/info",        get(crate::system::info))
+        .route("/system/pi-reboot",   post(crate::system::reboot))
+        .route("/system/pi-poweroff", post(crate::system::poweroff))
+        .route("/system/reboot",      post(crate::system::reboot))
+        .route("/system/poweroff",    post(crate::system::poweroff))
+
+        // Target (USB-connected machine) power controls. Soft tap +
+        // forced hold via HID Consumer Power button; wake via WoL
+        // magic packet over usb0; reboot is hold + 5s + wake.
+        .route("/target/info",        get(crate::target::get_info))
+        .route("/target/config",      axum::routing::put(crate::target::put_config))
+        .route("/target/power-tap",   post(crate::target::power_tap))
+        .route("/target/power-hold",  post(crate::target::power_hold))
+        .route("/target/wake",        post(crate::target::wake))
+        .route("/target/reboot",      post(crate::target::reboot))
         // File transfer to/from target via /var/lib/aeon/files/.
         // Target-facing public server (off by default) spawned in main.rs.
         .route("/files",

@@ -654,17 +654,62 @@ export interface SystemInfo {
 
 export const getSystemInfo = () => req<SystemInfo>('GET', '/system/info');
 
-export const rebootSystem = () =>
+// ── Pi-side controls (rarely needed — Pi is meant to stay up) ───────────
+// Renamed in v53 from rebootSystem/poweroffSystem so callers don't
+// accidentally use them when they mean the connected target. Pi
+// power controls live in the System maintenance subsection now.
+export const rebootPi = () =>
   req<{ ok: boolean; action: string; in_seconds: number; message: string }>(
     'POST',
-    '/system/reboot',
+    '/system/pi-reboot',
   );
 
-export const poweroffSystem = () =>
+export const poweroffPi = () =>
   req<{ ok: boolean; action: string; in_seconds: number; message: string }>(
     'POST',
-    '/system/poweroff',
+    '/system/pi-poweroff',
   );
+
+// ── Target (USB-connected machine) power controls (v53+) ────────────────
+// These operate over the existing USB HID gadget (consumer power
+// button) + Wake-on-LAN over usb0 ethernet — there's nothing the Pi
+// itself can do that doesn't go through one of those channels.
+
+export interface TargetMode {
+  id: 'tap' | 'hold' | 'wake' | 'reboot';
+  label: string;
+  hint: string;
+}
+export interface TargetInfo {
+  ok: boolean;
+  mac_override: string;       // user-set MAC, empty if auto-discover
+  mac_discovered: string | null;
+  mac_effective: string | null;
+  iface: string;              // typically "usb0"
+  modes: TargetMode[];
+}
+
+export const getTargetInfo = () => req<TargetInfo>('GET', '/target/info');
+
+export const setTargetConfig = (patch: { mac?: string; iface?: string }) =>
+  req<{ ok: boolean; mac: string; iface: string }>(
+    'PUT', '/target/config', patch);
+
+export const targetPowerTap = () =>
+  req<{ ok: boolean; mode: string; hold_ms: number }>(
+    'POST', '/target/power-tap');
+
+export const targetPowerHold = () =>
+  req<{ ok: boolean; mode: string; hold_ms: number }>(
+    'POST', '/target/power-hold');
+
+export const targetWake = () =>
+  req<{ ok: boolean; mac: string; iface: string }>(
+    'POST', '/target/wake');
+
+export const targetReboot = () =>
+  req<{ ok: boolean; mode: string; mac: string; iface: string; phases: string[] }>(
+    'POST', '/target/reboot');
 
 // ── File transfer (HTTP server on usb0) ────────────────────────────────
 

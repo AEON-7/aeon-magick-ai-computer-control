@@ -501,38 +501,81 @@
     window.location.href = '/login';
   }
 
-  /// Double-confirm reboot. First prompt is "are you sure"; the second
-  /// pops a one-shot "type REBOOT to confirm" so a stray click can't
-  /// accidentally kill a session mid-AI-job. Same for poweroff but
-  /// with stronger language since wake requires a power cycle.
-  async function onReboot() {
+  /// v53: header buttons control the USB-CONNECTED TARGET, not the Pi.
+  /// (Pi reboot/poweroff lives in System maintenance now — rarely needed.)
+  ///
+  /// The common workflow these support: load an ISO via the storage
+  /// drive, reboot the target, hit F12/Del during POST to enter the
+  /// boot menu, pick the USB-CDROM, install an OS.
+  ///
+  /// We double-confirm both — power events on the target are
+  /// disruptive enough that an accidental click should never trigger
+  /// one without an explicit typed phrase.
+  async function onTargetReboot() {
     if (!confirm(
-      'Reboot the Pi?\n\n' +
-      'The web UI will disconnect for ~30-60 seconds while the device ' +
-      'comes back up. Any in-flight HID input + capture will be lost.'
+      'Reboot the USB-connected target machine?\n\n' +
+      'This will:\n' +
+      '  1. Hold the HID power button for 8s (forces the target to power off)\n' +
+      '  2. Wait 5 seconds\n' +
+      '  3. Send a Wake-on-LAN magic packet over usb0\n\n' +
+      'Requires WoL enabled in the target\'s BIOS/UEFI. If the target ' +
+      'doesn\'t support WoL, you\'ll need to press its power button by hand ' +
+      'after step 1.'
     )) return;
     const phrase = prompt('Type REBOOT to confirm:');
     if (phrase !== 'REBOOT') return;
     try {
-      const r = await api.rebootSystem();
-      alert(r.message);
+      const r = await api.targetReboot();
+      alert(`Reboot sequence sent.\nPhases: ${r.phases.join(' → ')}\nMAC: ${r.mac}`);
     } catch (e: any) {
-      alert('Reboot failed: ' + (e?.message ?? 'unknown'));
+      alert('Target reboot failed: ' + (e?.message ?? 'unknown'));
     }
   }
-  async function onPoweroff() {
+  async function onTargetPoweroff() {
     if (!confirm(
-      'Power off the Pi?\n\n' +
-      'You will need to physically power-cycle the device to bring it ' +
-      'back. The web UI cannot turn it back on.'
+      'Force-power-off the USB-connected target machine?\n\n' +
+      'This holds the HID power button for 8 seconds. Every modern ' +
+      'motherboard treats that as a hardware-level shutdown — the OS ' +
+      'will NOT get a chance to flush state.\n\n' +
+      'Use the soft tap below first if you want a graceful OS shutdown.'
     )) return;
     const phrase = prompt('Type POWEROFF to confirm:');
     if (phrase !== 'POWEROFF') return;
     try {
-      const r = await api.poweroffSystem();
-      alert(r.message);
+      const r = await api.targetPowerHold();
+      alert(`Force power-off sent (${r.hold_ms}ms hold).`);
     } catch (e: any) {
-      alert('Poweroff failed: ' + (e?.message ?? 'unknown'));
+      alert('Target poweroff failed: ' + (e?.message ?? 'unknown'));
+    }
+  }
+  /// Short tap — most OSes interpret this the same as a tap on the
+  /// physical chassis power button. Windows: shows the power menu.
+  /// macOS: shows the shutdown dialog. Linux: usually starts a clean
+  /// shutdown. Far less destructive than the 8-second hold.
+  async function onTargetPowerTap() {
+    if (!confirm(
+      'Send a short power-button tap to the target?\n\n' +
+      'Most OSes will treat this as a graceful "shutdown please" — ' +
+      'Windows shows the power menu, macOS the shutdown dialog, Linux ' +
+      'starts the shutdown sequence. Cancel any unsaved work first.'
+    )) return;
+    try {
+      const r = await api.targetPowerTap();
+      alert(`Soft tap sent (${r.hold_ms}ms).`);
+    } catch (e: any) {
+      alert('Power tap failed: ' + (e?.message ?? 'unknown'));
+    }
+  }
+  /// Wake-on-LAN. Won't do anything if the target is already on.
+  async function onTargetWake() {
+    try {
+      const r = await api.targetWake();
+      alert(`WoL magic packet sent (mac=${r.mac}, via ${r.iface}).`);
+    } catch (e: any) {
+      alert('Wake failed: ' + (e?.message ?? 'unknown') +
+            '\n\nMake sure usb0 is up and the target has DHCP\'d at least once ' +
+            '(so the ARP cache knows its MAC), or set a MAC override at ' +
+            'PUT /api/target/config.');
     }
   }
 
@@ -706,19 +749,32 @@
       </div>
       <!-- divider -->
       <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
-      <!-- Group C: system -->
+      <!-- Group C: target power + session.
+           These buttons control the USB-CONNECTED MACHINE, not the Pi.
+           They go through the HID Consumer power-button (soft tap or
+           8-second hold) + WoL magic packet over usb0. -->
       <div class="flex items-center gap-2 pl-3">
         <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
+        <button class="btn text-xs hover:bg-live-500/20 hover:text-live-300 hover:border-live-500/40"
+                on:click={onTargetWake}
+                title="Send Wake-on-LAN magic packet to the USB-connected target (needs WoL enabled in target BIOS)">
+          ⏼ wake&nbsp;target
+        </button>
+        <button class="btn text-xs hover:bg-zinc-500/20 hover:text-zinc-200 hover:border-zinc-400/40"
+                on:click={onTargetPowerTap}
+                title="Short power-button tap on the target — OS-managed (graceful shutdown / power menu)">
+          ⏻ tap&nbsp;target
+        </button>
         <button class="btn text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
-                on:click={onReboot}
-                title="Reboot the Pi (requires double-confirm; web UI disconnects for ~30-60 s)">
-          ⟳ reboot
+                on:click={onTargetReboot}
+                title="Force-off + 5s wait + WoL — full power cycle for the USB-connected target">
+          ⟳ reboot&nbsp;target
         </button>
         <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
-                on:click={onPoweroff}
-                title="Power off the Pi (requires double-confirm; needs physical power-cycle to wake)">
-          ⏻ power&nbsp;off
+                on:click={onTargetPoweroff}
+                title="Hold power button 8s on target — forces hardware-level shutdown">
+          ⏻ force&nbsp;off&nbsp;target
         </button>
         <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>
       </div>
@@ -803,10 +859,15 @@
       <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
         <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
+        <!-- Target (USB-connected machine) power controls -->
+        <button class="btn text-xs hover:bg-live-500/20 hover:text-live-300 hover:border-live-500/40 col-span-2"
+                on:click={onTargetWake}>⏼ wake target (WoL)</button>
+        <button class="btn text-xs hover:bg-zinc-500/20 hover:text-zinc-200"
+                on:click={onTargetPowerTap}>⏻ tap target</button>
         <button class="btn text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
-                on:click={onReboot}>⟳ reboot</button>
-        <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
-                on:click={onPoweroff}>⏻ power off</button>
+                on:click={onTargetReboot}>⟳ reboot target</button>
+        <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40 col-span-2"
+                on:click={onTargetPoweroff}>⏻ force off target</button>
         <button class="btn text-xs col-span-2" on:click={onLogout}>sign out</button>
       </div>
     </div>

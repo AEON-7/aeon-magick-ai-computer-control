@@ -426,12 +426,22 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
     if matches!(identity.scope, TokenScope::Admin) {
         return true;
     }
-    // Token management + reboot/poweroff require Admin. /system/info is a
-    // read-only health endpoint and is whitelisted lower in the match.
+    // Token management + Pi-side reboot/poweroff require Admin.
+    // /system/info is a read-only health endpoint and is whitelisted
+    // lower in the match. Target power controls are also Admin-only:
+    // a non-admin token shouldn't be able to forcibly power-cycle the
+    // attached client machine, that's a privileged operation.
     if path.starts_with("/api/auth/tokens")
         || path.starts_with("/api/setup/")
         || path == "/api/system/reboot"
         || path == "/api/system/poweroff"
+        || path == "/api/system/pi-reboot"
+        || path == "/api/system/pi-poweroff"
+        || path == "/api/target/power-tap"
+        || path == "/api/target/power-hold"
+        || path == "/api/target/wake"
+        || path == "/api/target/reboot"
+        || path == "/api/target/config"
     {
         return false;
     }
