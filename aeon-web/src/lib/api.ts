@@ -368,11 +368,22 @@ export interface VpnState {
     has_auth_password: boolean;
   };
   tor: {
+    // v58.1: independent toggle + mode + over-VPN nesting.
+    enabled: boolean;
+    mode: 'split_tunnel' | 'transparent';
+    over_vpn: boolean;
     preset: string;
     has_bridges: boolean;
+    exit_country: string;
+    meek_mode: boolean;
     presets: { id: string; label: string; blurb: string }[];
+    modes: { id: string; label: string; blurb: string }[];
   };
-  i2p: { outproxy: string };
+  i2p: {
+    enabled: boolean;
+    outproxy: string;
+    over_vpn: boolean;
+  };
   providers: VpnProviderInfo[];
 }
 
@@ -393,8 +404,21 @@ export interface VpnPatch {
     auth_username?: string;
     auth_password?: string;
   };
-  tor?: { preset?: string; bridges?: string };
-  i2p?: { outproxy?: string };
+  tor?: {
+    // v58.1: independent toggle + routing mode + over-VPN nesting.
+    enabled?: boolean;
+    mode?: 'split_tunnel' | 'transparent';
+    over_vpn?: boolean;
+    preset?: string;
+    bridges?: string;
+    exit_country?: string;
+    meek_mode?: boolean;
+  };
+  i2p?: {
+    enabled?: boolean;
+    outproxy?: string;
+    over_vpn?: boolean;
+  };
 }
 
 export const getVpn = () => req<VpnState>('GET', '/network/vpn');

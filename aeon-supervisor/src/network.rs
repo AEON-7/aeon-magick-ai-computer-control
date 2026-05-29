@@ -295,6 +295,11 @@ struct I2p {
     /// Empty = .i2p-only mode (the safe default).
     #[serde(default)]
     outproxy: String,
+    /// v58.1: nest i2pd's outbound traffic through the active VPN.
+    /// Same fwmark + ip rule machinery as tor.over_vpn but for the
+    /// i2pd UID. Requires vpn.enabled = true.
+    #[serde(default)]
+    over_vpn: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -911,6 +916,7 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
         "i2p": {
             "enabled": s.i2p.enabled,
             "outproxy": s.i2p.outproxy,
+            "over_vpn": s.i2p.over_vpn,
         },
         // v58: clearnet providers — tor and i2p moved out of the VPN
         // enum but still appear in the providers list for backward
@@ -968,6 +974,7 @@ pub struct TorPut {
 pub struct I2pPut {
     #[serde(default)] pub enabled: Option<bool>,
     #[serde(default)] pub outproxy: Option<String>,
+    #[serde(default)] pub over_vpn: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1088,6 +1095,7 @@ pub async fn put_vpn(
     if let Some(i2p) = req.i2p {
         if let Some(v) = i2p.enabled { nf.i2p.enabled = v; }
         if let Some(v) = i2p.outproxy { nf.i2p.outproxy = v; }
+        if let Some(v) = i2p.over_vpn { nf.i2p.over_vpn = v; }
     }
 
     // v58: validate vpn.provider — "tor" and "i2p" got moved out of

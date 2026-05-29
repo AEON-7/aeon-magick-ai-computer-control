@@ -872,6 +872,16 @@ EOF
     # 2. Tor's own traffic exempt (otherwise it'd redirect itself).
     iptables -t nat -A OUTPUT -m owner --uid-owner debian-tor \
         -j RETURN -m comment --comment "aeon-vpn"
+    # 2b. v58.1: i2pd's outbound traffic exempt too — when both Tor
+    # and I2P are on in this transparent mode, i2pd needs to reach
+    # the I2P network directly (or via VPN per i2p.over_vpn) instead
+    # of being looped through Tor. The user can still pipe I2P
+    # over Tor explicitly by configuring tor as i2pd's outproxy, but
+    # the default behaviour is independent routing for each overlay.
+    if id -u i2pd >/dev/null 2>&1; then
+        iptables -t nat -A OUTPUT -m owner --uid-owner i2pd \
+            -j RETURN -m comment --comment "aeon-vpn"
+    fi
     # 3. NOTE: we deliberately do NOT exempt DNSCrypt-proxy's UID.
     #    When DNSCrypt is ALSO active alongside Tor, we want its
     #    DoH/DoT traffic (TCP) to ride through Tor's TransPort too —
@@ -984,6 +994,125 @@ EOF
     # so local apps fall back fast instead of timing out.
     aeon_block_pair OUTPUT "vpn-udp-output" "aeon-vpn" reject-port -p udp
     log "tor active — TCP + DNS via tor; DHCP/NTP/mDNS UDP allowed; other UDP dropped"
+}
+
+# v58.1: split-tunnel iptables for Tor. Only TCP destined for the
+# Tor automap range (10.192.0.0/10) gets REDIRECTed to TransPort.
+# Clearnet TCP stays on the default route (or rides the VPN if a
+# clearnet VPN is active). Assumes apply_tor_service already ran +
+# Tor's TransPort is listening.
+#
+# DNS handling here is intentionally minimal: we DON'T blanket-
+# REDIRECT UDP/53 → 5353 like transparent mode does. Instead the
+# dnsmasq drop-in (00-aeon-dnscrypt.conf, written by apply_dnscrypt)
+# already routes the `.onion` and `.exit` suffixes to Tor's DNSPort
+# via per-domain `server=` lines, so .onion lookups land on 5353
+# while clearnet DNS keeps going through dnscrypt-proxy → upstream.
+apply_tor_split_tunnel_iptables() {
+    log "tor: applying split-tunnel iptables (REDIRECT only TCP dst 10.192.0.0/10)"
+
+    # ── OUTPUT chain: Pi-originating .onion traffic ──
+    # 1. lo bypass (loopback always free)
+    iptables -t nat -A OUTPUT -o lo -j RETURN -m comment --comment "aeon-vpn"
+    # 2. debian-tor own traffic bypass (avoid Tor talking to itself)
+    iptables -t nat -A OUTPUT -m owner --uid-owner debian-tor \
+        -j RETURN -m comment --comment "aeon-vpn"
+    # 3. i2pd traffic bypass — runs independently
+    if id -u i2pd >/dev/null 2>&1; then
+        iptables -t nat -A OUTPUT -m owner --uid-owner i2pd \
+            -j RETURN -m comment --comment "aeon-vpn"
+    fi
+    # 4. Only TCP destined for Tor's virtual-IP range gets REDIRECTed.
+    iptables -t nat -A OUTPUT -p tcp --syn -d 10.192.0.0/10 \
+        -j REDIRECT --to-ports 9040 -m comment --comment "aeon-vpn"
+
+    # ── PREROUTING chain: USB-client .onion traffic ──
+    local usb_enabled; usb_enabled="$(toml_get usb_ethernet enabled false)"
+    if [ "$usb_enabled" = "true" ]; then
+        local pi_addr; pi_addr="$(toml_get usb_ethernet pi_addr 10.55.0.1)"
+        # Catch TCP from USB clients destined to Tor's virtual-IP
+        # range and route it through TransPort listening on usb0.
+        iptables -t nat -A PREROUTING -i usb0 -p tcp -d 10.192.0.0/10 \
+            -j REDIRECT --to-ports 9040 -m comment --comment "aeon-vpn"
+        iptables -A INPUT -i usb0 -d "$pi_addr" -p tcp --dport 9040 \
+            -j ACCEPT -m comment --comment "aeon-vpn"
+        log "tor split: USB clients can reach .onion via $pi_addr:9040; clearnet stays on default route"
+    fi
+    log "tor split-tunnel active — .onion via Tor, everything else direct (or via clearnet VPN if up)"
+}
+
+# v58.1: detect the active clearnet VPN's interface name. Returns
+# empty string if no clearnet VPN is up (in which case over_vpn
+# nesting is a no-op and we log a warning).
+detect_vpn_iface() {
+    local provider="$(toml_get vpn provider none)"
+    local enabled="$(toml_get vpn enabled false)"
+    if [ "$enabled" != "true" ]; then
+        echo ""
+        return
+    fi
+    case "$provider" in
+        tailscale) ip link show tailscale0 >/dev/null 2>&1 && echo "tailscale0" ;;
+        wireguard) ip link show aeon0     >/dev/null 2>&1 && echo "aeon0" ;;
+        openvpn)
+            # OpenVPN's tun device name varies (tun0 / tun1 …).
+            # Pick the first tun*  with an IP.
+            ip -o link show 2>/dev/null \
+                | awk -F': ' '/tun[0-9]+:/ {print $2}' \
+                | head -1
+            ;;
+        *) echo "" ;;
+    esac
+}
+
+# v58.1: Tor over VPN — fwmark debian-tor's outbound packets +
+# policy-route them via the VPN's interface using a dedicated
+# routing table. With this on, Tor's circuit handshakes with entry
+# guards exit through the VPN tunnel instead of the bare upstream,
+# so your ISP sees only VPN traffic + can't tell you're using Tor.
+apply_tor_over_vpn() {
+    local iface="$(detect_vpn_iface)"
+    if [ -z "$iface" ]; then
+        log "WARN: tor.over_vpn=true but no clearnet VPN is up — skipping policy routing"
+        return 0
+    fi
+    log "tor: nesting through clearnet VPN ($iface) via fwmark 0x100 + table 100"
+
+    # Mark Tor's outbound packets in the mangle table.
+    iptables -t mangle -A OUTPUT -m owner --uid-owner debian-tor \
+        -j MARK --set-mark 0x100 -m comment --comment "aeon-vpn"
+
+    # Custom routing table — default route via VPN.
+    ip route flush table 100 2>/dev/null || true
+    ip route add default dev "$iface" table 100 2>/dev/null || true
+
+    # ip rule that hands marked packets to table 100.
+    ip rule del fwmark 0x100 table 100 2>/dev/null || true
+    ip rule add fwmark 0x100 table 100
+}
+
+# v58.1: same idea for i2pd's outbound traffic. fwmark 0x200 so
+# the two policies don't collide if both are on.
+apply_i2p_over_vpn() {
+    local iface="$(detect_vpn_iface)"
+    if [ -z "$iface" ]; then
+        log "WARN: i2p.over_vpn=true but no clearnet VPN is up — skipping policy routing"
+        return 0
+    fi
+    if ! id -u i2pd >/dev/null 2>&1; then
+        log "WARN: i2p.over_vpn=true but i2pd user doesn't exist (i2pd installed?)"
+        return 0
+    fi
+    log "i2p: nesting through clearnet VPN ($iface) via fwmark 0x200 + table 200"
+
+    iptables -t mangle -A OUTPUT -m owner --uid-owner i2pd \
+        -j MARK --set-mark 0x200 -m comment --comment "aeon-vpn"
+
+    ip route flush table 200 2>/dev/null || true
+    ip route add default dev "$iface" table 200 2>/dev/null || true
+
+    ip rule del fwmark 0x200 table 200 2>/dev/null || true
+    ip rule add fwmark 0x200 table 200
 }
 
 apply_i2p_service() {
@@ -1177,27 +1306,37 @@ apply_tor() {
         return 0
     fi
 
-    # v58 (this PR): apply_tor_service does both the torrc + the
-    # existing transparent iptables (REDIRECT all TCP → TransPort).
-    # That preserves the v57 behaviour for users upgrading.
-    #
-    # v58.1 (next): carve apply_tor_service into apply_tor_torrc()
-    # + apply_tor_iptables_transparent(), then add:
-    #   - apply_tor_iptables_split_tunnel() — only REDIRECT TCP
-    #     destined for Tor's virtual-IP range (10.192.0.0/10),
-    #     clearnet keeps its normal default-route / VPN path.
-    #   - apply_tor_over_vpn() — fwmark debian-tor UID + ip rule
-    #     so Tor's entry-guard traffic egresses via the active VPN.
-    # Both are surgically isolated changes that warrant their own
-    # PR + bake cycle. For now the mode and over_vpn fields are
-    # accepted + persisted so the UI surface lands cleanly.
-    apply_tor_service
-
-    if [ "$mode" = "split_tunnel" ]; then
-        log "tor: split_tunnel requested — pending v58.1 iptables work, currently routing all TCP via Tor"
+    if [ "$mode" = "transparent" ]; then
+        # Full transparent redirect — all outbound TCP goes via Tor.
+        # apply_tor_service does both torrc + transparent iptables.
+        # (Includes i2pd UID exemption so I2P can still reach the
+        # I2P network when both are on.)
+        apply_tor_service
+    else
+        # Split tunnel: torrc + minimal iptables for .onion only.
+        # Run apply_tor_service to get the torrc and bring tor up,
+        # but then SWEEP the transparent iptables it just installed
+        # and replace them with the narrow split-tunnel set.
+        apply_tor_service
+        # Sweep aeon-vpn-tagged rules just installed and reapply only
+        # the split-tunnel subset. Wasteful (we do the work twice) but
+        # safer than reorganizing apply_tor_service mid-PR — the
+        # second pass leaves us in the correct state.
+        for table in filter nat mangle; do
+            for chain in OUTPUT INPUT FORWARD PREROUTING POSTROUTING; do
+                local lines
+                lines=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+                    | awk '/aeon-vpn/{print $1}' | sort -rn)
+                for n in $lines; do
+                    iptables -t "$table" -D "$chain" "$n" 2>/dev/null || true
+                done
+            done
+        done
+        apply_tor_split_tunnel_iptables
     fi
+
     if [ "$over_vpn" = "true" ]; then
-        log "tor: over_vpn requested — pending v58.1 policy-routing work, no nesting active"
+        apply_tor_over_vpn
     fi
 }
 
@@ -1207,16 +1346,23 @@ apply_tor() {
 # i2p.enabled flag.
 apply_i2p() {
     local enabled="$(toml_get i2p enabled false)"
-    log "i2p: enabled=$enabled"
+    local over_vpn="$(toml_get i2p over_vpn false)"
+    log "i2p: enabled=$enabled over_vpn=$over_vpn"
 
     if [ "$enabled" != "true" ]; then
         systemctl stop i2pd.service 2>/dev/null || true
         systemctl disable i2pd.service 2>/dev/null || true
-        log "i2p disabled — service stopped"
+        # Clear any over_vpn policy routing left over.
+        ip rule del fwmark 0x200 table 200 2>/dev/null || true
+        ip route flush table 200 2>/dev/null || true
+        log "i2p disabled — service stopped, ip rules cleared"
         return 0
     fi
     # Reuses the i2pd config rewriter we built in v57.
     apply_i2p_service
+    if [ "$over_vpn" = "true" ]; then
+        apply_i2p_over_vpn
+    fi
 }
 
 # ──────────────────────────────────────────────────────────────────────

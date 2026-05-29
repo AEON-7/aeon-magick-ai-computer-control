@@ -135,6 +135,19 @@
   let vpnSaving = false;
   let vpnMsg = '';
 
+  // v58.1: independent Tor / I2P toggles. They can run alongside any
+  // clearnet VPN provider — when both are enabled, .onion goes through
+  // Tor, .i2p through the I2P proxy, clearnet through the VPN (or
+  // straight WAN if no VPN).
+  let torEnabled = false;
+  let torMode: 'split_tunnel' | 'transparent' = 'split_tunnel';
+  let torOverVpn = false;
+  let i2pEnabled = false;
+  let i2pOverVpn = false;
+  // ExitCountry pulled out so the new Tor block can read/write it
+  // even when the legacy provider radio isn't on "tor".
+  let torExitCountry = '';
+
   let loading = true;
   let error = '';
   let advancedOpen = false;
@@ -196,6 +209,14 @@
       ovPass = '';
       torBridges = '';
       torPreset = v.tor?.preset ?? 'direct';
+      // v58.1: independent toggles. The API now surfaces these as
+      // top-level fields on v.tor and v.i2p (see api.ts shapes).
+      torEnabled = v.tor?.enabled ?? false;
+      torMode = (v.tor?.mode as 'split_tunnel' | 'transparent') ?? 'split_tunnel';
+      torOverVpn = v.tor?.over_vpn ?? false;
+      torExitCountry = v.tor?.exit_country ?? '';
+      i2pEnabled = v.i2p?.enabled ?? false;
+      i2pOverVpn = v.i2p?.over_vpn ?? false;
     } catch (e: any) {
       error = e?.message ?? 'failed to load network state';
     } finally {
@@ -439,6 +460,24 @@
       } else if (vpnProvider === 'i2p') {
         patch.i2p = { outproxy: i2pOutproxy };
       }
+      // v58.1: always send the independent toggle state for tor + i2p.
+      // The PUT migrates legacy vpnProvider=tor/i2p but the top-level
+      // toggles are the new source of truth — saving them with every
+      // request ensures the user's choice from the new UI sticks even
+      // when they don't touch the legacy radio.
+      patch.tor = {
+        ...(patch.tor ?? {}),
+        enabled: torEnabled,
+        mode: torMode,
+        over_vpn: torOverVpn,
+        exit_country: torExitCountry,
+      };
+      patch.i2p = {
+        ...(patch.i2p ?? {}),
+        enabled: i2pEnabled,
+        outproxy: i2pOutproxy,
+        over_vpn: i2pOverVpn,
+      };
       await api.setVpn(patch);
       vpnMsg = '✓ saved + applied (tunnel may take a few seconds)';
       setTimeout(() => (vpnMsg = ''), 4000);
@@ -1273,6 +1312,159 @@
                 <span class="text-xs text-live-400 font-mono">{dnsMsg}</span>
               {/if}
             </div>
+          </section>
+
+          <!-- ─── v58.1: Privacy overlays (Tor + I2P, independent of VPN) ─── -->
+          <section class="space-y-4">
+            <header class="space-y-1">
+              <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+                Privacy overlays
+              </h3>
+              <p class="text-zinc-400 text-sm">
+                Tor and I2P are independent of the VPN — any combination
+                can run at the same time. <code class="text-cursed-300">.onion</code>
+                sites go through Tor, <code class="text-cursed-300">.i2p</code>
+                sites through I2P, clearnet through the VPN (or straight
+                WAN if no VPN). Tor's "all traffic" mode pulls clearnet
+                in too, but I2P always stays independent so the I2P
+                network stays reachable.
+              </p>
+            </header>
+
+            <!-- ── Tor ── -->
+            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" bind:checked={torEnabled}
+                       class="w-4 h-4 accent-cursed-500" />
+                <span class="text-zinc-200 text-sm font-medium">Enable Tor</span>
+                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+                  • TransPort 9040 • DNSPort 5353
+                </span>
+              </label>
+
+              <div class="space-y-3 pl-7"
+                   class:opacity-40={!torEnabled}
+                   class:pointer-events-none={!torEnabled}>
+
+                <!-- Mode radio -->
+                <div class="space-y-2">
+                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                    Routing mode
+                  </p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <label class="flex items-start gap-3 cursor-pointer p-3 rounded
+                                  border transition-colors
+                                  {torMode === 'split_tunnel'
+                                    ? 'bg-cursed-500/10 border-cursed-500/50'
+                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                      <input type="radio" bind:group={torMode} value="split_tunnel"
+                             class="mt-1 w-4 h-4 accent-cursed-500" />
+                      <div class="space-y-1 flex-1 min-w-0">
+                        <div class="text-zinc-200 text-sm">Split tunnel (.onion only)</div>
+                        <p class="text-[11px] text-zinc-500 leading-relaxed">
+                          Only TCP destined for a <code>.onion</code> address rides
+                          Tor. Clearnet keeps the default route (or the VPN if
+                          one is selected). Recommended default — Tor stays out
+                          of your normal browsing.
+                        </p>
+                      </div>
+                    </label>
+                    <label class="flex items-start gap-3 cursor-pointer p-3 rounded
+                                  border transition-colors
+                                  {torMode === 'transparent'
+                                    ? 'bg-cursed-500/10 border-cursed-500/50'
+                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                      <input type="radio" bind:group={torMode} value="transparent"
+                             class="mt-1 w-4 h-4 accent-cursed-500" />
+                      <div class="space-y-1 flex-1 min-w-0">
+                        <div class="text-zinc-200 text-sm">All traffic via Tor</div>
+                        <p class="text-[11px] text-zinc-500 leading-relaxed">
+                          Every TCP connection from the Pi + USB clients goes
+                          through Tor (except i2pd's — that always stays
+                          independent). Strongest privacy, slowest browsing,
+                          many sites break (CAPTCHA loops, geo-blocks).
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Over-VPN -->
+                <label class="flex items-start gap-3 cursor-pointer pt-2">
+                  <input type="checkbox" bind:checked={torOverVpn}
+                         disabled={!vpnEnabled || vpnProvider === 'none'}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-0.5">
+                    <span class="text-zinc-300 text-sm">
+                      Nest Tor through the active VPN
+                    </span>
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      Tor's circuit handshakes with entry guards exit through
+                      the VPN tunnel rather than the bare upstream — your ISP
+                      sees only VPN traffic. Requires a clearnet VPN to be on
+                      ({vpnEnabled && vpnProvider !== 'none'
+                        ? `currently: ${vpnProvider}`
+                        : 'currently none — toggle locked'}).
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <!-- ── I2P ── -->
+            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" bind:checked={i2pEnabled}
+                       class="w-4 h-4 accent-cursed-500" />
+                <span class="text-zinc-200 text-sm font-medium">Enable I2P</span>
+                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+                  • HTTP proxy 4444 • SOCKS 4447
+                </span>
+                <a href="/network/i2p" class="ml-auto text-[10px] px-2 py-1 rounded
+                          border border-cursed-500/40 text-cursed-300
+                          hover:bg-cursed-500/10 transition-colors font-mono">
+                  I2P config →
+                </a>
+              </label>
+
+              <div class="space-y-3 pl-7"
+                   class:opacity-40={!i2pEnabled}
+                   class:pointer-events-none={!i2pEnabled}>
+                <p class="text-[11px] text-zinc-500 leading-relaxed">
+                  I2P is always split-tunnel by design — it's a peer-to-peer
+                  overlay, not a generic transport. <code>.i2p</code>
+                  sites work in any browser pointed at the HTTP proxy;
+                  clearnet stays on whatever route the rest of the system
+                  uses (Tor / VPN / direct).
+                </p>
+
+                <!-- Over-VPN -->
+                <label class="flex items-start gap-3 cursor-pointer pt-1">
+                  <input type="checkbox" bind:checked={i2pOverVpn}
+                         disabled={!vpnEnabled || vpnProvider === 'none'}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-0.5">
+                    <span class="text-zinc-300 text-sm">
+                      Nest I2P through the active VPN
+                    </span>
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      i2pd's outbound TCP rides the VPN tunnel instead of
+                      going direct. Hides "uses I2P" from your ISP at the
+                      cost of one extra hop. Requires a clearnet VPN to be on
+                      ({vpnEnabled && vpnProvider !== 'none'
+                        ? `currently: ${vpnProvider}`
+                        : 'currently none — toggle locked'}).
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <p class="text-[11px] text-zinc-600 leading-relaxed">
+              Tor service config (bridges, exit country, etc.) lives in the
+              VPN section below under the legacy "Tor (legacy)" provider —
+              that will move up here in a future release.
+            </p>
           </section>
 
           <!-- ─── VPN ─── -->
