@@ -22,6 +22,7 @@ use tracing::info;
 
 mod capture;
 mod config;
+mod h264_pipe;
 mod jpeg_pipe;
 mod state;
 mod supervise;

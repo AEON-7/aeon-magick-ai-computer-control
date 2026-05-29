@@ -9,7 +9,7 @@ use hyper_util::rt::TokioExecutor;
 use parking_lot::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{broadcast, watch, Notify};
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamerSnapshot {
@@ -25,6 +25,16 @@ pub struct StreamerSnapshot {
     /// the device. The webapi proxy reads this to decide where to fetch
     /// /snapshot and /stream from.
     pub pipeline_kind: Option<&'static str>,
+}
+
+/// One H.264 access unit (one decodable picture's NAL units), Annex-B
+/// framed (start-code prefixed). Keyframes carry SPS+PPS so a freshly
+/// connected client can configure its decoder without waiting for a
+/// separate parameter-set delivery. See [`crate::h264_pipe`].
+#[derive(Clone)]
+pub struct H264Au {
+    pub data: bytes::Bytes,
+    pub key: bool,
 }
 
 pub struct Shared {
@@ -58,6 +68,14 @@ pub struct Shared {
     /// so jpeg_pipe::run can hold its own reference into the same
     /// counter without the whole `Shared` having to be passed along.
     pub frames_published: Arc<AtomicU64>,
+
+    /// H.264 access-unit fan-out (v64). Only populated when
+    /// `output.format == "h264"`. broadcast (not watch) because H.264
+    /// inter-frame coding means every subscriber must see every AU in
+    /// order — see [`crate::h264_pipe`]. Each /h264 client calls
+    /// `.subscribe()`; a client that overruns the channel capacity gets a
+    /// `Lagged` signal and resyncs at the next keyframe.
+    pub h264_tx: broadcast::Sender<H264Au>,
 }
 
 #[derive(Clone)]
@@ -68,6 +86,11 @@ impl SharedState {
         let uds_client: Client<_, Empty<bytes::Bytes>> =
             Client::builder(TokioExecutor::new()).build(hyperlocal::UnixConnector);
         let (frame_tx, frame_rx) = watch::channel(None);
+        // H.264 AU fan-out. Drop the initial receiver; subscribers are
+        // created on demand per /h264 client. Capacity 256 ≈ several
+        // seconds of AUs — a client that overruns it gets Lagged and
+        // resyncs at the next keyframe rather than corrupting its decode.
+        let (h264_tx, _) = broadcast::channel(256);
         Self(Arc::new(Shared {
             cfg,
             snap: Mutex::new(StreamerSnapshot::default()),
@@ -77,6 +100,7 @@ impl SharedState {
             frame_tx,
             frame_rx,
             frames_published: Arc::new(AtomicU64::new(0)),
+            h264_tx,
         }))
     }
 

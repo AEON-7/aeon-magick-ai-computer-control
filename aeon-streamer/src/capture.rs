@@ -287,6 +287,42 @@ pub enum Pipeline {
 /// falls back to ffmpeg rescale for NV12/YU12-only sources (Cam Link at 4K).
 /// Called via `detect_pipeline` (the public entry point).
 fn pick_pipeline(modes: Vec<ParsedMode>, output: &crate::config::Output) -> Result<Pipeline> {
+    // H.264 mode (v64): always use the ffmpeg pipeline regardless of source
+    // format — ustreamer can't hand us raw H.264 NAL units, but ffmpeg can
+    // ingest any of these and hardware-encode to H.264 on a Pi 4. We pick
+    // the first source format ffmpeg can read (YUYV at ≤1080p, NV12/YU12 at
+    // 4K), mapping the v4l2 fourcc to ffmpeg's -input_format name.
+    if output.format == "h264" {
+        let prefs: &[(&str, &str)] = &[
+            ("YUYV", "yuyv422"),
+            ("UYVY", "uyvy422"),
+            ("NV12", "nv12"),
+            ("YU12", "yuv420p"),
+            ("MJPG", "mjpeg"),
+        ];
+        for &(fourcc, ff) in prefs {
+            if let Some(m) = modes.iter().find(|m| m.fourcc == fourcc) {
+                if let Some(res) = m.resolutions.first() {
+                    return Ok(Pipeline::FfmpegRescale {
+                        source_format: ff.to_string(),
+                        source_resolution: res.clone(),
+                        source_fps: 30,
+                        target_width: output.width,
+                        target_height: output.height,
+                        target_fps: output.fps,
+                        target_format: "h264".into(),
+                        scale_algorithm: output.scale_algorithm.clone(),
+                    });
+                }
+            }
+        }
+        let offered: Vec<&String> = modes.iter().map(|m| &m.fourcc).collect();
+        return Err(anyhow!(
+            "h264 mode: no ffmpeg-ingestible v4l2 format offered by device. enum: {:?}",
+            offered
+        ));
+    }
+
     // Try the fast path first.
     if let Ok(cap) = pick_best(modes.clone()) {
         return Ok(Pipeline::Ustreamer(cap));

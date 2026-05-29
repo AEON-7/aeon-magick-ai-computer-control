@@ -74,6 +74,17 @@ pub struct Output {
     /// on first boot. Toggle to `true` in /etc/aeon/streamer.toml when
     /// you've validated streaming works.
     pub hw_accel: bool,
+
+    /// H.264 target bitrate (kbps). Only used when `format = "h264"`.
+    /// 6000 ≈ 6 Mbps is ample for 1080p desktop content on a LAN and keeps
+    /// the Pi 4 hardware encoder comfortable. Tunable live via /system.
+    pub h264_bitrate_kbps: u32,
+
+    /// H.264 keyframe interval (GOP) in frames. A WebSocket client can only
+    /// begin decoding at an IDR, so keep this near ~1s of frames (30 @ 30fps).
+    /// Smaller = faster client sync + better packet-loss recovery, at a
+    /// bitrate cost.
+    pub h264_gop: u32,
 }
 
 impl Default for Output {
@@ -87,6 +98,8 @@ impl Default for Output {
             snapshot_path: PathBuf::from("/run/aeon/snapshots/live.jpg"),
             mjpeg_tcp_port: 8002,
             hw_accel: false,
+            h264_bitrate_kbps: 6000,
+            h264_gop: 30,
         }
     }
 }

@@ -141,7 +141,7 @@
   function credentialPlaceholder(id: string) {
     if (id === 'mullvad') return '16-digit Mullvad account number';
     if (id === 'ivpn') return 'IVPN account ID (ivpn-XXXX-XXXX-XXXX)';
-    return 'AzireVPN API token from dashboard';
+    return 'AzireVPN API token (NOT your account ID)';
   }
 </script>
 
@@ -234,6 +234,16 @@
                      placeholder={credentialPlaceholder(active)}
                      class="w-full bg-ink-800 border border-ink-700 rounded
                             px-3 py-2 text-sm text-zinc-200 font-mono" />
+              {#if active === 'azirevpn'}
+                <p class="text-[11px] text-amber-300/80 leading-relaxed">
+                  This is your <strong>API token</strong> — <em>not</em> your account ID.
+                  While signed in to AzireVPN, create one at
+                  <a class="underline hover:text-amber-200"
+                     href="https://manager.azirevpn.com/account/token"
+                     target="_blank" rel="noopener"
+                     >manager.azirevpn.com/account/token</a>.
+                </p>
+              {/if}
               <input type="text" bind:value={deviceName}
                      placeholder="device name (default: aeon-magick)"
                      class="w-full bg-ink-800 border border-ink-700 rounded

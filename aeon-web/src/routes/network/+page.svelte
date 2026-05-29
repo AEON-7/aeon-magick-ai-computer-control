@@ -2077,11 +2077,17 @@ AllowedIPs = 0.0.0.0/0`}
                             cached. IVPN's HQ is Gibraltar — outside 14-Eyes — and
                             their no-logs policy was Cure53-audited.
                           {:else}
-                            Paste your AzireVPN API token into the wizard. Generate
-                            one in your AzireVPN dashboard under "Settings →
-                            Access tokens". Same on-device WireGuard keypair flow.
-                            AzireVPN is the boutique pick — long-running no-log claim
-                            but no formal 3rd-party audit yet.
+                            Paste your AzireVPN <strong>API token</strong> into the
+                            wizard — this is <em>not</em> your account ID. While logged
+                            in, generate one at
+                            <a class="underline text-amber-200 hover:text-amber-100"
+                               href="https://manager.azirevpn.com/account/token"
+                               target="_blank" rel="noopener"
+                               >manager.azirevpn.com/account/token</a>.
+                            Same on-device WireGuard keypair flow: the supervisor
+                            registers your pubkey via AzireVPN's <code>/v3/ips</code>
+                            endpoint and caches the server list. Boutique pick —
+                            long-running no-log claim, but no formal 3rd-party audit yet.
                           {/if}
                         </p>
                       </div>

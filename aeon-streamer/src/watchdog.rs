@@ -25,8 +25,11 @@ pub async fn run(state: SharedState) -> Result<()> {
     // we call has_changed() / borrow_and_update() to detect whether
     // any new frame arrived since last poll. N consecutive false =
     // ffmpeg stalled.
-    let mut frame_rx = state.0.frame_rx.clone();
-    let _ = frame_rx.borrow_and_update();
+    // v64: liveness for the ffmpeg family (MJPEG via jpeg_pipe AND H.264 via
+    // h264_pipe) is derived from the frames_published counter delta below,
+    // not the frame watch channel — the H.264 pipeline publishes access
+    // units to a broadcast channel, not to frame_tx, so the counter is the
+    // one signal common to both pipelines.
 
     // v45: real captured_fps. jpeg_pipe::run bumps frames_published on
     // every published frame; sample (count, instant) at each watchdog
@@ -48,8 +51,10 @@ pub async fn run(state: SharedState) -> Result<()> {
         let now = Instant::now();
         let count = state.0.frames_published.load(Ordering::Relaxed);
         let dt = now.duration_since(last_sample_at).as_secs_f32();
+        // Media units (JPEG frames or H.264 access units) published since the
+        // last tick. Drives both captured_fps and ffmpeg-family liveness.
+        let dframes = count.saturating_sub(last_frame_count);
         if dt > 0.1 {
-            let dframes = count.saturating_sub(last_frame_count);
             let fps = (dframes as f32 / dt).round() as u32;
             state.mutate(|s| s.captured_fps = fps);
             last_frame_count = count;
@@ -68,8 +73,8 @@ pub async fn run(state: SharedState) -> Result<()> {
         // The hash check is only valuable for the ustreamer path, where
         // format changes mean ustreamer needs new args.
         let pipeline_kind = state.read().pipeline_kind;
-        let in_ffmpeg_mode = pipeline_kind == Some("ffmpeg");
-        if !in_ffmpeg_mode {
+        let in_ffmpeg_family = matches!(pipeline_kind, Some("ffmpeg") | Some("ffmpeg-h264"));
+        if !in_ffmpeg_family {
             if let Ok(h) = capture::enum_signature(&state.0.cfg.device) {
                 if let Some(prev) = &last_hash {
                     if &h != prev {
@@ -83,23 +88,11 @@ pub async fn run(state: SharedState) -> Result<()> {
         }
 
         // 2. Online check — different signal source per pipeline.
-        if in_ffmpeg_mode {
-            // ffmpeg-pipeline mode (v24): "online" = jpeg_pipe::run
-            // published at least one new frame since the last poll.
-            // The watch channel's has_changed() flag is set by the
-            // sender on every send(); borrow_and_update() clears it.
-            // 5 consecutive polls with no change (~10s at 2s poll) =
-            // ffmpeg stalled, signal a relaunch.
-            let fresh = match frame_rx.has_changed() {
-                Ok(true) => {
-                    // Mark as seen for next iteration.
-                    let _ = frame_rx.borrow_and_update();
-                    true
-                }
-                Ok(false) => false,
-                Err(_) => false,  // sender dropped — treated as stalled
-            };
-            if fresh {
+        if in_ffmpeg_family {
+            // ffmpeg family (MJPEG via jpeg_pipe, H.264 via h264_pipe):
+            // "online" = the publish counter advanced since the last poll.
+            // 5 consecutive idle polls (~10s) = the pipe stalled → relaunch.
+            if dframes > 0 {
                 offline_streak = 0;
                 state.mutate(|s| s.online = true);
             } else {
@@ -107,7 +100,7 @@ pub async fn run(state: SharedState) -> Result<()> {
                 state.mutate(|s| s.online = false);
                 if offline_streak >= 5 {
                     info!(streak = offline_streak,
-                        "no new frame from ffmpeg pipe in {} polls, relaunching",
+                        "no new frame/AU from ffmpeg pipe in {} polls, relaunching",
                         offline_streak);
                     state.signal_relaunch("ffmpeg pipe stalled");
                     offline_streak = 0;

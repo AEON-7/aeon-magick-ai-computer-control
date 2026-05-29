@@ -118,6 +118,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/streamer/state", get(crate::proxy::streamer_state))
         .route("/streamer/snapshot", get(crate::proxy::streamer_snapshot))
         .route("/streamer/stream", get(crate::proxy::streamer_stream))
+        // v64: H.264 low-latency live view over WebSocket (WebCodecs client).
+        .route("/streamer/ws", get(crate::proxy::streamer_ws))
         .route("/streamer/relaunch", post(crate::proxy::streamer_relaunch))
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs

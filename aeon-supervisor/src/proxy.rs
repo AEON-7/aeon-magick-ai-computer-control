@@ -3,6 +3,7 @@
 
 use crate::api::AppState;
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{Method, Response, StatusCode};
 use axum::response::IntoResponse;
@@ -118,6 +119,96 @@ pub async fn streamer_stream(State(state): State<AppState>) -> Response<Body> {
 }
 pub async fn streamer_relaunch(State(state): State<AppState>) -> Response<Body> {
     proxy(&state, &state.cfg.streamer_sock, Method::POST, "/relaunch", Some(vec![])).await
+}
+
+// ── v64: H.264 low-latency WebSocket bridge ─────────────────────────────
+//
+// Browser (WebCodecs) ⇄ WSS /api/streamer/ws ⇄ streamer unix-socket /h264.
+// The streamer frames each access unit as [1B flags][4B BE len][AU bytes];
+// we re-emit each AU as ONE binary WS message = [1B flags] ++ Annex-B AU
+// (the WebSocket frame boundary replaces the length prefix). flags bit0 = key.
+//
+// Auth: the upgrade is a GET behind the same auth_middleware as every /api
+// route. Browsers can't set Authorization headers on a WebSocket, but the
+// same-origin `aeon_session` cookie rides along automatically — that's how
+// the web UI authenticates. (Token-in-query for headless agents is a future
+// add; agents use /snapshot over plain HTTP today.)
+pub async fn streamer_ws(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response<Body> {
+    ws.on_upgrade(move |socket| bridge_h264(socket, state))
+}
+
+async fn bridge_h264(mut socket: WebSocket, state: AppState) {
+    let sock = &state.cfg.streamer_sock;
+    if !sock.exists() {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+    // Long-lived GET to the streamer's /h264 access-unit stream.
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, "/h264").into();
+    let req = match hyper::Request::builder().method("GET").uri(uri).body(Empty::new()) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let resp = match state.uds_client_empty.request(req).await {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let mut body = resp.into_body();
+    // Accumulates streamer-framed bytes until whole AUs can be split out.
+    let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+
+    loop {
+        tokio::select! {
+            // Next chunk from the streamer's /h264 stream.
+            frame = body.frame() => {
+                match frame {
+                    Some(Ok(f)) => {
+                        if let Ok(data) = f.into_data() {
+                            buf.extend_from_slice(&data);
+                        }
+                    }
+                    // EOF (streamer relaunched / pipeline changed) or error.
+                    _ => break,
+                }
+                // Drain every complete [1B flags][4B BE len][AU] record.
+                loop {
+                    if buf.len() < 5 {
+                        break;
+                    }
+                    let len =
+                        u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+                    if buf.len() < 5 + len {
+                        break;
+                    }
+                    let mut msg = Vec::with_capacity(1 + len);
+                    msg.push(buf[0]); // flags: bit0 = keyframe
+                    msg.extend_from_slice(&buf[5..5 + len]);
+                    if socket.send(Message::Binary(msg)).await.is_err() {
+                        return; // browser disconnected
+                    }
+                    buf.drain(..5 + len);
+                }
+            }
+            // Client frames: close/ping. axum auto-pongs; we watch for close
+            // so a browser navigating away tears down the streamer read.
+            ws_in = socket.recv() => {
+                match ws_in {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 // ── HID endpoints ───────────────────────────────────────────────────────

@@ -40,6 +40,7 @@ pub async fn serve(state: SharedState) -> Result<()> {
         .route("/relaunch", post(force_relaunch))
         .route("/snapshot", get(snapshot_proxy))
         .route("/stream", get(stream_proxy))
+        .route("/h264", get(h264_stream))
         .with_state(state.clone());
 
     // axum::serve only takes TcpListener; for unix sockets we run an
@@ -91,6 +92,10 @@ async fn force_relaunch(State(state): State<SharedState>) -> impl IntoResponse {
 /// - "ffmpeg"    → read the latest single-frame JPEG file ffmpeg writes
 async fn snapshot_proxy(State(state): State<SharedState>) -> Response<Body> {
     let kind = state.read().pipeline_kind.unwrap_or("ustreamer");
+    if kind == "ffmpeg-h264" {
+        // H.264 mode: ffmpeg writes an atomic JPEG to the snapshot path.
+        return serve_snapshot_from_file(&state).await;
+    }
     if kind == "ffmpeg" {
         return serve_snapshot_file(&state).await;
     }
@@ -102,6 +107,12 @@ async fn snapshot_proxy(State(state): State<SharedState>) -> Response<Body> {
 /// - "ffmpeg"    → proxy from ffmpeg's mpjpeg TCP listener
 async fn stream_proxy(State(state): State<SharedState>) -> Response<Body> {
     let kind = state.read().pipeline_kind.unwrap_or("ustreamer");
+    if kind == "ffmpeg-h264" {
+        // H.264 mode: the low-latency live view is /h264 (WebSocket +
+        // WebCodecs). This MJPEG /stream stays available as a fallback for
+        // browsers without WebCodecs, synthesized from the snapshot file.
+        return stream_mjpeg_from_file(&state).await;
+    }
     if kind == "ffmpeg" {
         return proxy_to_ffmpeg_tcp(&state, "/").await;
     }
@@ -275,4 +286,101 @@ async fn proxy_to_ustreamer(state: &SharedState, path: &str) -> Response<Body> {
         }
         Err(_) => (StatusCode::BAD_GATEWAY, "ustreamer unreachable").into_response(),
     }
+}
+
+/// v64: stream H.264 access units to the supervisor, which forwards them
+/// onto the browser WebSocket. Per-AU framing: `[1 byte flags][4 byte BE
+/// length][AU bytes]`; flags bit0 = keyframe. AU payload is Annex-B.
+///
+/// Only meaningful in the `ffmpeg-h264` pipeline; in other modes nothing is
+/// ever published to `h264_tx`, so this long-lived response simply idles.
+async fn h264_stream(State(state): State<SharedState>) -> Response<Body> {
+    let mut rx = state.0.h264_tx.subscribe();
+    let body_stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(au) => {
+                    let mut hdr = [0u8; 5];
+                    hdr[0] = if au.key { 1 } else { 0 };
+                    hdr[1..5].copy_from_slice(&(au.data.len() as u32).to_be_bytes());
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&hdr));
+                    yield Ok::<_, std::io::Error>(au.data);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "h264 subscriber lagged; resyncing at next keyframe");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .header("Cache-Control", "no-store")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response())
+}
+
+/// Serve the latest JPEG that the H.264 pipeline's ffmpeg writes atomically
+/// to the snapshot path. Agents depend on /snapshot returning a frame even
+/// when the live view is H.264.
+async fn serve_snapshot_from_file(state: &SharedState) -> Response<Body> {
+    let path = state.0.cfg.output.snapshot_path.clone();
+    // Tiny tmpfs file; a blocking read here is microseconds. ffmpeg writes
+    // with -atomic_writing (temp + rename), so a reader never catches a
+    // torn frame.
+    match std::fs::read(&path) {
+        Ok(b) if !b.is_empty() => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "image/jpeg")
+            .header("Cache-Control", "no-store")
+            .body(Body::from(b))
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response()
+            }),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no snapshot yet — ffmpeg still starting up",
+        )
+            .into_response(),
+    }
+}
+
+/// Fallback MJPEG /stream for the H.264 pipeline: re-read the atomic
+/// snapshot file at the configured fps and emit multipart. Laggy compared
+/// to the /h264 WebSocket path — this exists only for browsers without
+/// WebCodecs. Atomic writes on the producer side mean each read is a whole
+/// frame.
+async fn stream_mjpeg_from_file(state: &SharedState) -> Response<Body> {
+    let path = state.0.cfg.output.snapshot_path.clone();
+    let fps = state.0.cfg.output.fps.clamp(1, 30) as u64;
+    let interval = std::time::Duration::from_millis((1000 / fps).max(33));
+    let boundary = "aeonframe";
+    let body_stream = async_stream::stream! {
+        loop {
+            if let Ok(b) = std::fs::read(&path) {
+                if !b.is_empty() {
+                    let header = format!(
+                        "\r\n--{boundary}\r\n\
+                         Content-Type: image/jpeg\r\n\
+                         Content-Length: {}\r\n\r\n",
+                        b.len()
+                    );
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(b));
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            "Content-Type",
+            format!("multipart/x-mixed-replace; boundary={boundary}"),
+        )
+        .header("Cache-Control", "no-store")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response())
 }

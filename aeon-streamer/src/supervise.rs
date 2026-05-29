@@ -49,6 +49,9 @@ pub async fn run(state: SharedState) -> Result<()> {
         };
         let kind_tag: &'static str = match &pipeline {
             Pipeline::Ustreamer(_) => "ustreamer",
+            Pipeline::FfmpegRescale { target_format, .. } if target_format == "h264" => {
+                "ffmpeg-h264"
+            }
             Pipeline::FfmpegRescale { .. } => "ffmpeg",
         };
         state.mutate(|s| {
@@ -76,6 +79,14 @@ pub async fn run(state: SharedState) -> Result<()> {
                     "spawning ustreamer"
                 );
                 spawn_ustreamer(&state, cap)
+            }
+            Pipeline::FfmpegRescale { target_format, .. } if target_format == "h264" => {
+                info!(
+                    mode = "ffmpeg-h264",
+                    target = %display_res,
+                    "spawning ffmpeg (H.264 → stdout pipe + atomic JPEG snapshot)"
+                );
+                spawn_ffmpeg_h264(&state, &pipeline)
             }
             Pipeline::FfmpegRescale { .. } => {
                 info!(
@@ -112,12 +123,20 @@ pub async fn run(state: SharedState) -> Result<()> {
         // when the child exits / is killed / signals relaunch, the
         // stdout pipe closes and jpeg_pipe::run returns. A new task
         // gets spawned on the next iteration.
-        if matches!(pipeline, Pipeline::FfmpegRescale { .. }) {
+        if let Pipeline::FfmpegRescale { target_format, .. } = &pipeline {
             if let Some(stdout) = child.stdout.take() {
-                let tx = state.0.frame_tx.clone();
                 let counter = std::sync::Arc::clone(&state.0.frames_published);
-                tokio::spawn(crate::jpeg_pipe::run(stdout, tx, counter));
-                info!("jpeg_pipe reader spawned for this ffmpeg run");
+                if target_format == "h264" {
+                    // H.264: parse NAL units → access units → broadcast.
+                    let tx = state.0.h264_tx.clone();
+                    tokio::spawn(crate::h264_pipe::run(stdout, tx, counter));
+                    info!("h264_pipe reader spawned for this ffmpeg run");
+                } else {
+                    // MJPEG: parse SOI/EOI frames → latest-frame watch.
+                    let tx = state.0.frame_tx.clone();
+                    tokio::spawn(crate::jpeg_pipe::run(stdout, tx, counter));
+                    info!("jpeg_pipe reader spawned for this ffmpeg run");
+                }
             } else {
                 warn!("ffmpeg child has no stdout pipe — frames won't reach webapi");
             }
@@ -399,6 +418,147 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
         .arg("pipe:1")
         // Pipe stdout so jpeg_pipe::run can read frames. stderr stays
         // inherited so ffmpeg's warnings/errors land in our journal.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
+    Ok(cmd.spawn()?)
+}
+
+/// H.264 pipeline (v64). One ffmpeg, one capture-device open, TWO outputs
+/// fed from a single scaled source via the `split` filter:
+///
+///   output 1: H.264 Annex-B → stdout pipe → `h264_pipe::run` → broadcast
+///             → `/h264` → supervisor WebSocket → browser WebCodecs. This
+///             is the low-latency live path replacing the buffered
+///             multipart-MJPEG `<img>`.
+///
+///   output 2: a single JPEG, atomically rewritten every frame, at the
+///             snapshot path. `/snapshot` reads it (agents depend on that),
+///             and the MJPEG `/stream` fallback re-reads it for browsers
+///             without WebCodecs.
+///
+/// NOTE (hardware-in-the-loop): the encoder name, `-bsf:v dump_extra`,
+/// `-atomic_writing`, and the exact low-latency flags all want validation
+/// against the Pi 4's `h264_v4l2m2m`. This is the apple-mt-style frontier
+/// where on-device truth beats theory.
+fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
+    let cfg = &state.0.cfg;
+    let out = &cfg.output;
+
+    let Pipeline::FfmpegRescale {
+        source_format,
+        source_resolution,
+        source_fps,
+        target_width,
+        target_height,
+        target_fps,
+        scale_algorithm,
+        ..
+    } = pipeline
+    else {
+        anyhow::bail!("spawn_ffmpeg_h264 called with non-ffmpeg pipeline");
+    };
+
+    if let Some(parent) = out.snapshot_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Reuse the same pillarbox/letterbox crop detection as the MJPEG path
+    // so HID coordinates still map 1:1 to the host's logical display.
+    let detected = capture::detect_content_crop(
+        &cfg.ffmpeg_bin,
+        &cfg.device,
+        source_format,
+        source_resolution,
+        *source_fps,
+    );
+    let crop_filter = match &detected {
+        Ok(Some(c)) => {
+            info!(w = c.width, h = c.height, x = c.x, y = c.y, "h264: content crop detected");
+            Some(c.as_filter())
+        }
+        _ => None,
+    };
+    let (out_w, out_h) = if let Ok(Some(c)) = &detected {
+        let h = *target_height;
+        let w = ((h as f32 * c.aspect()).round() as u32 / 2) * 2; // even for chroma
+        (w, h)
+    } else {
+        (*target_width, *target_height)
+    };
+    let scale_part = if out.hw_accel {
+        format!("scale_v4l2m2m={out_w}:{out_h}")
+    } else {
+        format!("scale={out_w}:{out_h}:flags={scale_algorithm}")
+    };
+    let base = match crop_filter {
+        Some(c) => format!("{c},{scale_part}"),
+        None => scale_part,
+    };
+    // One filtered source split into two outputs (H.264 + JPEG snapshot).
+    let filter_complex = format!("[0:v]{base},split=2[vh][vj]");
+
+    // MJPEG snapshot quality (same 1–100 → q:v 2–15 mapping as the MJPEG path).
+    let qv = {
+        let inverted = 31u32.saturating_sub(((cfg.jpeg_quality as u32) * 31) / 100);
+        inverted.clamp(2, 15).to_string()
+    };
+    // Snapshot runs at a modest fps — agents grab it occasionally, and the
+    // software MJPEG encoder shouldn't compete with HW H.264 for CPU.
+    let snap_fps = (*target_fps).clamp(1, 12).to_string();
+
+    let venc = match cfg.platform {
+        Platform::Pi4 => "h264_v4l2m2m",
+        _ => "libx264",
+    };
+    let bitrate = format!("{}k", out.h264_bitrate_kbps.max(500));
+    let gop = out.h264_gop.max(1).to_string();
+    let snapshot_path = out.snapshot_path.display().to_string();
+
+    let mut cmd = Command::new(&cfg.ffmpeg_bin);
+    cmd.arg("-hide_banner")
+        .arg("-loglevel").arg("warning")
+        .arg("-y")
+        // Latency-cutting input flags (same as the MJPEG pipeline).
+        .arg("-fflags").arg("nobuffer")
+        .arg("-flags").arg("low_delay")
+        .arg("-avioflags").arg("direct")
+        .arg("-probesize").arg("32")
+        .arg("-analyzeduration").arg("0")
+        // Input
+        .arg("-f").arg("v4l2")
+        .arg("-input_format").arg(source_format)
+        .arg("-video_size").arg(source_resolution)
+        .arg("-framerate").arg(source_fps.to_string())
+        .arg("-i").arg(&cfg.device)
+        .arg("-filter_complex").arg(&filter_complex)
+        // ── output 1: H.264 Annex-B → stdout ──
+        .arg("-map").arg("[vh]")
+        .arg("-r").arg(target_fps.to_string())
+        .arg("-c:v").arg(venc)
+        .arg("-b:v").arg(&bitrate)
+        .arg("-g").arg(&gop)
+        .arg("-bf").arg("0") // no B-frames → no reorder latency
+        .arg("-pix_fmt").arg("yuv420p");
+    if venc == "libx264" {
+        // Dev-box / Pi 5 software path: make it as low-latency as possible.
+        cmd.arg("-preset").arg("ultrafast").arg("-tune").arg("zerolatency");
+    }
+    // Inline SPS/PPS ahead of every keyframe so a client connecting
+    // mid-stream can configure WebCodecs from the next IDR.
+    cmd.arg("-bsf:v").arg("dump_extra=freq=keyframe")
+        .arg("-f").arg("h264")
+        .arg("pipe:1")
+        // ── output 2: atomic single-frame JPEG for /snapshot + fallback ──
+        .arg("-map").arg("[vj]")
+        .arg("-r").arg(&snap_fps)
+        .arg("-c:v").arg("mjpeg")
+        .arg("-q:v").arg(&qv)
+        .arg("-update").arg("1")
+        .arg("-atomic_writing").arg("1")
+        .arg("-f").arg("image2")
+        .arg(&snapshot_path)
+        // stdout carries the H.264 stream for h264_pipe; stderr → journal.
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 

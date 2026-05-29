@@ -133,6 +133,14 @@ export const relaunchStreamer = () => req<{ ok: boolean }>('POST', '/streamer/re
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 
+// v64: H.264 low-latency live view over WebSocket (WebCodecs client). Same-origin
+// wss:// so the aeon_session cookie authenticates the upgrade automatically
+// (browsers can't set Authorization headers on a WebSocket handshake).
+export const streamWsURL = () =>
+  (location.protocol === 'https:' ? 'wss://' : 'ws://') +
+  location.host +
+  '/api/streamer/ws';
+
 // ── HID ────────────────────────────────────────────────────────────────
 
 export const getHidStatus = () => req<HidStatus>('GET', '/hid/status');

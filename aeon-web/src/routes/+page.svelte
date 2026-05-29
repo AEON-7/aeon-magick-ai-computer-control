@@ -1,8 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
+  import H264Canvas from '$lib/components/H264Canvas.svelte';
 
   let stream_url = '';
+  // v64: prefer the low-latency H.264 WebCodecs canvas when the browser
+  // supports it. H264Canvas dispatches `fallback` (no WebCodecs, or no
+  // keyframe ⇒ streamer still in MJPEG mode) and we revert to the <img>.
+  let ws_url = '';
+  let useH264 = false;
   let state: api.StreamerState | null = null;
   let hid: api.HidStatus | null = null;
   let poll_iv: ReturnType<typeof setInterval>;
@@ -82,6 +88,8 @@
 
   onMount(() => {
     stream_url = api.streamURL();
+    ws_url = api.streamWsURL();
+    useH264 = typeof window !== 'undefined' && 'VideoDecoder' in window;
     refreshState();
     refreshNet();
     poll_iv = setInterval(refreshState, 2000);
@@ -898,12 +906,16 @@
       on:touchcancel={onTouchEnd}
       role="application"
     >
-      <img
-        src={stream_url}
-        alt="target screen"
-        class="w-full h-full object-contain select-none pointer-events-none"
-        draggable="false"
-      />
+      {#if useH264}
+        <H264Canvas url={ws_url} on:fallback={() => (useH264 = false)} />
+      {:else}
+        <img
+          src={stream_url}
+          alt="target screen"
+          class="w-full h-full object-contain select-none pointer-events-none"
+          draggable="false"
+        />
+      {/if}
     </div>
 
     <!-- Hidden text input parked at top-left as a 1px transparent target.
