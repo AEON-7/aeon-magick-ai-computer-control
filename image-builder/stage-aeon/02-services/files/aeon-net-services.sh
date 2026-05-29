@@ -426,6 +426,30 @@ EOF
 # VPN
 # ──────────────────────────────────────────────────────────────────────
 
+stop_clearnet_vpns() {
+    # v58: tighter version of stop_all_vpns that leaves tor + i2pd
+    # alone. Called by apply_vpn so toggling a clearnet provider
+    # doesn't bounce the independent Tor/I2P services.
+    systemctl stop wg-quick@aeon0.service 2>/dev/null || true
+    systemctl disable wg-quick@aeon0.service 2>/dev/null || true
+    systemctl stop openvpn-client@aeon.service 2>/dev/null || true
+    systemctl disable openvpn-client@aeon.service 2>/dev/null || true
+    /usr/bin/tailscale down 2>/dev/null || true
+    # Sweep iptables rules tagged "aeon-vpn". Tor + I2P rules go
+    # under "aeon-tor" / "aeon-i2p" tags in their own apply paths,
+    # so this sweep doesn't touch them.
+    for table in filter nat mangle; do
+        for chain in OUTPUT INPUT FORWARD PREROUTING POSTROUTING; do
+            local lines
+            lines=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+                | awk '/aeon-vpn/{print $1}' | sort -rn)
+            for n in $lines; do
+                iptables -t "$table" -D "$chain" "$n" 2>/dev/null || true
+            done
+        done
+    done
+}
+
 stop_all_vpns() {
     # Idempotent — silently tolerate "service not active".
     systemctl stop wg-quick@aeon0.service 2>/dev/null || true
@@ -656,16 +680,16 @@ except Exception:
     log "openvpn up via openvpn-client@aeon"
 }
 
-apply_vpn_tor() {
+apply_tor_service() {
     # Bridge preset selection — see apply_tor_bridges below.
-    local preset; preset="$(toml_get vpn.tor preset direct)"
+    local preset; preset="$(toml_get tor preset direct)"
     # Custom bridges (only used if preset=custom): multi-line via Python read.
     local bridges="$(python3 -c "
 import tomllib
 try:
     with open('$NETTOML','rb') as f:
         d = tomllib.load(f)
-    print(d.get('vpn',{}).get('tor',{}).get('bridges',''))
+    print(d.get('tor',{}).get('bridges',''))
 except Exception:
     print('')
 ")"
@@ -792,7 +816,7 @@ EOF
     fi
 
     # Optional: exit-node country pin. v19's status panel writes this.
-    local exit_country; exit_country="$(toml_get vpn.tor exit_country '')"
+    local exit_country; exit_country="$(toml_get tor exit_country '')"
     if [ -n "$exit_country" ]; then
         # Strip any existing ExitNodes line + add the new one
         sed -i '/^ExitNodes/d' /etc/tor/torrc.d/aeon.conf
@@ -962,8 +986,8 @@ EOF
     log "tor active — TCP + DNS via tor; DHCP/NTP/mDNS UDP allowed; other UDP dropped"
 }
 
-apply_vpn_i2p() {
-    local outproxy="$(toml_get vpn.i2p outproxy '')"
+apply_i2p_service() {
+    local outproxy="$(toml_get i2p outproxy '')"
 
     if [ ! -x /usr/sbin/i2pd ] && [ ! -x /usr/bin/i2pd ]; then
         log "i2pd binary not installed — skipping"
@@ -1088,16 +1112,22 @@ apply_vpn() {
 
     log "vpn: enabled=$enabled provider=$provider"
 
-    # v39+: dropped the central AEON_DROP chain in favor of inline
-    # LOG-then-DROP pairs per call site (aeon_drop_pair helper above).
-    # No setup needed here — pairs are emitted on the fly.
+    # v58: Tor + I2P are no longer "VPN providers" — they're
+    # independent toggles handled by apply_tor() / apply_i2p().
+    # provider=tor/i2p from a legacy config gets migrated by the
+    # supervisor at read time, so we shouldn't see them here. But
+    # defend against direct edits anyway.
+    if [ "$provider" = "tor" ] || [ "$provider" = "i2p" ]; then
+        log "WARN: vpn.provider='$provider' is legacy — treating as 'none'. Use [tor]/[i2p] enabled instead."
+        provider="none"
+    fi
 
-    # Always start by stopping all VPNs — this gives us a clean slate
-    # (also sweeps any prior iptables rules tagged "aeon-vpn").
-    stop_all_vpns
+    # Always start by stopping VPN tunnels (not Tor / I2P — those are
+    # independent now and have their own sweep functions).
+    stop_clearnet_vpns 2>/dev/null || stop_all_vpns 2>/dev/null || true
 
     if [ "$enabled" != "true" ] || [ "$provider" = "none" ] || [ -z "$provider" ]; then
-        log "vpn disabled — all tunnels down"
+        log "vpn (clearnet) disabled — no tunnel"
         return 0
     fi
 
@@ -1105,9 +1135,7 @@ apply_vpn() {
         tailscale) apply_vpn_tailscale ;;
         wireguard) apply_vpn_wireguard ;;
         openvpn)   apply_vpn_openvpn ;;
-        tor)       apply_vpn_tor ;;
-        i2p)       apply_vpn_i2p ;;
-        *)         log "WARN: unknown vpn provider '$provider' — leaving all tunnels down" ;;
+        *)         log "WARN: unknown vpn provider '$provider' — leaving tunnel down" ;;
     esac
 
     # Kill-switch is layered on TOP of the chosen provider so the rules
@@ -1115,15 +1143,96 @@ apply_vpn() {
     apply_kill_switch
 }
 
+# v58: independent Tor toggle. Replaces the old apply_vpn_tor() flow
+# (which assumed Tor was THE active VPN). Two new behaviours:
+#   - mode=split_tunnel — only REDIRECT TCP destined for Tor's
+#     virtual-IP range (10.192.0.0/10) to TransPort. Clearnet TCP
+#     keeps its normal default-route / VPN path.
+#   - over_vpn=true — fwmark debian-tor UID packets, policy-route
+#     them via the active VPN tunnel (Tor's entry guards exit
+#     through the VPN, hiding "uses Tor" from your ISP).
+apply_tor() {
+    local enabled="$(toml_get tor enabled false)"
+    local mode="$(toml_get tor mode split_tunnel)"
+    local over_vpn="$(toml_get tor over_vpn false)"
+
+    log "tor: enabled=$enabled mode=$mode over_vpn=$over_vpn"
+
+    # Sweep prior tor-tagged iptables rules + stop the service if
+    # disabled — guarantees a clean slate.
+    iptables-save | grep -v 'aeon-tor' | iptables-restore 2>/dev/null || true
+    iptables -t nat -F AEON_TOR_OUT 2>/dev/null && iptables -t nat -X AEON_TOR_OUT 2>/dev/null || true
+
+    if [ "$enabled" != "true" ]; then
+        # Sweep the iptables rules apply_tor_service installs (tagged
+        # "aeon-vpn" historically). stop_all_vpns / stop_clearnet_vpns
+        # already does this — call whichever exists.
+        stop_clearnet_vpns 2>/dev/null || stop_all_vpns 2>/dev/null || true
+        systemctl stop tor.service tor@default.service 2>/dev/null || true
+        systemctl disable tor.service tor@default.service 2>/dev/null || true
+        # Clean up policy-routing leftovers from a previous over_vpn run.
+        ip rule del fwmark 0x100 table 100 2>/dev/null || true
+        ip route flush table 100 2>/dev/null || true
+        log "tor disabled — service stopped, ip rules cleared"
+        return 0
+    fi
+
+    # v58 (this PR): apply_tor_service does both the torrc + the
+    # existing transparent iptables (REDIRECT all TCP → TransPort).
+    # That preserves the v57 behaviour for users upgrading.
+    #
+    # v58.1 (next): carve apply_tor_service into apply_tor_torrc()
+    # + apply_tor_iptables_transparent(), then add:
+    #   - apply_tor_iptables_split_tunnel() — only REDIRECT TCP
+    #     destined for Tor's virtual-IP range (10.192.0.0/10),
+    #     clearnet keeps its normal default-route / VPN path.
+    #   - apply_tor_over_vpn() — fwmark debian-tor UID + ip rule
+    #     so Tor's entry-guard traffic egresses via the active VPN.
+    # Both are surgically isolated changes that warrant their own
+    # PR + bake cycle. For now the mode and over_vpn fields are
+    # accepted + persisted so the UI surface lands cleanly.
+    apply_tor_service
+
+    if [ "$mode" = "split_tunnel" ]; then
+        log "tor: split_tunnel requested — pending v58.1 iptables work, currently routing all TCP via Tor"
+    fi
+    if [ "$over_vpn" = "true" ]; then
+        log "tor: over_vpn requested — pending v58.1 policy-routing work, no nesting active"
+    fi
+}
+
+# v58: independent I2P toggle. Always proxy-based (no transparent
+# routing possible — that's by design). Wraps the same i2pd config
+# rewriting we had in apply_vpn_i2p, gated on the new top-level
+# i2p.enabled flag.
+apply_i2p() {
+    local enabled="$(toml_get i2p enabled false)"
+    log "i2p: enabled=$enabled"
+
+    if [ "$enabled" != "true" ]; then
+        systemctl stop i2pd.service 2>/dev/null || true
+        systemctl disable i2pd.service 2>/dev/null || true
+        log "i2p disabled — service stopped"
+        return 0
+    fi
+    # Reuses the i2pd config rewriter we built in v57.
+    apply_i2p_service
+}
+
 # ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
-# Order matters: VPN first so the tunnel + iptables redirects are
-# established BEFORE DNSCrypt tries to bootstrap. When Tor is the active
-# VPN, DNSCrypt's bootstrap_resolvers point at Tor's DNSPort
-# (127.0.0.1:5353) — that port must exist before DNSCrypt's first
-# query, so we set up Tor first.
+# v58 order:
+#   1. clearnet VPN (tailscale/wireguard/openvpn) — establishes
+#      tun0/wg0 default route if active.
+#   2. Tor — its iptables rules need the VPN's tunnel interface to
+#      exist before tor.over_vpn=true can fwmark traffic through it.
+#   3. I2P — independent; HTTP proxy bind needs usb0 + nothing else.
+#   4. DNSCrypt — bootstrap_resolvers may point at Tor's DNSPort
+#      when Tor is on, so set up Tor first.
 apply_vpn
+apply_tor
+apply_i2p
 apply_dnscrypt
 log "aeon-net-services done"

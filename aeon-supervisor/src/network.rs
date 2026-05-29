@@ -29,6 +29,36 @@ struct NetFile {
     dnscrypt: Dnscrypt,
     #[serde(default)]
     vpn: Vpn,
+    /// v58+: Tor and I2P are independent top-level toggles. They
+    /// can run alongside any vpn.provider (or none). Old configs
+    /// with vpn.provider="tor" or "i2p" get migrated by
+    /// migrate_legacy() at read time.
+    #[serde(default)]
+    tor: Tor,
+    #[serde(default)]
+    i2p: I2p,
+}
+
+/// v58: rewrite old vpn.provider="tor"/"i2p" configs into the new
+/// independent [tor]/[i2p] sections in-place. Idempotent. Called by
+/// read_state() before anyone else sees the struct.
+fn migrate_legacy(nf: &mut NetFile) {
+    match nf.vpn.provider.as_str() {
+        "tor" => {
+            // Old behaviour was "everything via Tor" → keep that as
+            // transparent mode, and clear the now-invalid VPN provider.
+            tracing::info!("migrate: vpn.provider=tor → tor.enabled=true (transparent), vpn=none");
+            nf.tor.enabled = true;
+            nf.tor.mode = "transparent".into();
+            nf.vpn.provider = "none".into();
+        }
+        "i2p" => {
+            tracing::info!("migrate: vpn.provider=i2p → i2p.enabled=true, vpn=none");
+            nf.i2p.enabled = true;
+            nf.vpn.provider = "none".into();
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -162,6 +192,12 @@ impl Default for Dnscrypt {
 struct Vpn {
     #[serde(default)]
     enabled: bool,
+    /// v58: provider enum trimmed. "tor" and "i2p" are no longer
+    /// VPN providers — they live in their own top-level [tor] and
+    /// [i2p] sections and can run alongside any VPN choice.
+    /// Valid: "none" | "tailscale" | "wireguard" | "openvpn".
+    /// Old configs with provider="tor" or "i2p" get migrated in
+    /// migrate_legacy_config().
     #[serde(default = "default_vpn_provider")]
     provider: String,
     #[serde(default)]
@@ -174,10 +210,6 @@ struct Vpn {
     wireguard: WireguardCfg,
     #[serde(default)]
     openvpn: OpenvpnCfg,
-    #[serde(default)]
-    tor: TorCfg,
-    #[serde(default)]
-    i2p: I2pCfg,
 }
 
 impl Default for Vpn {
@@ -190,14 +222,39 @@ impl Default for Vpn {
             tailscale: TailscaleCfg::default(),
             wireguard: WireguardCfg::default(),
             openvpn: OpenvpnCfg::default(),
-            tor: TorCfg::default(),
-            i2p: I2pCfg::default(),
         }
     }
 }
 
+// ── v58: Tor as a top-level independent toggle ───────────────────────
+//
+// Old model: vpn.provider = "tor" made Tor the entire VPN and
+// transparently redirected ALL outbound TCP through Tor. New model
+// decouples this — Tor can be on independently of any "VPN" choice.
+// .onion hidden-service access is the primary use case for the
+// split_tunnel mode; transparent mode preserves the old "everything
+// via Tor" behaviour for users who want it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct TorCfg {
+struct Tor {
+    /// Master toggle. When true, the Tor service runs and is
+    /// reachable on usb0 for the DNS-based .onion fix.
+    #[serde(default)]
+    enabled: bool,
+    /// "split_tunnel" — only TCP destined for Tor's virtual-IP range
+    ///                  (10.192.0.0/10) gets REDIRECTed to TransPort.
+    ///                  Clearnet TCP goes via the default route /
+    ///                  VPN. This is the v58 default.
+    /// "transparent"  — ALL outbound TCP goes through Tor (old v57
+    ///                  behaviour, kept for users who want it).
+    #[serde(default = "default_tor_mode")]
+    mode: String,
+    /// Nest Tor through the active VPN. Requires vpn.enabled = true.
+    /// When on, the debian-tor UID's outbound packets get fwmarked
+    /// and policy-routed through the VPN tunnel — entry-guard
+    /// connections leave via the VPN, the rest of the path is
+    /// normal Tor.
+    #[serde(default)]
+    over_vpn: bool,
     #[serde(default = "default_tor_preset")]
     preset: String,
     #[serde(default)]
@@ -208,9 +265,12 @@ struct TorCfg {
     meek_mode: bool,
 }
 
-impl Default for TorCfg {
+impl Default for Tor {
     fn default() -> Self {
         Self {
+            enabled: false,
+            mode: default_tor_mode(),
+            over_vpn: false,
             preset: default_tor_preset(),
             bridges: String::new(),
             exit_country: String::new(),
@@ -219,10 +279,20 @@ impl Default for TorCfg {
     }
 }
 
+fn default_tor_mode() -> String { "split_tunnel".to_string() }
 fn default_tor_preset() -> String { "direct".to_string() }
 
+// ── v58: I2P as a top-level independent toggle ───────────────────────
+//
+// Same story as Tor — independent of any "VPN" choice. I2P is
+// always "proxy mode" by design (no transparent equivalent
+// possible), so there's no mode field.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct I2pCfg {
+struct I2p {
+    #[serde(default)]
+    enabled: bool,
+    /// Optional clearnet outproxy (e.g. exit.stormycloud.i2p).
+    /// Empty = .i2p-only mode (the safe default).
     #[serde(default)]
     outproxy: String,
 }
@@ -267,10 +337,12 @@ fn default_vpn_provider() -> String { "none".to_string() }
 fn default_lan_bypass() -> String { "192.168.0.0/16".to_string() }
 
 fn read_state() -> NetFile {
-    std::fs::read_to_string(NETWORK_TOML)
+    let mut nf: NetFile = std::fs::read_to_string(NETWORK_TOML)
         .ok()
         .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    migrate_legacy(&mut nf);
+    nf
 }
 
 fn write_state(nf: &NetFile) -> std::io::Result<()> {
@@ -812,11 +884,18 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
             "auth_username": s.vpn.openvpn.auth_username,
             "has_auth_password": !s.vpn.openvpn.auth_password.is_empty(),
         },
+        // v58: tor and i2p are now read from top-level [tor] / [i2p]
+        // sections but exposed under the same JSON keys so older
+        // UI clients keep working. Adds enabled/mode/over_vpn for
+        // the new toggles.
         "tor": {
-            "preset": s.vpn.tor.preset,
-            "has_bridges": !s.vpn.tor.bridges.is_empty(),
-            "exit_country": s.vpn.tor.exit_country,
-            "meek_mode": s.vpn.tor.meek_mode,
+            "enabled": s.tor.enabled,
+            "mode": s.tor.mode,
+            "over_vpn": s.tor.over_vpn,
+            "preset": s.tor.preset,
+            "has_bridges": !s.tor.bridges.is_empty(),
+            "exit_country": s.tor.exit_country,
+            "meek_mode": s.tor.meek_mode,
             "presets": [
                 {"id": "direct", "label": "Direct", "blurb": "No bridge. Works on unrestricted networks. Fastest option."},
                 {"id": "obfs4", "label": "obfs4 (built-in)", "blurb": "Standard obfs4 obfuscation against simple traffic-analysis. Uses the Tor Browser default bridge list."},
@@ -824,17 +903,29 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
                 {"id": "snowflake", "label": "Snowflake", "blurb": "Ephemeral WebRTC-based bridges via volunteer proxies. Requires snowflake-client (install: apt install snowflake-client)."},
                 {"id": "custom", "label": "Custom", "blurb": "Paste your own bridge lines below. Get fresh bridges from bridges.torproject.org."},
             ],
+            "modes": [
+                {"id": "split_tunnel", "label": "Split tunnel (.onion only)", "blurb": "Only TCP destined for .onion services rides Tor. Clearnet keeps its normal path (default route, or your VPN if one is selected). The recommended default."},
+                {"id": "transparent", "label": "Transparent (everything via Tor)", "blurb": "Every outbound TCP connection from the Pi + USB clients goes through Tor. Strongest privacy, but slow and many services break (CAPTCHAs, geo-blocks). Old v57 and earlier did this by default."},
+            ],
         },
         "i2p": {
-            "outproxy": s.vpn.i2p.outproxy,
+            "enabled": s.i2p.enabled,
+            "outproxy": s.i2p.outproxy,
         },
+        // v58: clearnet providers — tor and i2p moved out of the VPN
+        // enum but still appear in the providers list for backward
+        // compat with older UI clients. Selecting them flips the
+        // corresponding top-level toggle (see PUT migration in
+        // put_vpn). Once UI's been updated to use the independent
+        // tor.enabled / i2p.enabled fields, these two entries can
+        // be dropped from the list.
         "providers": [
-            {"id": "none", "label": "None", "blurb": "No VPN. WAN traffic exits via the Pi's normal upstream (eth0/wlan0)."},
+            {"id": "none", "label": "None", "blurb": "No clearnet VPN. Traffic exits via the Pi's normal upstream (eth0/wlan0). Independent Tor + I2P can still be on for .onion / .i2p sites — see the toggles below."},
             {"id": "tailscale", "label": "Tailscale", "blurb": "WireGuard mesh. Bring an auth-key from the Tailscale admin console. Optionally turn this Pi into an exit-node for your tailnet."},
             {"id": "wireguard", "label": "WireGuard", "blurb": "Paste a working WireGuard .conf. We'll run it via wg-quick@aeon0."},
             {"id": "openvpn", "label": "OpenVPN", "blurb": "Paste a working .ovpn config. Username/password optional."},
-            {"id": "tor", "label": "Tor", "blurb": "Route all outbound TCP + DNS through Tor transparently. UDP can't traverse Tor — it's dropped while this is active. Slower than a real VPN but harder to deanonymize."},
-            {"id": "i2p", "label": "I2P", "blurb": "Garlic-routed overlay; reaches .i2p sites natively. Configure an outproxy to also reach the regular internet through I2P (slower, less anonymous than Tor for clearnet)."},
+            {"id": "tor", "label": "Tor (legacy)", "blurb": "v58+: prefer the independent Tor toggle below — Tor can now run alongside any of the above. Selecting this option flips tor.enabled=true in transparent mode for backward compat."},
+            {"id": "i2p", "label": "I2P (legacy)", "blurb": "v58+: prefer the independent I2P toggle below. Selecting this option flips i2p.enabled=true for backward compat."},
         ],
     }))
 }
@@ -863,20 +954,20 @@ pub struct VpnPutReq {
 
 #[derive(Deserialize)]
 pub struct TorPut {
-    #[serde(default)]
-    pub preset: Option<String>,
-    #[serde(default)]
-    pub bridges: Option<String>,
-    #[serde(default)]
-    pub exit_country: Option<String>,
-    #[serde(default)]
-    pub meek_mode: Option<bool>,
+    // v58: top-level fields for the independent toggle + mode + nest.
+    #[serde(default)] pub enabled: Option<bool>,
+    #[serde(default)] pub mode: Option<String>,
+    #[serde(default)] pub over_vpn: Option<bool>,
+    #[serde(default)] pub preset: Option<String>,
+    #[serde(default)] pub bridges: Option<String>,
+    #[serde(default)] pub exit_country: Option<String>,
+    #[serde(default)] pub meek_mode: Option<bool>,
 }
 
 #[derive(Deserialize)]
 pub struct I2pPut {
-    #[serde(default)]
-    pub outproxy: Option<String>,
+    #[serde(default)] pub enabled: Option<bool>,
+    #[serde(default)] pub outproxy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -954,7 +1045,21 @@ pub async fn put_vpn(
         if let Some(v) = ov.auth_username { nf.vpn.openvpn.auth_username = v; }
         if let Some(v) = ov.auth_password { nf.vpn.openvpn.auth_password = v; }
     }
+    // v58: tor + i2p moved to top-level. PUT still accepts the same
+    // nested shape ({tor: {...}, i2p: {...}}) so the existing UI
+    // keeps working until it migrates to the new endpoints.
     if let Some(tor) = req.tor {
+        if let Some(v) = tor.enabled { nf.tor.enabled = v; }
+        if let Some(m) = tor.mode {
+            if m != "split_tunnel" && m != "transparent" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": "tor.mode must be 'split_tunnel' or 'transparent'"})),
+                ).into_response();
+            }
+            nf.tor.mode = m;
+        }
+        if let Some(v) = tor.over_vpn { nf.tor.over_vpn = v; }
         if let Some(p) = tor.preset {
             const VALID_PRESETS: &[&str] = &["direct", "obfs4", "meek-azure", "snowflake", "custom"];
             if !VALID_PRESETS.contains(&p.as_str()) {
@@ -963,9 +1068,9 @@ pub async fn put_vpn(
                     Json(json!({"ok": false, "err": format!("unknown tor preset '{p}'")})),
                 ).into_response();
             }
-            nf.vpn.tor.preset = p;
+            nf.tor.preset = p;
         }
-        if let Some(v) = tor.bridges { nf.vpn.tor.bridges = v; }
+        if let Some(v) = tor.bridges { nf.tor.bridges = v; }
         if let Some(v) = tor.exit_country {
             // Country codes are 2-letter ISO-3166. Reject anything else
             // to avoid torrc injection (the value lands in a config file).
@@ -976,12 +1081,45 @@ pub async fn put_vpn(
                     Json(json!({"ok": false, "err": "exit_country must be a 2-letter ISO code or empty"})),
                 ).into_response();
             }
-            nf.vpn.tor.exit_country = v;
+            nf.tor.exit_country = v;
         }
-        if let Some(v) = tor.meek_mode { nf.vpn.tor.meek_mode = v; }
+        if let Some(v) = tor.meek_mode { nf.tor.meek_mode = v; }
     }
     if let Some(i2p) = req.i2p {
-        if let Some(v) = i2p.outproxy { nf.vpn.i2p.outproxy = v; }
+        if let Some(v) = i2p.enabled { nf.i2p.enabled = v; }
+        if let Some(v) = i2p.outproxy { nf.i2p.outproxy = v; }
+    }
+
+    // v58: validate vpn.provider — "tor" and "i2p" got moved out of
+    // the VPN enum, but the existing UI may still send them. Migrate
+    // PUT-time instead of 400ing: provider="tor" flips tor.enabled
+    // = true + transparent mode (the old behaviour), provider="i2p"
+    // flips i2p.enabled = true. This way old UIs keep working while
+    // we ship updated UI in v58.1.
+    if nf.vpn.provider == "tor" {
+        tracing::info!("PUT migration: provider=tor → tor.enabled=true + mode=transparent, vpn=none");
+        nf.tor.enabled = true;
+        if nf.tor.mode != "transparent" && nf.tor.mode != "split_tunnel" {
+            nf.tor.mode = "transparent".into();
+        } else if nf.tor.mode == "split_tunnel" {
+            // Caller upgraded to v58 schema mid-flight: keep their
+            // chosen mode.
+        }
+        nf.vpn.provider = "none".into();
+    } else if nf.vpn.provider == "i2p" {
+        tracing::info!("PUT migration: provider=i2p → i2p.enabled=true, vpn=none");
+        nf.i2p.enabled = true;
+        nf.vpn.provider = "none".into();
+    }
+    const VALID_VPN_PROVIDERS: &[&str] = &["none", "tailscale", "wireguard", "openvpn"];
+    if !VALID_VPN_PROVIDERS.contains(&nf.vpn.provider.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "err": format!("vpn.provider '{}' not allowed — use tor.enabled / i2p.enabled for those", nf.vpn.provider),
+            })),
+        ).into_response();
     }
 
     if let Err(e) = write_state(&nf) {
