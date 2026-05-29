@@ -100,7 +100,15 @@ struct Dnscrypt {
     #[serde(default)]
     anonymized: Anonymized,
 }
-fn default_server_mode() -> String { "specific".into() }
+/// v56: default to criteria-based auto mode. The strict defaults on
+/// `ResolverCriteria` give ~86 candidates, of which the supervisor
+/// picks 30 across multiple operators — dnscrypt-proxy's
+/// lb_strategy="p2" then routes per-query to the lowest-latency one
+/// live. When anonymized DNSCrypt is also enabled, the latency
+/// probe goes THROUGH the relay path, so the picked server is the
+/// fastest end-to-end choice (client → relay → resolver). Users
+/// who want a single named provider can switch to "specific".
+fn default_server_mode() -> String { "auto".into() }
 
 /// Anonymized DNSCrypt configuration. Off by default — adds 30-100ms
 /// of latency per query, so opt-in. When on, the user picks either

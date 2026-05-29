@@ -78,21 +78,31 @@ pub fn catalog() -> &'static [Resolver] {
         .as_slice()
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResolverCriteria {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub no_logs: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub dnssec: bool,
-    #[serde(default)]
+    /// "no filter" = raw answers, no malware/ad blocking. On by
+    /// default because filtering is opaque (you can't verify what
+    /// got rewritten) and many filtering resolvers double as
+    /// censorship infrastructure. Users who explicitly want
+    /// resolver-side blocking can untick this.
+    #[serde(default = "default_true")]
     pub no_filter: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub outside_five_eyes: bool,
-    #[serde(default)]
+    /// 14 Eyes adds DE/BE/IT/ES/SE/FR/NL/DK/NO on top of 5 Eyes.
+    /// On by default to bias the default pool toward privacy
+    /// jurisdictions — there are still 86 resolvers with all
+    /// criteria + trust ≥ 4 even with this on.
+    #[serde(default = "default_true")]
     pub outside_fourteen_eyes: bool,
     /// 1-5. 0 means "don't care". Filters out resolvers whose
-    /// trust_score is below this floor.
-    #[serde(default)]
+    /// trust_score is below this floor. Default 4 = audited or
+    /// large-infra operators only.
+    #[serde(default = "default_min_trust")]
     pub min_trust_score: u8,
     /// v55.1: when Tor is the active VPN, restrict the pool to
     /// resolvers reachable on port 443. Tor exit policies
@@ -105,6 +115,30 @@ pub struct ResolverCriteria {
     /// shrunk.
     #[serde(default)]
     pub tor_friendly_port: bool,
+}
+
+fn default_true() -> bool { true }
+fn default_min_trust() -> u8 { 4 }
+
+impl Default for ResolverCriteria {
+    /// v56: default-on for every privacy lever + min_trust_score=4.
+    /// This is the "make my DNS as private as the catalog allows
+    /// while keeping ~86 candidates available" preset, which is
+    /// what most users would pick if they thought about it. The
+    /// catalog still spans 4-5 operators and ~48 countries with
+    /// this default, so dnscrypt-proxy's lb_strategy has plenty of
+    /// room to find low-latency picks.
+    fn default() -> Self {
+        Self {
+            no_logs: true,
+            dnssec: true,
+            no_filter: true,
+            outside_five_eyes: true,
+            outside_fourteen_eyes: true,
+            min_trust_score: 4,
+            tor_friendly_port: false, // auto-set by supervisor when Tor is on
+        }
+    }
 }
 
 impl ResolverCriteria {
@@ -237,6 +271,7 @@ mod tests {
             outside_fourteen_eyes: false,
             no_filter: false,
             min_trust_score: 3,
+            tor_friendly_port: false,
         };
         let picks = auto_pick(&crit, 20);
         assert!(!picks.is_empty(), "strict criteria should still find some resolvers");
@@ -256,5 +291,31 @@ mod tests {
         let crit = ResolverCriteria::default();
         let picks = auto_pick(&crit, 10);
         assert!(picks.len() <= 10);
+    }
+
+    #[test]
+    fn default_criteria_yield_real_candidates() {
+        // v56: the strict defaults must still produce enough picks
+        // for dnscrypt-proxy's lb_strategy to have real choice. We
+        // want at LEAST 20 — that's our latency-probe budget.
+        let crit = ResolverCriteria::default();
+        let picks = auto_pick(&crit, 30);
+        assert!(
+            picks.len() >= 20,
+            "default criteria should yield ≥20 picks, got {} (relax defaults if catalog shrunk)",
+            picks.len()
+        );
+        // And those picks should span at least 2 distinct operators
+        // so a single operator outage doesn't kill DNS.
+        let cat = catalog();
+        let ops: std::collections::HashSet<_> = picks
+            .iter()
+            .map(|n| cat.iter().find(|r| &r.name == n).unwrap().operator.as_str())
+            .collect();
+        assert!(
+            ops.len() >= 2,
+            "default criteria should span ≥2 operators, got {}",
+            ops.len()
+        );
     }
 }

@@ -28,17 +28,18 @@
   let dnsMsg = '';
 
   // ── Server selection (v55+) ──
-  // Specific = pin to the resolver in `dnsProvider` (legacy).
-  // Auto     = feed dnscrypt-proxy ALL resolvers in the full ~226-
-  //            entry catalog that match the criteria below, let its
-  //            lb_strategy="p2" route per-query by live latency.
-  let srvMode: 'specific' | 'auto' = 'specific';
+  // v56: defaults to "auto" + all-criteria-on + trust>=4. dnscrypt-
+  // proxy's lb_strategy=p2 routes per-query to the lowest-latency
+  // server matching criteria. When anonymized relay routing is on,
+  // the latency probe goes through the relay → so picks reflect the
+  // real end-to-end round trip, not just the resolver hop.
+  let srvMode: 'specific' | 'auto' = 'auto';
   let srvCritNoLogs = true;
   let srvCritDnssec = true;
-  let srvCritNoFilter = false;
+  let srvCritNoFilter = true;
   let srvCritOutside5 = true;
-  let srvCritOutside14 = false;
-  let srvCritMinTrust = 0;
+  let srvCritOutside14 = true;
+  let srvCritMinTrust = 4;
   // Search + filter state for the resolver catalog (auto mode).
   let srvSearch = '';
   let srvShowOnlyMatching = false;
@@ -167,13 +168,15 @@
       }
       if (d.servers) {
         srvMode = d.servers.mode;
+        // v56: defaults match supervisor-side ResolverCriteria::default()
+        // — every privacy lever on, min_trust_score=4.
         const c = d.servers.auto_criteria ?? {};
         srvCritNoLogs = c.no_logs ?? true;
         srvCritDnssec = c.dnssec ?? true;
-        srvCritNoFilter = c.no_filter ?? false;
+        srvCritNoFilter = c.no_filter ?? true;
         srvCritOutside5 = c.outside_five_eyes ?? true;
-        srvCritOutside14 = c.outside_fourteen_eyes ?? false;
-        srvCritMinTrust = c.min_trust_score ?? 0;
+        srvCritOutside14 = c.outside_fourteen_eyes ?? true;
+        srvCritMinTrust = c.min_trust_score ?? 4;
       }
       vpnState = v;
       vpnEnabled = v.enabled;
@@ -807,6 +810,12 @@
                       dnscrypt-proxy probes all of these on startup, then routes
                       each query to the lowest-latency one. Switching automatically
                       if one slows down — no UI refresh needed.
+                      {#if anonEnabled}
+                        <strong class="text-cursed-300">When anonymized relay routing
+                        is on (it is, below), the latency probe goes through the
+                        relay path</strong> — so the picked server is the fastest
+                        end-to-end choice, not just the resolver hop.
+                      {/if}
                     </p>
                   </div>
                 {/if}

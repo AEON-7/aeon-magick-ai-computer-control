@@ -89,6 +89,25 @@ dev_mac  = "02:42:ae:00:55:02"
 enabled = false
 provider = "quad9"
 location = "auto"
+# v56: default to criteria-based auto-pick across the full ~226-server
+# catalog. dnscrypt-proxy's lb_strategy="p2" routes per-query to the
+# lowest-latency server matching the criteria — and when anonymized
+# DNSCrypt is also enabled (below), the latency probe goes THROUGH the
+# relay path, so picks reflect the real end-to-end round trip. Switch
+# to "specific" + set `provider` if you want a pinned resolver.
+server_mode = "auto"
+auto_picked_servers = []
+
+# Auto-pick criteria. v56 defaults strict-but-livable: every privacy
+# lever on, min_trust_score=4. Yields ~86 candidates spread across
+# 4-5 operators in 48 countries.
+[dnscrypt.auto_criteria]
+no_logs = true
+dnssec = true
+no_filter = true
+outside_five_eyes = true
+outside_fourteen_eyes = true
+min_trust_score = 4
 
 # Anonymized DNSCrypt (v51+). Off by default; opt-in via
 # PUT /api/network/dnscrypt {anonymized: {...}}. When enabled,
