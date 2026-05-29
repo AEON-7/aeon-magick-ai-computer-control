@@ -94,6 +94,17 @@ pub struct ResolverCriteria {
     /// trust_score is below this floor.
     #[serde(default)]
     pub min_trust_score: u8,
+    /// v55.1: when Tor is the active VPN, restrict the pool to
+    /// resolvers reachable on port 443. Tor exit policies
+    /// universally permit 443 (it looks like HTTPS) but commonly
+    /// block alternates like 8443 / 5443 / 5353, which then
+    /// manifests as silent timeouts even with force_tcp on. Auto-
+    /// set by the supervisor based on vpn state, NOT a user toggle
+    /// — but we surface it so the UI can show "Tor-active filter
+    /// is on" instead of leaving the user wondering why their pool
+    /// shrunk.
+    #[serde(default)]
+    pub tor_friendly_port: bool,
 }
 
 impl ResolverCriteria {
@@ -116,6 +127,9 @@ impl ResolverCriteria {
             return false;
         }
         if self.min_trust_score > 0 && r.trust_score < self.min_trust_score {
+            return false;
+        }
+        if self.tor_friendly_port && r.port != 443 {
             return false;
         }
         true

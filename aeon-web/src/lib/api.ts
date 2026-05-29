@@ -277,6 +277,12 @@ export interface ResolverCriteria {
   outside_fourteen_eyes?: boolean;
   /// 0 = don't care; 1-5 = minimum required trust_score
   min_trust_score?: number;
+  /// v55.1: auto-set by the supervisor when Tor is the active VPN.
+  /// Limits the pool to port-443 resolvers — Tor exits universally
+  /// permit 443 but commonly block 8443/5443/etc. Read-only from the
+  /// UI's perspective (we don't accept user input here), but
+  /// surfaced so the UI can render a "Tor-active filter is on" hint.
+  tor_friendly_port?: boolean;
 }
 
 export interface DnscryptServersState {

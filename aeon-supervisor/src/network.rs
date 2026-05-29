@@ -715,6 +715,15 @@ pub async fn put_dnscrypt(
         }
     }
 
+    // v55.1: when Tor is the active VPN, force the auto-pick to
+    // port-443-only resolvers. Tor exit policies block alternates
+    // (8443 / 5443 / etc.) which silently time out even with
+    // force_tcp on. We mutate the user's saved criteria so it shows
+    // up in the GET response — the UI surfaces "Tor-active filter is
+    // on" so the user understands why their pool shrunk.
+    let tor_active = nf.vpn.enabled && nf.vpn.provider == "tor";
+    nf.dnscrypt.auto_criteria.tor_friendly_port = tor_active;
+
     // Recompute the auto-picked server list so the TOML on disk
     // matches whatever aeon-net-services.sh will see on the next
     // reload. Cap at 30 — dnscrypt-proxy probes every server on
@@ -973,6 +982,24 @@ pub async fn put_vpn(
             Json(json!({"ok": false, "err": format!("persist: {e}")})),
         )
             .into_response();
+    }
+
+    // v55.1: changing VPN provider/enabled can change whether the
+    // Tor port-443 filter applies — recompute the DNSCrypt
+    // auto-picked server list so it's consistent with the new VPN
+    // state. Without this, the user could enable Tor + still have
+    // their DNSCrypt auto-pool include port-8443 resolvers that
+    // would silently time out.
+    let tor_active = nf.vpn.enabled && nf.vpn.provider == "tor";
+    nf.dnscrypt.auto_criteria.tor_friendly_port = tor_active;
+    nf.dnscrypt.auto_picked_servers = if nf.dnscrypt.server_mode == "auto" {
+        crate::dnscrypt_servers::auto_pick(&nf.dnscrypt.auto_criteria, 30)
+    } else {
+        Vec::new()
+    };
+    // Re-persist with the recomputed pool. write_state is cheap.
+    if let Err(e) = write_state(&nf) {
+        tracing::warn!("re-persist after vpn change: {e}");
     }
 
     reload_service("aeon-net-services.service");

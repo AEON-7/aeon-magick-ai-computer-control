@@ -59,6 +59,11 @@
 
   // ── Reactive derived state for resolver catalog (auto mode) ──
   $: srvCatalog = dnsState?.servers?.catalog ?? [];
+  // v55.1: the supervisor auto-applies a port-443-only filter when
+  // Tor is the active VPN. We mirror that filter in the UI's
+  // "matching" preview so the count + highlighting matches what
+  // the backend actually picks.
+  $: srvTorActive = vpnEnabled && vpnProvider === 'tor';
   // Resolvers that pass the user's privacy/trust criteria. Mirrors
   // ResolverCriteria::passes() on the supervisor side.
   $: srvMatching = srvCatalog.filter((r) => {
@@ -68,6 +73,7 @@
     if (srvCritOutside5 && r.eyes === 'five') return false;
     if (srvCritOutside14 && (r.eyes === 'five' || r.eyes === 'nine' || r.eyes === 'fourteen')) return false;
     if (srvCritMinTrust > 0 && r.trust_score < srvCritMinTrust) return false;
+    if (srvTorActive && r.port !== 443) return false;  // Tor exits only permit :443
     return true;
   });
   $: srvMatchingNames = new Set(srvMatching.map((r) => r.name));
@@ -698,6 +704,29 @@
               </div>
 
               {#if srvMode === 'auto'}
+                <!-- v55.1: Tor-active port-443 filter notice. -->
+                {#if srvTorActive}
+                  <div class="p-3 rounded border border-cursed-500/40 bg-cursed-500/10
+                              flex items-start gap-2">
+                    <span class="text-cursed-300 text-sm leading-none">🧅</span>
+                    <div class="space-y-1">
+                      <p class="text-xs text-cursed-200">
+                        <strong>Tor is active</strong> — auto-pick is restricted
+                        to <strong>port-443 resolvers only</strong>. Tor exit
+                        nodes universally permit 443 (looks like HTTPS) but
+                        commonly block alternates like 8443 / 5443 / 5353,
+                        which would silently time out even with
+                        <code class="text-cursed-300">force_tcp</code> on.
+                      </p>
+                      <p class="text-[11px] text-cursed-100/70 leading-relaxed">
+                        199 of 226 catalog entries use port 443, so the
+                        filter doesn't shrink your pool much. Excluded
+                        outright: Quad9 (8443), AdGuard (5443), CleanBrowsing
+                        family (5443), a handful of others.
+                      </p>
+                    </div>
+                  </div>
+                {/if}
                 <!-- ── Criteria checkboxes ── -->
                 <div class="space-y-2 pt-2">
                   <p class="text-xs uppercase tracking-wider text-zinc-500">

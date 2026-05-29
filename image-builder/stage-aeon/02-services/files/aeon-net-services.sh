@@ -154,7 +154,7 @@ EOF
         auto_csv=$(python3 -c "
 import tomllib
 try:
-    cfg = tomllib.loads(open('$NETWORK_TOML').read())
+    cfg = tomllib.loads(open('$NETTOML').read())
     s = cfg.get('dnscrypt', {}).get('auto_picked_servers', [])
     print(', '.join(\"'\" + r + \"'\" for r in s))
 except Exception:
@@ -242,7 +242,7 @@ except Exception:
         relay_csv=$(python3 -c "
 import tomllib
 try:
-    cfg = tomllib.loads(open('$NETWORK_TOML').read())
+    cfg = tomllib.loads(open('$NETTOML').read())
     relays = cfg.get('dnscrypt', {}).get('anonymized', {}).get('picked_relays', [])
     # Resolver name on the right side of the route — dnscrypt-proxy
     # uses route per server, but '*' wildcards apply to all servers.
