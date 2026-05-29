@@ -160,19 +160,30 @@ EOF
 
     # If Tor VPN is active, route DNSCrypt's bootstrap (the initial
     # DNS lookup to find the DoH/DoT server's IP) through Tor's own
-    # DNSPort on localhost. Subsequent DoH/DoT traffic to the upstream
-    # (TCP) then rides through Tor's TransPort via the iptables
-    # redirect chain. End result: all DNS — bootstrap + queries —
-    # leaves the device via Tor only. ISP sees Tor traffic, no DoH
-    # fingerprint, no plaintext DNS.
+    # DNSPort on localhost. Subsequent DNSCrypt traffic to the upstream
+    # rides through Tor's TransPort via the iptables redirect chain —
+    # BUT only if it's TCP. Tor TransPort can't forward UDP, and
+    # DNSCrypt v2 talks UDP by default. So we ALSO have to flip
+    # `force_tcp = true` in dnscrypt-proxy's config to keep it from
+    # spraying UDP at Quad9:8443 that our anti-leak REJECT rule kills
+    # (we saw exactly this: 814 packets blocked, all UDP/8443 to
+    # 9.9.9.11 and 149.112.112.112). The upstream-resolver listens on
+    # both TCP and UDP, so this is a transport-only change for us —
+    # no flag needs to be flipped on the resolver side. End result
+    # without Tor: dnscrypt-proxy's default behaviour (UDP first,
+    # TCP fallback). With Tor: TCP-only, every query rides the
+    # TransPort.
     local vpn_provider; vpn_provider="$(toml_get vpn provider none)"
     local vpn_enabled; vpn_enabled="$(toml_get vpn enabled false)"
     local bootstrap_line
+    local force_tcp_line=""
     if [ "$vpn_enabled" = "true" ] && [ "$vpn_provider" = "tor" ]; then
         bootstrap_line="bootstrap_resolvers = ['127.0.0.1:5353']  # Tor DNSPort"
-        log "dnscrypt: Tor is active — bootstrapping via Tor DNSPort (127.0.0.1:5353)"
+        force_tcp_line="force_tcp = true   # Tor TransPort only forwards TCP"
+        log "dnscrypt: Tor is active — bootstrapping via Tor DNSPort (127.0.0.1:5353), force_tcp=true"
     else
         bootstrap_line="bootstrap_resolvers = ['9.9.9.11:53', '1.1.1.1:53', '8.8.8.8:53']"
+        log "dnscrypt: bootstrap_resolvers = 9.9.9.11, 1.1.1.1, 8.8.8.8"
     fi
 
     # v50: lock down protocol selection to DNSCrypt for all named
@@ -252,9 +263,18 @@ require_dnssec = true
 require_nolog = true
 require_nofilter = false
 
+# v54: force TCP for all upstream queries when Tor is the active
+# VPN. Tor's TransPort can't forward UDP, and our anti-leak iptables
+# REJECT-s Pi-originating UDP outside of DHCP/NTP/mDNS — so without
+# this, every DNSCrypt query gets killed and dnscrypt-proxy spins
+# retrying. With force_tcp, every query rides Tor's TCP TransPort
+# cleanly. (Empty string when Tor isn't active — UDP-first behaviour
+# is faster on a normal connection.)
+${force_tcp_line}
+
 # Bootstrap: where to send the FIRST DNS query that resolves the
-# upstream DoH/DoT server's hostname. After bootstrap, that IP is
-# cached and all subsequent queries go straight to the upstream.
+# upstream resolver's hostname. After bootstrap, that IP is cached
+# and subsequent queries go straight to the upstream.
 $bootstrap_line
 ignore_system_dns = true
 

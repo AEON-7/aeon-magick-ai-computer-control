@@ -746,6 +746,7 @@
         <a href="/ssh-keys"  class="btn text-xs">SSH&nbsp;keys</a>
         <a href="/tokens"    class="btn text-xs">API&nbsp;tokens</a>
         <a href="/audit"     class="btn text-xs">audit&nbsp;log</a>
+        <a href="/system"    class="btn text-xs" title="Pi maintenance — health + reboot/poweroff">Pi&nbsp;system</a>
       </div>
       <!-- divider -->
       <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
@@ -854,7 +855,8 @@
         <a href="/files"    class="btn text-xs">files + clip</a>
         <a href="/ssh-keys" class="btn text-xs">SSH keys</a>
         <a href="/tokens"   class="btn text-xs">API tokens</a>
-        <a href="/audit"    class="btn text-xs col-span-2">audit log</a>
+        <a href="/audit"    class="btn text-xs">audit log</a>
+        <a href="/system"   class="btn text-xs col-span-2">Pi system (health + reboot)</a>
       </div>
       <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
         <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>

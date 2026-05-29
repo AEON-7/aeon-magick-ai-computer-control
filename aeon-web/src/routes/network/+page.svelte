@@ -558,6 +558,36 @@
               <span class="text-zinc-200 text-sm">Enable DNSCrypt</span>
             </label>
 
+            <!-- v54: when Tor + a port-8443 resolver are both selected,
+                 warn about Tor exit policies. We DO set force_tcp on
+                 the dnscrypt-proxy side automatically, so UDP queries
+                 can't leak — but Tor exit nodes frequently block TCP
+                 to non-standard ports like 8443, which manifests as
+                 silent timeouts. Recommend AdGuard / OpenDNS / etc. -->
+            {#if dnsEnabled && vpnEnabled && vpnProvider === 'tor'
+                 && (dnsProvider === 'quad9' || dnsProvider === 'quad9-unfiltered'
+                     || dnsProvider === 'cleanbrowsing')}
+              <div class="p-3 rounded border border-amber-500/40 bg-amber-500/10 ml-7
+                          flex items-start gap-2">
+                <span class="text-amber-400 text-sm leading-none">⚠</span>
+                <div class="space-y-1">
+                  <p class="text-xs text-amber-200">
+                    <strong>{dnsProvider === 'cleanbrowsing' ? 'CleanBrowsing' : 'Quad9'}
+                    DNSCrypt runs on port 8443</strong>, which most Tor exit nodes
+                    refuse to forward. Queries will time out silently after a few
+                    retries. We force every DNSCrypt query to TCP when Tor is on
+                    (so nothing leaks via UDP), but the exit policy is outside our
+                    control.
+                  </p>
+                  <p class="text-[11px] text-amber-100/70 leading-relaxed">
+                    <strong>Works well over Tor:</strong> AdGuard (any flavour),
+                    OpenDNS, and Anonymized DNSCrypt setups that exit on port 443.
+                    Switch to one of those above if DNS isn't resolving.
+                  </p>
+                </div>
+              </div>
+            {/if}
+
             <div class="space-y-4 pl-7" class:opacity-40={!dnsEnabled} class:pointer-events-none={!dnsEnabled}>
               <div class="space-y-2" role="radiogroup" aria-label="DNSCrypt provider">
                 <p class="text-xs uppercase tracking-wider text-zinc-500">
