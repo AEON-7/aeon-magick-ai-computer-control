@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct BlockedQuery {
     /// Max entries to return (1..1000). Default 300 — enough to spot a
     /// recent pattern, small enough to render fast.
