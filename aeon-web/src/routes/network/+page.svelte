@@ -27,6 +27,22 @@
   let dnsSaving = false;
   let dnsMsg = '';
 
+  // ── Server selection (v55+) ──
+  // Specific = pin to the resolver in `dnsProvider` (legacy).
+  // Auto     = feed dnscrypt-proxy ALL resolvers in the full ~226-
+  //            entry catalog that match the criteria below, let its
+  //            lb_strategy="p2" route per-query by live latency.
+  let srvMode: 'specific' | 'auto' = 'specific';
+  let srvCritNoLogs = true;
+  let srvCritDnssec = true;
+  let srvCritNoFilter = false;
+  let srvCritOutside5 = true;
+  let srvCritOutside14 = false;
+  let srvCritMinTrust = 0;
+  // Search + filter state for the resolver catalog (auto mode).
+  let srvSearch = '';
+  let srvShowOnlyMatching = false;
+
   // ── Anonymized DNSCrypt (v51+) ──
   // Off by default; opt-in adds 30-100ms latency per query but routes
   // through a relay so the resolver never sees the client IP.
@@ -40,6 +56,31 @@
   // Search box for the full ~190-relay catalog (specific mode only).
   let anonSearch = '';
   let anonShowOnlySelected = false;
+
+  // ── Reactive derived state for resolver catalog (auto mode) ──
+  $: srvCatalog = dnsState?.servers?.catalog ?? [];
+  // Resolvers that pass the user's privacy/trust criteria. Mirrors
+  // ResolverCriteria::passes() on the supervisor side.
+  $: srvMatching = srvCatalog.filter((r) => {
+    if (srvCritNoLogs && !r.no_logs) return false;
+    if (srvCritDnssec && !r.dnssec) return false;
+    if (srvCritNoFilter && !r.no_filter) return false;
+    if (srvCritOutside5 && r.eyes === 'five') return false;
+    if (srvCritOutside14 && (r.eyes === 'five' || r.eyes === 'nine' || r.eyes === 'fourteen')) return false;
+    if (srvCritMinTrust > 0 && r.trust_score < srvCritMinTrust) return false;
+    return true;
+  });
+  $: srvMatchingNames = new Set(srvMatching.map((r) => r.name));
+  $: srvFiltered = srvCatalog.filter((r) => {
+    if (srvShowOnlyMatching && !srvMatchingNames.has(r.name)) return false;
+    if (!srvSearch.trim()) return true;
+    const q = srvSearch.toLowerCase().trim();
+    return r.name.toLowerCase().includes(q)
+        || r.operator.toLowerCase().includes(q)
+        || r.country.toLowerCase().includes(q)
+        || r.label.toLowerCase().includes(q)
+        || (r.description ?? '').toLowerCase().includes(q);
+  });
 
   // Reactive derived state for the specific-mode multi-select.
   // Svelte 4 forbids non-assignment expressions in {@const} so we
@@ -117,6 +158,16 @@
         anonOutsideFourteenEyes = d.anonymized.criteria.outside_fourteen_eyes ?? false;
         anonDnssec = d.anonymized.criteria.dnssec ?? true;
         anonSpecificRelays = [...(d.anonymized.specific_relays ?? [])];
+      }
+      if (d.servers) {
+        srvMode = d.servers.mode;
+        const c = d.servers.auto_criteria ?? {};
+        srvCritNoLogs = c.no_logs ?? true;
+        srvCritDnssec = c.dnssec ?? true;
+        srvCritNoFilter = c.no_filter ?? false;
+        srvCritOutside5 = c.outside_five_eyes ?? true;
+        srvCritOutside14 = c.outside_fourteen_eyes ?? false;
+        srvCritMinTrust = c.min_trust_score ?? 0;
       }
       vpnState = v;
       vpnEnabled = v.enabled;
@@ -248,6 +299,17 @@
         enabled: dnsEnabled,
         provider: dnsProvider,
         location: dnsLocation,
+        servers: {
+          mode: srvMode,
+          auto_criteria: {
+            no_logs: srvCritNoLogs,
+            dnssec: srvCritDnssec,
+            no_filter: srvCritNoFilter,
+            outside_five_eyes: srvCritOutside5,
+            outside_fourteen_eyes: srvCritOutside14,
+            min_trust_score: srvCritMinTrust,
+          },
+        },
         anonymized: {
           enabled: anonEnabled,
           mode: anonMode,
@@ -589,9 +651,230 @@
             {/if}
 
             <div class="space-y-4 pl-7" class:opacity-40={!dnsEnabled} class:pointer-events-none={!dnsEnabled}>
-              <div class="space-y-2" role="radiogroup" aria-label="DNSCrypt provider">
+
+              <!-- v55: Server-selection mode. Specific = pin to one
+                   provider. Auto = use the full ~226-entry catalog
+                   filtered by criteria, with dnscrypt-proxy's
+                   lb_strategy=p2 routing per-query by live latency. -->
+              <div class="space-y-2" role="radiogroup" aria-label="Server selection mode">
                 <p class="text-xs uppercase tracking-wider text-zinc-500">
-                  Provider
+                  Server selection
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <label class="flex items-start gap-3 cursor-pointer
+                                p-3 rounded-lg border transition-colors
+                                {srvMode === 'specific'
+                                  ? 'bg-cursed-500/10 border-cursed-500/50'
+                                  : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                    <input type="radio" bind:group={srvMode} value="specific"
+                           class="mt-1 w-4 h-4 accent-cursed-500" />
+                    <div class="space-y-1 flex-1 min-w-0">
+                      <div class="text-zinc-200 text-sm font-medium">Pin a specific provider</div>
+                      <p class="text-[11px] text-zinc-500">
+                        Pick exactly one resolver from the curated list below.
+                        Simple + predictable.
+                      </p>
+                    </div>
+                  </label>
+                  <label class="flex items-start gap-3 cursor-pointer
+                                p-3 rounded-lg border transition-colors
+                                {srvMode === 'auto'
+                                  ? 'bg-cursed-500/10 border-cursed-500/50'
+                                  : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                    <input type="radio" bind:group={srvMode} value="auto"
+                           class="mt-1 w-4 h-4 accent-cursed-500" />
+                    <div class="space-y-1 flex-1 min-w-0">
+                      <div class="text-zinc-200 text-sm font-medium">
+                        Auto (criteria-based, lowest-latency live)
+                      </div>
+                      <p class="text-[11px] text-zinc-500">
+                        Filter the full ~226-server catalog by your criteria;
+                        dnscrypt-proxy probes each + routes per-query to the
+                        fastest match.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {#if srvMode === 'auto'}
+                <!-- ── Criteria checkboxes ── -->
+                <div class="space-y-2 pt-2">
+                  <p class="text-xs uppercase tracking-wider text-zinc-500">
+                    Privacy + trust criteria
+                  </p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <label class="flex items-center gap-2 cursor-pointer text-xs
+                                  p-2 rounded border border-ink-800 bg-ink-950/40
+                                  hover:border-ink-700">
+                      <input type="checkbox" bind:checked={srvCritNoLogs}
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">No-logs policy</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer text-xs
+                                  p-2 rounded border border-ink-800 bg-ink-950/40
+                                  hover:border-ink-700">
+                      <input type="checkbox" bind:checked={srvCritDnssec}
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">DNSSEC validating</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer text-xs
+                                  p-2 rounded border border-ink-800 bg-ink-950/40
+                                  hover:border-ink-700">
+                      <input type="checkbox" bind:checked={srvCritNoFilter}
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">No filtering (raw answers)</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer text-xs
+                                  p-2 rounded border border-ink-800 bg-ink-950/40
+                                  hover:border-ink-700">
+                      <input type="checkbox" bind:checked={srvCritOutside5}
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">Outside Five Eyes</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer text-xs
+                                  p-2 rounded border border-ink-800 bg-ink-950/40
+                                  hover:border-ink-700">
+                      <input type="checkbox" bind:checked={srvCritOutside14}
+                             class="w-3 h-3 accent-cursed-500" />
+                      <span class="text-zinc-300">Outside Fourteen Eyes</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-xs
+                                  p-2 rounded border border-ink-800 bg-ink-950/40">
+                      <span class="text-zinc-300">Min trust:</span>
+                      <select bind:value={srvCritMinTrust}
+                              class="bg-ink-800 border border-ink-700 rounded
+                                     px-2 py-0.5 text-xs text-zinc-200">
+                        <option value={0}>any</option>
+                        <option value={2}>2+ (small ops)</option>
+                        <option value={3}>3+ (commercial)</option>
+                        <option value={4}>4+ (audited)</option>
+                        <option value={5}>5 (highest)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p class="text-[11px] text-zinc-500 leading-relaxed">
+                    Privacy: <code class="text-zinc-400">no_logs + DNSSEC + no_filter + jurisdiction</code>.
+                    Trust: <code class="text-zinc-400">operator reputation tier + audit + DNSCrypt-vs-DoH</code>.
+                    Scores are derived from the stamp's operator-declared
+                    properties plus a hand-curated operator table — they're
+                    heuristics, not ground truth.
+                  </p>
+                </div>
+
+                <!-- ── Currently auto-picked list ── -->
+                {#if dnsState?.servers?.auto_picked?.length}
+                  <div class="space-y-1 p-3 rounded bg-cursed-500/5
+                              border border-cursed-500/30">
+                    <div class="flex items-baseline justify-between gap-2">
+                      <p class="text-[11px] uppercase tracking-wider text-cursed-300">
+                        Currently picked servers
+                      </p>
+                      <p class="text-[10px] text-zinc-500 font-mono">
+                        {dnsState.servers.auto_picked.length} matching · live-routed by latency
+                      </p>
+                    </div>
+                    <p class="text-[10px] text-zinc-600 leading-relaxed pt-1">
+                      dnscrypt-proxy probes all of these on startup, then routes
+                      each query to the lowest-latency one. Switching automatically
+                      if one slows down — no UI refresh needed.
+                    </p>
+                  </div>
+                {/if}
+
+                <!-- ── Full catalog browser ── -->
+                <div class="space-y-2 pt-3 border-t border-ink-800">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                      Full upstream catalog ({srvCatalog.length} servers)
+                    </p>
+                    <p class="text-[11px] font-mono text-cursed-300">
+                      {srvMatching.length} match your criteria
+                    </p>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <input type="text" bind:value={srvSearch}
+                           placeholder="search: name, operator, country code…"
+                           class="flex-1 min-w-0 bg-ink-800 border border-ink-700
+                                  rounded px-3 py-1.5 text-xs text-zinc-200 font-mono" />
+                    <label class="flex items-center gap-1.5 cursor-pointer text-[11px]
+                                  text-zinc-400 hover:text-zinc-200">
+                      <input type="checkbox" bind:checked={srvShowOnlyMatching}
+                             class="w-3 h-3 accent-cursed-500" />
+                      only matching
+                    </label>
+                  </div>
+
+                  <div class="max-h-96 overflow-y-auto space-y-2
+                              border border-ink-800 rounded p-3 bg-ink-950/40">
+                    {#if srvFiltered.length === 0}
+                      <p class="text-xs text-zinc-500 italic text-center py-4">
+                        {srvSearch ? `no servers match “${srvSearch}”` : 'no servers'}
+                      </p>
+                    {:else}
+                      {#each srvFiltered.slice(0, 60) as r}
+                        {@const matches = srvMatchingNames.has(r.name)}
+                        <div class="p-2 rounded text-xs
+                                    {matches ? 'bg-live-500/10 border border-live-500/30' :
+                                     'bg-ink-950/60 border border-ink-800'}"
+                             title={r.description}>
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-mono text-zinc-200 truncate">{r.label}</span>
+                            <span class="text-[10px] text-zinc-500">{r.operator}</span>
+                            {#if r.country}
+                              <span class="text-[10px] font-mono text-zinc-500">{r.country}</span>
+                            {/if}
+                            <span class="text-[10px] px-1.5 py-0.5 rounded
+                                         {r.eyes === 'none' ? 'bg-live-500/15 text-live-300' :
+                                          r.eyes === 'fourteen' ? 'bg-amber-500/15 text-amber-300' :
+                                          r.eyes === 'nine' ? 'bg-orange-500/15 text-orange-300' :
+                                          r.eyes === 'five' ? 'bg-red-500/15 text-red-300' :
+                                          'bg-zinc-500/15 text-zinc-400'}">
+                              {r.eyes === 'none' ? 'no eyes' :
+                               r.eyes === 'unknown' ? '?' : r.eyes + ' eyes'}
+                            </span>
+                          </div>
+                          <div class="flex items-center gap-3 mt-1 text-[10px] text-zinc-400">
+                            <span title="Privacy score 0-5">
+                              priv <span class="font-mono text-cursed-300">{r.privacy_score}</span>
+                            </span>
+                            <span title="Trust score 0-5">
+                              trust <span class="font-mono text-cursed-300">{r.trust_score}</span>
+                            </span>
+                            {#if r.no_logs}
+                              <span class="px-1 rounded bg-zinc-700/40 text-zinc-300">no-logs</span>
+                            {/if}
+                            {#if r.dnssec}
+                              <span class="px-1 rounded bg-zinc-700/40 text-zinc-300">dnssec</span>
+                            {/if}
+                            {#if r.no_filter}
+                              <span class="px-1 rounded bg-zinc-700/40 text-zinc-300">unfiltered</span>
+                            {/if}
+                            {#each r.filters as f}
+                              <span class="px-1 rounded bg-amber-500/15 text-amber-300">
+                                blocks {f}
+                              </span>
+                            {/each}
+                          </div>
+                        </div>
+                      {/each}
+                      {#if srvFiltered.length > 60}
+                        <p class="text-[10px] text-zinc-600 italic text-center pt-2">
+                          Showing first 60 of {srvFiltered.length}. Narrow with
+                          search to see more.
+                        </p>
+                      {/if}
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+
+              <div class="space-y-2 pt-3 border-t border-ink-800"
+                   class:opacity-40={srvMode === 'auto'}
+                   class:pointer-events-none={srvMode === 'auto'}
+                   role="radiogroup" aria-label="DNSCrypt provider">
+                <p class="text-xs uppercase tracking-wider text-zinc-500">
+                  Provider {srvMode === 'auto' ? '(ignored in auto mode)' : ''}
                 </p>
                 <div class="space-y-2">
                   {#if dnsState}

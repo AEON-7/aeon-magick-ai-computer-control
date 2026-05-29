@@ -248,6 +248,44 @@ export interface AnonymizedState {
   catalog: AnonymizedRelay[];
 }
 
+/// Full upstream DNSCrypt v2 resolver catalog (v55+). ~226 entries
+/// parsed from public-resolvers.md with privacy + trust scoring.
+export interface DnscryptCatalogEntry {
+  name: string;
+  label: string;
+  operator: string;
+  country: string;          // ISO 3166 alpha-2 (empty if unknown)
+  eyes: 'none' | 'five' | 'nine' | 'fourteen' | 'unknown';
+  transport: 'DNSCrypt';
+  port: number;
+  addr: string;
+  dnssec: boolean;          // operator-declared DNSSEC validation
+  no_logs: boolean;         // operator-declared no-log policy
+  no_filter: boolean;       // operator-declared no on-server filter
+  filters: string[];        // ["malware", "adult", "ads", "crypto-mining"]
+  privacy_score: number;    // 0-5
+  trust_score: number;      // 0-5
+  operator_tier: number;    // 1-3
+  description: string;
+}
+
+export interface ResolverCriteria {
+  no_logs?: boolean;
+  dnssec?: boolean;
+  no_filter?: boolean;
+  outside_five_eyes?: boolean;
+  outside_fourteen_eyes?: boolean;
+  /// 0 = don't care; 1-5 = minimum required trust_score
+  min_trust_score?: number;
+}
+
+export interface DnscryptServersState {
+  mode: 'specific' | 'auto';
+  auto_criteria: ResolverCriteria;
+  auto_picked: string[];          // resolver names handed to dnscrypt-proxy
+  catalog: DnscryptCatalogEntry[];
+}
+
 export interface DnscryptState {
   ok: boolean;
   enabled: boolean;
@@ -257,6 +295,7 @@ export interface DnscryptState {
   custom_label: string;
   providers: DnscryptProvider[];
   locations: DnscryptLocation[];
+  servers: DnscryptServersState;  // v55+
   anonymized: AnonymizedState;
 }
 
@@ -274,6 +313,11 @@ export const setDnscrypt = (
       mode?: 'auto' | 'specific';
       criteria?: AnonymizedCriteria;
       specific_relays?: string[];
+    };
+    /// v55+: criteria-based auto-pick across full upstream catalog.
+    servers?: {
+      mode?: 'specific' | 'auto';
+      auto_criteria?: ResolverCriteria;
     };
   },
 ) =>

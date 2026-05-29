@@ -140,6 +140,34 @@ EOF
         fi
     fi
 
+    # v55: when server_mode = "auto", use the list the supervisor's
+    # auto-picker already wrote to TOML — that's filtered against the
+    # user's privacy/trust criteria across the full ~226-server
+    # catalog. dnscrypt-proxy's lb_strategy="p2" picks per-query by
+    # observed latency, so the user gets the lowest-latency match for
+    # their criteria automatically. Falls back to the single-resolver
+    # behaviour if server_mode is "specific" or the auto list is
+    # somehow empty.
+    local server_mode; server_mode="$(toml_get dnscrypt server_mode specific)"
+    if [ "$server_mode" = "auto" ] && [ -z "$server_list" ]; then
+        local auto_csv
+        auto_csv=$(python3 -c "
+import tomllib
+try:
+    cfg = tomllib.loads(open('$NETWORK_TOML').read())
+    s = cfg.get('dnscrypt', {}).get('auto_picked_servers', [])
+    print(', '.join(\"'\" + r + \"'\" for r in s))
+except Exception:
+    print('')
+")
+        if [ -n "$auto_csv" ]; then
+            server_list="$auto_csv"
+            log "dnscrypt: server_mode=auto — using $(echo "$auto_csv" | tr ',' '\n' | wc -l | tr -d ' ') resolvers from criteria"
+        else
+            log "WARN: dnscrypt server_mode=auto but auto_picked_servers is empty — falling back to provider"
+        fi
+    fi
+
     if [ -z "$server_list" ]; then
         local resolvers; resolvers=$(dnscrypt_resolvers_for "$provider")
         for r in $resolvers; do
@@ -252,6 +280,16 @@ EOF
 server_names = [$server_list]
 listen_addresses = ['127.0.2.1:53', '[::1]:53']
 max_clients = 250
+
+# v55: "p2" = Weighted Power of Two. dnscrypt-proxy continuously
+# probes the configured server_names and routes per-query to a
+# weighted random pick among the two lowest-latency ones. With our
+# auto-mode list of 30 criteria-matching resolvers, this is the
+# "auto-pick best latency live" behaviour the user asked for. For
+# specific-mode the server_names list has one entry, so the strategy
+# is a no-op.
+lb_strategy = 'p2'
+lb_estimator = true
 
 ipv4_servers = true
 ipv6_servers = false

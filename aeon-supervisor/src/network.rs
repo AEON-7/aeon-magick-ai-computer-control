@@ -80,11 +80,27 @@ struct Dnscrypt {
     /// Friendly label for the custom stamp (shown in the UI).
     #[serde(default)]
     custom_label: String,
+    /// Server-selection mode (v55+):
+    ///   "specific" — pin to the single resolver in `provider`
+    ///                (legacy behaviour, still the default).
+    ///   "auto"     — feed dnscrypt-proxy ALL resolvers matching the
+    ///                `auto_criteria` filter. Its lb_strategy="p2"
+    ///                routes per-query to the lowest-latency match.
+    #[serde(default = "default_server_mode")]
+    server_mode: String,
+    /// Criteria for auto mode. Ignored when server_mode="specific".
+    #[serde(default)]
+    auto_criteria: crate::dnscrypt_servers::ResolverCriteria,
+    /// Cache of the resolvers auto_pick produced on last apply. Used
+    /// so the API and aeon-net-services.sh see the same list.
+    #[serde(default)]
+    auto_picked_servers: Vec<String>,
     /// Anonymized DNSCrypt: route queries through a relay so the
     /// resolver never sees the client IP. v51+.
     #[serde(default)]
     anonymized: Anonymized,
 }
+fn default_server_mode() -> String { "specific".into() }
 
 /// Anonymized DNSCrypt configuration. Off by default — adds 30-100ms
 /// of latency per query, so opt-in. When on, the user picks either
@@ -126,6 +142,9 @@ impl Default for Dnscrypt {
             location: default_dns_location(),
             custom_stamp: String::new(),
             custom_label: String::new(),
+            server_mode: default_server_mode(),
+            auto_criteria: crate::dnscrypt_servers::ResolverCriteria::default(),
+            auto_picked_servers: Vec::new(),
             anonymized: Anonymized::default(),
         }
     }
@@ -378,6 +397,18 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
         "location": s.dnscrypt.location,
         "custom_stamp": s.dnscrypt.custom_stamp,
         "custom_label": s.dnscrypt.custom_label,
+        // Server selection (v55+). When server_mode="auto",
+        // `auto_picked_servers` is the live list of resolver names
+        // dnscrypt-proxy will probe + route between by latency. The
+        // full catalog of ~226 DNSCrypt v2 resolvers is included
+        // under `servers.catalog` so the UI can render the
+        // search/filter list without a second round-trip.
+        "servers": {
+            "mode": s.dnscrypt.server_mode,
+            "auto_criteria": s.dnscrypt.auto_criteria,
+            "auto_picked": s.dnscrypt.auto_picked_servers,
+            "catalog": crate::dnscrypt_servers::catalog(),
+        },
         "anonymized": {
             "enabled": s.dnscrypt.anonymized.enabled,
             "mode": s.dnscrypt.anonymized.mode,
@@ -506,6 +537,17 @@ pub struct DnscryptPutReq {
     pub custom_label: Option<String>,
     #[serde(default)]
     pub anonymized: Option<AnonymizedPutReq>,
+    /// v55: criteria-based auto-pick across the full ~226-entry
+    /// upstream resolver catalog.
+    #[serde(default)]
+    pub servers: Option<ServersPutReq>,
+}
+
+#[derive(Deserialize)]
+pub struct ServersPutReq {
+    /// "specific" or "auto".
+    #[serde(default)] pub mode: Option<String>,
+    #[serde(default)] pub auto_criteria: Option<crate::dnscrypt_servers::ResolverCriteria>,
 }
 
 /// All fields optional — clients send only what they're changing.
@@ -655,6 +697,33 @@ pub async fn put_dnscrypt(
             nf.dnscrypt.enabled = true;
         }
     }
+
+    // v55: server-selection mode + criteria.
+    if let Some(srv) = req.servers {
+        if let Some(m) = srv.mode {
+            if m != "specific" && m != "auto" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": "servers.mode must be 'specific' or 'auto'"})),
+                )
+                    .into_response();
+            }
+            nf.dnscrypt.server_mode = m;
+        }
+        if let Some(c) = srv.auto_criteria {
+            nf.dnscrypt.auto_criteria = c;
+        }
+    }
+
+    // Recompute the auto-picked server list so the TOML on disk
+    // matches whatever aeon-net-services.sh will see on the next
+    // reload. Cap at 30 — dnscrypt-proxy probes every server on
+    // startup so larger pools turn into slow boots.
+    nf.dnscrypt.auto_picked_servers = if nf.dnscrypt.server_mode == "auto" {
+        crate::dnscrypt_servers::auto_pick(&nf.dnscrypt.auto_criteria, 30)
+    } else {
+        Vec::new()
+    };
 
     // Recompute picked_relays AFTER any field changes so the TOML
     // reflects the actual relays that will be in effect on the next
