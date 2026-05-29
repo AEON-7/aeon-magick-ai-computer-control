@@ -178,6 +178,23 @@ pub fn build_router(cfg: Config) -> Router {
         // browser proxy URL. Read-only; outproxy + enable still flow
         // through /network/vpn since I2P is a VPN provider variant.
         .route("/network/i2p/status", get(crate::i2p::get_status))
+
+        // v59: per-provider VPN wizards (Mullvad / IVPN / AzireVPN).
+        // Each runs the provider's REST API: validate account/token,
+        // generate WG keypair on Pi, register pubkey with provider,
+        // fetch server list, render wg-quick config when user picks
+        // a server. Existing vpn.provider=wireguard flow stays for
+        // custom configs.
+        .route("/network/vpn/providers/catalog",
+            get(crate::vpn_providers::api::get_catalog))
+        .route("/network/vpn/providers/:id/setup",
+            post(crate::vpn_providers::api::setup))
+        .route("/network/vpn/providers/:id/state",
+            get(crate::vpn_providers::api::get_state))
+        .route("/network/vpn/providers/:id/select",
+            post(crate::vpn_providers::api::select))
+        .route("/network/vpn/providers/:id/pick-fastest",
+            post(crate::vpn_providers::api::pick_fastest))
         // WiFi management — scan, connect, current state. Used by the
         // /setup-wifi captive-portal page during AP-fallback mode and
         // by the authenticated WiFi panel for ongoing management.

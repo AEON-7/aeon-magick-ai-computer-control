@@ -930,6 +930,13 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
             {"id": "tailscale", "label": "Tailscale", "blurb": "WireGuard mesh. Bring an auth-key from the Tailscale admin console. Optionally turn this Pi into an exit-node for your tailnet."},
             {"id": "wireguard", "label": "WireGuard", "blurb": "Paste a working WireGuard .conf. We'll run it via wg-quick@aeon0."},
             {"id": "openvpn", "label": "OpenVPN", "blurb": "Paste a working .ovpn config. Username/password optional."},
+            // v59: provider wizards. Underlying transport is WireGuard;
+            // config is fetched from the provider's REST API via the
+            // /api/network/vpn/providers/:id/* endpoints. Per-provider
+            // setup lives under /network/vpn/providers/<id>.
+            {"id": "mullvad", "label": "Mullvad VPN", "blurb": "Swedish HQ, multiple 3rd-party audits, anonymous account (16-digit number, no email). The most-trusted of the three. Setup wizard at /network/vpn/providers/mullvad."},
+            {"id": "ivpn", "label": "IVPN", "blurb": "Gibraltar HQ (outside 14-Eyes), audited by Cure53. Smaller server fleet than Mullvad. Setup wizard at /network/vpn/providers/ivpn."},
+            {"id": "azirevpn", "label": "AzireVPN", "blurb": "Swedish boutique provider. Long-running no-log claim but no formal 3rd-party audit. Setup wizard at /network/vpn/providers/azirevpn."},
             {"id": "tor", "label": "Tor (legacy)", "blurb": "v58+: prefer the independent Tor toggle below — Tor can now run alongside any of the above. Selecting this option flips tor.enabled=true in transparent mode for backward compat."},
             {"id": "i2p", "label": "I2P (legacy)", "blurb": "v58+: prefer the independent I2P toggle below. Selecting this option flips i2p.enabled=true for backward compat."},
         ],
@@ -1119,7 +1126,13 @@ pub async fn put_vpn(
         nf.i2p.enabled = true;
         nf.vpn.provider = "none".into();
     }
-    const VALID_VPN_PROVIDERS: &[&str] = &["none", "tailscale", "wireguard", "openvpn"];
+    // v59: mullvad/ivpn/azirevpn join the list — they all run as
+    // WireGuard tunnels but their config comes from the provider
+    // wizard rather than a user-pasted .conf.
+    const VALID_VPN_PROVIDERS: &[&str] = &[
+        "none", "tailscale", "wireguard", "openvpn",
+        "mullvad", "ivpn", "azirevpn",
+    ];
     if !VALID_VPN_PROVIDERS.contains(&nf.vpn.provider.as_str()) {
         return (
             StatusCode::BAD_REQUEST,

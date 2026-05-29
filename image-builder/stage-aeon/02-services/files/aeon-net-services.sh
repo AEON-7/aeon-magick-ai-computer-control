@@ -643,6 +643,82 @@ except Exception:
     log "wireguard up via wg-quick@aeon0"
 }
 
+# v59: provider-managed WireGuard. Reads the per-provider state file
+# under /etc/aeon/vpn-secrets/ that the supervisor's setup wizard
+# wrote, renders the wg-quick config, and brings up wg-quick@aeon0.
+# Same downstream pipeline as apply_vpn_wireguard — just a different
+# config source. The provider arg picks which state file to read.
+apply_vpn_provider_wg() {
+    local provider="$1"
+    local secrets="/etc/aeon/vpn-secrets/${provider}.toml"
+    if [ ! -f "$secrets" ]; then
+        log "vpn provider '$provider' selected but no config yet — finish setup wizard at /network/vpn/providers/$provider"
+        return 0
+    fi
+    local rendered
+    rendered=$(python3 -c "
+import tomllib, sys
+try:
+    with open('$secrets','rb') as f:
+        s = tomllib.load(f)
+    sel = s.get('selected_server','')
+    if not sel:
+        print('NO_SELECTED_SERVER', file=sys.stderr)
+        sys.exit(2)
+    server = next((sv for sv in s.get('servers', []) if sv.get('id') == sel), None)
+    if not server:
+        print(f'server {sel!r} not in cache', file=sys.stderr)
+        sys.exit(3)
+
+    # Per-provider Interface defaults (DNS + MTU). Mullvad uses their
+    # own resolver at 10.64.0.1; IVPN uses 172.16.0.1; AzireVPN uses
+    # 91.231.153.2. Pick the right one based on provider arg.
+    provider = '$provider'
+    if provider == 'mullvad':
+        dns = '10.64.0.1'; mtu = '1380'
+    elif provider == 'ivpn':
+        dns = '172.16.0.1'; mtu = '1420'
+    else:
+        dns = '91.231.153.2'; mtu = '1420'
+
+    ipv4 = s.get('peer_ipv4','')
+    ipv6 = s.get('peer_ipv6','')
+    addr = f'{ipv4}/32'
+    if ipv6:
+        addr += f', {ipv6}/128'
+
+    cfg = f'''# Managed by aeon-net-services (provider={provider}).
+[Interface]
+PrivateKey = {s.get('wg_private_key','')}
+Address    = {addr}
+DNS        = {dns}
+MTU        = {mtu}
+
+[Peer]
+PublicKey  = {server.get('public_key','')}
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint   = {server.get('endpoint_ip','')}:{server.get('endpoint_port', 51820)}
+PersistentKeepalive = 25
+'''
+    print(cfg, end='')
+except SystemExit:
+    raise
+except Exception as e:
+    print(f'render error: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>&1)
+    local rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$rendered" ]; then
+        log "WARN: failed to render WG config for $provider: $rendered"
+        return 0
+    fi
+    install -d -m 0700 /etc/wireguard
+    printf '%s' "$rendered" > "$WG_CONF"
+    chmod 0600 "$WG_CONF"
+    systemctl enable --now wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    log "wireguard up via wg-quick@aeon0 (provider=$provider)"
+}
+
 apply_vpn_openvpn() {
     local cfg="$(python3 -c "
 import tomllib
@@ -1261,10 +1337,11 @@ apply_vpn() {
     fi
 
     case "$provider" in
-        tailscale) apply_vpn_tailscale ;;
-        wireguard) apply_vpn_wireguard ;;
-        openvpn)   apply_vpn_openvpn ;;
-        *)         log "WARN: unknown vpn provider '$provider' — leaving tunnel down" ;;
+        tailscale)            apply_vpn_tailscale ;;
+        wireguard)            apply_vpn_wireguard ;;
+        openvpn)              apply_vpn_openvpn ;;
+        mullvad|ivpn|azirevpn) apply_vpn_provider_wg "$provider" ;;
+        *)                    log "WARN: unknown vpn provider '$provider' — leaving tunnel down" ;;
     esac
 
     # Kill-switch is layered on TOP of the chosen provider so the rules

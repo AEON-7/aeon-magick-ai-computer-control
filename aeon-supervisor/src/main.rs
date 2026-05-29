@@ -36,6 +36,7 @@ mod storage;
 mod system;
 mod target;
 mod tls;
+mod vpn_providers;
 mod webui;
 mod wifi;
 
@@ -56,6 +57,14 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // v59: install a default rustls crypto provider. Both axum-server
+    // and ureq depend on rustls 0.23, which since 0.22 stopped auto-
+    // picking one. Without this we panic at first TLS handshake with
+    // "Could not automatically determine the process-level
+    // CryptoProvider from Rustls crate features."
+    let _ = rustls::crypto::aws_lc_rs::default_provider()
+        .install_default();
+
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(&cli.log))
