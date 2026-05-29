@@ -135,6 +135,24 @@
   let vpnSaving = false;
   let vpnMsg = '';
 
+  // v61: wizard-provider configuration status (mullvad/ivpn/azirevpn).
+  // We poll the per-provider state endpoints so we know whether to
+  // show "needs setup → wizard" vs "configured, ready to apply". The
+  // user can still _select_ a wizard provider from the radio without
+  // configuring it, but Save & Apply is gated until configuration is
+  // present (otherwise wg-quick@aeon0 would start with an empty
+  // config and the device would lose its tunnel).
+  let wizardProviderConfigured: Record<string, boolean> = {
+    mullvad: false,
+    ivpn: false,
+    azirevpn: false,
+  };
+  let wizardProviderServer: Record<string, string> = {
+    mullvad: '',
+    ivpn: '',
+    azirevpn: '',
+  };
+
   // v58.1: independent Tor / I2P toggles. They can run alongside any
   // clearnet VPN provider — when both are enabled, .onion goes through
   // Tor, .i2p through the I2P proxy, clearnet through the VPN (or
@@ -217,6 +235,28 @@
       torExitCountry = v.tor?.exit_country ?? '';
       i2pEnabled = v.i2p?.enabled ?? false;
       i2pOverVpn = v.i2p?.over_vpn ?? false;
+
+      // v61: refresh wizard-provider state so the inline banner can
+      // show "configured + which server" or "needs setup". These
+      // endpoints exist regardless of which provider is currently
+      // active — we hit all three so toggling the radio doesn't need
+      // an extra round-trip. Cheap; the state files are tiny.
+      await Promise.all(
+        ['mullvad', 'ivpn', 'azirevpn'].map(async (id) => {
+          try {
+            const r = await fetch(
+              `/api/network/vpn/providers/${id}/state`,
+            ).then((rr) => rr.json());
+            wizardProviderConfigured[id] = !!r?.configured;
+            wizardProviderServer[id] = r?.selected_server ?? '';
+          } catch {
+            wizardProviderConfigured[id] = false;
+            wizardProviderServer[id] = '';
+          }
+        }),
+      );
+      wizardProviderConfigured = { ...wizardProviderConfigured };
+      wizardProviderServer = { ...wizardProviderServer };
     } catch (e: any) {
       error = e?.message ?? 'failed to load network state';
     } finally {
@@ -416,6 +456,22 @@
   }
 
   async function saveVpn() {
+    // v61: gate the apply on wizard-provider configuration. Mullvad/
+    // IVPN/AzireVPN need a registered account + selected server in
+    // their state file before wg-quick@aeon0 can bring up the tunnel.
+    // Without that gate the user clicks Save & Apply, the supervisor
+    // writes an empty WireGuard config, and wg-quick fails silently —
+    // they see "off" in the status panel with no clear reason why.
+    if (
+      vpnEnabled &&
+      api.WIZARD_PROVIDERS.has(vpnProvider) &&
+      !wizardProviderConfigured[vpnProvider]
+    ) {
+      error =
+        `${vpnProvider} isn't configured yet. Open the setup wizard at ` +
+        `/network/vpn-providers and register your account first.`;
+      return;
+    }
     if (
       vpnKillSwitch &&
       !vpnState?.kill_switch &&
@@ -1644,6 +1700,85 @@ AllowedIPs = 0.0.0.0/0`}
                   Only needed if your .ovpn references
                   <code>auth-user-pass</code> without inline credentials.
                 </p>
+              </div>
+            {/if}
+
+            {#if vpnEnabled && (vpnProvider === 'mullvad' || vpnProvider === 'ivpn' || vpnProvider === 'azirevpn')}
+              <!-- v61: inline banner pointing at the wizard. The
+                   per-provider state endpoint tells us whether the
+                   user has registered an account + selected a server
+                   yet. If not, we hard-gate "Save & Apply" above
+                   (see saveVpn) so the user gets a clear "go to the
+                   wizard first" message instead of an opaque
+                   wg-quick failure. -->
+              <div class="space-y-3 pl-7">
+                {#if wizardProviderConfigured[vpnProvider]}
+                  <div class="p-4 rounded-lg border border-live-500/40
+                              bg-live-500/10 space-y-2">
+                    <div class="flex items-start gap-3">
+                      <span class="text-live-400 text-lg leading-none mt-0.5">✓</span>
+                      <div class="space-y-1">
+                        <div class="text-live-200 text-sm font-medium">
+                          {vpnProvider} is configured
+                        </div>
+                        <p class="text-xs text-live-100/70 leading-relaxed">
+                          {#if wizardProviderServer[vpnProvider]}
+                            Currently pinned to
+                            <code class="font-mono">{wizardProviderServer[vpnProvider]}</code>.
+                          {:else}
+                            No server pinned yet —
+                            <a class="text-cursed-300 hover:underline"
+                               href="/network/vpn-providers">pick one in the wizard</a>
+                            or let "fastest" probe and apply.
+                          {/if}
+                          Save & Apply below to bring the tunnel up.
+                        </p>
+                      </div>
+                    </div>
+                    <a class="btn-secondary text-xs ml-7 inline-block"
+                       href="/network/vpn-providers">
+                      change server / refresh keys →
+                    </a>
+                  </div>
+                {:else}
+                  <div class="p-4 rounded-lg border border-amber-500/40
+                              bg-amber-500/10 space-y-3">
+                    <div class="flex items-start gap-3">
+                      <span class="text-amber-400 text-lg leading-none mt-0.5">⚠</span>
+                      <div class="space-y-1">
+                        <div class="text-amber-200 text-sm font-medium">
+                          {vpnProvider} needs setup
+                        </div>
+                        <p class="text-xs text-amber-100/70 leading-relaxed">
+                          {#if vpnProvider === 'mullvad'}
+                            Paste your 16-digit Mullvad account number into the
+                            wizard. The supervisor generates a WireGuard keypair,
+                            registers the pubkey with Mullvad's API, and caches
+                            their server list. No email, no password — Mullvad's
+                            anonymous-account model is one of the reasons it's the
+                            trust-rating leader of the three.
+                          {:else if vpnProvider === 'ivpn'}
+                            Paste your IVPN account ID (starts with <code>ivpn</code>)
+                            into the wizard. Same flow as Mullvad: keypair generated
+                            on-device, pubkey registered with IVPN's API, server list
+                            cached. IVPN's HQ is Gibraltar — outside 14-Eyes — and
+                            their no-logs policy was Cure53-audited.
+                          {:else}
+                            Paste your AzireVPN API token into the wizard. Generate
+                            one in your AzireVPN dashboard under "Settings →
+                            Access tokens". Same on-device WireGuard keypair flow.
+                            AzireVPN is the boutique pick — long-running no-log claim
+                            but no formal 3rd-party audit yet.
+                          {/if}
+                        </p>
+                      </div>
+                    </div>
+                    <a class="btn-primary text-xs ml-7 inline-block"
+                       href="/network/vpn-providers">
+                      open setup wizard →
+                    </a>
+                  </div>
+                {/if}
               </div>
             {/if}
 

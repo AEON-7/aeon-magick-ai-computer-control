@@ -333,15 +333,30 @@ export const setDnscrypt = (
     patch,
   );
 
-// ── VPN (Tailscale / WireGuard / OpenVPN) ──────────────────────────────
+// ── VPN (Tailscale / WireGuard / OpenVPN / commercial providers) ───────
 
 export type VpnProvider =
   | 'none'
   | 'tailscale'
   | 'wireguard'
   | 'openvpn'
+  // v59: commercial providers with their own setup wizard at
+  // /network/vpn-providers — the radio on /network points users there
+  // when one of these is selected but the provider hasn't been
+  // configured yet.
+  | 'mullvad'
+  | 'ivpn'
+  | 'azirevpn'
   | 'tor'
   | 'i2p';
+
+/**
+ * Provider IDs that need the dedicated setup wizard at
+ * /network/vpn-providers. Used by the main /network page to render an
+ * inline banner pointing users there.
+ */
+export const WIZARD_PROVIDERS: ReadonlySet<VpnProvider> =
+  new Set(['mullvad', 'ivpn', 'azirevpn']);
 
 export interface VpnProviderInfo {
   id: VpnProvider;

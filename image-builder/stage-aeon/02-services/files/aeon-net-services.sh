@@ -1034,13 +1034,44 @@ EOF
         iptables -A FORWARD -i usb0 -p udp --dport 68   -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 123  -j ACCEPT -m comment --comment "aeon-vpn"
         iptables -A FORWARD -i usb0 -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
-        # Block forwarded UDP from usb0 clients when Tor is active.
-        # REJECT with ICMP port-unreachable rather than DROP — that
-        # tells the client *immediately* "this transport is closed"
-        # so QUIC/HTTP-3 falls back to TCP HTTPS in milliseconds,
-        # instead of waiting out the QUIC handshake timeout (~1 sec
-        # per retry, several retries). End user impact: first page
-        # load feels normal instead of laggy.
+
+        # v61: USB clients' UDP destined for the Pi gateway itself
+        # (10.55.0.1) is a Tor-safe LAN-only flow — it never leaves
+        # the device, so there's nothing to deanonymize. Allow it
+        # before the catch-all REJECT below. This unblocks: target
+        # apps using the Pi as a DNS/mDNS/NTP forwarder on non-standard
+        # ports, IPMI/management broadcasts a target Windows host emits
+        # on connection, and any future on-Pi UDP services.
+        iptables -A FORWARD -i usb0 -d "$pi_addr" -p udp \
+            -j ACCEPT -m comment --comment "aeon-vpn"
+
+        # v61: subnet + global broadcasts (10.55.0.255, 255.255.255.255)
+        # and link-local multicast (224.0.0.0/4) get *silently dropped*
+        # before the LOG-and-REJECT pair fires. They're protocol noise
+        # — Windows NetBIOS name service, SSDP, mDNS responder, etc.,
+        # all expected to fail outside their L2 segment — and used to
+        # spam the Security Console with 10-15 identical entries per
+        # second. Same deanonymization story as the REJECT below
+        # (they're not going to WAN), but no log noise.
+        local usb_subnet; usb_subnet="$(toml_get usb_ethernet subnet 10.55.0.0/24)"
+        local usb_bcast; usb_bcast="$(python3 -c "
+import ipaddress
+print(ipaddress.IPv4Network('${usb_subnet}').broadcast_address)
+" 2>/dev/null || echo 10.55.0.255)"
+        iptables -A FORWARD -i usb0 -p udp -d "$usb_bcast" \
+            -j DROP -m comment --comment "aeon-vpn"
+        iptables -A FORWARD -i usb0 -p udp -d 255.255.255.255 \
+            -j DROP -m comment --comment "aeon-vpn"
+        iptables -A FORWARD -i usb0 -p udp -d 224.0.0.0/4 \
+            -j DROP -m comment --comment "aeon-vpn"
+
+        # Block remaining forwarded UDP from usb0 clients when Tor
+        # is active. REJECT with ICMP port-unreachable rather than DROP
+        # — that tells the client *immediately* "this transport is
+        # closed" so QUIC/HTTP-3 falls back to TCP HTTPS in
+        # milliseconds, instead of waiting out the QUIC handshake
+        # timeout (~1 sec per retry, several retries). End user impact:
+        # first page load feels normal instead of laggy.
         aeon_block_pair FORWARD "vpn-udp-forward" "aeon-vpn" reject-port \
             -i usb0 -p udp
         # (e) Make sure the INPUT chain accepts the redirected TCP on
@@ -1066,6 +1097,16 @@ EOF
     iptables -A OUTPUT -p udp --dport 68 -j ACCEPT -m comment --comment "aeon-vpn"
     iptables -A OUTPUT -p udp --dport 123 -j ACCEPT -m comment --comment "aeon-vpn"
     iptables -A OUTPUT -p udp --dport 5353 -j ACCEPT -m comment --comment "aeon-vpn"
+    # v61: UDP destined for the Pi's own USB subnet (i.e. responses
+    # to attached clients) is LAN-only — it can't reach WAN regardless
+    # of whether Tor's up — so let it through without the REJECT noise.
+    # Covers dnsmasq replies on UDP/53, mDNS responder hits, NTP
+    # responses, and any custom on-Pi UDP service exposed to the target.
+    if [ "$usb_enabled" = "true" ]; then
+        local usb_subnet_out; usb_subnet_out="$(toml_get usb_ethernet subnet 10.55.0.0/24)"
+        iptables -A OUTPUT -o usb0 -p udp -d "$usb_subnet_out" \
+            -j ACCEPT -m comment --comment "aeon-vpn"
+    fi
     # Same idea for Pi-local UDP — REJECT with ICMP port-unreachable
     # so local apps fall back fast instead of timing out.
     aeon_block_pair OUTPUT "vpn-udp-output" "aeon-vpn" reject-port -p udp
@@ -1364,16 +1405,18 @@ apply_tor() {
 
     log "tor: enabled=$enabled mode=$mode over_vpn=$over_vpn"
 
-    # Sweep prior tor-tagged iptables rules + stop the service if
-    # disabled — guarantees a clean slate.
-    iptables-save | grep -v 'aeon-tor' | iptables-restore 2>/dev/null || true
+    # v61: Sweep prior aeon-vpn-tagged iptables rules unconditionally
+    # so we never pile up duplicates. apply_tor_service installs rules
+    # tagged "aeon-vpn" (legacy carry-over from when Tor was a VPN
+    # provider option). Re-enabling Tor or switching split⇄transparent
+    # used to leave the previous rule-set in place, producing 10+ LOG
+    # entries per dropped packet (visible in the Security Console as
+    # repeated identical drops at the same timestamp). The earlier
+    # `grep -v 'aeon-tor'` was a no-op — wrong tag.
+    stop_clearnet_vpns 2>/dev/null || stop_all_vpns 2>/dev/null || true
     iptables -t nat -F AEON_TOR_OUT 2>/dev/null && iptables -t nat -X AEON_TOR_OUT 2>/dev/null || true
 
     if [ "$enabled" != "true" ]; then
-        # Sweep the iptables rules apply_tor_service installs (tagged
-        # "aeon-vpn" historically). stop_all_vpns / stop_clearnet_vpns
-        # already does this — call whichever exists.
-        stop_clearnet_vpns 2>/dev/null || stop_all_vpns 2>/dev/null || true
         systemctl stop tor.service tor@default.service 2>/dev/null || true
         systemctl disable tor.service tor@default.service 2>/dev/null || true
         # Clean up policy-routing leftovers from a previous over_vpn run.
