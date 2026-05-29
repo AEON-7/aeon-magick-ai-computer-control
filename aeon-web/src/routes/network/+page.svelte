@@ -202,10 +202,81 @@
     detail: string;
     onClick: () => void;
   }
-  function findOverlay(kind: 'tor' | 'i2p' | 'vpn'): api.VpnStatusOverlay | undefined {
-    return statusOverlays.find((o) => o.kind === kind);
+
+  // v62: derive the per-overlay status array from VpnStatus. New
+  // supervisor builds populate `overlays` directly; older builds
+  // only fill the legacy flat fields, so we synthesize a single
+  // overlay from those as a backward-compat shim. The render path
+  // then iterates one list regardless of supervisor version.
+  // (Order matters: serviceLights below reads statusOverlays directly
+  //  so Svelte's reactivity tracker can see the dependency. The bug
+  //  this fixes was the entire /network page going black: serviceLights
+  //  used to call findOverlay() — a normal function — to read
+  //  statusOverlays, which hid the dependency from Svelte's static
+  //  analyzer, so serviceLights ran before statusOverlays was
+  //  initialized and crashed on statusOverlays.find of undefined.)
+  $: statusOverlays = (() => {
+    if (!vpnStatus || !vpnStatus.enabled) return [] as api.VpnStatusOverlay[];
+    if (Array.isArray(vpnStatus.overlays) && vpnStatus.overlays.length > 0) {
+      return vpnStatus.overlays;
+    }
+    if (vpnStatus.provider === 'none') return [];
+    // Legacy shape — synthesize a single overlay from flat fields so
+    // the new rendering path covers both supervisor versions.
+    const kind: api.VpnStatusOverlay['kind'] =
+      vpnStatus.provider === 'tor'
+        ? 'tor'
+        : vpnStatus.provider === 'i2p'
+        ? 'i2p'
+        : 'vpn';
+    return [{
+      kind,
+      provider: vpnStatus.provider,
+      enabled: vpnStatus.enabled,
+      state: vpnStatus.state,
+      bootstrap_percent: vpnStatus.bootstrap_percent,
+      summary: vpnStatus.summary,
+      public_ip: vpnStatus.public_ip,
+      public_country: vpnStatus.public_country,
+      detail: vpnStatus.detail,
+    }];
+  })();
+
+  // Labels for the overlay header — "Mullvad VPN" beats "wireguard"
+  // when we know the user configured a wizard provider.
+  function overlayLabel(o: api.VpnStatusOverlay | undefined, fallbackProvider = ''): string {
+    if (!o) {
+      switch (fallbackProvider) {
+        case 'mullvad': return 'Mullvad VPN';
+        case 'ivpn': return 'IVPN';
+        case 'azirevpn': return 'AzireVPN';
+        case 'tailscale': return 'Tailscale';
+        case 'wireguard': return 'WireGuard';
+        case 'openvpn': return 'OpenVPN';
+        default: return fallbackProvider || 'VPN';
+      }
+    }
+    if (o.kind === 'tor') return 'Tor';
+    if (o.kind === 'i2p') return 'I2P';
+    switch (o.provider) {
+      case 'mullvad': return 'Mullvad VPN';
+      case 'ivpn': return 'IVPN';
+      case 'azirevpn': return 'AzireVPN';
+      case 'tailscale': return 'Tailscale';
+      case 'wireguard': return 'WireGuard';
+      case 'openvpn': return 'OpenVPN';
+      default: return o.provider;
+    }
   }
+
   $: serviceLights = (() => {
+    // Read statusOverlays once at the top so Svelte's static dependency
+    // analyzer sees we depend on it. Without this, the previous findOverlay-
+    // based lookup hid the reference inside a function call and the
+    // reactive ran with statusOverlays still undefined → crash.
+    const overlays = statusOverlays;
+    const findOverlay = (k: 'tor' | 'i2p' | 'vpn') =>
+      (overlays ?? []).find((o) => o.kind === k);
     const lights: ServiceLight[] = [];
 
     // DNS — dnscrypt-proxy's "are we encrypted" state.
@@ -304,7 +375,7 @@
       const exitCountry = vpnOv?.public_country;
       lights.push({
         key: 'vpn',
-        label: `${overlayLabel(vpnOv ?? { ...({} as api.VpnStatusOverlay), kind: 'vpn', provider: vpnProvider })}${exitCountry ? ' · ' + exitCountry : ''}`,
+        label: `${overlayLabel(vpnOv, vpnProvider)}${exitCountry ? ' · ' + exitCountry : ''}`,
         tone,
         detail: vpnOv?.summary ?? `${vpnProvider} enabled`,
         onClick: () => (vpnOpen = true),
@@ -321,54 +392,6 @@
 
     return lights;
   })();
-
-  // v61: derive the per-overlay status array from VpnStatus. New
-  // supervisor builds populate `overlays` directly; older builds
-  // only fill the legacy flat fields, so we synthesize a single
-  // overlay from those as a backward-compat shim. The render path
-  // then iterates one list regardless of supervisor version.
-  $: statusOverlays = (() => {
-    if (!vpnStatus || !vpnStatus.enabled) return [] as api.VpnStatusOverlay[];
-    if (Array.isArray(vpnStatus.overlays) && vpnStatus.overlays.length > 0) {
-      return vpnStatus.overlays;
-    }
-    if (vpnStatus.provider === 'none') return [];
-    // Legacy shape — synthesize a single overlay from flat fields so
-    // the new rendering path covers both supervisor versions.
-    const kind: api.VpnStatusOverlay['kind'] =
-      vpnStatus.provider === 'tor'
-        ? 'tor'
-        : vpnStatus.provider === 'i2p'
-        ? 'i2p'
-        : 'vpn';
-    return [{
-      kind,
-      provider: vpnStatus.provider,
-      enabled: vpnStatus.enabled,
-      state: vpnStatus.state,
-      bootstrap_percent: vpnStatus.bootstrap_percent,
-      summary: vpnStatus.summary,
-      public_ip: vpnStatus.public_ip,
-      public_country: vpnStatus.public_country,
-      detail: vpnStatus.detail,
-    }];
-  })();
-
-  // Labels for the overlay header — "Mullvad VPN" beats "wireguard"
-  // when we know the user configured a wizard provider.
-  function overlayLabel(o: api.VpnStatusOverlay): string {
-    if (o.kind === 'tor') return 'Tor';
-    if (o.kind === 'i2p') return 'I2P';
-    switch (o.provider) {
-      case 'mullvad': return 'Mullvad VPN';
-      case 'ivpn': return 'IVPN';
-      case 'azirevpn': return 'AzireVPN';
-      case 'tailscale': return 'Tailscale';
-      case 'wireguard': return 'WireGuard';
-      case 'openvpn': return 'OpenVPN';
-      default: return o.provider;
-    }
-  }
 
   async function refresh() {
     loading = true;
