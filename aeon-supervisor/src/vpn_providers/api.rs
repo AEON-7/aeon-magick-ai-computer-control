@@ -119,11 +119,20 @@ pub async fn setup(
                 Ok(json!({"ok": true, "server_count": servers.len(), "peer_ipv4": s.peer_ipv4}))
             }
             "azirevpn" => {
-                let kr = azirevpn::register_key(&cred, &pub_key)?;
+                // v63.1: AzireVPN's "register key" actually goes through
+                // POST /v3/ips — it returns the assigned IPv4/IPv6, the
+                // DNS servers AzireVPN wants us to use, and an auto-
+                // assigned device name. All three get persisted into
+                // the state file so the wg.conf renderer doesn't need
+                // hardcoded values.
+                let alloc = azirevpn::register_key(&cred, &pub_key)?;
                 let servers = azirevpn::fetch_servers(&cred, trust)?;
                 let s = azirevpn::AzireState {
                     api_token: cred,
-                    peer_ipv4: kr.ipv4,
+                    peer_ipv4: alloc.ipv4.clone(),
+                    peer_ipv6: alloc.ipv6,
+                    dns_servers: alloc.dns,
+                    device_name: alloc.device_name,
                     wg_private_key: priv_key,
                     wg_public_key: pub_key,
                     selected_server: String::new(),

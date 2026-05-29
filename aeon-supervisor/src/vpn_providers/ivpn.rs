@@ -2,22 +2,28 @@
 //!
 //! IVPN account flow:
 //!   1. User pastes account ID (e.g. "ivpn-XXXX-XXXX-XXXX")
-//!   2. POST /v5/session/new with account_id → session token
-//!   3. Generate local WG keypair on Pi
-//!   4. POST /v5/wireguard/connect with WG pubkey → server peer config
-//!      (allocated client IP + server list with pubkeys)
-//!   5. User picks a server, supervisor renders wg config
+//!   2. POST /v4/session/new with account_id → session token + wg peer IP
+//!   3. Generate local WG keypair on Pi (done client-side before step 2,
+//!      the pubkey is bound at session establishment)
+//!   4. User picks a server from the cached list, supervisor renders
+//!      wg config
 //!
 //! Slightly different from Mullvad: IVPN binds the WG pubkey at
 //! session establishment, then re-uses that key across all server
 //! switches. Mullvad treats each pubkey as a device record.
+//!
+//! v63.1: switched session endpoint v5 → v4. Initial v59 implementation
+//! used /v5/session/new because some IVPN docs reference v5, but the
+//! live API only serves session/* under /v4 (v5 returns 404). The
+//! server-listing endpoint /servers/stats works on both v4 and v5 —
+//! kept on v4 so everything routes through the same base URL.
 
 use super::{EyesTier, Server, eyes_for_country, compute_server_score, http_get_json, http_post_json};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const SECRETS_PATH: &str = "/etc/aeon/vpn-secrets/ivpn.toml";
-const API_BASE: &str = "https://api.ivpn.net/v5";
+const API_BASE: &str = "https://api.ivpn.net/v4";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct IvpnState {
@@ -63,24 +69,43 @@ pub fn write_state(s: &IvpnState) -> std::io::Result<()> {
     Ok(())
 }
 
-/// POST /v5/session/new — exchange account_id for a session token.
+/// POST /v4/session/new — exchange account_id for a session token.
+///
+/// Live API contract observed from probing api.ivpn.net + cross-checking
+/// with IVPN's open-source desktop client (github.com/ivpn/desktop-app):
+///   * field name is `wg_public_key`, NOT `wireguard_public_key`
+///   * response top-level keys are `token` and `wg_ip` (not nested under
+///     a `wireguard` object the way Mullvad's response is)
+///   * 400 response with `error_code` in body when the account is
+///     invalid or already over its device cap
 pub fn new_session(account_id: &str, wg_pubkey: &str) -> Result<SessionResult, String> {
     let url = format!("{API_BASE}/session/new");
     let payload = serde_json::json!({
         "username": account_id,
-        "wireguard_public_key": wg_pubkey,
+        "wg_public_key": wg_pubkey,
     });
     let v = http_post_json(&url, None, &payload)?;
-    // Response shape (documented):
-    //   {"status":200, "token":"...", "session_token":"...",
-    //    "wireguard": {"ipv4_address":"172.x.x.x", ...}, ...}
+    // IVPN returns 200 with a `status` field — sometimes a non-200
+    // status sneaks through with a friendlier message. Surface that
+    // explicitly so the wizard can show "your account is over its
+    // 5-device limit" rather than "no session token in response".
+    if let Some(status) = v.get("status").and_then(|x| x.as_i64()) {
+        if status != 200 {
+            let msg = v.get("message").and_then(|x| x.as_str())
+                .unwrap_or("unknown IVPN error");
+            return Err(format!("ivpn API status {status}: {msg}"));
+        }
+    }
     let token = v.get("token").and_then(|x| x.as_str())
         .or_else(|| v.get("session_token").and_then(|x| x.as_str()))
         .ok_or_else(|| "no session token in response".to_string())?
         .to_string();
-    let ipv4 = v.get("wireguard")
-        .and_then(|w| w.get("ipv4_address"))
-        .and_then(|x| x.as_str())
+    // Response shape:
+    //   {"status":200,"token":"...","wg_ip":"172.30.x.x","vpn_username":"..."}
+    // Some older builds nested it under `wireguard.ipv4_address` —
+    // try both for resilience across future API revisions.
+    let ipv4 = v.get("wg_ip").and_then(|x| x.as_str())
+        .or_else(|| v.get("wireguard").and_then(|w| w.get("ipv4_address")).and_then(|x| x.as_str()))
         .unwrap_or("")
         .to_string();
     Ok(SessionResult { token, ipv4 })
@@ -92,8 +117,8 @@ pub struct SessionResult {
     pub ipv4: String,
 }
 
-/// GET /v5/servers — full server list with country + city + WG peer
-/// info. Public (no auth needed for listing).
+/// GET /v4/servers/stats — full server list with country + city + WG
+/// peer info. Public (no auth needed for listing).
 pub fn fetch_servers(provider_trust: u8) -> Result<Vec<Server>, String> {
     let url = format!("{API_BASE}/servers/stats");
     let v = http_get_json(&url, None)?;
