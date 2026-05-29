@@ -305,3 +305,359 @@ pub async fn disconnect(
 pub struct DisconnectReq {
     pub ssid: String,
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// v63: known-network management + AP-mode toggle.
+//
+// The /setup-wifi page covers first-boot. Once a user is in the
+// authenticated UI they want a proper /wifi page that:
+//   * lists every saved NetworkManager wifi connection profile
+//     (so they can forget / re-prioritize)
+//   * can flip a per-profile autoconnect toggle
+//   * can switch between client mode and "I want this Pi to BE an AP"
+//   * lets them set the AP-mode SSID + password, which also become
+//     the credentials used by the no-internet fallback AP that
+//     aeon-netwatch spins up at boot
+// ─────────────────────────────────────────────────────────────────────────
+
+/// GET /api/wifi/known — list saved wifi connection profiles.
+pub async fn list_known(State(_state): State<AppState>) -> impl IntoResponse {
+    // Listing NetworkManager profiles + filtering to wifi type, then
+    // for each one query autoconnect + priority via `nmcli -g`. Cheap
+    // — typical user has <10 saved networks.
+    let listing = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("nmcli")
+            .args(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show"])
+            .output()
+    })
+    .await;
+
+    let text = match listing {
+        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
+        _ => return Json(json!({"ok": true, "networks": []})).into_response(),
+    };
+
+    let mut networks: Vec<Value> = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.splitn(3, ':').collect();
+        if fields.len() < 2 || fields[1] != "802-11-wireless" {
+            continue;
+        }
+        let name = fields[0].to_string();
+        // Skip the fallback AP profile from the user-visible list —
+        // it's managed by aeon-netwatch, not by the user, and "forget"
+        // would break first-boot for the next operator.
+        if name == "aeon-setup" {
+            continue;
+        }
+        let active = fields.get(2).map(|s| !s.is_empty()).unwrap_or(false);
+
+        // Per-profile metadata via -g (get-value).
+        let meta = std::process::Command::new("nmcli")
+            .args([
+                "-g",
+                "connection.autoconnect,connection.autoconnect-priority,802-11-wireless.mode,802-11-wireless.ssid",
+                "connection",
+                "show",
+                &name,
+            ])
+            .output();
+        let (autoconnect, priority, mode, ssid) = match meta {
+            Ok(out) => {
+                let s = String::from_utf8_lossy(&out.stdout);
+                let mut it = s.lines();
+                let ac = it.next().unwrap_or("yes").trim() == "yes";
+                let pri: i64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+                let md = it.next().unwrap_or("infrastructure").trim().to_string();
+                let sd = it.next().unwrap_or(&name).trim().to_string();
+                (ac, pri, md, if sd.is_empty() { name.clone() } else { sd })
+            }
+            Err(_) => (true, 0, "infrastructure".to_string(), name.clone()),
+        };
+
+        networks.push(json!({
+            "profile": name,
+            "ssid": ssid,
+            "autoconnect": autoconnect,
+            "priority": priority,
+            "mode": mode,
+            "active": active,
+        }));
+    }
+
+    Json(json!({"ok": true, "networks": networks})).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ProfileReq {
+    pub profile: String,
+}
+
+/// DELETE /api/wifi/known — forget a saved profile entirely.
+pub async fn forget(
+    State(_state): State<AppState>,
+    Json(req): Json<ProfileReq>,
+) -> impl IntoResponse {
+    if req.profile.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "profile required"}))).into_response();
+    }
+    // Defense against operator footgun — refuse to delete the boot
+    // fallback profile via this UI flow.
+    if req.profile == "aeon-setup" {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "aeon-setup is the boot-fallback AP — managed by aeon-netwatch, not removable here"}))).into_response();
+    }
+    let profile = req.profile.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("nmcli")
+            .args(["connection", "delete", &profile])
+            .output()
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) if out.status.success() => Json(json!({"ok": true})).into_response(),
+        Ok(Ok(out)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "ok": false,
+            "err": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        }))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
+              Json(json!({"ok": false, "err": "nmcli delete failed"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AutoconnectReq {
+    pub profile: String,
+    pub enabled: bool,
+}
+
+/// POST /api/wifi/autoconnect — flip a profile's autoconnect flag.
+pub async fn set_autoconnect(
+    State(_state): State<AppState>,
+    Json(req): Json<AutoconnectReq>,
+) -> impl IntoResponse {
+    if req.profile.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "profile required"}))).into_response();
+    }
+    let val = if req.enabled { "yes" } else { "no" }.to_string();
+    let profile = req.profile.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("nmcli")
+            .args([
+                "connection", "modify", &profile,
+                "connection.autoconnect", &val,
+            ])
+            .output()
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) if out.status.success() => Json(json!({"ok": true, "autoconnect": req.enabled})).into_response(),
+        Ok(Ok(out)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "ok": false,
+            "err": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        }))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
+              Json(json!({"ok": false, "err": "nmcli modify failed"}))).into_response(),
+    }
+}
+
+/// GET /api/wifi/ap — current AP-mode config (credentials used in
+/// both user-toggled AP mode and the no-internet boot-fallback).
+pub async fn ap_get(State(_state): State<AppState>) -> impl IntoResponse {
+    // The fallback AP profile is named "aeon-setup". We read its SSID
+    // straight back so the UI can show "currently broadcasting as X".
+    // Password is NEVER echoed — only "is one set?".
+    let result = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("nmcli")
+            .args(["-g", "802-11-wireless.ssid,802-11-wireless-security.psk-flags",
+                   "connection", "show", "aeon-setup"])
+            .output()
+    })
+    .await;
+
+    // Also figure out whether the AP is currently active.
+    let active = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("nmcli")
+            .args(["-t", "-f", "NAME", "connection", "show", "--active"])
+            .output()
+    })
+    .await;
+
+    let mut ssid = "aeon-setup".to_string();
+    let mut has_password = false;
+    let mut is_active = false;
+
+    if let Ok(Ok(out)) = result {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let mut it = s.lines();
+            if let Some(line) = it.next() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    ssid = line.to_string();
+                }
+            }
+            // psk-flags=0 means "store in plaintext" — password present.
+            // psk-flags=1 means agent-owned (NM stores it but won't echo).
+            // No psk-flags line = no security set at all (open AP).
+            if let Some(flags) = it.next() {
+                has_password = !flags.trim().is_empty();
+            }
+        }
+    }
+
+    if let Ok(Ok(out)) = active {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            if line.trim() == "aeon-setup" {
+                is_active = true;
+                break;
+            }
+        }
+    }
+
+    Json(json!({
+        "ok": true,
+        "ssid": ssid,
+        "has_password": has_password,
+        "active": is_active,
+        // Default password used by aeon-netwatch's first-boot fallback.
+        // We expose this so the UI can tell the user what it currently
+        // is when they've never customized it.
+        "default_ssid": "aeon-setup",
+        "default_password": "aeon-setup-pw",
+    })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ApSetReq {
+    pub ssid: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    /// When true, bring the AP up immediately after writing the
+    /// profile. When false (the common case for "I'm using client
+    /// mode now, just save the AP creds for the next boot-fallback")
+    /// we write the profile and leave activation to aeon-netwatch.
+    #[serde(default)]
+    pub activate: bool,
+}
+
+/// PUT /api/wifi/ap — set AP-mode SSID + password.
+///
+/// The `aeon-setup` profile is the source of truth for BOTH:
+///   * the AP that aeon-netwatch brings up when no client network is
+///     reachable at boot (the captive-portal fallback)
+///   * the AP the user explicitly switches into via the /wifi page
+///
+/// So changing these credentials affects both flows. We document this
+/// loudly in the UI.
+pub async fn ap_set(
+    State(_state): State<AppState>,
+    Json(req): Json<ApSetReq>,
+) -> impl IntoResponse {
+    if req.ssid.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "ssid required"}))).into_response();
+    }
+    if let Some(pw) = &req.password {
+        // WPA2 PSK constraint — 8 char minimum or NetworkManager refuses.
+        if !pw.is_empty() && pw.len() < 8 {
+            return (StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": "WPA2 password must be at least 8 characters"}))).into_response();
+        }
+    }
+
+    let ssid = req.ssid.clone();
+    let password = req.password.clone();
+    let activate = req.activate;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // Idempotent: delete + recreate. NetworkManager's modify-in-place
+        // is fiddly for AP-mode profiles (mode + band + ipv4.method all
+        // interlock); a clean recreate is simpler and survives upgrades.
+        let _ = std::process::Command::new("nmcli")
+            .args(["connection", "delete", "aeon-setup"])
+            .output();
+
+        let mut args: Vec<String> = vec![
+            "connection".into(), "add".into(),
+            "type".into(), "wifi".into(),
+            "ifname".into(), "wlan0".into(),
+            "con-name".into(), "aeon-setup".into(),
+            "autoconnect".into(), "no".into(),
+            "ssid".into(), ssid.clone(),
+            "mode".into(), "ap".into(),
+            "ipv4.method".into(), "shared".into(),
+            "ipv4.addresses".into(), "10.42.0.1/24".into(),
+            "ipv6.method".into(), "ignore".into(),
+            "802-11-wireless.band".into(), "bg".into(),
+            "802-11-wireless.channel".into(), "6".into(),
+        ];
+        if let Some(pw) = &password {
+            if !pw.is_empty() {
+                args.extend([
+                    "wifi-sec.key-mgmt".into(), "wpa-psk".into(),
+                    "wifi-sec.psk".into(), pw.clone(),
+                ]);
+            }
+        }
+
+        let add_out = std::process::Command::new("nmcli")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("nmcli add: {e}"))?;
+        if !add_out.status.success() {
+            return Err(format!("nmcli add aeon-setup: {}",
+                String::from_utf8_lossy(&add_out.stderr).trim()));
+        }
+
+        if activate {
+            let up = std::process::Command::new("nmcli")
+                .args(["--wait", "15", "connection", "up", "aeon-setup"])
+                .output()
+                .map_err(|e| format!("nmcli up: {e}"))?;
+            if !up.status.success() {
+                return Err(format!("nmcli up aeon-setup: {}",
+                    String::from_utf8_lossy(&up.stderr).trim()));
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => Json(json!({"ok": true})).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+                       Json(json!({"ok": false, "err": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({"ok": false, "err": format!("task join: {e}")}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RadioReq {
+    pub on: bool,
+}
+
+/// POST /api/wifi/radio — radio on/off. Used to implement the
+/// "Disable WiFi entirely" choice on the /wifi page (e.g. operator
+/// running ethernet-only and doesn't want a beacon visible at all).
+pub async fn radio(
+    State(_state): State<AppState>,
+    Json(req): Json<RadioReq>,
+) -> impl IntoResponse {
+    let val = if req.on { "on" } else { "off" }.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("nmcli")
+            .args(["radio", "wifi", &val])
+            .output()
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) if out.status.success() => Json(json!({"ok": true, "radio_on": req.on})).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
+              Json(json!({"ok": false, "err": "nmcli radio failed"}))).into_response(),
+    }
+}

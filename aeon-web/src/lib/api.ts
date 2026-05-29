@@ -645,8 +645,17 @@ export interface SystemFirewallRule {
   match_options: string;   // free-form trailing match tokens (e.g. limit, comment)
 }
 
+export interface SystemFirewallDiagnostics {
+  total_rules_per_table: Record<string, number>;
+  aeon_tag_counts: Record<string, number>;
+}
+
 export const listSystemFirewallRules = () =>
-  req<{ ok: boolean; rules: SystemFirewallRule[] }>('GET', '/firewall/system-rules');
+  req<{
+    ok: boolean;
+    rules: SystemFirewallRule[];
+    diagnostics?: SystemFirewallDiagnostics;
+  }>('GET', '/firewall/system-rules');
 
 export const addFirewallRule = (rule: FirewallRuleDraft) =>
   req<{ ok: boolean; id: string }>('POST', '/firewall/rules', rule);

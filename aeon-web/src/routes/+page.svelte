@@ -739,6 +739,7 @@
       <!-- Group B: nav -->
       <div class="flex items-center gap-2 px-3">
         <a href="/network"   class="btn text-xs">network</a>
+        <a href="/wifi"      class="btn text-xs" title="WiFi mode, known networks, AP credentials">WiFi</a>
         <a href="/security"  class="btn text-xs">security</a>
         <a href="/dns"       class="btn text-xs">DNS</a>
         <a href="/storage"   class="btn text-xs">disk&nbsp;drive</a>
@@ -849,6 +850,7 @@
       <!-- Nav links — two columns for thumb reach. -->
       <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
         <a href="/network"  class="btn text-xs">network</a>
+        <a href="/wifi"     class="btn text-xs">WiFi</a>
         <a href="/security" class="btn text-xs">security</a>
         <a href="/dns"      class="btn text-xs">DNS</a>
         <a href="/storage"  class="btn text-xs">disk drive</a>

@@ -3,7 +3,13 @@
 device = "/dev/kvmd-video"
 api_sock = "/run/aeon/streamer.sock"
 ustreamer_sock = "/run/aeon/ustreamer.sock"
-jpeg_quality = 80
+# v63: defaults dropped from 80→70. JPEG quality 70 is visually
+# indistinguishable from 80 for screen content (UI elements, text,
+# desktop) but cuts wire size ~30%, which lets WiFi / browser-side
+# multipart parsers drain frames faster — most "3s lag" reports turn
+# out to be TCP/browser buffering, not encode cost. Tunable live via
+# PUT /api/streamer/config or the slider on /system.
+jpeg_quality = 70
 drop_same_frames = 30
 ustreamer_bin = "/usr/bin/ustreamer"
 ffmpeg_bin = "/usr/bin/ffmpeg"
@@ -28,7 +34,16 @@ run_as = "aeon"
 #   Pure 1080p host           → 1920x1080
 width = 1920
 height = 1080
-fps = 30
+# v63: dropped 30→24. Three reasons:
+#  (1) 24 fps is the cinema standard — visually fluid for desktop
+#      capture without paying the encoder for redundant frames.
+#  (2) Browser-side multipart-MJPEG parsers buffer per-frame; at 30 fps
+#      a slow drain produces a multi-second tail. 24 fps gives the
+#      same parser ~33ms more breathing room per frame.
+#  (3) Pi 4's MJPEG encoder is comfortable at 24 with margin for the
+#      JPEG quality drop above. Operators wanting smoother playback
+#      can push back to 30 via /system or the streamer.toml.
+fps = 24
 format = "mjpeg"               # "mjpeg" or "h264"
 scale_algorithm = "bicubic"    # "lanczos" (best) | "bicubic" (default) | "neighbor" (fastest)
 snapshot_path = "/run/aeon/snapshots/live.jpg"

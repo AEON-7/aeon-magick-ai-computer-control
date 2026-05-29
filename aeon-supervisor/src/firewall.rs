@@ -415,13 +415,29 @@ pub async fn list_rules(State(_state): State<AppState>) -> Json<Value> {
 }
 
 /// GET /api/firewall/system-rules — read-only view of every rule that
-/// aeon-net-services.sh, aeon-usb-net.sh, or the AEON_DROP chain
-/// installed. Parsed live from `iptables -nvL` so it always reflects
-/// the actual kernel state. The UI uses this to show users what the
-/// device is enforcing under the hood + lets them click "override"
-/// to create a user ACCEPT with the same predicates flipped to allow.
+/// aeon-net-services.sh, aeon-usb-net.sh, aeon-netwatch.sh (captive),
+/// or the AEON_DROP chain installed. Parsed live from `iptables -nvL`
+/// so it always reflects the actual kernel state. The UI uses this to
+/// show users what the device is enforcing under the hood + lets them
+/// click "override" to create a user ACCEPT with the same predicates
+/// flipped to allow.
+///
+/// v63: also returns diagnostic counts. Previously the listing matched
+/// only two literal tags ("aeon-vpn", "aeon-usb-net") and skipped
+/// "aeon-captive" entirely; rules under a future tag would have
+/// vanished too. Now we match any `aeon-*` comment EXCEPT `aeon-fw`
+/// (which is the user-rule tag), so the listing keeps working as new
+/// scripts get added. The diagnostic counts (total rules per table,
+/// per-tag breakdown) help operators see at a glance whether 0 rules
+/// in the listing is real ("VPN + USB net both off so nothing aeon-
+/// tagged was installed") vs broken ("supervisor can't shell out").
 pub async fn list_system_rules(State(_state): State<AppState>) -> Json<Value> {
     let mut out: Vec<Value> = Vec::new();
+    let mut total_per_table: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    let mut aeon_tag_counts: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+
     for table in &["filter", "nat", "mangle"] {
         let cmd = Command::new("iptables")
             .args(["-t", table, "-nvL", "--line-numbers"])
@@ -429,6 +445,7 @@ pub async fn list_system_rules(State(_state): State<AppState>) -> Json<Value> {
         let Ok(cmd) = cmd else { continue };
         let text = String::from_utf8_lossy(&cmd.stdout);
         let mut current_chain = String::new();
+        let mut chain_rules = 0u64;
         for line in text.lines() {
             // Chain headers look like "Chain INPUT (policy ACCEPT 0 packets, 0 bytes)"
             if let Some(rest) = line.strip_prefix("Chain ") {
@@ -437,15 +454,41 @@ pub async fn list_system_rules(State(_state): State<AppState>) -> Json<Value> {
                 }
                 continue;
             }
-            // We want rules tagged aeon-vpn / aeon-usb-net (system) but
-            // NOT aeon-fw (user) — user rules already show up in the
-            // editable list.
-            let source = if line.contains("aeon-vpn") {
-                "aeon-net-services"
-            } else if line.contains("aeon-usb-net") {
-                "aeon-usb-net"
-            } else {
+            // Empty / column-header lines — ignore.
+            if line.trim().is_empty()
+                || line.starts_with("num ")
+                || line.starts_with("pkts ")
+            {
                 continue;
+            }
+            // Count every rule for the per-table summary.
+            *total_per_table.entry((*table).to_string()).or_insert(0) += 1;
+            chain_rules += 1;
+
+            // Detect an `aeon-*` comment. Comments look like `/* aeon-foo */`.
+            // Match any aeon-prefixed tag, but EXCLUDE aeon-fw which is the
+            // user-rule tag — those already render in the editable list.
+            // Tokenize and look for an `aeon-` token inside `/* ... */`.
+            let mut aeon_tag: Option<&str> = None;
+            let mut in_comment = false;
+            for tok in line.split_whitespace() {
+                if tok == "/*" { in_comment = true; continue; }
+                if tok == "*/" { in_comment = false; continue; }
+                if in_comment
+                    && tok.starts_with("aeon-")
+                    && tok != "aeon-fw"
+                {
+                    aeon_tag = Some(tok);
+                    *aeon_tag_counts.entry(tok.to_string()).or_insert(0) += 1;
+                    break;
+                }
+            }
+            let Some(tag) = aeon_tag else { continue };
+            let source = match tag {
+                "aeon-vpn" => "aeon-net-services",
+                "aeon-usb-net" => "aeon-usb-net",
+                "aeon-captive" => "aeon-netwatch (captive portal)",
+                _ => "aeon-system",
             };
             // Parse iptables -nvL columns:
             // num  pkts bytes target  prot  opt in   out  source dest   [match-options] /* comment */
@@ -522,8 +565,26 @@ pub async fn list_system_rules(State(_state): State<AppState>) -> Json<Value> {
                 "match_options": extras.join(" "),
             }));
         }
+        // chain_rules is the per-chain count; folded into total_per_table
+        // already, but keep the variable visible to silence the
+        // unused-write warning + leave a hook for a future "rules per
+        // chain" breakdown.
+        let _ = chain_rules;
     }
-    Json(json!({"ok": true, "rules": out}))
+    Json(json!({
+        "ok": true,
+        "rules": out,
+        // v63: diagnostics so operators can tell why the parsed list is
+        // empty. If total_per_table shows non-zero counts but the parsed
+        // list is empty, the iptables call worked but no aeon-* tag was
+        // found — most commonly "VPN/Tor/I2P all off, USB net off" so
+        // nothing's been installed. If total_per_table is all zeros, the
+        // supervisor couldn't shell out to iptables at all.
+        "diagnostics": {
+            "total_rules_per_table": total_per_table,
+            "aeon_tag_counts": aeon_tag_counts,
+        }
+    }))
 }
 
 #[derive(Deserialize)]

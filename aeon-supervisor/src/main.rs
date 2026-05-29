@@ -33,6 +33,7 @@ mod clipboard;
 mod file_xfer;
 mod ssh_keys;
 mod storage;
+mod streamer_config;
 mod system;
 mod target;
 mod tls;

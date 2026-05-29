@@ -20,6 +20,78 @@
   let msg = '';
   let poll: ReturnType<typeof setInterval>;
 
+  // v63: live streamer tuning. fps + jpeg_quality knobs go through
+  // GET/PUT /api/streamer/config which writes streamer.toml + bounces
+  // aeon-streamer.service. The page also surfaces the read-only
+  // format/resolution/hw_accel values so operators know what they're
+  // dialing in latency against.
+  let streamerCfg: {
+    fps: number;
+    jpeg_quality: number;
+    width: number;
+    height: number;
+    format: string;
+    hw_accel: boolean;
+  } | null = null;
+  let stagedFps = 24;
+  let stagedQuality = 70;
+  let streamerSaving = false;
+  let streamerMsg = '';
+
+  async function refreshStreamer() {
+    try {
+      const r = await fetch('/api/streamer/config', { credentials: 'same-origin' })
+        .then((r) => r.json());
+      if (r.ok) {
+        streamerCfg = {
+          fps: r.fps,
+          jpeg_quality: r.jpeg_quality,
+          width: r.width,
+          height: r.height,
+          format: r.format,
+          hw_accel: r.hw_accel,
+        };
+        // Pre-fill the sliders with the saved values so the user sees
+        // where they currently are; let them tweak without losing
+        // context.
+        if (!streamerSaving) {
+          stagedFps = r.fps;
+          stagedQuality = r.jpeg_quality;
+        }
+      }
+    } catch {
+      // Best-effort — older supervisor builds won't have this endpoint.
+      streamerCfg = null;
+    }
+  }
+
+  async function saveStreamer() {
+    streamerSaving = true;
+    streamerMsg = '';
+    try {
+      const r = await fetch('/api/streamer/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          fps: stagedFps,
+          jpeg_quality: stagedQuality,
+        }),
+      }).then((r) => r.json());
+      if (r.ok) {
+        streamerMsg = `✓ saved + restarted aeon-streamer (fps=${stagedFps}, q=${stagedQuality})`;
+        await refreshStreamer();
+      } else {
+        streamerMsg = `✗ ${r.err ?? 'save failed'}`;
+      }
+    } catch (e: any) {
+      streamerMsg = `✗ ${e?.message ?? 'save failed'}`;
+    } finally {
+      streamerSaving = false;
+      setTimeout(() => (streamerMsg = ''), 5000);
+    }
+  }
+
   async function refresh() {
     try {
       info = await api.getSystemInfo();
@@ -32,6 +104,7 @@
 
   onMount(() => {
     refresh();
+    refreshStreamer();
     poll = setInterval(refresh, 5000);
   });
   onDestroy(() => { if (poll) clearInterval(poll); });
@@ -155,6 +228,109 @@
               </p>
             </div>
           </div>
+        </section>
+      {/if}
+
+      <!-- ─── Stream tuning (v63) ─── -->
+      {#if streamerCfg}
+        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+          <header class="space-y-1">
+            <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+              Stream tuning
+            </h2>
+            <p class="text-xs text-zinc-500 leading-relaxed">
+              Live knobs for the MJPEG capture pipeline. Lower fps + lower
+              quality means fewer bytes on the wire, which drains the
+              browser-side multipart parser faster and cuts perceived
+              latency. The trade-off is fluidity (low fps) and visible
+              compression artifacts (low quality). Most "3 s lag" reports
+              get fixed by dropping fps to 24 or 18 — try in that order.
+            </p>
+            <p class="text-[11px] text-zinc-600 leading-relaxed pt-1">
+              Source resolution {streamerCfg.width}×{streamerCfg.height},
+              format <code>{streamerCfg.format}</code>,
+              hw_accel <code>{streamerCfg.hw_accel ? 'on' : 'off'}</code>.
+              Saving these settings restarts aeon-streamer (the live
+              stream drops for ~2 s).
+            </p>
+          </header>
+
+          <!-- fps slider -->
+          <div class="space-y-1">
+            <div class="flex justify-between text-[11px] uppercase tracking-wider">
+              <span class="text-zinc-500">Frame rate</span>
+              <span class="font-mono text-cursed-300">{stagedFps} fps</span>
+            </div>
+            <input type="range" min="6" max="30" step="1"
+                   bind:value={stagedFps}
+                   disabled={streamerSaving}
+                   class="w-full accent-cursed-500" />
+            <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
+              <span>6 (slow but very low bandwidth)</span>
+              <span>24 (cinema, default)</span>
+              <span>30 (smooth, higher latency)</span>
+            </div>
+          </div>
+
+          <!-- quality slider -->
+          <div class="space-y-1">
+            <div class="flex justify-between text-[11px] uppercase tracking-wider">
+              <span class="text-zinc-500">JPEG quality</span>
+              <span class="font-mono text-cursed-300">{stagedQuality}</span>
+            </div>
+            <input type="range" min="40" max="95" step="1"
+                   bind:value={stagedQuality}
+                   disabled={streamerSaving}
+                   class="w-full accent-cursed-500" />
+            <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
+              <span>40 (mushy, low bandwidth)</span>
+              <span>70 (default, lossless-feeling)</span>
+              <span>95 (zero compression artifacts)</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 pt-2 border-t border-ink-800">
+            <button class="btn-primary text-sm"
+                    on:click={saveStreamer}
+                    disabled={streamerSaving ||
+                              (stagedFps === streamerCfg.fps
+                                && stagedQuality === streamerCfg.jpeg_quality)}>
+              {streamerSaving ? 'saving + restarting…' : 'Save & restart streamer'}
+            </button>
+            {#if streamerMsg}
+              <span class="text-xs font-mono
+                           {streamerMsg.startsWith('✓') ? 'text-live-300' : 'text-red-300'}">
+                {streamerMsg}
+              </span>
+            {/if}
+          </div>
+
+          <details class="pt-3 border-t border-ink-800">
+            <summary class="cursor-pointer text-[11px] uppercase tracking-wider
+                            text-zinc-500 hover:text-zinc-300">
+              ▸ Where does the latency come from?
+            </summary>
+            <div class="mt-3 space-y-2 text-[11px] text-zinc-500 leading-relaxed">
+              <p>
+                The capture chain on a Pi 4 is roughly:
+                <strong>Cam Link (~50 ms internal queue)</strong> →
+                <strong>ffmpeg/ustreamer encode (~30 ms)</strong> →
+                <strong>axum HTTPS body stream (~5 ms)</strong> →
+                <strong>browser multipart parser (variable)</strong>.
+                The first three add up to ~85 ms steady state — fast.
+                The fourth is where multi-second "lag" usually lives:
+                browsers buffer multipart-MJPEG aggressively, and over
+                WiFi a slow drain piles frames into that buffer faster
+                than the consumer reads them.
+              </p>
+              <p>
+                The real fix is dropping the MJPEG transport entirely
+                and shipping H.264 over WebSocket — Pi 4's hardware H.264
+                encoder is already there. That's a focused upcoming PR
+                (v64+); for now the levers above are what we have.
+              </p>
+            </div>
+          </details>
         </section>
       {/if}
 

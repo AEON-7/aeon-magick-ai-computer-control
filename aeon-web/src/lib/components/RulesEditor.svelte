@@ -20,6 +20,7 @@
 
   let rules: api.FirewallRule[] = [];
   let systemRules: api.SystemFirewallRule[] = [];
+  let systemDiag: api.SystemFirewallDiagnostics | null = null;
   let showSystem = false;           // System rules panel hidden by default
   let loading = true;
   let error = '';
@@ -51,6 +52,7 @@
       ]);
       rules = r.rules;
       systemRules = s.rules;
+      systemDiag = s.diagnostics ?? null;
       loading = false;
     } catch (e: any) {
       error = e?.message ?? 'failed to load rules';
@@ -504,9 +506,63 @@
       {/each}
 
       {#if systemRules.length === 0}
-        <p class="text-xs text-zinc-500 italic">
-          No system rules tagged. Either nothing is installed yet, or the
-          supervisor can't shell out to iptables.
+        <!-- v63: dump the diagnostics so the operator can tell why
+             this list is empty. The two common reasons are: (a) no
+             aeon-* tagged rules installed yet because VPN/Tor/I2P
+             are off AND USB net is off (in which case
+             total_rules_per_table will still show non-zero counts
+             from NM/kernel defaults), or (b) the supervisor literally
+             can't shell out to iptables (all zeros). -->
+        {#if systemDiag}
+          {@const totalAcrossTables = Object.values(systemDiag.total_rules_per_table).reduce((a, b) => a + b, 0)}
+          {@const aeonTotal = Object.values(systemDiag.aeon_tag_counts).reduce((a, b) => a + b, 0)}
+          {#if totalAcrossTables === 0}
+            <div class="p-3 rounded bg-red-500/10 border border-red-500/40
+                        text-xs text-red-200 space-y-1">
+              <p><strong>Supervisor can't read iptables.</strong></p>
+              <p class="text-red-200/70">
+                <code>iptables -nvL</code> returned 0 total rules across
+                filter/nat/mangle. Either the binary isn't on $PATH for
+                the systemd unit, or the supervisor doesn't have
+                CAP_NET_ADMIN. SSH in and check
+                <code>journalctl -u aeon-supervisor</code>.
+              </p>
+            </div>
+          {:else if aeonTotal === 0}
+            <div class="p-3 rounded bg-zinc-700/30 border border-ink-700
+                        text-xs text-zinc-400 space-y-1">
+              <p><strong>No aeon-tagged rules installed.</strong></p>
+              <p class="text-zinc-500">
+                The kernel has
+                {totalAcrossTables} total iptables rules across
+                {Object.entries(systemDiag.total_rules_per_table)
+                  .map(([t, n]) => `${t}=${n}`).join(', ')}
+                — those are from NetworkManager, kernel defaults, and
+                other non-aeon services. Aeon installs its own rules
+                only when the relevant feature is on:
+                <em>USB ethernet</em> adds DNAT/MASQUERADE for usb0:53,
+                <em>VPN/Tor/I2P</em> add the kill-switch + redirect
+                chains, etc. Turn one of those on (network page) and
+                this list will populate.
+              </p>
+            </div>
+          {/if}
+        {:else}
+          <p class="text-xs text-zinc-500 italic">
+            No system rules tagged. Either nothing is installed yet, or the
+            supervisor can't shell out to iptables.
+          </p>
+        {/if}
+      {:else if systemDiag}
+        <!-- Non-empty list — still surface the breakdown for context. -->
+        <p class="text-[10px] font-mono text-zinc-600 pt-2">
+          Showing {systemRules.length} aeon-tagged rule{systemRules.length === 1 ? '' : 's'}
+          of
+          {Object.entries(systemDiag.total_rules_per_table)
+            .map(([t, n]) => `${t}=${n}`).join(', ')}
+          total kernel rules. Per-tag:
+          {Object.entries(systemDiag.aeon_tag_counts)
+            .map(([t, n]) => `${t}=${n}`).join(', ') || 'none'}
         </p>
       {/if}
     {/if}

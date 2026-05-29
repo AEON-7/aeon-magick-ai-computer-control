@@ -119,6 +119,12 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/streamer/snapshot", get(crate::proxy::streamer_snapshot))
         .route("/streamer/stream", get(crate::proxy::streamer_stream))
         .route("/streamer/relaunch", post(crate::proxy::streamer_relaunch))
+        // v63: live streamer tuning. fps + jpeg_quality are tunable
+        // from the /system page so operators can dial in latency vs
+        // smoothness without ssh'ing.
+        .route("/streamer/config",
+            get(crate::streamer_config::get_config)
+                .put(crate::streamer_config::put_config))
         // HID
         .route("/hid/status", get(crate::proxy::hid_status))
         .route("/hid/type", post(crate::proxy::hid_type))
@@ -197,11 +203,18 @@ pub fn build_router(cfg: Config) -> Router {
             post(crate::vpn_providers::api::pick_fastest))
         // WiFi management — scan, connect, current state. Used by the
         // /setup-wifi captive-portal page during AP-fallback mode and
-        // by the authenticated WiFi panel for ongoing management.
+        // by the authenticated /wifi panel for ongoing management.
         .route("/wifi/scan", get(crate::wifi::scan))
         .route("/wifi/connect", post(crate::wifi::connect))
         .route("/wifi/state", get(crate::wifi::state))
         .route("/wifi/disconnect", post(crate::wifi::disconnect))
+        // v63: known-network management + AP-mode + radio toggle.
+        .route("/wifi/known", get(crate::wifi::list_known)
+            .delete(crate::wifi::forget))
+        .route("/wifi/autoconnect", post(crate::wifi::set_autoconnect))
+        .route("/wifi/ap", get(crate::wifi::ap_get)
+            .put(crate::wifi::ap_set))
+        .route("/wifi/radio", post(crate::wifi::radio))
         // Mass storage — manage ISOs uploaded for the USB-CDROM
         // gadget function. Upload endpoint streams to disk; max body
         // limit is raised below.
