@@ -28,3 +28,4 @@ auth.toml
 tokens.toml
 usb-serial.state
 persona.state
+__pycache__/

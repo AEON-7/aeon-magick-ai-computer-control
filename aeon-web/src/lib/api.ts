@@ -447,11 +447,21 @@ export const setVpn = (patch: VpnPatch) =>
 
 // ── VPN live status (polled every few seconds while UI is visible) ─────
 
-export interface VpnStatus {
-  ok: boolean;
+export type VpnStatusState =
+  | 'establishing'
+  | 'connected'
+  | 'reconnecting'
+  | 'failed'
+  | 'disabled';
+
+export interface VpnStatusOverlay {
+  /** v61: which overlay layer this represents — clearnet VPN, Tor,
+   *  or I2P. Each runs independently of the others so the UI shows
+   *  one status panel per active overlay. */
+  kind: 'vpn' | 'tor' | 'i2p';
   provider: string;
   enabled: boolean;
-  state: 'establishing' | 'connected' | 'reconnecting' | 'failed' | 'disabled';
+  state: VpnStatusState;
   bootstrap_percent: number | null;
   summary: string;
   public_ip: string | null;
@@ -464,6 +474,26 @@ export interface VpnStatus {
     handshake_age_s?: number | null;
     magic_dns?: string;
   };
+}
+
+export interface VpnStatus {
+  ok: boolean;
+  /** v61: array of all currently-active overlay statuses. Optional
+   *  to keep this interface compatible with older supervisor builds
+   *  that only filled the legacy flat fields. */
+  overlays?: VpnStatusOverlay[];
+  // ── Legacy flat fields (pre-v61) — populated from the "primary"
+  // overlay (clearnet VPN > Tor > I2P) for backward compat. New UI
+  // code prefers iterating `overlays` so multi-overlay setups (e.g.
+  // Mullvad + Tor split-tunnel) render both panels.
+  provider: string;
+  enabled: boolean;
+  state: VpnStatusState;
+  bootstrap_percent: number | null;
+  summary: string;
+  public_ip: string | null;
+  public_country: string | null;
+  detail: VpnStatusOverlay['detail'];
 }
 
 export const getVpnStatus = () => req<VpnStatus>('GET', '/network/vpn/status');

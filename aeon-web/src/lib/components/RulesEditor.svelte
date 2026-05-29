@@ -419,18 +419,45 @@
       <span>{showSystem ? '▼' : '▶'}</span>
       System default rules ({systemRules.length})
       <span class="normal-case text-[10px] text-zinc-600">
-        read-only · installed by aeon-net-services + aeon-usb-net
+        installed by aeon-net-services + aeon-usb-net
       </span>
     </button>
 
     {#if showSystem}
-      <p class="text-[11px] text-zinc-500 leading-relaxed">
-        These ship with the device and back the persona / mode / VPN behavior.
-        Your rules in the editor above run <strong>before</strong> these — to
-        let a flow through that's currently being dropped, click
-        <span class="font-mono text-cursed-300">override</span> on any row to
-        drop a matching ACCEPT into your user rules.
-      </p>
+      <!-- v62: more prominent warning banner — the user explicitly
+           asked for full visibility into system rules. The override
+           flow (click "override" to drop a matching user-ACCEPT
+           before this rule fires) is the safe primary action.
+           Direct edit/disable of system rules is on the roadmap
+           but lives in a separate apply pipeline so it doesn't ship
+           in this cut. -->
+      <div class="mt-2 p-3 rounded border border-amber-500/40
+                  bg-amber-500/10 space-y-1.5">
+        <div class="flex items-start gap-2">
+          <span class="text-amber-400 text-base leading-none mt-0.5">⚠</span>
+          <div class="space-y-1 flex-1">
+            <p class="text-xs text-amber-200 font-medium">
+              These are the system-managed rules backing Tor, I2P, the
+              VPN kill-switch, USB-net isolation/restriction, DNS
+              hijacking, and anti-leak guards.
+            </p>
+            <p class="text-[11px] text-amber-100/70 leading-relaxed">
+              Your user rules in the editor above run <strong>before</strong>
+              these — that's how you punch holes safely. Click
+              <span class="font-mono text-cursed-300">override</span> on
+              any DROP/REJECT row to drop a matching ACCEPT into your
+              user rules. <strong>Disabling a system rule directly is
+              not yet exposed in the UI</strong> (planned for v63);
+              modifying these without understanding the wider iptables
+              chain can break Tor routing, expose your real IP under
+              VPN, or break USB-host isolation. If you really need to
+              tear one down, SSH in and edit the relevant section of
+              <code>/usr/local/bin/aeon-net-services.sh</code> or
+              <code>/usr/local/bin/aeon-usb-net.sh</code>.
+            </p>
+          </div>
+        </div>
+      </div>
 
       {#each Array.from(new Set(systemRules.map(r => `${r.table}:${r.chain}`))) as tableChain}
         {@const [table, chain] = tableChain.split(':')}

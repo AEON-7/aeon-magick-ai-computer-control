@@ -59,6 +59,13 @@
   let anonShowOnlySelected = false;
 
   // ── Reactive derived state for resolver catalog (auto mode) ──
+  // v62: svelte-check's flow analysis was narrowing srvMode away from
+  // 'specific' once any prior `=== 'auto'` comparison fired, breaking
+  // the new clickable-catalog mode. Lift the comparison into a
+  // reactive boolean so the template uses a plain bool instead of a
+  // narrowed union compare.
+  $: srvModeIsSpecific = srvMode === 'specific';
+  $: srvModeIsAuto = srvMode === 'auto';
   $: srvCatalog = dnsState?.servers?.catalog ?? [];
   // v55.1: the supervisor auto-applies a port-443-only filter when
   // Tor is the active VPN. We mirror that filter in the UI's
@@ -169,6 +176,199 @@
   let loading = true;
   let error = '';
   let advancedOpen = false;
+
+  // v62: each major section is now its own top-level <details>.
+  // Default open state mirrors what the user typically looks at first.
+  let dnsOpen = false;
+  let overlaysOpen = false;
+  let vpnOpen = false;
+
+  // v62: status lights for the top-of-page service summary.
+  //
+  //   green  — service is enabled AND its runtime check passes (DNS:
+  //            dnscrypt-proxy listening, Tor: bootstrap=100, I2P:
+  //            active peers > 0, VPN: state=connected)
+  //   amber  — service enabled but bootstrapping / reconnecting
+  //   red    — service enabled but explicitly failed
+  //   grey   — service not enabled
+  //
+  // The light's title attribute carries the one-liner so a hover gives
+  // the same info the section header used to dump verbatim.
+  type LightTone = 'live' | 'amber' | 'red' | 'grey';
+  interface ServiceLight {
+    key: 'dns' | 'tor' | 'i2p' | 'vpn';
+    label: string;
+    tone: LightTone;
+    detail: string;
+    onClick: () => void;
+  }
+  function findOverlay(kind: 'tor' | 'i2p' | 'vpn'): api.VpnStatusOverlay | undefined {
+    return statusOverlays.find((o) => o.kind === kind);
+  }
+  $: serviceLights = (() => {
+    const lights: ServiceLight[] = [];
+
+    // DNS — dnscrypt-proxy's "are we encrypted" state.
+    if (dnsEnabled) {
+      const label =
+        srvMode === 'auto'
+          ? `Encrypted DNS · auto (${dnsState?.servers?.auto_picked?.length ?? 0} live)`
+          : `Encrypted DNS · ${dnsProvider}`;
+      lights.push({
+        key: 'dns',
+        label,
+        tone: 'live',
+        detail: anonEnabled
+          ? 'DNSCrypt active with anonymized relay routing'
+          : 'DNSCrypt active',
+        onClick: () => (dnsOpen = true),
+      });
+    } else {
+      lights.push({
+        key: 'dns',
+        label: 'DNS · plain',
+        tone: 'grey',
+        detail:
+          'Encrypted DNS is off — queries leave the device in cleartext',
+        onClick: () => (dnsOpen = true),
+      });
+    }
+
+    // Tor — independent toggle, look it up in the overlay list.
+    const torOv = findOverlay('tor');
+    if (torEnabled) {
+      const pct = torOv?.bootstrap_percent;
+      const tone: LightTone =
+        torOv?.state === 'connected'
+          ? 'live'
+          : torOv?.state === 'failed'
+          ? 'red'
+          : 'amber';
+      lights.push({
+        key: 'tor',
+        label:
+          torOv?.state === 'connected'
+            ? `Tor · ${torMode === 'split_tunnel' ? '.onion only' : 'all traffic'}`
+            : `Tor · ${pct !== null && pct !== undefined ? pct + '%' : torOv?.state ?? 'starting'}`,
+        tone,
+        detail: torOv?.summary ?? 'Tor enabled',
+        onClick: () => (overlaysOpen = true),
+      });
+    } else {
+      lights.push({
+        key: 'tor',
+        label: 'Tor · off',
+        tone: 'grey',
+        detail: 'Tor disabled',
+        onClick: () => (overlaysOpen = true),
+      });
+    }
+
+    // I2P — same shape as Tor.
+    const i2pOv = findOverlay('i2p');
+    if (i2pEnabled) {
+      const tone: LightTone =
+        i2pOv?.state === 'connected'
+          ? 'live'
+          : i2pOv?.state === 'failed'
+          ? 'red'
+          : 'amber';
+      const peers = i2pOv?.detail?.active_peers;
+      lights.push({
+        key: 'i2p',
+        label:
+          peers !== undefined ? `I2P · ${peers} peers` : 'I2P · starting',
+        tone,
+        detail: i2pOv?.summary ?? 'I2P enabled',
+        onClick: () => (overlaysOpen = true),
+      });
+    } else {
+      lights.push({
+        key: 'i2p',
+        label: 'I2P · off',
+        tone: 'grey',
+        detail: 'I2P disabled',
+        onClick: () => (overlaysOpen = true),
+      });
+    }
+
+    // Clearnet VPN.
+    const vpnOv = findOverlay('vpn');
+    if (vpnEnabled && vpnProvider !== 'none') {
+      const tone: LightTone =
+        vpnOv?.state === 'connected'
+          ? 'live'
+          : vpnOv?.state === 'failed'
+          ? 'red'
+          : 'amber';
+      const exitCountry = vpnOv?.public_country;
+      lights.push({
+        key: 'vpn',
+        label: `${overlayLabel(vpnOv ?? { ...({} as api.VpnStatusOverlay), kind: 'vpn', provider: vpnProvider })}${exitCountry ? ' · ' + exitCountry : ''}`,
+        tone,
+        detail: vpnOv?.summary ?? `${vpnProvider} enabled`,
+        onClick: () => (vpnOpen = true),
+      });
+    } else {
+      lights.push({
+        key: 'vpn',
+        label: 'VPN · off',
+        tone: 'grey',
+        detail: 'No clearnet VPN active',
+        onClick: () => (vpnOpen = true),
+      });
+    }
+
+    return lights;
+  })();
+
+  // v61: derive the per-overlay status array from VpnStatus. New
+  // supervisor builds populate `overlays` directly; older builds
+  // only fill the legacy flat fields, so we synthesize a single
+  // overlay from those as a backward-compat shim. The render path
+  // then iterates one list regardless of supervisor version.
+  $: statusOverlays = (() => {
+    if (!vpnStatus || !vpnStatus.enabled) return [] as api.VpnStatusOverlay[];
+    if (Array.isArray(vpnStatus.overlays) && vpnStatus.overlays.length > 0) {
+      return vpnStatus.overlays;
+    }
+    if (vpnStatus.provider === 'none') return [];
+    // Legacy shape — synthesize a single overlay from flat fields so
+    // the new rendering path covers both supervisor versions.
+    const kind: api.VpnStatusOverlay['kind'] =
+      vpnStatus.provider === 'tor'
+        ? 'tor'
+        : vpnStatus.provider === 'i2p'
+        ? 'i2p'
+        : 'vpn';
+    return [{
+      kind,
+      provider: vpnStatus.provider,
+      enabled: vpnStatus.enabled,
+      state: vpnStatus.state,
+      bootstrap_percent: vpnStatus.bootstrap_percent,
+      summary: vpnStatus.summary,
+      public_ip: vpnStatus.public_ip,
+      public_country: vpnStatus.public_country,
+      detail: vpnStatus.detail,
+    }];
+  })();
+
+  // Labels for the overlay header — "Mullvad VPN" beats "wireguard"
+  // when we know the user configured a wizard provider.
+  function overlayLabel(o: api.VpnStatusOverlay): string {
+    if (o.kind === 'tor') return 'Tor';
+    if (o.kind === 'i2p') return 'I2P';
+    switch (o.provider) {
+      case 'mullvad': return 'Mullvad VPN';
+      case 'ivpn': return 'IVPN';
+      case 'azirevpn': return 'AzireVPN';
+      case 'tailscale': return 'Tailscale';
+      case 'wireguard': return 'WireGuard';
+      case 'openvpn': return 'OpenVPN';
+      default: return o.provider;
+    }
+  }
 
   async function refresh() {
     loading = true;
@@ -689,18 +889,68 @@
       </section>
 
       <!-- ──────────────────────────────────────────────────────────── -->
-      <!-- DNSCrypt + VPN — fully expanded as standard network settings  -->
+      <!-- v62: per-service status light row. One pill per overlay     -->
+      <!--      with a colored dot. Click jumps to (+opens) the         -->
+      <!--      relevant configuration section below.                   -->
       <!-- ──────────────────────────────────────────────────────────── -->
-      <div class="bg-ink-900 border border-ink-700 rounded-xl">
-        <div class="px-6 py-4 border-b border-ink-700">
-          <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-            Standard network settings
-          </span>
+      <section class="bg-ink-900 border border-ink-700 rounded-xl p-4 space-y-2">
+        <h3 class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+          Privacy stack
+        </h3>
+        <div class="flex flex-wrap gap-2">
+          {#each serviceLights as l (l.key)}
+            <button type="button" on:click={l.onClick}
+                    title={l.detail}
+                    class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full
+                           border text-xs font-mono transition-colors
+                           {l.tone === 'live' ? 'bg-live-500/10 border-live-500/40 text-live-200 hover:bg-live-500/20' :
+                            l.tone === 'amber' ? 'bg-amber-500/10 border-amber-500/40 text-amber-200 hover:bg-amber-500/20' :
+                            l.tone === 'red' ? 'bg-red-500/10 border-red-500/40 text-red-200 hover:bg-red-500/20' :
+                            'bg-ink-950/60 border-ink-800 text-zinc-500 hover:border-ink-700 hover:text-zinc-300'}">
+              <span class="h-2 w-2 rounded-full
+                           {l.tone === 'live' ? 'bg-live-400 animate-pulse' :
+                            l.tone === 'amber' ? 'bg-amber-400 animate-pulse' :
+                            l.tone === 'red' ? 'bg-red-400' :
+                            'bg-zinc-600'}"></span>
+              {l.label}
+            </button>
+          {/each}
         </div>
+      </section>
 
-        <div class="p-6 space-y-8">
+      <!-- ──────────────────────────────────────────────────────────── -->
+      <!-- v62: each major service is now its own top-level collapsible -->
+      <!--      section. Previously all three were nested inside a       -->
+      <!--      single "Standard network settings" wrapper which made    -->
+      <!--      the page a giant unscrollable wall.                      -->
+      <!-- ──────────────────────────────────────────────────────────── -->
 
-          <!-- ─── DNSCrypt ─── -->
+      <!-- ─── Encrypted DNS ─── -->
+      <details bind:open={dnsOpen}
+               class="bg-ink-900 border border-ink-700 rounded-xl">
+        <summary class="cursor-pointer select-none px-6 py-4
+                        flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="h-2 w-2 rounded-full flex-shrink-0
+                         {dnsEnabled ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
+            <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+              Encrypted DNS
+            </span>
+            <span class="text-xs text-zinc-500 truncate">
+              {dnsEnabled
+                ? srvMode === 'auto'
+                  ? `auto · ${dnsState?.servers?.auto_picked?.length ?? 0} live`
+                  : `pinned · ${dnsProvider}`
+                : 'plain DNS — cleartext on the wire'}
+            </span>
+          </div>
+          <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex-shrink-0">
+            {dnsOpen ? '▾ close' : '▸ expand'}
+          </span>
+        </summary>
+        <div class="border-t border-ink-700 p-6 space-y-8">
+
+          <!-- ─── DNSCrypt body ─── -->
           <section class="space-y-4">
             <header class="space-y-1">
               <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
@@ -916,13 +1166,27 @@
                 {/if}
 
                 <!-- ── Full catalog browser ── -->
+                <!-- v62: rows are now clickable in specific mode so the
+                     user can pick any of the 226 upstream resolvers
+                     directly. The old curated-provider radio (Quad9 /
+                     custom / etc.) was removed — every resolver in that
+                     list also lives in the catalog, so the radio was
+                     redundant and made the section twice as tall. In
+                     auto mode the click is disabled (the criteria do
+                     the selection); in specific mode the picked row is
+                     highlighted cursed-purple. -->
                 <div class="space-y-2 pt-3 border-t border-ink-800">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <p class="text-[11px] uppercase tracking-wider text-zinc-500">
-                      Full upstream catalog ({srvCatalog.length} servers)
+                      {srvModeIsSpecific ? 'Pick a resolver' : 'Full upstream catalog'}
+                      ({srvCatalog.length} servers)
                     </p>
                     <p class="text-[11px] font-mono text-cursed-300">
-                      {srvMatching.length} match your criteria
+                      {#if srvModeIsSpecific && dnsProvider}
+                        currently pinned: {dnsProvider}
+                      {:else}
+                        {srvMatching.length} match your criteria
+                      {/if}
                     </p>
                   </div>
                   <div class="flex flex-wrap items-center gap-2">
@@ -947,11 +1211,26 @@
                     {:else}
                       {#each srvFiltered.slice(0, 60) as r}
                         {@const matches = srvMatchingNames.has(r.name)}
-                        <div class="p-2 rounded text-xs
-                                    {matches ? 'bg-live-500/10 border border-live-500/30' :
-                                     'bg-ink-950/60 border border-ink-800'}"
-                             title={r.description}>
+                        {@const picked = srvModeIsSpecific && dnsProvider === r.name}
+                        {@const hoverable = srvModeIsSpecific
+                          ? (matches
+                              ? 'hover:bg-cursed-500/10 hover:border-cursed-500/40 cursor-pointer'
+                              : 'hover:bg-ink-900 hover:border-ink-700 cursor-pointer')
+                          : 'cursor-default'}
+                        {@const baseClass = picked
+                          ? 'bg-cursed-500/15 border border-cursed-500/60'
+                          : matches
+                          ? 'bg-live-500/10 border border-live-500/30'
+                          : 'bg-ink-950/60 border border-ink-800'}
+                        <button type="button"
+                                disabled={!srvModeIsSpecific}
+                                on:click={() => { if (srvModeIsSpecific) dnsProvider = r.name; }}
+                                title={r.description}
+                                class="w-full text-left p-2 rounded text-xs transition-colors {baseClass} {hoverable}">
                           <div class="flex items-center gap-2 flex-wrap">
+                            {#if picked}
+                              <span class="text-cursed-300 text-xs">●</span>
+                            {/if}
                             <span class="font-mono text-zinc-200 truncate">{r.label}</span>
                             <span class="text-[10px] text-zinc-500">{r.operator}</span>
                             {#if r.country}
@@ -974,6 +1253,7 @@
                             <span title="Trust score 0-5">
                               trust <span class="font-mono text-cursed-300">{r.trust_score}</span>
                             </span>
+                            <span class="font-mono text-zinc-600">{r.name}</span>
                             {#if r.no_logs}
                               <span class="px-1 rounded bg-zinc-700/40 text-zinc-300">no-logs</span>
                             {/if}
@@ -989,7 +1269,7 @@
                               </span>
                             {/each}
                           </div>
-                        </div>
+                        </button>
                       {/each}
                       {#if srvFiltered.length > 60}
                         <p class="text-[10px] text-zinc-600 italic text-center pt-2">
@@ -1002,65 +1282,23 @@
                 </div>
               {/if}
 
-              <div class="space-y-2 pt-3 border-t border-ink-800"
-                   class:opacity-40={srvMode === 'auto'}
-                   class:pointer-events-none={srvMode === 'auto'}
-                   role="radiogroup" aria-label="DNSCrypt provider">
-                <p class="text-xs uppercase tracking-wider text-zinc-500">
-                  Provider {srvMode === 'auto' ? '(ignored in auto mode)' : ''}
-                </p>
-                <div class="space-y-2">
-                  {#if dnsState}
-                    {#each dnsState.providers as p}
-                      {@const lb = logBadge(p.log_policy)}
-                      {@const sb = secBadge(p.security)}
-                      <label class="flex items-start gap-3 cursor-pointer
-                                    p-3 rounded-lg border transition-colors
-                                    {dnsProvider === p.id
-                                      ? 'bg-cursed-500/10 border-cursed-500/50'
-                                      : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
-                        <input type="radio" bind:group={dnsProvider} value={p.id}
-                               class="mt-1 w-4 h-4 accent-cursed-500" />
-                        <div class="space-y-1.5 flex-1 min-w-0">
-                          <div class="flex items-center gap-2 flex-wrap">
-                            <span class="text-zinc-200 text-sm font-medium">{p.label}</span>
-                            <span class="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">
-                              {p.transport}
-                            </span>
-                            <span class="text-[10px] font-mono px-1.5 py-0.5 rounded
-                                         border {lb.classes}">
-                              {lb.text}
-                            </span>
-                            <span class="text-[10px] font-mono px-1.5 py-0.5 rounded
-                                         border {sb.classes}">
-                              {sb.text}
-                            </span>
-                            <span class="text-[10px] font-mono text-zinc-500 uppercase">
-                              {p.jurisdiction}
-                            </span>
-                          </div>
-                          <p class="text-xs text-zinc-400">{p.blurb}</p>
-                          <p class="text-[11px] text-zinc-500 italic">
-                            Logs: {p.log_detail}
-                          </p>
-                          {#if p.homepage}
-                            <a href={p.homepage} target="_blank" rel="noreferrer"
-                               class="text-[10px] text-cursed-300 hover:underline font-mono">
-                              → {p.homepage.replace(/^https?:\/\//, '')}
-                            </a>
-                          {/if}
-                        </div>
-                      </label>
-                    {/each}
-                  {/if}
-                </div>
-              </div>
-
-              {#if dnsProvider === 'custom'}
-                <!-- Custom stamp input — only shown when "custom" picked. -->
-                <div class="space-y-2 border-l-2 border-cursed-500/40 pl-4">
-                  <p class="text-xs uppercase tracking-wider text-zinc-500">
-                    Custom DNSCrypt v2 stamp
+              <!-- v62: custom DNSCrypt stamp now lives in a collapsed
+                   sub-section instead of being gated on a "custom"
+                   radio option. The catalog row picker above replaced
+                   the radio entirely. Custom stamp stays an option for
+                   self-hosted resolvers or pre-release stamps not yet
+                   in the upstream list. -->
+              <details class="pt-3 border-t border-ink-800">
+                <summary class="cursor-pointer text-[11px] uppercase tracking-wider
+                                text-zinc-500 hover:text-zinc-300">
+                  ▸ Use a custom sdns:// stamp instead
+                </summary>
+                <div class="mt-3 space-y-2 border-l-2 border-cursed-500/40 pl-4">
+                  <p class="text-xs text-zinc-500 leading-relaxed">
+                    Override the catalog with a single hand-pasted stamp.
+                    Picking a custom stamp implicitly switches the server
+                    mode to <strong>specific</strong> and overrides the row
+                    selection above.
                   </p>
                   <input type="text" bind:value={dnsCustomLabel}
                          placeholder="Friendly label (e.g. mycorp-dns)"
@@ -1078,48 +1316,23 @@
                       dnscrypt.info/stamps</a>
                     or any provider's documentation. Stamps encode DNSCrypt v2,
                     DoH (DNS-over-HTTPS), DoT (DNS-over-TLS), or ODoH endpoints
-                    along with their public key + hash pin. The label is
-                    cosmetic, used only in dnscrypt-proxy's log output.
+                    along with their public key + hash pin.
                   </p>
                   <p class="text-[11px] text-amber-200/80 leading-relaxed">
                     ⚠ <strong>Heads-up:</strong> if your stamp is a DoH/DoT URL
                     (prefix <code>sdns://Ag…</code> or <code>sdns://Aw…</code>),
                     the resolver's hostname will be exposed via the TLS SNI
-                    extension on every query. The curated provider list above
-                    uses true DNSCrypt v2 stamps (prefix <code>sdns://AQ…</code>)
+                    extension on every query. Picking from the catalog above
+                    sticks to true DNSCrypt v2 stamps (prefix <code>sdns://AQ…</code>)
                     which have no SNI to leak.
                   </p>
+                  <button type="button"
+                          on:click={() => { dnsProvider = 'custom'; srvMode = 'specific'; }}
+                          class="btn-secondary text-xs">
+                    use this stamp →
+                  </button>
                 </div>
-              {/if}
-
-              <div class="space-y-2">
-                <p class="text-xs uppercase tracking-wider text-zinc-500">
-                  Preferred region
-                </p>
-                <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {#if dnsState}
-                    {#each dnsState.locations as loc}
-                      <label class="flex items-center gap-2 cursor-pointer
-                                    p-2 rounded border transition-colors text-xs
-                                    {dnsLocation === loc.id
-                                      ? 'bg-cursed-500/10 border-cursed-500/50 text-cursed-200'
-                                      : 'bg-ink-950/40 border-ink-800 text-zinc-400 hover:border-ink-700'}">
-                        <input type="radio" bind:group={dnsLocation} value={loc.id}
-                               class="w-3 h-3 accent-cursed-500" />
-                        <span>{loc.label}</span>
-                      </label>
-                    {/each}
-                  {/if}
-                </div>
-                <p class="text-[11px] text-zinc-500 leading-relaxed">
-                  Curated providers above all run global anycast — actual
-                  exit Point-of-Presence is picked by BGP, not by this knob.
-                  Region influences latency-probe weighting and which
-                  resolver of a provider's set is preferred. For real geo
-                  control, route DNS through a VPN exit in your target
-                  country (the VPN section below).
-                </p>
-              </div>
+              </details>
             </div>
 
             <!-- ─── Anonymized DNSCrypt (v51+) ─── -->
@@ -1369,13 +1582,39 @@
               {/if}
             </div>
           </section>
+        </div>
+      </details>
 
-          <!-- ─── v58.1: Privacy overlays (Tor + I2P, independent of VPN) ─── -->
+      <!-- ─── Privacy Overlay Networks (Tor + I2P) ─── -->
+      <details bind:open={overlaysOpen}
+               class="bg-ink-900 border border-ink-700 rounded-xl">
+        <summary class="cursor-pointer select-none px-6 py-4
+                        flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0 flex-wrap">
+            <span class="h-2 w-2 rounded-full flex-shrink-0
+                         {torEnabled || i2pEnabled ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
+            <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+              Privacy Overlay Networks
+            </span>
+            <span class="text-xs text-zinc-500 truncate">
+              {#if torEnabled && i2pEnabled}
+                Tor ({torMode === 'split_tunnel' ? '.onion only' : 'all traffic'}) + I2P
+              {:else if torEnabled}
+                Tor · {torMode === 'split_tunnel' ? '.onion only' : 'all traffic'}
+              {:else if i2pEnabled}
+                I2P only
+              {:else}
+                both off
+              {/if}
+            </span>
+          </div>
+          <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex-shrink-0">
+            {overlaysOpen ? '▾ close' : '▸ expand'}
+          </span>
+        </summary>
+        <div class="border-t border-ink-700 p-6 space-y-4">
           <section class="space-y-4">
             <header class="space-y-1">
-              <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-                Privacy overlays
-              </h3>
               <p class="text-zinc-400 text-sm">
                 Tor and I2P are independent of the VPN — any combination
                 can run at the same time. <code class="text-cursed-300">.onion</code>
@@ -1385,6 +1624,37 @@
                 in too, but I2P always stays independent so the I2P
                 network stays reachable.
               </p>
+              <!-- v62: browser compatibility tip (was on the user's
+                   ask list — common failure mode is "I enabled Tor
+                   but my browser can't load anything"). -->
+              <div class="mt-2 p-3 rounded border border-ink-800 bg-ink-950/40
+                          text-[11px] text-zinc-400 leading-relaxed space-y-1.5">
+                <p>
+                  <span class="text-cursed-300 font-medium">Browser tuning for Tor mode.</span>
+                  Best supported: <strong>Brave, Chrome, Firefox</strong>.
+                  Safari + iCloud Private Relay conflict with Tor exits;
+                  disable Private Relay if you must use Safari.
+                </p>
+                <ul class="ml-4 list-disc space-y-1">
+                  <li>
+                    <strong>Disable the browser's secure DNS</strong> —
+                    Brave/Chrome <code>Settings → Security → Use secure DNS = off</code>;
+                    Firefox <code>about:preferences#privacy → DNS over HTTPS = off</code>.
+                    The browser's DoH conflicts with the Pi's encrypted DNS path.
+                  </li>
+                  <li>
+                    <strong>Allow .onion in non-Tor windows</strong> —
+                    Brave <code>brave://settings/privacy → Tor windows → Allow .onion in non-Tor windows = on</code>.
+                    Firefox <code>about:config → network.dns.blockDotOnion = false</code>.
+                    Without this, .onion URLs are blocked before they reach Tor's resolver.
+                  </li>
+                  <li>
+                    Want hardened anonymity (fingerprinting, anti-tracking,
+                    safer defaults)? Use <strong>Tor Browser</strong> on top
+                    of split-tunnel mode rather than transparent Tor.
+                  </li>
+                </ul>
+              </div>
             </header>
 
             <!-- ── Tor ── -->
@@ -1522,13 +1792,33 @@
               that will move up here in a future release.
             </p>
           </section>
+        </div>
+      </details>
 
-          <!-- ─── VPN ─── -->
+      <!-- ─── VPN ─── -->
+      <details bind:open={vpnOpen}
+               class="bg-ink-900 border border-ink-700 rounded-xl">
+        <summary class="cursor-pointer select-none px-6 py-4
+                        flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0 flex-wrap">
+            <span class="h-2 w-2 rounded-full flex-shrink-0
+                         {vpnEnabled && vpnProvider !== 'none' ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
+            <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+              VPN (WAN tunnel)
+            </span>
+            <span class="text-xs text-zinc-500 truncate">
+              {vpnEnabled && vpnProvider !== 'none'
+                ? `via ${vpnProvider}${vpnKillSwitch ? ' · kill-switch on' : ''}`
+                : 'off — clearnet uses default route'}
+            </span>
+          </div>
+          <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex-shrink-0">
+            {vpnOpen ? '▾ close' : '▸ expand'}
+          </span>
+        </summary>
+        <div class="border-t border-ink-700 p-6 space-y-4">
           <section class="space-y-4">
             <header class="space-y-1">
-              <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-                VPN (WAN tunnel)
-              </h3>
               <p class="text-zinc-400 text-sm">
                 Route this device's WAN traffic — including anything
                 NAT'd through the USB ethernet — over an outbound VPN
@@ -1978,158 +2268,182 @@ obfs4 …`}
             </div>
 
             <!-- ────────────────────────────────────────────────────── -->
-            <!-- Live VPN status panel — polled every 4 s             -->
+            <!-- Live overlay status panels — polled every 4 s         -->
+            <!-- v61: one panel per active overlay (clearnet VPN,      -->
+            <!--      Tor, I2P). Previously gated on the legacy        -->
+            <!--      vpn.provider field, which silently hid Tor +     -->
+            <!--      I2P status after the v58 toggle split.           -->
             <!-- ────────────────────────────────────────────────────── -->
-            {#if vpnStatus && vpnStatus.enabled && vpnStatus.provider !== 'none'}
-              <div class="mt-4 pt-4 border-t border-ink-700 space-y-3">
-                <header class="flex items-center justify-between">
-                  <div class="flex items-center gap-2">
-                    <span class="font-mono text-xs uppercase tracking-wider text-zinc-400">
-                      Status
-                    </span>
-                    <!-- State pill -->
-                    {#if vpnStatus.state === 'connected'}
-                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                   bg-live-900/40 border border-live-500/40
-                                   text-live-300 text-[10px] font-mono uppercase">
-                        <span class="h-1.5 w-1.5 rounded-full bg-live-400 animate-pulse"></span>
-                        connected
-                      </span>
-                    {:else if vpnStatus.state === 'establishing'}
-                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                   bg-amber-900/40 border border-amber-500/40
-                                   text-amber-300 text-[10px] font-mono uppercase">
-                        <span class="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-                        establishing
-                      </span>
-                    {:else if vpnStatus.state === 'reconnecting'}
-                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                   bg-amber-900/40 border border-amber-500/40
-                                   text-amber-300 text-[10px] font-mono uppercase">
-                        reconnecting
-                      </span>
-                    {:else}
-                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                   bg-red-900/40 border border-red-500/40
-                                   text-red-300 text-[10px] font-mono uppercase">
-                        <span class="h-1.5 w-1.5 rounded-full bg-red-400"></span>
-                        {vpnStatus.state}
-                      </span>
+            {#if statusOverlays.length > 0}
+              <div class="mt-4 pt-4 border-t border-ink-700 space-y-4">
+                {#each statusOverlays as ov (ov.kind + ':' + ov.provider)}
+                  <div class="space-y-3 p-3 rounded-lg border border-ink-800 bg-ink-950/40">
+                    <header class="flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-mono text-xs uppercase tracking-wider text-zinc-300">
+                          {overlayLabel(ov)}
+                        </span>
+                        {#if ov.state === 'connected'}
+                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                       bg-live-900/40 border border-live-500/40
+                                       text-live-300 text-[10px] font-mono uppercase">
+                            <span class="h-1.5 w-1.5 rounded-full bg-live-400 animate-pulse"></span>
+                            connected
+                          </span>
+                        {:else if ov.state === 'establishing'}
+                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                       bg-amber-900/40 border border-amber-500/40
+                                       text-amber-300 text-[10px] font-mono uppercase">
+                            <span class="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                            establishing
+                          </span>
+                        {:else if ov.state === 'reconnecting'}
+                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                       bg-amber-900/40 border border-amber-500/40
+                                       text-amber-300 text-[10px] font-mono uppercase">
+                            reconnecting
+                          </span>
+                        {:else}
+                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
+                                       bg-red-900/40 border border-red-500/40
+                                       text-red-300 text-[10px] font-mono uppercase">
+                            <span class="h-1.5 w-1.5 rounded-full bg-red-400"></span>
+                            {ov.state}
+                          </span>
+                        {/if}
+                      </div>
+
+                      <!-- One rotate button per overlay isn't worth it
+                           — Tor's NEWNYM, Tailscale reset, WG reconnect
+                           and i2pd tunnel rebuild are all triggered by
+                           the single /api/network/vpn/rotate endpoint
+                           which knows which to call based on what's
+                           active. Show the rotate button only on the
+                           first overlay so the row doesn't get noisy. -->
+                      {#if ov === statusOverlays[0]}
+                        <button class="btn text-xs whitespace-nowrap"
+                                on:click={rotateIdentity}
+                                disabled={rotating || ov.state !== 'connected'}
+                                title="Refresh identity / circuits / keys">
+                          {rotating ? 'rotating…' : '↻ change identity'}
+                        </button>
+                      {/if}
+                    </header>
+
+                    {#if ov === statusOverlays[0] && rotateMsg}
+                      <p class="text-xs font-mono text-zinc-400">{rotateMsg}</p>
+                    {/if}
+
+                    <p class="text-xs text-zinc-400">{ov.summary}</p>
+
+                    <!-- Bootstrap progress bar (Tor / I2P) -->
+                    {#if ov.bootstrap_percent !== null && ov.bootstrap_percent !== undefined && ov.bootstrap_percent < 100}
+                      <div class="space-y-1">
+                        <div class="flex justify-between text-[10px] font-mono text-zinc-500">
+                          <span>BOOTSTRAP</span>
+                          <span>{ov.bootstrap_percent}%</span>
+                        </div>
+                        <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
+                          <div class="h-full bg-cursed-500 transition-all duration-300"
+                               style="width: {ov.bootstrap_percent}%"></div>
+                        </div>
+                      </div>
+                    {/if}
+
+                    <!-- Public IP + country -->
+                    {#if ov.public_ip}
+                      <div class="flex items-center gap-3 text-xs font-mono">
+                        <span class="text-zinc-500">Public IP:</span>
+                        <span class="text-zinc-200">{ov.public_ip}</span>
+                        {#if ov.public_country}
+                          <span class="text-cursed-300 uppercase tracking-wider">
+                            {ov.public_country}
+                          </span>
+                        {/if}
+                      </div>
+                    {/if}
+
+                    <!-- Tor circuit list -->
+                    {#if ov.detail.circuits && ov.detail.circuits.length > 0}
+                      <div class="space-y-1">
+                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                          Active circuits ({ov.detail.circuits.length})
+                        </p>
+                        <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px] text-zinc-400">
+                          {#each ov.detail.circuits.slice(0, 6) as c}
+                            <div class="truncate">
+                              <span class="text-zinc-600">#{c.id}</span>
+                              {c.hops.join(' → ')}
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    <!-- Tailscale peer list -->
+                    {#if ov.detail.peers && ov.detail.peers.length > 0}
+                      <div class="space-y-1">
+                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                          Tailnet peers ({ov.detail.peers.length})
+                        </p>
+                        <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px]">
+                          {#each ov.detail.peers as p}
+                            <div class="flex items-center gap-2 truncate">
+                              <span class={p.online ? 'text-live-400' : 'text-zinc-600'}>●</span>
+                              <span class="text-zinc-300">{p.host}</span>
+                              <span class="text-zinc-500">{p.ips?.[0]}</span>
+                              {#if p.exit_node}
+                                <span class="text-cursed-400 text-[9px]">[exit]</span>
+                              {/if}
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    <!-- I2P peer count -->
+                    {#if ov.detail.active_peers !== undefined}
+                      <p class="text-xs font-mono text-zinc-400">
+                        <span class="text-zinc-500">Active peers:</span>
+                        {ov.detail.active_peers}
+                      </p>
+                    {/if}
+
+                    <!-- WireGuard handshake age -->
+                    {#if ov.detail.handshake_age_s !== undefined && ov.detail.handshake_age_s !== null}
+                      <p class="text-xs font-mono text-zinc-400">
+                        <span class="text-zinc-500">Last handshake:</span>
+                        {ov.detail.handshake_age_s}s ago
+                      </p>
                     {/if}
                   </div>
-
-                  <button class="btn text-xs" on:click={rotateIdentity}
-                          disabled={rotating || vpnStatus.state !== 'connected'}
-                          title="Refresh identity / circuits / keys">
-                    {rotating ? 'rotating…' : '↻ change identity'}
-                  </button>
-                </header>
-
-                {#if rotateMsg}
-                  <p class="text-xs font-mono text-zinc-400">{rotateMsg}</p>
-                {/if}
-
-                <p class="text-xs text-zinc-400">{vpnStatus.summary}</p>
-
-                <!-- Bootstrap progress bar (Tor / I2P) -->
-                {#if vpnStatus.bootstrap_percent !== null && vpnStatus.bootstrap_percent < 100}
-                  <div class="space-y-1">
-                    <div class="flex justify-between text-[10px] font-mono text-zinc-500">
-                      <span>BOOTSTRAP</span>
-                      <span>{vpnStatus.bootstrap_percent}%</span>
-                    </div>
-                    <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
-                      <div class="h-full bg-cursed-500 transition-all duration-300"
-                           style="width: {vpnStatus.bootstrap_percent}%"></div>
-                    </div>
-                  </div>
-                {/if}
-
-                <!-- Public IP + country -->
-                {#if vpnStatus.public_ip}
-                  <div class="flex items-center gap-3 text-xs font-mono">
-                    <span class="text-zinc-500">Public IP:</span>
-                    <span class="text-zinc-200">{vpnStatus.public_ip}</span>
-                    {#if vpnStatus.public_country}
-                      <span class="text-cursed-300 uppercase tracking-wider">
-                        {vpnStatus.public_country}
-                      </span>
-                    {/if}
-                  </div>
-                {/if}
-
-                <!-- Tor circuit list -->
-                {#if vpnStatus.detail.circuits && vpnStatus.detail.circuits.length > 0}
-                  <div class="space-y-1">
-                    <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                      Active circuits ({vpnStatus.detail.circuits.length})
-                    </p>
-                    <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px] text-zinc-400">
-                      {#each vpnStatus.detail.circuits.slice(0, 6) as c}
-                        <div class="truncate">
-                          <span class="text-zinc-600">#{c.id}</span>
-                          {c.hops.join(' → ')}
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-
-                <!-- Tailscale peer list -->
-                {#if vpnStatus.detail.peers && vpnStatus.detail.peers.length > 0}
-                  <div class="space-y-1">
-                    <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                      Tailnet peers ({vpnStatus.detail.peers.length})
-                    </p>
-                    <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px]">
-                      {#each vpnStatus.detail.peers as p}
-                        <div class="flex items-center gap-2 truncate">
-                          <span class={p.online ? 'text-live-400' : 'text-zinc-600'}>●</span>
-                          <span class="text-zinc-300">{p.host}</span>
-                          <span class="text-zinc-500">{p.ips?.[0]}</span>
-                          {#if p.exit_node}
-                            <span class="text-cursed-400 text-[9px]">[exit]</span>
-                          {/if}
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-
-                <!-- I2P peer count -->
-                {#if vpnStatus.detail.active_peers !== undefined}
-                  <p class="text-xs font-mono text-zinc-400">
-                    <span class="text-zinc-500">Active peers:</span>
-                    {vpnStatus.detail.active_peers}
-                  </p>
-                {/if}
-
-                <!-- WireGuard handshake age -->
-                {#if vpnStatus.detail.handshake_age_s !== undefined && vpnStatus.detail.handshake_age_s !== null}
-                  <p class="text-xs font-mono text-zinc-400">
-                    <span class="text-zinc-500">Last handshake:</span>
-                    {vpnStatus.detail.handshake_age_s}s ago
-                  </p>
-                {/if}
+                {/each}
               </div>
             {/if}
           </section>
-
         </div>
-      </div>
+      </details>
 
       <!-- ──────────────────────────────────────────────────────────── -->
       <!-- Advanced network — firewall, NAT, port-forward, etc.          -->
       <!-- Big rules editor lives in a sub-component imported below.     -->
+      <!-- v62: matches the other sections' expand-button affordance.   -->
       <!-- ──────────────────────────────────────────────────────────── -->
       <details class="bg-ink-900 border border-ink-700 rounded-xl"
                bind:open={advancedOpen}>
-        <summary class="cursor-pointer select-none px-6 py-4 flex items-center justify-between">
-          <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-            Advanced network — firewall + NAT + port-forward
-          </span>
-          <span class="text-xs text-zinc-500">
-            {advancedOpen ? 'hide' : 'show'} rules editor
+        <summary class="cursor-pointer select-none px-6 py-4
+                        flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="h-2 w-2 rounded-full flex-shrink-0 bg-zinc-600"></span>
+            <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+              Advanced Network — Firewall + NAT + Port-Forwarding
+            </span>
+            <span class="text-xs text-zinc-500 truncate">
+              user rules + system defaults
+            </span>
+          </div>
+          <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex-shrink-0">
+            {advancedOpen ? '▾ close' : '▸ expand'}
           </span>
         </summary>
         <div class="border-t border-ink-700">

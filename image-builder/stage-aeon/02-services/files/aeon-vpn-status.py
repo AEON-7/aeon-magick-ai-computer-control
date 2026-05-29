@@ -323,19 +323,122 @@ PROVIDERS = {
     "wireguard": wireguard_status,
     "openvpn": openvpn_status,
     "i2p": i2p_status,
+    # v59: commercial wizard providers ride wg-quick@aeon0, so their
+    # runtime status is just WireGuard. Map them to wireguard_status
+    # so they show up in the live status panel instead of "disabled".
+    "mullvad": wireguard_status,
+    "ivpn": wireguard_status,
+    "azirevpn": wireguard_status,
 }
+
+
+def _disabled_overlay(kind: str) -> dict:
+    return {
+        "kind": kind,
+        "provider": kind if kind != "vpn" else "none",
+        "enabled": False,
+        "state": "disabled",
+        "bootstrap_percent": None,
+        "summary": f"{kind} disabled",
+        "public_ip": None,
+        "public_country": None,
+        "detail": {},
+    }
+
+
+def collect_overlays(cfg: dict) -> list[dict]:
+    """v61: gather a status block for every active privacy overlay.
+
+    v58 split Tor + I2P out of the [vpn] section into their own
+    top-level [tor] / [i2p] blocks. Before this rewrite the script
+    still keyed everything on vpn.provider, so enabling Tor via the
+    independent toggle made the status panel render as "disabled"
+    even though Tor was running fine — losing the bootstrap %,
+    circuit list, and exit-country display. Now we read all three
+    toggles independently and emit one overlay per active layer.
+    """
+    overlays: list[dict] = []
+
+    vpn = cfg.get("vpn", {})
+    vpn_enabled = bool(vpn.get("enabled", False))
+    vpn_provider = vpn.get("provider", "none")
+    if (
+        vpn_enabled
+        and vpn_provider != "none"
+        # Skip legacy provider=tor / provider=i2p — those are surfaced
+        # via the dedicated tor.enabled / i2p.enabled paths below to
+        # avoid duplicate overlays after a config migration.
+        and vpn_provider not in ("tor", "i2p")
+        and vpn_provider in PROVIDERS
+    ):
+        ov = {"kind": "vpn", "enabled": True}
+        ov.update(PROVIDERS[vpn_provider](cfg))
+        # PROVIDERS[wireguard] sets provider="wireguard" — preserve the
+        # actual wizard provider name so the UI can show "Mullvad" not
+        # just "WireGuard" in the status header.
+        ov["provider"] = vpn_provider
+        overlays.append(ov)
+
+    tor = cfg.get("tor", {})
+    if bool(tor.get("enabled", False)):
+        ov = {"kind": "tor", "enabled": True}
+        ov.update(tor_status(cfg))
+        overlays.append(ov)
+
+    i2p = cfg.get("i2p", {})
+    if bool(i2p.get("enabled", False)):
+        ov = {"kind": "i2p", "enabled": True}
+        ov.update(i2p_status(cfg))
+        overlays.append(ov)
+
+    return overlays
 
 
 def main() -> int:
     cfg = load_net_config()
-    vpn = cfg.get("vpn", {})
-    enabled = bool(vpn.get("enabled", False))
-    provider = vpn.get("provider", "none")
+    overlays = collect_overlays(cfg)
 
-    response = {
+    # Public IP lookup is only worth doing when at least one overlay is
+    # connected. We attach the result to whichever overlay is the
+    # "exit" path — the clearnet VPN if present, otherwise Tor. (I2P
+    # never carries clearnet by design, so it doesn't get a public_ip.)
+    exit_overlay = None
+    for ov in overlays:
+        if ov["kind"] == "vpn" and ov.get("state") == "connected":
+            exit_overlay = ov
+            break
+    if exit_overlay is None:
+        for ov in overlays:
+            if ov["kind"] == "tor" and ov.get("state") == "connected":
+                exit_overlay = ov
+                break
+    if exit_overlay is not None:
+        ip, country = public_ip_via_curl()
+        exit_overlay["public_ip"] = ip
+        exit_overlay["public_country"] = country
+
+    # Pick a "primary" overlay for legacy top-level fields — keeps
+    # older web-UI builds rendering until they pick up the overlays-
+    # aware shape. Clearnet VPN > Tor > I2P > "none".
+    primary: dict | None = None
+    for ov in overlays:
+        if ov["kind"] == "vpn":
+            primary = ov
+            break
+    if primary is None:
+        for ov in overlays:
+            if ov["kind"] == "tor":
+                primary = ov
+                break
+    if primary is None and overlays:
+        primary = overlays[0]
+
+    response: dict = {
         "ok": True,
-        "provider": provider,
-        "enabled": enabled,
+        "overlays": overlays,
+        # Legacy flat fields — populated from primary overlay if any.
+        "provider": "none",
+        "enabled": False,
         "state": "disabled",
         "bootstrap_percent": None,
         "summary": "VPN disabled",
@@ -343,20 +446,17 @@ def main() -> int:
         "public_country": None,
         "detail": {},
     }
-
-    if not enabled or provider == "none" or provider not in PROVIDERS:
-        print(json.dumps(response))
-        return 0
-
-    detail = PROVIDERS[provider](cfg)
-    response.update(detail)
-
-    # Only bother fetching public IP if we're connected — saves an
-    # 8-second curl timeout while bootstrapping.
-    if response.get("state") == "connected":
-        ip, country = public_ip_via_curl()
-        response["public_ip"] = ip
-        response["public_country"] = country
+    if primary is not None:
+        response.update({
+            "provider": primary.get("provider", primary["kind"]),
+            "enabled": True,
+            "state": primary.get("state", "disabled"),
+            "bootstrap_percent": primary.get("bootstrap_percent"),
+            "summary": primary.get("summary", ""),
+            "public_ip": primary.get("public_ip"),
+            "public_country": primary.get("public_country"),
+            "detail": primary.get("detail", {}),
+        })
 
     print(json.dumps(response))
     return 0
