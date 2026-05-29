@@ -174,6 +174,10 @@ pub fn build_router(cfg: Config) -> Router {
         // Identity rotation — Tor SIGNAL NEWNYM, Tailscale reset, WG/OVPN
         // reconnect. POST with no body.
         .route("/network/vpn/rotate", post(crate::network::post_vpn_rotate))
+        // v57: I2P runtime status — installed/running/bind addresses/
+        // browser proxy URL. Read-only; outproxy + enable still flow
+        // through /network/vpn since I2P is a VPN provider variant.
+        .route("/network/i2p/status", get(crate::i2p::get_status))
         // WiFi management — scan, connect, current state. Used by the
         // /setup-wifi captive-portal page during AP-fallback mode and
         // by the authenticated WiFi panel for ongoing management.

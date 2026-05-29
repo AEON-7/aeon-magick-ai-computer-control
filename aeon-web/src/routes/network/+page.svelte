@@ -1555,8 +1555,35 @@ obfs4 …`}
             {/if}
 
             {#if vpnEnabled && vpnProvider === 'i2p'}
+              <!-- v57: I2P needs more setup than Tor (browser proxy
+                   config + .i2p name resolution happens in i2pd's
+                   address book, not DNS). Surface that here + link
+                   to the dedicated /network/i2p page where the
+                   detailed status + browser proxy URLs live. -->
               <div class="space-y-2 pl-7">
-                <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="i2p-out">
+                <div class="p-3 rounded border border-amber-500/40 bg-amber-500/10
+                            flex items-start gap-2">
+                  <span class="text-amber-400 text-sm leading-none">⚠</span>
+                  <div class="space-y-1 flex-1">
+                    <p class="text-xs text-amber-200">
+                      <strong>i2pd must be installed + running for I2P traffic
+                      to route.</strong> Pre-installed on AEON images, but the
+                      daemon doesn't bind on usb0 until you save this VPN
+                      change. Unlike Tor, I2P isn't transparent — browsers
+                      have to point at i2pd's HTTP proxy explicitly to reach
+                      <code class="text-amber-300">.i2p</code> sites.
+                    </p>
+                    <a href="/network/i2p"
+                       class="inline-flex items-center gap-1 mt-1
+                              text-xs px-2 py-1 rounded
+                              border border-cursed-500/40 text-cursed-300
+                              hover:bg-cursed-500/10 transition-colors font-mono">
+                      I2P config →
+                    </a>
+                  </div>
+                </div>
+
+                <label class="text-xs uppercase tracking-wider text-zinc-500 block pt-2" for="i2p-out">
                   Outproxy (optional)
                 </label>
                 <input id="i2p-out" type="text" bind:value={i2pOutproxy}
@@ -1567,12 +1594,9 @@ obfs4 …`}
                   Without an outproxy, i2pd only reaches <code>.i2p</code>
                   sites (the safest default). Set an outproxy to also reach
                   the regular internet through I2P — slower than Tor, less
-                  anonymous than a real VPN. HTTP proxy on
-                  <code>127.0.0.1:4444</code>, SOCKS on
-                  <code>127.0.0.1:4447</code>. <em>Apps must opt in by
-                  pointing at those proxies</em> — I2P is not transparently
-                  routed (unlike Tor here) because i2pd doesn't support
-                  TPROXY cleanly.
+                  anonymous than a real VPN. Proxy URLs + status live on
+                  the <a class="text-cursed-300 hover:underline" href="/network/i2p">I2P
+                  config page</a>.
                 </p>
               </div>
             {/if}

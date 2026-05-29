@@ -361,12 +361,37 @@ EOF
     # Point NetworkManager's shared-mode dnsmasq at 127.0.2.1 so DHCP
     # clients on usb0 get DNS via the encrypted upstream. The shared
     # method's embedded dnsmasq picks up these drop-ins.
+    #
+    # v57: ALSO carve out .onion + .exit suffixes to go DIRECTLY to
+    # Tor's DNSPort on 127.0.0.1:5353 instead of through dnscrypt-
+    # proxy. dnscrypt-proxy would forward .onion to the upstream
+    # public resolver (Quad9 etc.), which doesn't know about onion
+    # services and returns NXDOMAIN — so .onion sites in regular
+    # browsers were silently broken even though Tor's TransPort
+    # would have worked. With these two `server=/onion/...` lines,
+    # Tor's AutomapHostsOnResolve catches the .onion lookup and
+    # returns a virtual IP from 10.192.0.0/10, the iptables REDIRECT
+    # chain catches the TCP and routes it through TransPort, and
+    # any browser reaches the hidden service transparently.
     install -d -m 0755 /etc/NetworkManager/dnsmasq-shared.d
-    cat > /etc/NetworkManager/dnsmasq-shared.d/00-aeon-dnscrypt.conf <<'EOF'
+    if [ "$vpn_provider" = "tor" ] && [ "$vpn_enabled" = "true" ]; then
+        cat > /etc/NetworkManager/dnsmasq-shared.d/00-aeon-dnscrypt.conf <<'EOF'
+# Forward all DNS through local dnscrypt-proxy by default.
+no-resolv
+server=127.0.2.1
+# v57: route .onion / .exit straight to Tor's DNSPort. dnscrypt-proxy
+# would NXDOMAIN them; Tor's AutomapHostsOnResolve returns a virtual
+# IP that the iptables REDIRECT chain routes through TransPort.
+server=/onion/127.0.0.1#5353
+server=/exit/127.0.0.1#5353
+EOF
+    else
+        cat > /etc/NetworkManager/dnsmasq-shared.d/00-aeon-dnscrypt.conf <<'EOF'
 # Forward all DNS through local dnscrypt-proxy.
 no-resolv
 server=127.0.2.1
 EOF
+    fi
     # Re-up usb0 connection so the shared dnsmasq re-reads its conf.
     nmcli con up aeon-usb0 >/dev/null 2>&1 || true
 
@@ -946,27 +971,58 @@ apply_vpn_i2p() {
     fi
 
     install -d -m 0755 /etc/i2pd
-    # The Debian package ships a default /etc/i2pd/i2pd.conf with HTTP
-    # proxy on 4444 and SOCKS on 4447 already enabled. We leave that
-    # alone and only manage the optional outproxy override.
-    if [ -n "$outproxy" ]; then
-        # Append outproxy directive to the [httpproxy] section if not
-        # already present; replace it in-place otherwise.
-        if grep -q "^outproxy" /etc/i2pd/i2pd.conf 2>/dev/null; then
-            sed -i "s|^outproxy.*|outproxy = $outproxy|" /etc/i2pd/i2pd.conf
-        else
-            cat >> /etc/i2pd/i2pd.conf <<EOF
 
-# aeon outproxy override
-[httpproxy]
-outproxy = $outproxy
-EOF
-        fi
-        log "i2p: outproxy set to $outproxy"
+    # v57: bind i2pd's HTTP proxy, SOCKS proxy, and web console on
+    # the usb0 IP (when USB networking is up) so USB-connected
+    # target machines can actually reach them. The Debian package
+    # ships localhost-only by default, which made AEON's I2P mode
+    # invisible to anything off the Pi.
+    #
+    # The Debian /etc/i2pd/i2pd.conf has plain "address = 127.0.0.1"
+    # lines under each [section]. We use a Python helper to update
+    # the value under the right section header without touching
+    # anything else. Pure sed gets confused by section boundaries.
+    local pi_addr_for_i2p; pi_addr_for_i2p="$(toml_get usb_ethernet pi_addr 10.55.0.1)"
+    local usb_up; usb_up="$(toml_get usb_ethernet enabled false)"
+    local bind_addr="127.0.0.1"
+    if [ "$usb_up" = "true" ]; then
+        bind_addr="$pi_addr_for_i2p"
     fi
+    python3 - "$bind_addr" "$outproxy" <<'PYEOF'
+import sys, re, configparser
+bind_addr = sys.argv[1]
+outproxy = sys.argv[2]
+path = "/etc/i2pd/i2pd.conf"
+try:
+    text = open(path).read()
+except FileNotFoundError:
+    text = ""
+# i2pd's config is INI-shaped but uses '=' with spaces and inline
+# comments. Use configparser with relaxed settings.
+cp = configparser.ConfigParser(interpolation=None, strict=False)
+cp.read_string(text)
+# Ensure each section exists, then set the address/port. ConfigParser
+# preserves whatever else is in there.
+for section in ("httpproxy", "socksproxy", "http"):
+    if section not in cp:
+        cp[section] = {}
+    cp[section]["enabled"] = "true"
+    cp[section]["address"] = bind_addr
+# Apply the user outproxy override if present (it lives in [httpproxy]).
+if outproxy:
+    cp["httpproxy"]["outproxy"] = outproxy
+elif "outproxy" in cp.get("httpproxy", {}):
+    # Cleared via empty input — remove the stale value.
+    cp["httpproxy"].pop("outproxy", None)
+with open(path, "w") as f:
+    cp.write(f, space_around_delimiters=True)
+PYEOF
 
     systemctl enable --now i2pd.service 2>&1 | tee -a "$LOG" || true
-    log "i2p (i2pd) active — HTTP proxy on 127.0.0.1:4444, SOCKS on 127.0.0.1:4447"
+    log "i2p (i2pd) active — HTTP ${bind_addr}:4444, SOCKS ${bind_addr}:4447, console http://${bind_addr}:7070/"
+    if [ "$usb_up" != "true" ]; then
+        log "    (USB networking is off — proxies only reachable from the Pi itself)"
+    fi
     log "    (apps must opt in by configuring those proxies — not transparently routed)"
 }
 

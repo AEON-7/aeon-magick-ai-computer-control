@@ -23,6 +23,7 @@ mod dns_log;
 mod dnscrypt_relays;
 mod dnscrypt_servers;
 mod firewall;
+mod i2p;
 mod macros;
 mod mcp;
 mod network;

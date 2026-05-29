@@ -435,6 +435,29 @@ export const rotateVpnIdentity = () =>
     '/network/vpn/rotate',
   );
 
+// ── I2P status (v57+) ──────────────────────────────────────────────────
+
+export interface I2pBinding {
+  addr: string;
+  port: number;
+}
+
+export interface I2pStatus {
+  ok: boolean;
+  installed: boolean;       // i2pd binary present on disk
+  service_active: boolean;  // systemd unit running
+  http_proxy: I2pBinding;   // browser HTTP proxy (typically :4444)
+  socks_proxy: I2pBinding;  // SOCKS proxy (typically :4447)
+  web_console: I2pBinding;  // i2pd router console (typically :7070)
+  outproxy: string;         // configured clearnet exit, empty = I2P-only
+  browser_hint: {
+    http_proxy_url: string;
+    console_url: string;
+  };
+}
+
+export const getI2pStatus = () => req<I2pStatus>('GET', '/network/i2p/status');
+
 // ── Mass storage (USB-CDROM library) ───────────────────────────────────
 
 export interface IsoMeta {
