@@ -158,6 +158,58 @@ pub fn compute_server_score(provider_trust: u8, eyes: EyesTier) -> u8 {
 
 // ── HTTP helper (shared by all provider modules) ─────────────────────
 
+/// UTF-8-safe truncation for error bodies. Slicing a &str at an
+/// arbitrary byte index panics if it lands mid-codepoint — and a
+/// panic *inside the error-formatting path* would mask the real
+/// failure. Walk back to the nearest char boundary.
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Turn a non-2xx HTTP response into a human-readable error string.
+///
+/// v65.1: this is the fix for the opaque "status code 404 / 400"
+/// errors the VPN wizard used to show. ureq 2.x returns
+/// `Err(Error::Status(code, resp))` for any non-2xx, so the previous
+/// `req.call().map_err(|e| format!("http: {e}"))?` short-circuited
+/// BEFORE reading the response body — discarding the provider's
+/// actual explanation. Providers stash that explanation under
+/// different keys, so try the common ones:
+///   - IVPN / AzireVPN: `{"message": "..."}`
+///   - Mullvad:         `{"error": "...", "code": "..."}`
+/// Fall back to the raw (truncated) body if none match.
+fn api_error_message(code: u16, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        for key in ["message", "error", "detail", "description", "error_message"] {
+            if let Some(msg) = v.get(key).and_then(|x| x.as_str()) {
+                if !msg.trim().is_empty() {
+                    // Include a machine code if the provider gave one
+                    // (Mullvad's INVALID_ACCOUNT, etc.) — helps support.
+                    let code_hint = v.get("code")
+                        .and_then(|x| x.as_str())
+                        .filter(|c| !c.is_empty())
+                        .map(|c| format!(" [{c}]"))
+                        .unwrap_or_default();
+                    return format!("HTTP {code}: {}{code_hint}", msg.trim());
+                }
+            }
+        }
+    }
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        format!("HTTP {code} (empty response body)")
+    } else {
+        format!("HTTP {code}: {}", truncate_str(trimmed, 300))
+    }
+}
+
 /// Minimal blocking HTTP client. All provider API calls are
 /// infrequent (setup wizard + occasional refresh), so the simple
 /// blocking path beats async machinery for clarity.
@@ -168,13 +220,22 @@ pub fn http_get_json(url: &str, bearer: Option<&str>) -> Result<serde_json::Valu
     if let Some(t) = bearer {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
-    let resp = req.call().map_err(|e| format!("http: {e}"))?;
-    let status = resp.status();
-    let body = resp.into_string().map_err(|e| format!("body: {e}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("HTTP {status}: {body}"));
+    match req.call() {
+        Ok(resp) => {
+            let body = resp.into_string().map_err(|e| format!("read body: {e}"))?;
+            serde_json::from_str(&body)
+                .map_err(|e| format!("parse: {e} (body: {})", truncate_str(&body, 200)))
+        }
+        // Non-2xx — read the body so the provider's actual error
+        // surfaces instead of a bare "status code NNN".
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(api_error_message(code, &body))
+        }
+        Err(ureq::Error::Transport(t)) => {
+            Err(format!("network error reaching {url}: {t}"))
+        }
     }
-    serde_json::from_str(&body).map_err(|e| format!("parse: {e} (body: {})", &body[..body.len().min(200)]))
 }
 
 pub fn http_post_json(url: &str, bearer: Option<&str>, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -185,13 +246,20 @@ pub fn http_post_json(url: &str, bearer: Option<&str>, payload: &serde_json::Val
     if let Some(t) = bearer {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
-    let resp = req.send_json(payload.clone()).map_err(|e| format!("http: {e}"))?;
-    let status = resp.status();
-    let body = resp.into_string().map_err(|e| format!("body: {e}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("HTTP {status}: {body}"));
+    match req.send_json(payload.clone()) {
+        Ok(resp) => {
+            let body = resp.into_string().map_err(|e| format!("read body: {e}"))?;
+            serde_json::from_str(&body)
+                .map_err(|e| format!("parse: {e} (body: {})", truncate_str(&body, 200)))
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(api_error_message(code, &body))
+        }
+        Err(ureq::Error::Transport(t)) => {
+            Err(format!("network error reaching {url}: {t}"))
+        }
     }
-    serde_json::from_str(&body).map_err(|e| format!("parse: {e} (body: {})", &body[..body.len().min(200)]))
 }
 
 // ── WireGuard keygen helper ──────────────────────────────────────────
