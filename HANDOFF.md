@@ -2,8 +2,14 @@
 
 > Portable session-handoff for picking the project up in a fresh Claude
 > instance (e.g. after a billing/tenant change). Snapshot taken at
-> **v65**, git `3b396e4`, on branch `main` (pushed to
+> **v66**, git `a3db7b2`, on branch `main` (pushed to
 > `AEON-7/aeon-magick-ai-computer-control`). Working tree clean.
+>
+> **v66 (latest):** VPN wizard polish — real provider error messages
+> (was opaque "status code 4xx"), `?provider=` deep-link tab fix
+> (IVPN/Azire links no longer dump you on Mullvad), flat provider logos
+> (`VpnLogo.svelte`). All three VPN wizards (Mullvad/IVPN/Azire) confirmed
+> working end-to-end. Image md5 `21638e8b8f04ed3d1fff2922304359ab`.
 >
 > Read this first, then `AGENTS.md` (operation), `ARCHITECTURE.md`
 > (design), `BUILDING.md` (bake recipe).
@@ -177,16 +183,31 @@ both built on top of v63.1 and incorporate these fixes. `ivpn.rs` is on
 
 ## 7. Open to-do list (prioritized for the new instance)
 
-**P0 — finish the latency win (the user's top ask):**
+**P0 — finish the latency win (the user's top ask) — v67:**
+CONFIRMED via code trace: H.264 is **config-driven by `streamer.toml`
+`format=`, not triggered by the browser connecting**. The streamer only
+spawns the H.264 ffmpeg pipeline + serves `/h264` when
+`target_format == "h264"`. Shipped default is still `format = "mjpeg"`,
+so Chrome/Brave open the WS, find no `/h264` stream, and **silently fall
+back to MJPEG** — which is why the user's testing showed fps mattering
+but jpeg_quality not (classic MJPEG buffering). The user has been on
+MJPEG the whole time.
 1. **Flip `format = "h264"` default** in
-   `image-builder/stage-aeon/02-services/files/streamer.toml`, OR better,
-   **add a runtime format switch** to `streamer_config.rs`
-   `put_config` (currently only fps + jpeg_quality) + a UI toggle on
-   `/system`. Then the device defaults to the low-latency path on
-   Chrome/Brave.
+   `image-builder/stage-aeon/02-services/files/streamer.toml`, AND
+   **add a format switch** to `streamer_config.rs` `put_config`
+   (currently only fps + jpeg_quality — `format` is GET-only) + a
+   toggle on `/system`. Today switching to H.264 requires an SSH edit;
+   there is no UI path.
 2. Verify H.264 end-to-end on the user's Pi (WiFi 192.168.1.56, Brave) —
    confirm sub-second and that the drop-to-newest bridge holds under
    congestion.
+
+**DONE since this doc was first written (v65.1 + v66):**
+- VPN wizard error surfacing — opaque "status code 4xx" → real provider
+  message. ✓
+- VPN tab deep-link (`?provider=`) — IVPN/Azire links open the right
+  tab. ✓
+- Flat VPN provider logos (`VpnLogo.svelte`). ✓
 
 **P1 — known correctness fix:**
 3. **Default persona → `generic-composite`** in `hid.toml` (currently
@@ -211,11 +232,12 @@ both built on top of v63.1 and incorporate these fixes. `ivpn.rs` is on
 |---|---|
 | Repo | `/Users/albert/aeon-magick-ai-computer-control` |
 | Remote | `AEON-7/aeon-magick-ai-computer-control` (GitHub), branch `main` |
-| HEAD | `3b396e4` (docs sync) — source is `5f7db06` (v65) |
+| HEAD | `a3db7b2` (v66) |
 | Device | Pi 4, **WiFi 192.168.1.56**, persona `generic-composite` |
-| Current image | `~/Documents/aeon-magick/aeon-magick-v65.img.xz` · 595 MB · md5 `94cf982cbb52d9dfd5ad0400f916256b` |
-| Image archive | `~/Documents/aeon-magick/aeon-magick-v*.img.xz` (v60→v65) |
-| pi-gen dir | `~/pi-gen` (config has `IMG_NAME=aeon-magick`, `IMG_DATE="v65"`) |
+| Current image | `~/Documents/aeon-magick/aeon-magick-v66.img.xz` · 594 MB · md5 `21638e8b8f04ed3d1fff2922304359ab` |
+| Image archive | `~/Documents/aeon-magick/aeon-magick-v*.img.xz` (v60→v66) |
+| pi-gen dir | `~/pi-gen` (config has `IMG_NAME=aeon-magick`, `IMG_DATE="v66"` — bump before next bake) |
+| Bake note | v66 bake used `sudo PRESERVE_CONTAINER=1 CLEAN=1 ./build-docker.sh` and copy-out succeeded (exit 0) — no docker-cp needed this run |
 | SSH | `admin@aeon-magick.local` (or `.56`), default pw `aeon-default-change-me` |
 | Admin portal pw | stashed in `~/.config/aeon/env` (mode 600) — never paste in chat |
 | MCP endpoint | `https://aeon-magick.local/api/mcp` (Basic auth, TLS verify off) |
