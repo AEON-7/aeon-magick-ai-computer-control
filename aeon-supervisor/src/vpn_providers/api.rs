@@ -432,3 +432,87 @@ pub async fn pick_fastest(
             Json(json!({"ok": false, "err": format!("probe: {e}")}))).into_response(),
     }
 }
+
+// ── POST /api/network/vpn/providers/:id/refresh ─────────────────────
+//
+// Re-fetch the provider's server list and update the cache WITHOUT
+// re-registering a device/session. The server lists come from cheap
+// endpoints — public for IVPN (servers.json) and Mullvad (relays),
+// token-authed (but device-free) for AzireVPN (/v3/locations). Requires
+// the provider to already be configured (we reuse the stored creds).
+// This is what the wizard's "refresh server list" button calls, so the
+// user doesn't have to re-run the whole setup just to pick up the
+// provider's latest servers.
+pub async fn refresh_servers(
+    State(_state): State<AppState>,
+    Path(provider): Path<String>,
+) -> impl IntoResponse {
+    let meta = match provider_meta(&provider) {
+        Some(m) => m,
+        None => return unknown_provider(&provider),
+    };
+    let trust = meta.trust_score;
+    let pid = provider.clone();
+    let blocking = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        match pid.as_str() {
+            "mullvad" => {
+                let mut s = mullvad::read_state();
+                if s.account_number.is_empty() || s.device_id.is_empty() {
+                    return Err("not configured — run setup first".into());
+                }
+                let servers = mullvad::fetch_relays(trust)?;
+                if !servers.iter().any(|sv| sv.id == s.selected_server) {
+                    s.selected_server = String::new();
+                }
+                let n = servers.len();
+                s.servers = servers;
+                s.servers_updated_ms = now_ms();
+                mullvad::write_state(&s).map_err(|e| format!("persist: {e}"))?;
+                Ok(n)
+            }
+            "ivpn" => {
+                let mut s = ivpn::read_state();
+                if s.account_id.is_empty() || s.session_token.is_empty() {
+                    return Err("not configured — run setup first".into());
+                }
+                let servers = ivpn::fetch_servers(trust)?;
+                if !servers.iter().any(|sv| sv.id == s.selected_server) {
+                    s.selected_server = String::new();
+                }
+                let n = servers.len();
+                s.servers = servers;
+                s.servers_updated_ms = now_ms();
+                ivpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
+                Ok(n)
+            }
+            "azirevpn" => {
+                let mut s = azirevpn::read_state();
+                if s.api_token.is_empty() {
+                    return Err("not configured — run setup first".into());
+                }
+                let servers = azirevpn::fetch_servers(&s.api_token, trust)?;
+                if !servers.iter().any(|sv| sv.id == s.selected_server) {
+                    s.selected_server = String::new();
+                }
+                let n = servers.len();
+                s.servers = servers;
+                s.servers_updated_ms = now_ms();
+                azirevpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
+                Ok(n)
+            }
+            _ => Err(format!("unknown provider '{pid}'")),
+        }
+    })
+    .await;
+    match blocking {
+        Ok(Ok(n)) => {
+            crate::audit::log("admin (session)", "vpn_provider_refresh",
+                &format!("provider={provider}"), "ok", None);
+            Json(json!({"ok": true, "server_count": n})).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY,
+            Json(json!({"ok": false, "err": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "err": format!("join: {e}")}))).into_response(),
+    }
+}

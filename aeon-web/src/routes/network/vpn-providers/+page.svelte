@@ -141,6 +141,32 @@
     }
   }
 
+  // v67.7: re-fetch the provider's server list without re-running the
+  // whole setup (no device/session churn). Uses the stored credentials.
+  async function refreshServers() {
+    busy = true;
+    error = '';
+    msg = 'refreshing server list…';
+    try {
+      const r = await fetch(`/api/network/vpn/providers/${active}/refresh`, {
+        method: 'POST',
+      }).then(r => r.json());
+      if (r.ok) {
+        msg = `✓ refreshed — ${r.server_count} servers cached`;
+        ranking = [];
+        await refresh();
+      } else {
+        error = `refresh failed: ${r.err}`;
+        msg = '';
+      }
+    } catch (e: any) {
+      error = e?.message ?? 'refresh failed';
+      msg = '';
+    } finally {
+      busy = false;
+    }
+  }
+
   async function pickFastest() {
     busy = true;
     error = '';
@@ -306,6 +332,11 @@
                      placeholder="filter by country / city…"
                      class="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded
                             px-3 py-1.5 text-xs text-zinc-200 font-mono" />
+              <button class="btn text-xs" disabled={busy}
+                      on:click={refreshServers}
+                      title="Re-pull the provider's latest server list (no new device/session)">
+                ⟳ refresh server list
+              </button>
               <button class="btn-primary text-xs" disabled={busy}
                       on:click={pickFastest}>
                 {busy ? 'probing…' : 'pick fastest now'}

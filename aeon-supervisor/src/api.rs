@@ -205,6 +205,8 @@ pub fn build_router(cfg: Config) -> Router {
             post(crate::vpn_providers::api::select))
         .route("/network/vpn/providers/:id/pick-fastest",
             post(crate::vpn_providers::api::pick_fastest))
+        .route("/network/vpn/providers/:id/refresh",
+            post(crate::vpn_providers::api::refresh_servers))
         // WiFi management — scan, connect, current state. Used by the
         // /setup-wifi captive-portal page during AP-fallback mode and
         // by the authenticated /wifi panel for ongoing management.
