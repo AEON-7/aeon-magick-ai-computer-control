@@ -273,3 +273,62 @@ pub fn config_exists() -> bool {
 fn _typecheck_value(v: Value) -> Value {
     v
 }
+
+#[cfg(test)]
+mod tests {
+    /// Reproduce exactly what put_config does: parse the shipped
+    /// streamer.toml, mutate fps + jpeg_quality, re-serialize, then
+    /// verify the result is still STRUCTURALLY VALID — i.e. top-level
+    /// keys stay top-level and [output] keys stay under [output].
+    /// This guards against the toml-Value round-trip reordering keys
+    /// such that a top-level scalar gets absorbed into the [output]
+    /// table (which would break aeon-streamer on the next slider use).
+    #[test]
+    fn roundtrip_preserves_structure() {
+        let text = r#"device = "/dev/kvmd-video"
+jpeg_quality = 70
+drop_same_frames = 30
+ustreamer_bin = "/usr/bin/ustreamer"
+run_as = "aeon"
+
+[output]
+match_source = false
+width = 1920
+height = 1080
+fps = 30
+format = "mjpeg"
+mjpeg_tcp_port = 8002
+hw_accel = false
+"#;
+        let mut parsed: toml::Value = toml::from_str(text).unwrap();
+        let table = parsed.as_table_mut().unwrap();
+        table.insert("jpeg_quality".into(), toml::Value::Integer(60));
+        let out = table
+            .entry("output".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        out.as_table_mut().unwrap().insert("fps".into(), toml::Value::Integer(15));
+        let serialized = toml::to_string(&parsed).unwrap();
+        eprintln!("--- re-serialized ---\n{serialized}\n---");
+
+        // Must re-parse.
+        let rp: toml::Value = toml::from_str(&serialized)
+            .expect("re-serialized streamer.toml must re-parse");
+        // Top-level keys must remain top-level.
+        assert_eq!(rp.get("device").and_then(|x| x.as_str()), Some("/dev/kvmd-video"),
+            "device leaked out of top level");
+        assert_eq!(rp.get("run_as").and_then(|x| x.as_str()), Some("aeon"),
+            "run_as leaked out of top level");
+        assert_eq!(rp.get("ustreamer_bin").and_then(|x| x.as_str()), Some("/usr/bin/ustreamer"),
+            "ustreamer_bin leaked out of top level");
+        // [output] keys must remain under [output].
+        let o = rp.get("output").expect("output table missing");
+        assert_eq!(o.get("format").and_then(|x| x.as_str()), Some("mjpeg"),
+            "output.format missing/moved");
+        assert_eq!(o.get("mjpeg_tcp_port").and_then(|x| x.as_integer()), Some(8002),
+            "output.mjpeg_tcp_port missing/moved");
+        assert_eq!(o.get("fps").and_then(|x| x.as_integer()), Some(15),
+            "fps not updated");
+        assert_eq!(rp.get("jpeg_quality").and_then(|x| x.as_integer()), Some(60),
+            "jpeg_quality not updated");
+    }
+}

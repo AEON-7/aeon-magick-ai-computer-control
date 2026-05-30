@@ -590,7 +590,12 @@ pub async fn ap_set(
             "ssid".into(), ssid.clone(),
             "mode".into(), "ap".into(),
             "ipv4.method".into(), "shared".into(),
-            "ipv4.addresses".into(), "10.42.0.1/24".into(),
+            // v67: MUST match aeon-netwatch's AP_GATEWAY (192.168.50.1)
+            // and captive.rs's SETUP_REDIRECT. An earlier value of
+            // 10.42.0.1 put the manually-set AP on a different subnet
+            // than the captive DNAT + setup redirect expected, so the
+            // fallback AP came up but the setup page was unreachable.
+            "ipv4.addresses".into(), "192.168.50.1/24".into(),
             "ipv6.method".into(), "ignore".into(),
             "802-11-wireless.band".into(), "bg".into(),
             "802-11-wireless.channel".into(), "6".into(),

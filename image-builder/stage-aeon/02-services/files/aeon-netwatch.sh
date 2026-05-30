@@ -48,6 +48,12 @@ ap_active() {
 
 apply_captive_portal_hijack() {
     log "AP-up: enabling captive portal hijack"
+    # v67: signal the supervisor's port-80 captive listener that we ARE
+    # in AP-setup mode. Without this flag the listener upgrades http→https
+    # for the requested host (normal client behaviour); with it, the
+    # listener runs the OS-probe captive flow + redirects to /setup/wifi.
+    install -d -m 0755 /run/aeon
+    : > /run/aeon/ap-mode
     # dnsmasq wildcard
     install -d -m 0755 /etc/NetworkManager/dnsmasq-shared.d
     cat > "$DNSMASQ_CAPTIVE" <<EOF
@@ -75,6 +81,10 @@ EOF
 
 remove_captive_portal_hijack() {
     log "AP-down: removing captive portal hijack"
+    # v67: clear the AP-mode flag so the port-80 listener reverts to
+    # plain http→https upgrade (so a reconnected client hitting
+    # http://<pi> reaches the console, not the setup page).
+    rm -f /run/aeon/ap-mode
     rm -f "$DNSMASQ_CAPTIVE"
     # Sweep our captive iptables rules — line-number based for reliability.
     for chain in PREROUTING OUTPUT INPUT FORWARD; do
@@ -156,16 +166,28 @@ fi
 
 if (( now - down_since >= MAX_DOWN_SECONDS )); then
     log "offline $((now - down_since))s, activating $AP_CON"
-    # Ensure the AP profile exists.
+    # Ensure the AP profile exists with default SSID/PSK on first creation.
     if ! nmcli con show "$AP_CON" >/dev/null 2>&1; then
         nmcli con add type wifi con-name "$AP_CON" ifname wlan0 ssid "$AP_CON" \
             mode ap autoconnect no >/dev/null 2>&1
         nmcli con mod "$AP_CON" \
-            wifi-sec.key-mgmt wpa-psk wifi-sec.psk "aeon-setup-pw" \
-            ipv4.method shared "ipv4.addresses" "192.168.50.1/24" \
-            ipv6.method disabled \
-            wifi.band bg wifi.channel 6 >/dev/null 2>&1
+            wifi-sec.key-mgmt wpa-psk wifi-sec.psk "aeon-setup-pw" >/dev/null 2>&1
     fi
+    # v67: ALWAYS enforce the AP network config before bringing it up.
+    # The /wifi page's AP form (wifi.rs ap_set) also writes this profile,
+    # and an earlier version created it on a different subnet (10.42.0.1)
+    # which left the captive DNAT + the supervisor's setup redirect
+    # (both hardcoded to AP_GATEWAY=192.168.50.1) pointing at an
+    # unreachable address — the AP came up but the setup page was dead.
+    # Re-asserting these fields every activation makes netwatch
+    # authoritative for the fallback AP's L3 config regardless of who
+    # created the profile, while PRESERVING any custom SSID/PSK the user
+    # set via /wifi (we don't touch wifi-sec/ssid here).
+    nmcli con mod "$AP_CON" \
+        802-11-wireless.mode ap \
+        ipv4.method shared "ipv4.addresses" "${AP_GATEWAY}/24" \
+        ipv6.method disabled \
+        wifi.band bg wifi.channel 6 >/dev/null 2>&1
     # Capture NM's actual error so we don't silently keep retrying — the
     # journal will now show *why* AP activation failed (regdomain, wpa
     # mode, iface busy, etc.).
