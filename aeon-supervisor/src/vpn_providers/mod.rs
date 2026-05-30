@@ -186,6 +186,17 @@ fn truncate_str(s: &str, max: usize) -> &str {
 ///   - Mullvad:         `{"error": "...", "code": "..."}`
 /// Fall back to the raw (truncated) body if none match.
 fn api_error_message(code: u16, body: &str) -> String {
+    // Human gloss for status codes whose raw meaning trips people up.
+    // 402 in particular: every provider returns it for "valid token,
+    // but the account isn't paid up" — the token authenticated (else
+    // you'd get 401), so the actionable cause is billing, not creds.
+    // (AzireVPN returns 402 on /v3/ips when the subscription lapsed.)
+    let hint = match code {
+        402 => " — your VPN subscription appears inactive or expired; renew with the provider, then retry (the token itself is valid)",
+        403 => " — the account is authenticated but not permitted this action (subscription tier, device/key limit, or token scope)",
+        429 => " — rate-limited by the provider; wait a moment and retry",
+        _ => "",
+    };
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         for key in ["message", "error", "detail", "description", "error_message"] {
             if let Some(msg) = v.get(key).and_then(|x| x.as_str()) {
@@ -197,16 +208,16 @@ fn api_error_message(code: u16, body: &str) -> String {
                         .filter(|c| !c.is_empty())
                         .map(|c| format!(" [{c}]"))
                         .unwrap_or_default();
-                    return format!("HTTP {code}: {}{code_hint}", msg.trim());
+                    return format!("HTTP {code}: {}{code_hint}{hint}", msg.trim());
                 }
             }
         }
     }
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        format!("HTTP {code} (empty response body)")
+        format!("HTTP {code}{hint}")
     } else {
-        format!("HTTP {code}: {}", truncate_str(trimmed, 300))
+        format!("HTTP {code}: {}{hint}", truncate_str(trimmed, 300))
     }
 }
 
