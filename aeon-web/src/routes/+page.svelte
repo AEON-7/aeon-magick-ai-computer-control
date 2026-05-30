@@ -7,9 +7,28 @@
   // v64: prefer the low-latency H.264 WebCodecs canvas when the browser
   // supports it. H264Canvas dispatches `fallback` (no WebCodecs, or no
   // keyframe ⇒ streamer still in MJPEG mode) and we revert to the <img>.
+  //
+  // v67: only attempt H.264 when the streamer is ACTUALLY producing it.
+  // Previously useH264 was set to "browser has WebCodecs" unconditionally
+  // in onMount — so on Chrome/Brave with the default MJPEG streamer, the
+  // page mounted H264Canvas, got no keyframes, and showed a BLACK CANVAS
+  // for ~4.5s until the no-keyframe timer fell back to MJPEG. On a reload
+  // that reads as "the stream is broken". Now useH264 is derived from the
+  // streamer's advertised format (state.mode.format), so an MJPEG streamer
+  // shows the <img> instantly with no black-canvas probe delay, and an
+  // H.264 streamer engages WebCodecs as soon as state reports it.
   let ws_url = '';
-  let useH264 = false;
+  let webCodecsOk = false;
+  // Sticky: set when H264Canvas reports a fallback (decoder/ws failure) so
+  // we don't flap back into a known-bad H.264 attempt on the next poll.
+  let h264FellBack = false;
   let state: api.StreamerState | null = null;
+  // Derived: use H.264 only if the browser supports it, the streamer is
+  // emitting h264, and we haven't already hit a fallback this session.
+  $: useH264 =
+    webCodecsOk &&
+    !h264FellBack &&
+    (state?.mode?.format ?? '').includes('h264');
   let hid: api.HidStatus | null = null;
   let poll_iv: ReturnType<typeof setInterval>;
   // Network status pills — we only care about the small "is it on?"
@@ -100,7 +119,7 @@
   onMount(() => {
     stream_url = api.streamURL();
     ws_url = api.streamWsURL();
-    useH264 = typeof window !== 'undefined' && 'VideoDecoder' in window;
+    webCodecsOk = typeof window !== 'undefined' && 'VideoDecoder' in window;
     refreshState();
     refreshNet();
     poll_iv = setInterval(refreshState, 2000);
@@ -939,7 +958,7 @@
       role="application"
     >
       {#if useH264}
-        <H264Canvas url={ws_url} on:fallback={() => (useH264 = false)} />
+        <H264Canvas url={ws_url} on:fallback={() => (h264FellBack = true)} />
       {:else}
         <img
           src={stream_url}
