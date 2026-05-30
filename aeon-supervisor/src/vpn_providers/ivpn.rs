@@ -117,51 +117,70 @@ pub struct SessionResult {
     pub ipv4: String,
 }
 
-/// GET /v4/servers/stats — full server list with country + city + WG
-/// peer info. Public (no auth needed for listing).
+/// GET /v4/servers.json — full WireGuard server list. Public (no auth).
+///
+/// v67.4: previously hit /v4/servers/stats and looked for `public_key` +
+/// `ip_address` per entry — but stats names the key `wg_public_key` and
+/// carries NO per-server IP, so every server failed the
+/// non-empty-pubkey-and-IP check and the cache came up empty ("0 servers
+/// in cache"). servers.json is the right source: a `wireguard` array of
+/// gateways, each with a `hosts[]` list giving the actual endpoint
+/// `host` (IPv4), `public_key`, and `hostname`. We flatten hosts into
+/// individual selectable Servers.
+///
+/// Response shape (verbatim):
+///   { "wireguard": [ { "gateway":"ro.wg.ivpn.net", "country_code":"RO",
+///       "country":"Romania", "city":"Bucharest",
+///       "hosts":[ { "hostname":"ro1.wg.ivpn.net", "host":"37.120.206.53",
+///                   "public_key":"F2uQ…", "local_ip":"172.16.0.1/12" } ] } ],
+///     "openvpn":[…], "config":{…} }
 pub fn fetch_servers(provider_trust: u8) -> Result<Vec<Server>, String> {
-    let url = format!("{API_BASE}/servers/stats");
+    let url = format!("{API_BASE}/servers.json");
     let v = http_get_json(&url, None)?;
-    let servers = v.get("servers")
-        .or_else(|| v.get("wireguard"))
+    let gateways = v.get("wireguard")
         .and_then(|x| x.as_array())
-        .ok_or_else(|| "no servers array in response".to_string())?;
-    let mut out = Vec::with_capacity(servers.len());
-    for s in servers {
-        let hostname = s.get("hostnames").and_then(|h| h.as_array())
-            .and_then(|h| h.first())
-            .and_then(|h| h.as_str())
-            .or_else(|| s.get("hostname").and_then(|h| h.as_str()))
-            .unwrap_or("");
-        let country = s.get("country_code").and_then(|x| x.as_str())
+        .ok_or_else(|| "no wireguard array in /v4/servers.json".to_string())?;
+    let mut out = Vec::new();
+    for gw in gateways {
+        let country = gw.get("country_code").and_then(|x| x.as_str())
             .unwrap_or("")
             .to_uppercase();
-        let country_name = s.get("country").and_then(|x| x.as_str())
+        let country_name = gw.get("country").and_then(|x| x.as_str())
             .unwrap_or(&country)
             .to_string();
-        let city = s.get("city").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let pubkey = s.get("public_key").and_then(|x| x.as_str()).unwrap_or("");
-        let endpoint_ip = s.get("ip_address").and_then(|x| x.as_str())
-            .or_else(|| s.get("ipv4").and_then(|x| x.as_str()))
-            .unwrap_or("");
-        if hostname.is_empty() || pubkey.is_empty() || endpoint_ip.is_empty() {
-            continue;
+        let city = gw.get("city").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let hosts = match gw.get("hosts").and_then(|x| x.as_array()) {
+            Some(h) => h,
+            None => continue,
+        };
+        for host in hosts {
+            let hostname = host.get("hostname").and_then(|x| x.as_str()).unwrap_or("");
+            let ip = host.get("host").and_then(|x| x.as_str()).unwrap_or("");
+            let pubkey = host.get("public_key").and_then(|x| x.as_str()).unwrap_or("");
+            if hostname.is_empty() || ip.is_empty() || pubkey.is_empty() {
+                continue;
+            }
+            let eyes = eyes_for_country(&country);
+            let score = compute_server_score(provider_trust, eyes);
+            out.push(Server {
+                id: hostname.to_string(),
+                label: format!("{country_name} — {city}"),
+                country: country.clone(),
+                country_name: country_name.clone(),
+                city: city.clone(),
+                hostname: hostname.to_string(),
+                endpoint_ip: ip.to_string(),
+                // IVPN WireGuard single-hop listens on UDP 2049 (their
+                // config generator's default Endpoint port).
+                endpoint_port: 2049,
+                public_key: pubkey.to_string(),
+                eyes,
+                server_score: score,
+            });
         }
-        let eyes = eyes_for_country(&country);
-        let score = compute_server_score(provider_trust, eyes);
-        out.push(Server {
-            id: hostname.to_string(),
-            label: format!("{country_name} — {city}"),
-            country: country.clone(),
-            country_name,
-            city,
-            hostname: hostname.to_string(),
-            endpoint_ip: endpoint_ip.to_string(),
-            endpoint_port: 51820,
-            public_key: pubkey.to_string(),
-            eyes,
-            server_score: score,
-        });
+    }
+    if out.is_empty() {
+        return Err("parsed 0 IVPN WireGuard servers from /v4/servers.json".into());
     }
     Ok(out)
 }
