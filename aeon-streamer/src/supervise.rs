@@ -337,8 +337,16 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
         // scale_v4l2m2m doesn't take a flags= option; quality is implicit.
         format!("scale_v4l2m2m={w}:{h}", w = out_w, h = out_h)
     } else {
+        // in_range=full:out_range=jpeg — CRITICAL for correct color.
+        // The Cam Link (capturing a computer's HDMI) delivers FULL-range
+        // YUV (NV12/YU12 at 4K), but swscale defaults to assuming
+        // limited/TV range on these planar formats → a heavy green/
+        // magenta cast (ffmpeg even warns "deprecated pixel format used,
+        // make sure you did set range correctly"). Declaring the input
+        // full-range and keeping it full-range for the JPEG output fixes
+        // the cast. Verified on-device against a 4K MacBook source.
         format!(
-            "scale={w}:{h}:flags={alg}",
+            "scale={w}:{h}:flags={alg}:in_range=full:out_range=jpeg",
             w = out_w,
             h = out_h,
             alg = scale_algorithm
@@ -553,11 +561,18 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
     // is the common `match_source` path for a ≤1080p source.
     let need_scale = (out_w, out_h) != (nat_w, nat_h);
     let scale_part = if !need_scale {
-        String::new()
+        // match_source, no resample. Still force full→limited range so the
+        // Cam Link's full-range NV12/YU12 doesn't get mis-mapped (same
+        // green/magenta cast the MJPEG path hit). `scale` with no size
+        // change is a cheap way to attach the range conversion; h264
+        // conventionally carries limited (tv) range.
+        format!("scale=in_range=full:out_range=tv")
     } else if out.hw_accel {
         format!("scale_v4l2m2m={out_w}:{out_h}")
     } else {
-        format!("scale={out_w}:{out_h}:flags={scale_algorithm}")
+        // See the MJPEG path for why in_range=full matters. h264 carries
+        // limited (tv) range by convention, so out_range=tv here.
+        format!("scale={out_w}:{out_h}:flags={scale_algorithm}:in_range=full:out_range=tv")
     };
     // Assemble crop + (optional) scale; either may be absent.
     let base = [crop_filter.as_deref().unwrap_or(""), scale_part.as_str()]
