@@ -90,6 +90,7 @@ cp -R ~/aeon-magick-ai-computer-control/image-builder/stage-aeon ~/pi-gen/
 cd ~/pi-gen
 cat > config <<'EOF'
 IMG_NAME=aeon-magick
+IMG_DATE="v65"          # → deploy/image_${IMG_DATE}-aeon-magick.img.xz; bump each build
 RELEASE=bookworm
 TARGET_HOSTNAME=aeon-magick
 ENABLE_SSH=1
@@ -108,12 +109,30 @@ EOF
 touch stage3/SKIP stage4/SKIP stage5/SKIP \
       stage3/SKIP_IMAGES stage4/SKIP_IMAGES stage5/SKIP_IMAGES
 
-# Build inside Docker (works on macOS)
-sudo ./build-docker.sh
+# Build inside Docker (works on macOS). Run WITHOUT sudo so deploy/ stays
+# user-owned; PRESERVE_CONTAINER=1 keeps the container for the copy-out.
+docker rm -fv pigen_work 2>/dev/null   # clear any stale build container
+PRESERVE_CONTAINER=1 ./build-docker.sh
 ```
 
-Output: `deploy/<date>-aeon-magick.img.xz`. Flash with Raspberry Pi
-Imager, BalenaEtcher, or:
+> **Heads-up:** the build prints `Build finished` and then often **exits 1 on
+> the final "copying results from deploy/" step** with `Permission denied` —
+> that copy-out is the only failure; the image built fine. It happens when
+> `~/pi-gen/deploy/` is root-owned (legacy of past `sudo` builds). Pull the
+> real image straight out of the preserved container:
+>
+> ```bash
+> docker cp pigen_work:/pi-gen/deploy/image_v65-aeon-magick.img.xz \
+>     ~/Documents/aeon-magick/aeon-magick-v65.img.xz
+> xz -t ~/Documents/aeon-magick/aeon-magick-v65.img.xz   # verify integrity
+> docker rm -fv pigen_work                                # cleanup
+> ```
+>
+> (Or run `sudo chown -R "$USER" ~/pi-gen/deploy` once so the normal copy-out
+> succeeds — but `docker cp` avoids sudo entirely.)
+
+Output: `deploy/image_<IMG_DATE>-aeon-magick.img.xz` (e.g. `image_v65-…`).
+Flash with Raspberry Pi Imager, BalenaEtcher, or:
 
 ```bash
 diskutil unmountDisk /dev/disk4
@@ -127,7 +146,8 @@ sudo dd if=deploy/*-aeon-magick.img of=/dev/rdisk4 bs=4m
 cd ~/aeon-magick-ai-computer-control
 ./scripts/build-binaries.sh && \
 ./scripts/build-web.sh && \
-( cp -R image-builder/stage-aeon ~/pi-gen/ && cd ~/pi-gen && sudo ./build-docker.sh )
+( cp -R image-builder/stage-aeon ~/pi-gen/ && cd ~/pi-gen && \
+  docker rm -fv pigen_work 2>/dev/null; PRESERVE_CONTAINER=1 ./build-docker.sh )
 ```
 
 ## Quick sanity check before cross-compiling

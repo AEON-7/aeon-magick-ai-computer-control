@@ -20,13 +20,19 @@ left "stuck pressed" by network loss. Trust this.
 
 ## Loop
 
-`state` → `snapshot` → reason → act (`type_text` / `key_chord` / `click` /
-`move_cursor` / `scroll`) → `snapshot` → confirm.
+`state` → `snapshot` → reason → act (`type_text` / `key_chord` / `click_at` /
+`scroll`) → `snapshot` → confirm.
 
-If the cursor went to the wrong place: take a fresh snapshot and
-re-`move_cursor` from the new observed position. Boot-mouse deltas are
-int8-bounded (−127..127). For larger moves, send several `move_cursor`
-calls in sequence.
+**Clicking (preferred):** switch once to the absolute-pointer persona
+(`set_persona persona="generic-absolute"`), then use **`click_at`** with the
+target as a fraction of the frame — `x = pixel_x / frame_width`,
+`y = pixel_y / frame_height` (screen-centre = `0.5, 0.5`). The cursor lands
+exactly there: no acceleration drift, no re-aiming. `move_pointer` hovers
+without clicking; `drag` press-moves-releases between two points.
+
+On a *relative* persona instead, drive with `move_cursor` deltas (int8-bounded,
+−127..127; split larger moves into several calls) and re-aim from a fresh
+snapshot if you overshoot.
 
 ## Macros
 

@@ -165,7 +165,8 @@ curl -sk -u admin:$PW \
     -o frame.jpg
 ```
 
-Returns the current JPEG. 1920×1080 by default; 4K if the source is 4K.
+Returns the current JPEG. 1920×1080 by default; with `match_source` enabled it
+mirrors the source's native resolution (capped at 1080p). 4K sources downscale to fit.
 Pi 4 hardware JPEG encoding keeps frame latency around 40-80 ms on LAN.
 
 ### Live MJPEG stream
@@ -228,6 +229,47 @@ curl -sk -u admin:$PW -X POST \
 Boot mouse semantics — relative deltas, clamped to int8 range
 (−127..127). For multi-segment moves, split client-side.
 
+### Move / click at an absolute position (precise targeting)
+
+Requires the `generic-absolute` persona (see *Switch HID persona* below).
+Instead of relative deltas you give a point as a **fraction of the screen** —
+`(0,0)` = top-left, `(1,1)` = bottom-right — so the cursor lands exactly where
+you computed it from a snapshot (`x = pixel_x / frame_width`,
+`y = pixel_y / frame_height`). This sidesteps host pointer-acceleration
+entirely and is **the recommended way for an AI agent to click** a specific
+element.
+
+```bash
+# move the pointer to the centre of the screen (no click)
+curl -sk -u admin:$PW -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"x": 0.5, "y": 0.5}' \
+    https://aeon-magick.local/api/hid/move_abs
+```
+
+Body: `x`, `y` (0..1, required) plus optional `buttons` (bitmask: 1=left,
+2=right, 4=middle) and `wheel` (signed, ±127). Omit `buttons`/`wheel` to just
+move. To **click** a point, send it once with the button bit set, then again
+with `buttons: 0` at the same coordinates.
+
+### Click-and-drag (held buttons)
+
+Because `move_abs` carries the button mask, a drag is press → move → release:
+
+```bash
+# drag from (0.2,0.3) to (0.6,0.7) with the left button held
+for step in '{"x":0.2,"y":0.3,"buttons":1}' \
+            '{"x":0.6,"y":0.7,"buttons":1}' \
+            '{"x":0.6,"y":0.7,"buttons":0}'; do
+  curl -sk -u admin:$PW -X POST -H "Content-Type: application/json" \
+      -d "$step" https://aeon-magick.local/api/hid/move_abs
+done
+```
+
+For the *relative* personas, `POST /api/hid/button {"button":"left","down":true|false}`
+holds or releases a button at the current position (the web UI uses this to
+drag). `release_all` always clears any held button.
+
 ### Scroll
 
 ```bash
@@ -252,14 +294,32 @@ curl -sk -u admin:$PW -X POST \
     https://aeon-magick.local/api/hid/persona
 ```
 
-Valid values: `generic-composite`, `logitech-mx`, `apple-magic`. Triggers a
-USB re-enumeration on the target — about a one-second blip.
+Valid values: `generic-composite`, `generic-absolute`, `logitech-mx`,
+`apple-magic-stable`, `apple-magic`. Triggers a USB re-enumeration on the
+target — about a one-second blip.
+
+- **`generic-composite`** — boot keyboard + relative boot mouse, neutral VID
+  `1d6b`. Most compatible, smallest attack surface. Safe on Linux hosts.
+- **`generic-absolute`** — boot keyboard + **absolute pointer** (VID `1d6b`).
+  Same compatibility, but the mouse reports absolute screen coordinates, which
+  unlocks `move_abs` / `click_at` (point at an exact spot). **Best choice for
+  AI agents** — precise, no relative-acceleration drift. Also Linux-safe.
+- **`logitech-mx`** — Logitech VID `046d`, MX-Keys + MX-Master flavor (media
+  keys, extra buttons). Can wedge `aeon-hid` on **Linux** targets (the
+  `hid-logitech-dj` driver claims it but doesn't drain reports) — prefer a
+  `generic-*` persona on Linux.
+- **`apple-magic-stable`** — Apple VID, Apple keyboard + working trackpad
+  (pointer + keys + modifiers). Use for macOS targets.
+- **`apple-magic`** (experimental) — Apple multi-touch descriptor; gestures are
+  a work-in-progress and the pointer is currently unreliable. See
+  `docs/design/apple-mt.md`.
 
 **Persistence:** the selection is written to `/etc/aeon/persona.state`
 and survives reboots. To revert to the default, SSH in and `sudo rm
 /etc/aeon/persona.state` then `sudo systemctl restart aeon-hid`. The
 default falls back to whatever `persona = ` is set to in
-`/etc/aeon/hid.toml` (which ships as `generic-composite`).
+`/etc/aeon/hid.toml` (which ships as `logitech-mx`; for Linux targets or
+precise agent control, set it to `generic-absolute`).
 
 **How the switch is implemented:** the supervisor writes the new persona
 slug to `persona.state`, the aeon-hid daemon exits cleanly, systemd
@@ -828,7 +888,7 @@ https://aeon-magick.local/api/mcp
 ```
 
 with Basic auth `admin:<password>` and TLS verification off (self-signed
-cert). The server advertises 52 tools, grouped below.
+cert). The server advertises 55 tools, grouped below.
 
 ### Live control + state
 
@@ -840,6 +900,9 @@ cert). The server advertises 52 tools, grouped below.
 | `key_chord` | fire a key combo |
 | `click` | left/right/middle click |
 | `move_cursor` | relative cursor move (int8 deltas) |
+| `click_at` | click at an absolute screen point — `x`,`y` as fractions 0..1; needs `generic-absolute` |
+| `move_pointer` | move the absolute pointer to a point without clicking (hover) |
+| `drag` | press → move → release between two absolute points |
 | `scroll` | wheel scroll |
 | `set_persona` | hot-swap HID identity |
 | `release_all` | panic-release everything |
@@ -922,8 +985,11 @@ The proven pattern (used by Celina, our local OpenClaw anchor agent):
 1. **`state`** to confirm everything is reachable + the right persona is loaded.
 2. **`snapshot`** to fetch a frame.
 3. Reason over the frame and decide what to do.
-4. **`type_text` / `key_chord` / `click` / `move_cursor` / `scroll`** to act.
-   Each call is atomic; you do not need to track partial press state.
+4. **`type_text` / `key_chord` / `click_at` / `scroll`** to act. To click a
+   specific element, switch to the `generic-absolute` persona once and use
+   **`click_at`** with the target's fractional coordinates — far more reliable
+   than relative `move_cursor`. Each call is atomic; you don't track partial
+   press state.
 5. Optionally wait briefly, then **`snapshot`** again to confirm what changed.
 6. Loop.
 

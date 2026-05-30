@@ -8,6 +8,12 @@ input events, but **macOS will not synthesize 3- or 4-finger swipe
 gestures** from PTP reports — those gestures are conditioned on Apple's
 proprietary "MultiTouch" service path.
 
+> **Note:** this doc is only about Apple *multi-touch gestures*. If you just
+> need **absolute pointer positioning** — point the cursor at an exact screen
+> coordinate, which is what most AI-agent use cases want — that already ships
+> and works everywhere via the **`generic-absolute`** persona + `move_abs` /
+> `click_at`. No Apple-vendor descriptor required.
+
 ## Two-phase plan
 
 ### Phase A — Precision Touchpad emulation (works on Windows + Linux now)

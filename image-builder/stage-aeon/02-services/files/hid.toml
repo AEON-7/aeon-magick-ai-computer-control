@@ -1,6 +1,14 @@
 # Default aeon-hid config.
 
-# Pick one: "generic-composite", "logitech-mx", "apple-magic"
+# Pick one: "generic-composite", "generic-absolute", "logitech-mx",
+#           "apple-magic-stable", "apple-magic".
+#   generic-absolute  — keyboard + ABSOLUTE pointer; best for AI agents
+#                       (enables move_abs / click_at). Linux-safe.
+#   generic-composite — keyboard + relative mouse; most compatible, Linux-safe.
+#   logitech-mx       — Logitech-flavored; media keys + extra buttons, but can
+#                       wedge aeon-hid on Linux targets (prefer generic-* there).
+#   apple-magic-stable — working Apple keyboard + trackpad (use on macOS).
+#   apple-magic        — experimental multi-touch (pointer currently unreliable).
 persona = "logitech-mx"
 
 # The Pi 4 USB-C UDC; on Pi 5 set to "1000480000.usb"

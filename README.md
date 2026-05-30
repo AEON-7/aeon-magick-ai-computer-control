@@ -47,8 +47,8 @@ It's the strangest USB device in the universe and also the most boring one.
 
 ## What it does, in one bullet list
 
-- 🎹 **Pretends to be a keyboard/mouse/trackpad** via USB-C OTG (Linux gadget framework) — three hot-swappable personas including Apple Magic Keyboard + Trackpad with real multi-touch descriptor
-- 🎥 **Captures HDMI** via Elgato Cam Link 4K (or any UVC device), streams MJPEG to a browser at native resolution, 1080p60 capable
+- 🎹 **Pretends to be a keyboard/mouse/trackpad** via USB-C OTG (Linux gadget framework) — five hot-swappable personas, including an **absolute pointer** (`generic-absolute`, ideal for AI agents) and an Apple Magic Keyboard + Trackpad multi-touch descriptor
+- 🎥 **Captures HDMI** via Elgato Cam Link 4K (or any UVC device) — MJPEG or low-latency **H.264/WebCodecs**, native source resolution (`match_source`), 1080p60 capable
 - 🌐 **Optional USB ethernet adapter** on the same cable — host pipes its WAN through the Pi (`isolation` / `sharing` / `restricted` modes)
 - 🔒 **Optional encrypted DNS** (DNSCrypt v2 + DoH) — Cloudflare / Quad9 / AdGuard / NextDNS / Mullvad — for both the Pi AND USB clients
 - 🕳️ **Optional VPN tunnel** — Tailscale · WireGuard · OpenVPN · **Tor** (with bridge presets: direct/obfs4/meek-azure/snowflake/custom) · I2P — with kill-switch + LAN-bypass
@@ -60,13 +60,15 @@ It's the strangest USB device in the universe and also the most boring one.
 ## Personas
 
 `aeon-hid` builds a USB composite HID gadget on the Pi's USB-C OTG port. It
-ships three identities you can hot-swap (via API or web UI):
+ships five identities you can hot-swap (via API or web UI):
 
 | Persona | What the host sees | Use this when |
 |---|---|---|
-| `generic-composite` | Boot keyboard + boot mouse, VID `1d6b` (Linux Foundation) | You want maximum compatibility and a small attack surface. |
-| `logitech-mx` | Logitech Unifying Receiver (VID `046d`), MX-Keys-style keyboard + MX-Master-style mouse + consumer media keys | You want media keys and extra mouse buttons. The host often has a Logitech driver path that lights up. |
-| `apple-magic` (experimental) | Apple VID (`05ac`), Apple keyboard + Magic Trackpad multi-touch | You want **macOS gesture support** — 2/3/4-finger swipes, pinch, rotate — without installing anything on the Mac. See [`docs/design/apple-mt.md`](./docs/design/apple-mt.md) for the not-fully-solved Apple HID descriptor saga. |
+| `generic-composite` | Boot keyboard + relative boot mouse, VID `1d6b` (Linux Foundation) | You want maximum compatibility and a small attack surface. |
+| `generic-absolute` | Boot keyboard + **absolute pointer**, VID `1d6b` | You're driving with an **AI agent** — `click_at`/`move_abs` land the cursor on exact screen coordinates, no relative drift. Linux-safe. |
+| `logitech-mx` | Logitech Unifying Receiver (VID `046d`), MX-Keys-style keyboard + MX-Master-style mouse + consumer media keys | You want media keys and extra mouse buttons. (Can wedge `aeon-hid` on Linux targets — prefer `generic-*` there.) |
+| `apple-magic-stable` | Apple VID (`05ac`), Apple keyboard + working trackpad (pointer + keys) | You're on a **macOS** target and want a reliable Apple-flavored keyboard + pointer. |
+| `apple-magic` (experimental) | Apple VID (`05ac`), Apple keyboard + Magic Trackpad multi-touch | You want **macOS gesture support** — 2/3/4-finger swipes, pinch, rotate. Not fully solved — see [`docs/design/apple-mt.md`](./docs/design/apple-mt.md) for the Apple HID descriptor saga. |
 
 Switching persona requires a USB re-enumeration on the target. Takes about
 a second. The target host briefly sees the device disappear and a different

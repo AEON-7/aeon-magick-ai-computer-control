@@ -50,8 +50,12 @@ These came from the eye-Pi build that preceded this project:
 
 - **Cam Link 4K UVC enumeration changes with the source signal.** At 4K it
   ONLY offers NV12; at lower res it offers YUYV + YU12 + NV12. Solution baked
-  into `aeon-streamer`: ffmpeg auto-detects whichever pixel format the v4l2
-  device is currently presenting, encodes to MJPEG on the fly.
+  into `aeon-streamer`: it auto-detects whichever pixel format the v4l2 device
+  is presenting and **prefers planar NV12/YU12** (the H.264 encoder ingests it
+  with no per-frame software conversion — picking packed YUYV instead pegged
+  the CPU at 1080p). Output is MJPEG or low-latency **H.264/WebCodecs**; the
+  supervisor's H.264 WebSocket bridge drops to the newest keyframe-anchored
+  frame under congestion, so a slow link can't balloon latency.
 - **USB UVC devices don't support V4L2 DV-timings.** Adaptive resolution
   needs polling — both a v4l2-enum-hash watchdog AND a "is the streamer
   actually producing frames" watchdog. Both built into the streamer itself.
@@ -70,12 +74,16 @@ and HID descriptors are pinned by the active *persona*. Personas:
 
 | Name | Devices | VID/PID basis |
 |------|---------|---------------|
-| `logitech-mx` | Boot keyboard + boot mouse + consumer | 046d (Logitech) Unifying Receiver  |
-| `apple-magic` | Apple keyboard + multi-touch trackpad | 05ac (Apple) Magic Keyboard / Trackpad |
-| `generic-composite` | Boot keyboard + boot mouse | 1d6b (Linux Foundation) |
+| `generic-composite` | Boot keyboard + relative boot mouse | 1d6b (Linux Foundation) |
+| `generic-absolute` | Boot keyboard + **absolute pointer** (X/Y 0..32767) | 1d6b (Linux Foundation) |
+| `logitech-mx` | Boot keyboard + boot mouse + consumer | 046d (Logitech) Unifying Receiver |
+| `apple-magic-stable` | Apple keyboard + working trackpad | 05ac (Apple) Magic Keyboard / Trackpad |
+| `apple-magic` | Apple keyboard + multi-touch trackpad (experimental) | 05ac (Apple) Magic Keyboard / Trackpad |
 
 Switching persona requires un-bind / re-bind of the USB gadget (target host
-sees re-enumeration). API exposes this as `POST /api/persona/switch`.
+sees re-enumeration). API exposes this as `POST /api/hid/persona`. The
+`generic-absolute` pointer is driven via `POST /api/hid/move_abs` (normalized
+0..1 X/Y + button mask); relative personas use `/api/hid/move` + `/api/hid/button`.
 
 ### Apple multi-touch caveat
 

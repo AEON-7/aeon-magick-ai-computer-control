@@ -145,6 +145,32 @@ larger or smoother moves, split client-side into multiple calls (the device
 deliberately does **not** auto-segment — the agent stays in charge of the
 path, and a dropped packet only drops one segment, not a whole gesture).
 
+### Move / click at an absolute point — `move_abs` (recommended for agents)
+
+With the `generic-absolute` persona, give a point as a fraction of the screen
+(`(0,0)` top-left … `(1,1)` bottom-right) and the cursor lands there exactly —
+no relative-acceleration drift. Compute it from a snapshot as
+`x = pixel_x / frame_width`, `y = pixel_y / frame_height`.
+
+```bash
+# move (and optionally click) at an absolute point
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"x": 0.5, "y": 0.5, "buttons": 0}' \
+    "https://$AEON_HOST/api/hid/move_abs"
+```
+
+`buttons` is a bitmask (1=left, 2=right, 4=middle); `wheel` is optional. A
+click = send with the button bit, then again with `buttons:0`. Over MCP this
+is the `click_at` / `move_pointer` / `drag` tools — no math needed, just pass
+`x`,`y`.
+
+### Drag — hold a button across a move
+
+`move_abs` carries the button mask, so press → move → release drags. For the
+relative personas, `POST /api/hid/button {"button":"left","down":true}` /
+`…"down":false` holds/releases at the current spot. `release_all` clears it.
+
 ### Scroll
 
 ```bash
@@ -168,14 +194,18 @@ curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
 
 Valid values:
 
-- `generic-composite` — boot keyboard + boot mouse, neutral VID. Most
-  compatible, smallest attack surface.
-- `logitech-mx` — Logitech VID, MX-Keys + MX-Master flavor. Lights up the
-  target's Logitech driver path on Windows / macOS for media keys + extra
-  buttons.
-- `apple-magic` (experimental) — Apple VID, Magic-Trackpad-style multi-touch.
-  Enables macOS gestures (2-finger scroll, pinch). 3/4-finger gestures
-  partially work — see `docs/design/apple-mt.md` in the repo.
+- `generic-composite` — boot keyboard + relative boot mouse, neutral VID.
+  Most compatible, smallest attack surface. Linux-safe.
+- `generic-absolute` — boot keyboard + **absolute pointer**, neutral VID.
+  Reports absolute screen coords → enables `move_abs` / `click_at`. **Best for
+  AI agents** (precise pointing, no drift). Linux-safe.
+- `logitech-mx` — Logitech VID, MX-Keys + MX-Master flavor (media keys, extra
+  buttons). Can wedge `aeon-hid` on Linux targets — prefer a `generic-*`
+  persona there.
+- `apple-magic-stable` — Apple VID, Apple keyboard + working trackpad (pointer
+  + keys + modifiers). Use for macOS targets.
+- `apple-magic` (experimental) — Apple VID, multi-touch; macOS gestures WIP and
+  the pointer is currently unreliable — see `docs/design/apple-mt.md`.
 
 Switching triggers a USB re-enumeration on the target (about 1 s blip).
 
@@ -237,7 +267,8 @@ The server uses Streamable HTTP transport and exposes these tools (same
 shape as the curl endpoints above):
 
 `state`, `snapshot`, `type_text`, `key_chord`, `click`, `move_cursor`,
-`scroll`, `set_persona`, `release_all`, `list_macros`, `run_macro`.
+`click_at`, `move_pointer`, `drag`, `scroll`, `set_persona`, `release_all`,
+`list_macros`, `run_macro`.
 
 It also advertises stored macros + prompts as MCP **resources**
 (`aeon://macros/<name>`, `aeon://prompts/<name>`) so a UI like Claude
@@ -257,10 +288,11 @@ ambiguity in audit logs.
    model is reasoning over the captured frame directly — there is no
    "where is the cursor right now" state to track because every input is
    relative or chord-based.
-4. **`move`** in segments to drive the cursor to the target (split deltas
-   larger than ±127 into multiple calls). For macOS-style trackpad
-   gestures, switch to `apple-magic` persona first.
-5. **`click`** (or `key`, `type`, `scroll`) to act.
+4. On the `generic-absolute` persona, **`click_at`** the target with its
+   fractional coords (`x = pixel_x / width`, `y = pixel_y / height`) — the
+   reliable path. (On a relative persona, drive there with segmented `move`
+   instead, splitting deltas larger than ±127.)
+5. **`click_at`** / **`click`** (or `key`, `type`, `scroll`, `drag`) to act.
 6. **`snapshot`** again to verify the expected change happened. If not,
    loop back to step 3 with the new frame.
 
@@ -277,8 +309,8 @@ needed unless the target OS smooths poorly (rare).
 | Devices needed | 2 (Flipper + PiKVM) | 1 (PiKVM) | **1 (aeon-magick)** |
 | Input transport | WebSocket | HTTPS REST | **HTTPS REST** |
 | Vision transport | PiKVM snapshot | PiKVM snapshot | **same device, same auth** |
-| Mouse semantics | relative + naturalistic | absolute | **relative, atomic** |
-| Personas | one (Logitech) | one (generic) | **3, hot-swappable** |
+| Mouse semantics | relative + naturalistic | absolute | **relative *or* absolute, atomic** |
+| Personas | one (Logitech) | one (generic) | **5, hot-swappable** |
 | Apple gestures | no | no | **yes (experimental)** |
 | Pre-OS / BIOS HID | no | yes | **yes** |
 | Atomic input ops | yes (firmware) | no | **yes (API design)** |

@@ -25,8 +25,15 @@ run_as = "aeon"
 # the ustreamer fast path runs and these knobs are ignored — frames flow
 # through at the source resolution.
 [output]
-# Pick width × height to match your host's *logical* (post-Retina) screen
-# size so agent pointer coords map 1:1 with what the human sees:
+# match_source = true tracks the *source* resolution exactly (capped at the
+# H.264 encoder's 1920×1080 ceiling) and skips the scale filter entirely when
+# output == source — so a ≤1080p host streams native with zero resampling
+# (lower CPU, sharper text). Re-detected live when the source res changes.
+# Leave false to force the fixed width × height below.
+match_source = false
+# Used when match_source = false. Pick width × height to match your host's
+# *logical* (post-Retina) screen size so agent pointer coords map 1:1 with
+# what the human sees:
 #   M1 MBP 13" default scale  → 1440x900
 #   M2/M3 MBA 13"             → 1470x956
 #   M2/M3 MBP 14" default     → 1512x982
@@ -34,16 +41,13 @@ run_as = "aeon"
 #   Pure 1080p host           → 1920x1080
 width = 1920
 height = 1080
-# v63: dropped 30→24. Three reasons:
-#  (1) 24 fps is the cinema standard — visually fluid for desktop
-#      capture without paying the encoder for redundant frames.
-#  (2) Browser-side multipart-MJPEG parsers buffer per-frame; at 30 fps
-#      a slow drain produces a multi-second tail. 24 fps gives the
-#      same parser ~33ms more breathing room per frame.
-#  (3) Pi 4's MJPEG encoder is comfortable at 24 with margin for the
-#      JPEG quality drop above. Operators wanting smoother playback
-#      can push back to 30 via /system or the streamer.toml.
-fps = 24
+# fps: the Cam Link captures at 60 fps (≤1080p), so output fps should be a
+# clean divisor — 15, 30, or 60 — so frames drop evenly (the /system selector
+# and PUT /api/streamer/config snap to these; 24 would force an uneven 2-of-5
+# cadence). On the H.264 path 60 fps costs almost no extra CPU (capture was
+# always 60; the HW encoder is cheap). 30 is a balanced default; 60 for smooth
+# motion at ≤1080p; 15 to minimise bandwidth.
+fps = 30
 format = "mjpeg"               # "mjpeg" or "h264"
 scale_algorithm = "bicubic"    # "lanczos" (best) | "bicubic" (default) | "neighbor" (fastest)
 snapshot_path = "/run/aeon/snapshots/live.jpg"
