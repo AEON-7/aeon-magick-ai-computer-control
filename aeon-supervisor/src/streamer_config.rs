@@ -122,8 +122,12 @@ pub async fn put_config(
     State(_state): State<AppState>,
     Json(patch): Json<ConfigPatch>,
 ) -> impl IntoResponse {
-    // Validate. clamp() is fine because both ends are reasonable.
-    let fps = patch.fps.map(|v| v.clamp(1, 30));
+    // Frame rate is restricted to deterministic divisors of the 60fps
+    // capture (15/30/60) so frame-dropping is even — snap any incoming value
+    // to the nearest allowed step.
+    let fps = patch
+        .fps
+        .map(|v| [15i64, 30, 60].into_iter().min_by_key(|&f| (f - v).abs()).unwrap_or(30));
     let q = patch.jpeg_quality.map(|v| v.clamp(30, 95));
 
     if fps.is_none() && q.is_none() {

@@ -15,6 +15,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 async fn proxy(
     state: &AppState,
@@ -162,52 +165,117 @@ async fn bridge_h264(mut socket: WebSocket, state: AppState) {
             return;
         }
     };
-    let mut body = resp.into_body();
-    // Accumulates streamer-framed bytes until whole AUs can be split out.
-    let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+    let body = resp.into_body();
 
-    loop {
-        tokio::select! {
-            // Next chunk from the streamer's /h264 stream.
-            frame = body.frame() => {
-                match frame {
-                    Some(Ok(f)) => {
-                        if let Ok(data) = f.into_data() {
-                            buf.extend_from_slice(&data);
+    // ── Drop-to-newest bridge (v64.1) ──────────────────────────────────
+    // Previously this read one AU and `socket.send().await`'d it inline, so
+    // a browser slower than the source applied backpressure all the way up
+    // the unix socket into the streamer's 256-deep broadcast — letting live
+    // latency silently accumulate to *seconds* and never recover (the lag we
+    // chased; it surfaced on a congested Ethernet path). Now a reader task
+    // drains /h264 as fast as it arrives (so the broadcast + socket never
+    // back up) and stages access units in `pending`; when a backlog forms it
+    // discards everything before the most recent keyframe. The writer
+    // forwards that keyframe-anchored tail, so a slow/congested link drops
+    // stale frames and resyncs at the next keyframe instead of running
+    // seconds behind.
+    let pending: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let notify = Arc::new(Notify::new());
+    let done = Arc::new(AtomicBool::new(false));
+
+    let pending_r = pending.clone();
+    let notify_r = notify.clone();
+    let done_r = done.clone();
+    let reader = tokio::spawn(async move {
+        let mut body = body;
+        // Accumulates streamer-framed bytes until whole AUs can be split out.
+        let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+        while !done_r.load(Ordering::Relaxed) {
+            match body.frame().await {
+                Some(Ok(f)) => {
+                    if let Ok(data) = f.into_data() {
+                        buf.extend_from_slice(&data);
+                    }
+                }
+                // EOF (streamer relaunched / pipeline changed) or error.
+                _ => break,
+            }
+            let mut produced = false;
+            // Split out every complete [1B flags][4B BE len][AU] record.
+            loop {
+                if buf.len() < 5 {
+                    break;
+                }
+                let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+                if buf.len() < 5 + len {
+                    break;
+                }
+                let mut msg = Vec::with_capacity(1 + len);
+                msg.push(buf[0]); // flags: bit0 = keyframe
+                msg.extend_from_slice(&buf[5..5 + len]);
+                buf.drain(..5 + len);
+                {
+                    let mut p = pending_r.lock().unwrap();
+                    p.push(msg);
+                    // Hard cap (e.g. browser hung but not yet disconnected):
+                    // keep only the latest keyframe-anchored run so memory
+                    // stays bounded.
+                    if p.len() > 60 {
+                        if let Some(kf) = p.iter().rposition(|m| m[0] & 1 == 1) {
+                            if kf > 0 {
+                                p.drain(..kf);
+                            }
                         }
                     }
-                    // EOF (streamer relaunched / pipeline changed) or error.
-                    _ => break,
                 }
-                // Drain every complete [1B flags][4B BE len][AU] record.
-                loop {
-                    if buf.len() < 5 {
-                        break;
-                    }
-                    let len =
-                        u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-                    if buf.len() < 5 + len {
-                        break;
-                    }
-                    let mut msg = Vec::with_capacity(1 + len);
-                    msg.push(buf[0]); // flags: bit0 = keyframe
-                    msg.extend_from_slice(&buf[5..5 + len]);
-                    if socket.send(Message::Binary(msg)).await.is_err() {
-                        return; // browser disconnected
-                    }
-                    buf.drain(..5 + len);
-                }
+                produced = true;
             }
-            // Client frames: close/ping. axum auto-pongs; we watch for close
-            // so a browser navigating away tears down the streamer read.
+            if produced {
+                notify_r.notify_one();
+            }
+        }
+        done_r.store(true, Ordering::Relaxed);
+        notify_r.notify_one();
+    });
+
+    // Writer: forward the keyframe-anchored tail; watch for client close.
+    loop {
+        tokio::select! {
+            _ = notify.notified() => {}
             ws_in = socket.recv() => {
                 match ws_in {
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                    _ => {}
+                    _ => continue,
                 }
             }
         }
+        let batch: Vec<Vec<u8>> = {
+            let mut p = pending.lock().unwrap();
+            // Frames piled up while we were sending ⇒ browser is behind the
+            // source: skip to the most recent keyframe, dropping the stale
+            // run. (No keyframe staged yet ⇒ forward as-is; client waits for
+            // one.) The `> 3` guard avoids dropping during normal cadence.
+            if p.len() > 3 {
+                if let Some(kf) = p.iter().rposition(|m| m[0] & 1 == 1) {
+                    if kf > 0 {
+                        p.drain(..kf);
+                    }
+                }
+            }
+            std::mem::take(&mut *p)
+        };
+        for msg in batch {
+            if socket.send(Message::Binary(msg)).await.is_err() {
+                done.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+        if done.load(Ordering::Relaxed) && pending.lock().unwrap().is_empty() {
+            break;
+        }
     }
+    done.store(true, Ordering::Relaxed);
+    reader.abort();
     let _ = socket.send(Message::Close(None)).await;
 }
 
@@ -225,8 +293,14 @@ pub async fn hid_key(State(state): State<AppState>, body: bytes::Bytes) -> Respo
 pub async fn hid_click(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
     proxy(&state, &state.cfg.hid_sock, Method::POST, "/click", Some(body.to_vec())).await
 }
+pub async fn hid_button(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/button", Some(body.to_vec())).await
+}
 pub async fn hid_move(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
     proxy(&state, &state.cfg.hid_sock, Method::POST, "/move", Some(body.to_vec())).await
+}
+pub async fn hid_move_abs(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.hid_sock, Method::POST, "/move_abs", Some(body.to_vec())).await
 }
 pub async fn hid_scroll(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
     proxy(&state, &state.cfg.hid_sock, Method::POST, "/scroll", Some(body.to_vec())).await

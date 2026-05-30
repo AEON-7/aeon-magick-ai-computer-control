@@ -42,10 +42,24 @@ pub async fn run(state: SharedState) -> Result<()> {
                 target_height,
                 target_format,
                 ..
-            } => (
-                format!("{target_format} (ffmpeg {source_format}@{source_resolution})"),
-                format!("{target_width}x{target_height}"),
-            ),
+            } => {
+                // With match_source the real output tracks the (capped)
+                // source resolution, so report that instead of the unused
+                // config target. (Crop is applied in spawn; the common
+                // no-crop case is exact.)
+                let res = if state.0.cfg.output.match_source {
+                    parse_wxh(source_resolution)
+                        .map(|(w, h)| cap_1080p(w, h))
+                        .map(|(w, h)| format!("{w}x{h}"))
+                        .unwrap_or_else(|| format!("{target_width}x{target_height}"))
+                } else {
+                    format!("{target_width}x{target_height}")
+                };
+                (
+                    format!("{target_format} (ffmpeg {source_format}@{source_resolution})"),
+                    res,
+                )
+            }
         };
         let kind_tag: &'static str = match &pipeline {
             Pipeline::Ustreamer(_) => "ustreamer",
@@ -441,6 +455,25 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
 /// `-atomic_writing`, and the exact low-latency flags all want validation
 /// against the Pi 4's `h264_v4l2m2m`. This is the apple-mt-style frontier
 /// where on-device truth beats theory.
+/// Parse a "WxH" resolution string (e.g. "1920x1080") into (w, h).
+fn parse_wxh(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// Cap a resolution to the Pi 4 hardware H.264 encoder's 1920×1080 ceiling,
+/// preserving aspect ratio (even dimensions for chroma). Returns the input
+/// unchanged when it already fits — the no-rescale `match_source` case.
+fn cap_1080p(w: u32, h: u32) -> (u32, u32) {
+    if w <= 1920 && h <= 1080 {
+        return (w, h);
+    }
+    let factor = f32::min(1920.0 / w as f32, 1080.0 / h as f32);
+    let cw = (((w as f32 * factor).round() as u32) / 2) * 2;
+    let ch = (((h as f32 * factor).round() as u32) / 2) * 2;
+    (cw.max(2), ch.max(2))
+}
+
 fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     let cfg = &state.0.cfg;
     let out = &cfg.output;
@@ -479,24 +512,52 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         }
         _ => None,
     };
-    let (out_w, out_h) = if let Ok(Some(c)) = &detected {
+    // The frame resolution *after* the optional content-crop — the "natural"
+    // res we'd emit with no rescaling at all.
+    let (nat_w, nat_h) = if let Ok(Some(c)) = &detected {
+        (c.width, c.height)
+    } else {
+        parse_wxh(source_resolution).unwrap_or((*target_width, *target_height))
+    };
+
+    // Output dimensions. With `match_source`, emit the natural res capped at
+    // the encoder's 1920×1080 ceiling (≤1080p → native; >1080p → fit 1080p).
+    // Otherwise keep the configured target (width derived from cropped aspect).
+    let (out_w, out_h) = if out.match_source {
+        cap_1080p(nat_w, nat_h)
+    } else if let Ok(Some(c)) = &detected {
         let h = *target_height;
         let w = ((h as f32 * c.aspect()).round() as u32 / 2) * 2; // even for chroma
         (w, h)
     } else {
         (*target_width, *target_height)
     };
-    let scale_part = if out.hw_accel {
+
+    // Skip the scale filter when the output already equals the natural res —
+    // no point resampling 1:1 (saves CPU and avoids resample softness). This
+    // is the common `match_source` path for a ≤1080p source.
+    let need_scale = (out_w, out_h) != (nat_w, nat_h);
+    let scale_part = if !need_scale {
+        String::new()
+    } else if out.hw_accel {
         format!("scale_v4l2m2m={out_w}:{out_h}")
     } else {
         format!("scale={out_w}:{out_h}:flags={scale_algorithm}")
     };
-    let base = match crop_filter {
-        Some(c) => format!("{c},{scale_part}"),
-        None => scale_part,
-    };
+    // Assemble crop + (optional) scale; either may be absent.
+    let base = [crop_filter.as_deref().unwrap_or(""), scale_part.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
     // One filtered source split into two outputs (H.264 + JPEG snapshot).
-    let filter_complex = format!("[0:v]{base},split=2[vh][vj]");
+    // When `base` is empty (match_source, no crop, no scale) the source feeds
+    // split directly.
+    let filter_complex = if base.is_empty() {
+        "[0:v]split=2[vh][vj]".to_string()
+    } else {
+        format!("[0:v]{base},split=2[vh][vj]")
+    };
 
     // MJPEG snapshot quality (same 1–100 → q:v 2–15 mapping as the MJPEG path).
     let qv = {
@@ -504,8 +565,11 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         inverted.clamp(2, 15).to_string()
     };
     // Snapshot runs at a modest fps — agents grab it occasionally, and the
-    // software MJPEG encoder shouldn't compete with HW H.264 for CPU.
-    let snap_fps = (*target_fps).clamp(1, 12).to_string();
+    // software MJPEG encoder (1080p JPEG per frame) shouldn't compete with
+    // HW H.264 for CPU. Capped well below the live fps: a screenshot grabs
+    // the latest frame regardless, and the MJPEG <img> fallback only needs
+    // to be usable, not smooth.
+    let snap_fps = (*target_fps).clamp(1, 6).to_string();
 
     let venc = match cfg.platform {
         Platform::Pi4 => "h264_v4l2m2m",
@@ -539,6 +603,10 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         .arg("-b:v").arg(&bitrate)
         .arg("-g").arg(&gop)
         .arg("-bf").arg("0") // no B-frames → no reorder latency
+        // KEEP yuv420p. Feeding the Pi's h264_v4l2m2m encoder nv12 directly
+        // (to skip the swscale repack) produced badly corrupted output —
+        // green macroblocks + ghosting — so the small CPU win isn't worth
+        // it. swscale's yuv420p conversion path is clean.
         .arg("-pix_fmt").arg("yuv420p");
     if venc == "libx264" {
         // Dev-box / Pi 5 software path: make it as low-latency as possible.

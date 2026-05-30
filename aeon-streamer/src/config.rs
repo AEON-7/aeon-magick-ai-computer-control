@@ -85,6 +85,15 @@ pub struct Output {
     /// Smaller = faster client sync + better packet-loss recovery, at a
     /// bitrate cost.
     pub h264_gop: u32,
+
+    /// Dynamically match the output resolution to the *source* resolution
+    /// (capped at the Pi 4 HW encoder's 1920×1080 ceiling), skipping the
+    /// scale filter entirely when they're equal — a ≤1080p source streams
+    /// at native res with no resampling; a >1080p source (e.g. 4K) is still
+    /// downscaled to fit 1080p (the encoder can't exceed it). When true,
+    /// `width`/`height` are ignored, and source-resolution changes are
+    /// tracked live via the streamer's re-detect/respawn.
+    pub match_source: bool,
 }
 
 impl Default for Output {
@@ -100,6 +109,7 @@ impl Default for Output {
             hw_accel: false,
             h264_bitrate_kbps: 6000,
             h264_gop: 30,
+            match_source: false,
         }
     }
 }

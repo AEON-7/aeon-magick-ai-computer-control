@@ -12,13 +12,14 @@
   let state: api.StreamerState | null = null;
   let hid: api.HidStatus | null = null;
   let poll_iv: ReturnType<typeof setInterval>;
-  // Network status pills — refreshed every 5s. We only care about the
-  // small "is it on?" booleans on this page, not the full config — the
-  // /network page is for that.
+  // Network status pills — we only care about the small "is it on?"
+  // booleans here, not the full config (the /network page owns that).
+  // These change rarely, so we fetch once on mount + whenever the tab
+  // regains focus — NOT on a timer. The old 5s poll needlessly re-pulled
+  // the ~141 KB DNSCrypt catalog every time (see getDnscrypt's opt-in).
   let vpnOn = false;
   let vpnProvider: string = 'none';
   let dnscryptOn = false;
-  let net_poll_iv: ReturnType<typeof setInterval>;
 
   // ── Mobile / fullscreen state ──
   // We track fullscreen separately from `captured` because on mobile the
@@ -48,6 +49,9 @@
 
   let canvas: HTMLDivElement;
   let dragging = false;
+  // Which mouse button is currently held down (for click-and-drag), so we
+  // know which to release on mouseup / pointer-unlock. null = none held.
+  let down_button: 'left' | 'right' | 'middle' | null = null;
   let last_x = 0;
   let last_y = 0;
 
@@ -71,8 +75,9 @@
     }
   }
 
-  // Refresh VPN + DNSCrypt enabled flags. Polled less often than the
-  // streamer state (5s vs 2s) — these change rarely.
+  // Refresh VPN + DNSCrypt enabled flags. getDnscrypt() with no args
+  // returns the tiny status only (no 141 KB catalog). Called on mount +
+  // on tab-focus, never on a timer.
   async function refreshNet() {
     try {
       const [v, d] = await Promise.all([api.getVpn(), api.getDnscrypt()]);
@@ -86,6 +91,12 @@
     }
   }
 
+  // Re-check the status pills when the user returns to the tab, instead
+  // of polling on an interval.
+  function onVisibility() {
+    if (typeof document !== 'undefined' && !document.hidden) refreshNet();
+  }
+
   onMount(() => {
     stream_url = api.streamURL();
     ws_url = api.streamWsURL();
@@ -93,7 +104,7 @@
     refreshState();
     refreshNet();
     poll_iv = setInterval(refreshState, 2000);
-    net_poll_iv = setInterval(refreshNet, 5000);
+    document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
     document.addEventListener('pointerlockchange', onPointerLockChange);
@@ -109,7 +120,7 @@
 
   onDestroy(() => {
     clearInterval(poll_iv);
-    clearInterval(net_poll_iv);
+    document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKey);
     document.removeEventListener('pointerlockchange', onPointerLockChange);
@@ -126,6 +137,12 @@
   function onPointerLockChange() {
     if (!document.pointerLockElement && captured) {
       captured = false;
+      // Release any held button so an interrupted drag (Esc / lost lock)
+      // can't leave it stuck down.
+      if (down_button) {
+        api.mouseButton(false, down_button).catch(console.warn);
+        down_button = null;
+      }
     }
   }
 
@@ -196,7 +213,11 @@
       last_y = ev.clientY;
     }
     const button = (['left', 'middle', 'right'] as const)[ev.button] ?? 'left';
-    api.click(button, ev.detail || 1).catch(console.warn);
+    // Press and HOLD (not an atomic click) so motion before mouseup becomes a
+    // drag. A quick down→up with no move between is just a normal click; two
+    // quick pairs read as a double-click.
+    down_button = button;
+    api.mouseButton(true, button).catch(console.warn);
   }
 
   // Set the baseline coordinate when the cursor enters the canvas. Without
@@ -214,6 +235,13 @@
     // tracking either, so moving over the header/sidebar doesn't push
     // bogus deltas at the target.
     dragging = false;
+    // Safety: release a held button if the cursor leaves mid-drag (casual
+    // mode) so it can't stick. Captured mode is pointer-locked, so leave
+    // doesn't fire there.
+    if (down_button) {
+      api.mouseButton(false, down_button).catch(console.warn);
+      down_button = null;
+    }
   }
 
   function onMouseMove(ev: MouseEvent) {
@@ -245,6 +273,10 @@
 
   function onMouseUp() {
     dragging = false;
+    if (down_button) {
+      api.mouseButton(false, down_button).catch(console.warn);
+      down_button = null;
+    }
   }
 
   function onWheel(ev: WheelEvent) {

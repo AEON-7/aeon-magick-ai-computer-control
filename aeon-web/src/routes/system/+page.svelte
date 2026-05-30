@@ -239,12 +239,13 @@
               Stream tuning
             </h2>
             <p class="text-xs text-zinc-500 leading-relaxed">
-              Live knobs for the MJPEG capture pipeline. Lower fps + lower
-              quality means fewer bytes on the wire, which drains the
-              browser-side multipart parser faster and cuts perceived
-              latency. The trade-off is fluidity (low fps) and visible
-              compression artifacts (low quality). Most "3 s lag" reports
-              get fixed by dropping fps to 24 or 18 — try in that order.
+              Live knobs for the H.264 capture pipeline. The Cam Link
+              captures at 60fps, so frame rate is restricted to its clean
+              divisors (15 / 30 / 60) — that keeps frame-drops even (every
+              4th / 2nd / all). 60 is smoothest but only sustainable at lower
+              source resolutions; use 30 or 15 at 1080p. JPEG quality now
+              only affects the /snapshot image + MJPEG fallback, not the live
+              H.264 stream.
             </p>
             <p class="text-[11px] text-zinc-600 leading-relaxed pt-1">
               Source resolution {streamerCfg.width}×{streamerCfg.height},
@@ -255,20 +256,30 @@
             </p>
           </header>
 
-          <!-- fps slider -->
+          <!-- fps: discrete divisors of the 60fps capture, so frame-dropping
+               is deterministic (keep every 4th / 2nd / all frame). -->
           <div class="space-y-1">
             <div class="flex justify-between text-[11px] uppercase tracking-wider">
               <span class="text-zinc-500">Frame rate</span>
               <span class="font-mono text-cursed-300">{stagedFps} fps</span>
             </div>
-            <input type="range" min="6" max="30" step="1"
-                   bind:value={stagedFps}
-                   disabled={streamerSaving}
-                   class="w-full accent-cursed-500" />
+            <div class="flex gap-2">
+              {#each [15, 30, 60] as f}
+                <button type="button"
+                        on:click={() => (stagedFps = f)}
+                        disabled={streamerSaving}
+                        class="flex-1 rounded-md border px-3 py-2 font-mono text-sm transition
+                               {stagedFps === f
+                                 ? 'border-cursed-500 bg-cursed-500/20 text-cursed-300'
+                                 : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
+                  {f} fps
+                </button>
+              {/each}
+            </div>
             <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
-              <span>6 (slow but very low bandwidth)</span>
-              <span>24 (cinema, default)</span>
-              <span>30 (smooth, higher latency)</span>
+              <span>15 (low bandwidth)</span>
+              <span>30 (default)</span>
+              <span>60 (smoothest — low-res only)</span>
             </div>
           </div>
 

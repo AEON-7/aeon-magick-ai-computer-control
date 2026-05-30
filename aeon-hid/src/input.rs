@@ -26,6 +26,10 @@ pub struct Hid {
     /// touch report writers will live in a follow-on commit.
     #[allow(dead_code)]
     trackpad: Mutex<Option<PathBuf>>,
+    /// Currently held-down mouse button mask (bit0 L, bit1 R, bit2 M) for
+    /// click-and-drag. Carried in every move/scroll/click report so a button
+    /// stays pressed across moves; cleared by `button_up` / `release_all`.
+    held_buttons: Mutex<u8>,
 }
 
 impl Hid {
@@ -35,6 +39,7 @@ impl Hid {
             mouse: Mutex::new(Some(PathBuf::from("/dev/hidg1"))),
             consumer: Mutex::new(Some(PathBuf::from("/dev/hidg2"))),
             trackpad: Mutex::new(None),
+            held_buttons: Mutex::new(0),
         }
     }
 
@@ -106,10 +111,15 @@ impl Hid {
             .lock()
             .clone()
             .ok_or_else(|| anyhow!("mouse function not present in current persona"))?;
+        // Preserve any held-down buttons (an in-progress drag) across the
+        // click: press adds the click button on top, release returns to the
+        // held state rather than zeroing everything. held=0 in the common
+        // case → identical to before.
+        let held = *self.held_buttons.lock();
         let mut result = Ok(());
         for _ in 0..count {
-            let press = [button_mask, 0, 0, 0];
-            let release = [0u8; 4];
+            let press = [held | (button_mask & 0x07), 0, 0, 0];
+            let release = [held, 0, 0, 0];
             if let Err(e) = write_report(&path, &press) {
                 result = Err(e);
             }
@@ -129,7 +139,9 @@ impl Hid {
             .lock()
             .clone()
             .ok_or_else(|| anyhow!("mouse function not present"))?;
-        let report = [0u8, dx as u8, dy as u8, 0];
+        // Carry held buttons so motion during a drag keeps them pressed.
+        let buttons = *self.held_buttons.lock();
+        let report = [buttons, dx as u8, dy as u8, 0];
         write_report(&path, &report)
     }
 
@@ -139,7 +151,64 @@ impl Hid {
             .lock()
             .clone()
             .ok_or_else(|| anyhow!("mouse function not present"))?;
-        let report = [0u8, 0, 0, dy as u8];
+        let buttons = *self.held_buttons.lock();
+        let report = [buttons, 0, 0, dy as u8];
+        write_report(&path, &report)
+    }
+
+    /// Set the ABSOLUTE pointer position, button state, and a wheel tick in
+    /// one report. Valid only when the active persona's hidg1 slot is the
+    /// absolute pointer (generic-absolute) — writes the 6-byte
+    /// ABS_POINTER_DESC report `[buttons][Xlo][Xhi][Ylo][Yhi][wheel]`.
+    /// `x`/`y` are device units 0..=32767 (caller maps the screen fraction
+    /// into range). `buttons`: bit0=left, bit1=right, bit2=middle. Because
+    /// the report carries position + buttons together, the UI drives moves,
+    /// clicks, drags, and scroll all through this single call.
+    pub fn move_abs(&self, x: u16, y: u16, buttons: u8, wheel: i8) -> Result<()> {
+        let path = self
+            .mouse
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("pointer function not present"))?;
+        let x = x.min(0x7fff);
+        let y = y.min(0x7fff);
+        let report = [
+            buttons & 0x07,
+            (x & 0xff) as u8,
+            (x >> 8) as u8,
+            (y & 0xff) as u8,
+            (y >> 8) as u8,
+            wheel as u8,
+        ];
+        write_report(&path, &report)
+    }
+
+    /// Press and HOLD mouse buttons for click-and-drag. The buttons stay
+    /// down — carried in every subsequent move/scroll report — until
+    /// `button_up` or `release_all`. `mask`: bit0=left, bit1=right, bit2=middle.
+    pub fn button_down(&self, mask: u8) -> Result<()> {
+        let path = self
+            .mouse
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("mouse function not present"))?;
+        let mut held = self.held_buttons.lock();
+        *held |= mask & 0x07;
+        let report = [*held, 0, 0, 0];
+        write_report(&path, &report)
+    }
+
+    /// Release the given mouse buttons (end a drag). Any other held buttons
+    /// stay pressed.
+    pub fn button_up(&self, mask: u8) -> Result<()> {
+        let path = self
+            .mouse
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("mouse function not present"))?;
+        let mut held = self.held_buttons.lock();
+        *held &= !(mask & 0x07);
+        let report = [*held, 0, 0, 0];
         write_report(&path, &report)
     }
 
@@ -185,6 +254,7 @@ impl Hid {
     /// all-zero report to each available device. Equivalent to PiKVM's
     /// /api/hid/reset.
     pub fn release_all(&self) -> Result<()> {
+        *self.held_buttons.lock() = 0;
         let _ = write_report(&self.kbd.lock(), &[0u8; 8]);
         if let Some(p) = self.mouse.lock().as_ref() {
             let _ = write_report(p, &[0u8; 4]);

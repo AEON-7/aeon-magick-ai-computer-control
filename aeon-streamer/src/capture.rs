@@ -293,11 +293,17 @@ fn pick_pipeline(modes: Vec<ParsedMode>, output: &crate::config::Output) -> Resu
     // the first source format ffmpeg can read (YUYV at ≤1080p, NV12/YU12 at
     // 4K), mapping the v4l2 fourcc to ffmpeg's -input_format name.
     if output.format == "h264" {
+        // Prefer planar YUV420 (NV12/YU12): the Pi's h264_v4l2m2m encoder
+        // ingests it directly, so ffmpeg does ZERO software pixel-format
+        // conversion. Packed 4:2:2 (YUYV/UYVY) forces a per-frame swscale
+        // convert to yuv420p — cheap-sounding, but at 1080p30 it pegged the
+        // CPU at ~280% (the encode is HW; the *convert* is software). Fall
+        // back to 4:2:2 / MJPEG only if the device offers nothing planar.
         let prefs: &[(&str, &str)] = &[
-            ("YUYV", "yuyv422"),
-            ("UYVY", "uyvy422"),
             ("NV12", "nv12"),
             ("YU12", "yuv420p"),
+            ("YUYV", "yuyv422"),
+            ("UYVY", "uyvy422"),
             ("MJPG", "mjpeg"),
         ];
         for &(fourcc, ff) in prefs {
@@ -306,7 +312,11 @@ fn pick_pipeline(modes: Vec<ParsedMode>, output: &crate::config::Output) -> Resu
                     return Ok(Pipeline::FfmpegRescale {
                         source_format: ff.to_string(),
                         source_resolution: res.clone(),
-                        source_fps: 30,
+                        // Cam Link captures at 60fps; request that so 60fps
+                        // output is real. The v4l2 driver clamps to the
+                        // nearest supported rate for other resolutions (e.g.
+                        // 24 at 4K), and the output `-r` drops to target_fps.
+                        source_fps: 60,
                         target_width: output.width,
                         target_height: output.height,
                         target_fps: output.fps,

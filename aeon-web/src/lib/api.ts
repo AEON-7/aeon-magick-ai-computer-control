@@ -154,6 +154,12 @@ export const sendKey = (keys: string[], hold_ms = 50) =>
 export const click = (button: 'left' | 'right' | 'middle' = 'left', count = 1) =>
   req<{ ok: boolean }>('POST', '/hid/click', { button, count });
 
+/// Press-and-hold (down=true) or release (down=false) a mouse button, for
+/// click-and-drag. Held buttons ride along with subsequent moveMouse calls;
+/// releaseAll clears them. A quick down→up with no move is just a click.
+export const mouseButton = (down: boolean, button: 'left' | 'right' | 'middle' = 'left') =>
+  req<{ ok: boolean }>('POST', '/hid/button', { button, down });
+
 export const moveMouse = (dx: number, dy: number) =>
   req<{ ok: boolean }>('POST', '/hid/move', { dx, dy });
 
@@ -313,7 +319,15 @@ export interface DnscryptState {
   anonymized: AnonymizedState;
 }
 
-export const getDnscrypt = () => req<DnscryptState>('GET', '/network/dnscrypt');
+// The DNSCrypt status (enabled/provider/location) is tiny, but the full
+// resolver + relay catalogs (~141 KB, build-time-static) are only needed
+// by the config UI's picker. Pass { catalog: true } there; status pollers
+// (e.g. the home page pills) omit it so they don't re-pull 141 KB.
+export const getDnscrypt = (opts?: { catalog?: boolean }) =>
+  req<DnscryptState>(
+    'GET',
+    `/network/dnscrypt${opts?.catalog ? '?catalog=true' : ''}`,
+  );
 
 export const setDnscrypt = (
   patch: {

@@ -82,6 +82,7 @@ pub struct EcmConfig {
 pub fn descriptors_for(p: Persona) -> PersonaDescriptors {
     match p {
         Persona::GenericComposite => generic(),
+        Persona::GenericAbsolute => generic_absolute(),
         Persona::LogitechMx => logitech_mx(),
         Persona::AppleMagic => apple_magic(),
         Persona::AppleMagicStable => apple_magic_stable(),
@@ -162,6 +163,52 @@ const BOOT_MOUSE_DESC: &[u8] = &[
     0x81, 0x06, //     Input (Data, Var, Rel) — X, Y, wheel
     0xC0, //   End Collection
     0xC0, // End Collection
+];
+
+// ── Absolute pointer (USB-tablet style) ──────────────────────────────────
+//
+// Unlike BOOT_MOUSE_DESC (relative deltas), this reports ABSOLUTE X/Y in a
+// 0..32767 logical range that the OS maps across the full screen — so the
+// host cursor jumps to exactly the position we report (the QEMU usb-tablet
+// model). Lets the web UI place the remote cursor where the user points
+// over the video. 6-byte report:
+//   byte 0    : buttons (bit0 = left, bit1 = right, bit2 = middle)
+//   bytes 1-2 : X, little-endian, 0..32767
+//   bytes 3-4 : Y, little-endian, 0..32767
+//   byte 5    : wheel delta (signed, relative)
+const ABS_POINTER_DESC: &[u8] = &[
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x02,       // Usage (Mouse)
+    0xA1, 0x01,       // Collection (Application)
+    0x09, 0x01,       //   Usage (Pointer)
+    0xA1, 0x00,       //   Collection (Physical)
+    0x05, 0x09,       //     Usage Page (Buttons)
+    0x19, 0x01,       //     Usage Minimum (Button 1)
+    0x29, 0x03,       //     Usage Maximum (Button 3)
+    0x15, 0x00,       //     Logical Minimum (0)
+    0x25, 0x01,       //     Logical Maximum (1)
+    0x95, 0x03,       //     Report Count (3)
+    0x75, 0x01,       //     Report Size (1)
+    0x81, 0x02,       //     Input (Data, Var, Abs) — buttons
+    0x95, 0x01,       //     Report Count (1)
+    0x75, 0x05,       //     Report Size (5)
+    0x81, 0x03,       //     Input (Const) — padding to byte boundary
+    0x05, 0x01,       //     Usage Page (Generic Desktop)
+    0x09, 0x30,       //     Usage (X)
+    0x09, 0x31,       //     Usage (Y)
+    0x15, 0x00,       //     Logical Minimum (0)
+    0x26, 0xFF, 0x7F, //     Logical Maximum (32767)
+    0x75, 0x10,       //     Report Size (16)
+    0x95, 0x02,       //     Report Count (2)
+    0x81, 0x02,       //     Input (Data, Var, Abs) — absolute X, Y
+    0x09, 0x38,       //     Usage (Wheel)
+    0x15, 0x81,       //     Logical Minimum (-127)
+    0x25, 0x7F,       //     Logical Maximum (127)
+    0x75, 0x08,       //     Report Size (8)
+    0x95, 0x01,       //     Report Count (1)
+    0x81, 0x06,       //     Input (Data, Var, Rel) — wheel
+    0xC0,             //   End Collection
+    0xC0,             // End Collection
 ];
 
 // ── HID consumer page (16-bit usage codes for media keys etc.) ───────────
@@ -266,6 +313,55 @@ fn generic() -> PersonaDescriptors {
                 report_desc: BOOT_MOUSE_DESC,
                 kind: HidKind::Mouse,
                 interface_label: Some("Pointing Device"),
+            },
+        ],
+    }
+}
+
+/// Generic composite, but with an ABSOLUTE pointer in the hidg1 "mouse"
+/// slot instead of the relative boot mouse. The keyboard stays boot-protocol
+/// (works pre-OS); the absolute pointer is report-protocol only (absolute
+/// pointing can't be a boot device). Driven via the /move_abs API.
+fn generic_absolute() -> PersonaDescriptors {
+    PersonaDescriptors {
+        id_vendor: 0x1d6b,  // Linux Foundation
+        id_product: 0x0104, // Multifunction Composite Gadget
+        bcd_device: 0x0100,
+        manufacturer: "aeon-magick",
+        product: "Aeon Magick AI Computer Control",
+        serial: String::new(),
+        ecm: None,
+        mass_storage: None,
+        functions: vec![
+            HidFunction {
+                name: "hid.kbd",
+                protocol: 1,
+                subclass: 1,
+                report_length: 8,
+                report_desc: BOOT_KEYBOARD_DESC,
+                kind: HidKind::Keyboard,
+                interface_label: Some("Keyboard"),
+            },
+            HidFunction {
+                // Keep the name "hid.mouse" so it lands in the Hid struct's
+                // hidg1 `mouse` slot — but the descriptor is absolute, so it
+                // must be driven via move_abs (6-byte report), not move_rel.
+                name: "hid.mouse",
+                protocol: 0, // not a boot mouse (absolute = report protocol)
+                subclass: 0,
+                report_length: 6,
+                report_desc: ABS_POINTER_DESC,
+                kind: HidKind::Mouse,
+                interface_label: Some("Absolute Pointer"),
+            },
+            HidFunction {
+                name: "hid.consumer",
+                protocol: 0,
+                subclass: 0,
+                report_length: 2,
+                report_desc: CONSUMER_DESC,
+                kind: HidKind::Consumer,
+                interface_label: Some("Consumer Control"),
             },
         ],
     }

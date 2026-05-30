@@ -399,7 +399,10 @@
     try {
       const [u, d, v] = await Promise.all([
         api.getUsbNet(),
-        api.getDnscrypt(),
+        // This page renders the resolver/relay picker, so it needs the
+        // full catalog — opt in explicitly. Fetched once here (and via
+        // the manual "Refresh list" button), never on a timer.
+        api.getDnscrypt({ catalog: true }),
         api.getVpn(),
       ]);
       usbState = u;

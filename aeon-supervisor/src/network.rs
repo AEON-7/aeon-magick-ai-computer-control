@@ -6,7 +6,7 @@
 //! state idempotently.
 
 use crate::api::AppState;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -450,9 +450,38 @@ pub async fn put_state(
 // /api/network/dnscrypt
 // ──────────────────────────────────────────────────────────────────────
 
-/// GET /api/network/dnscrypt — current DNSCrypt state.
-pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
+/// Query params for GET /api/network/dnscrypt.
+#[derive(serde::Deserialize, Default)]
+pub struct DnscryptQuery {
+    /// Include the full static resolver + relay catalogs (~141 KB).
+    /// Off by default so status polls stay tiny — the catalogs are
+    /// build-time-static, so the config UI fetches them once on demand
+    /// (or via its manual "refresh list" button) instead of every poll.
+    #[serde(default)]
+    pub catalog: bool,
+}
+
+/// GET /api/network/dnscrypt — current DNSCrypt state. Pass
+/// `?catalog=true` to include the heavy static resolver/relay catalogs;
+/// status polls omit them to stay small.
+pub async fn get_dnscrypt(
+    State(_state): State<AppState>,
+    Query(q): Query<DnscryptQuery>,
+) -> Json<Value> {
     let s = read_state();
+
+    // Heavy catalogs are opt-in (?catalog=true). Empty arrays otherwise
+    // so the response shape stays stable for status-only callers.
+    let servers_catalog: Value = if q.catalog {
+        json!(crate::dnscrypt_servers::catalog())
+    } else {
+        Value::Array(vec![])
+    };
+    let anon_catalog: Value = if q.catalog {
+        json!(crate::dnscrypt_relays::catalog())
+    } else {
+        Value::Array(vec![])
+    };
 
     // picked_relays is persisted (computed at PUT time) so the API
     // and the apply script see the same selection. Empty when
@@ -492,7 +521,7 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
             "mode": s.dnscrypt.server_mode,
             "auto_criteria": s.dnscrypt.auto_criteria,
             "auto_picked": s.dnscrypt.auto_picked_servers,
-            "catalog": crate::dnscrypt_servers::catalog(),
+            "catalog": servers_catalog,
         },
         "anonymized": {
             "enabled": s.dnscrypt.anonymized.enabled,
@@ -504,7 +533,7 @@ pub async fn get_dnscrypt(State(_state): State<AppState>) -> Json<Value> {
             "currently_picked": picked_relays,
             // Full curated catalog so the UI can render filter chips +
             // a "specific relay" multi-select.
-            "catalog": crate::dnscrypt_relays::catalog(),
+            "catalog": anon_catalog,
         },
         // ── DNSCrypt-only provider list (v49+) ──────────────────────
         //

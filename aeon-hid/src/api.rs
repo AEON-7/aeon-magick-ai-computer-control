@@ -35,6 +35,8 @@ pub async fn serve(state: SharedState) -> Result<()> {
         .route("/key", post(post_key))
         .route("/click", post(post_click))
         .route("/move", post(post_move))
+        .route("/move_abs", post(post_move_abs))
+        .route("/button", post(post_button))
         .route("/scroll", post(post_scroll))
         .route("/release_all", post(post_release_all))
         .route("/persona", post(post_persona))
@@ -65,6 +67,7 @@ async fn get_status(State(state): State<SharedState>) -> impl IntoResponse {
         "persona": state.0.cfg.persona.as_slug(),
         "available_personas": [
             "generic-composite",
+            "generic-absolute",
             "logitech-mx",
             "apple-magic-stable",
             "apple-magic",
@@ -165,6 +168,41 @@ async fn post_click(
 }
 
 #[derive(Deserialize)]
+struct ButtonReq {
+    #[serde(default = "default_button")]
+    button: String,
+    /// true = press and hold (begin a drag); false = release (end a drag).
+    down: bool,
+}
+
+/// POST /button — press-and-hold or release a mouse button for click-and-
+/// drag. Held buttons are carried in subsequent /move and /scroll reports;
+/// /release_all clears them. The UI calls this on mousedown/mouseup.
+async fn post_button(
+    State(state): State<SharedState>,
+    Json(req): Json<ButtonReq>,
+) -> impl IntoResponse {
+    let mask = match req.button.as_str() {
+        "left" => 0x01,
+        "right" => 0x02,
+        "middle" => 0x04,
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "err": "button must be left/right/middle"}))),
+    };
+    let res = if req.down {
+        state.0.hid.button_down(mask)
+    } else {
+        state.0.hid.button_up(mask)
+    };
+    match res {
+        Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "button": req.button, "down": req.down}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "err": e.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
 struct MoveReq { dx: i32, dy: i32 }
 
 async fn post_move(
@@ -177,6 +215,43 @@ async fn post_move(
     let dy = req.dy.clamp(-127, 127) as i8;
     match state.0.hid.move_rel(dx, dy) {
         Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "dx": dx, "dy": dy}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "err": e.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct MoveAbsReq {
+    /// Normalized 0.0..=1.0 position across the captured screen (the UI maps
+    /// the pointer's fraction over the video into this range).
+    x: f64,
+    y: f64,
+    /// Button bitmask: bit0=left, bit1=right, bit2=middle. Default 0 (hover).
+    #[serde(default)]
+    buttons: u8,
+    /// Wheel tick (relative). Default 0.
+    #[serde(default)]
+    wheel: i32,
+}
+
+/// POST /move_abs — place the absolute pointer at a normalized screen
+/// position with the given button + wheel state (generic-absolute persona).
+/// Moves, clicks, drags, and scroll all come through here, since the report
+/// carries position and buttons together.
+async fn post_move_abs(
+    State(state): State<SharedState>,
+    Json(req): Json<MoveAbsReq>,
+) -> impl IntoResponse {
+    let x = (req.x.clamp(0.0, 1.0) * 32767.0).round() as u16;
+    let y = (req.y.clamp(0.0, 1.0) * 32767.0).round() as u16;
+    let wheel = req.wheel.clamp(-127, 127) as i8;
+    match state.0.hid.move_abs(x, y, req.buttons, wheel) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "x": x, "y": y, "buttons": req.buttons & 0x07, "wheel": wheel})),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "err": e.to_string()})),
@@ -282,7 +357,7 @@ async fn post_persona(
             Json(json!({
                 "ok": false,
                 "err": format!(
-                    "unknown persona '{}'; expected generic-composite, logitech-mx, apple-magic-stable, or apple-magic",
+                    "unknown persona '{}'; expected generic-composite, generic-absolute, logitech-mx, apple-magic-stable, or apple-magic",
                     req.persona
                 ),
             })),

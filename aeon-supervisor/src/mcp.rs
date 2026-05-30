@@ -124,10 +124,31 @@ fn tools_catalog() -> Value {
                  "Scroll the mouse wheel. Positive dy = standard wheel up; macOS 'natural scrolling' inverts.",
                  json!({"type":"object","required":["dy"],
                         "properties":{"dy":{"type":"integer"}}})),
+            tool("click_at",
+                 "Click at an EXACT screen position — the precise, reliable way to hit a specific on-screen element. x and y are FRACTIONS of the screen: top-left = (0,0), bottom-right = (1,1), center = (0.5,0.5). From a `snapshot`, compute x = pixel_x / image_width and y = pixel_y / image_height. REQUIRES the `generic-absolute` persona — call set_persona(\"generic-absolute\") once first. Strongly preferred over move_cursor + click for clicking UI: move_cursor is relative and pointer acceleration makes precise targeting unreliable.",
+                 json!({"type":"object","required":["x","y"],
+                        "properties":{
+                            "x":{"type":"number","description":"Horizontal, 0.0 (left) .. 1.0 (right)."},
+                            "y":{"type":"number","description":"Vertical, 0.0 (top) .. 1.0 (bottom)."},
+                            "button":{"type":"string","enum":["left","right","middle"],"default":"left"},
+                            "double":{"type":"boolean","default":false,"description":"true = double-click."}}})),
+            tool("move_pointer",
+                 "Move the ABSOLUTE pointer to a screen position without clicking (hover). x,y are screen fractions 0.0..1.0 (see click_at). Requires the generic-absolute persona. Use for hover-triggered UI or to position before inspecting.",
+                 json!({"type":"object","required":["x","y"],
+                        "properties":{
+                            "x":{"type":"number","description":"0.0 (left) .. 1.0 (right)."},
+                            "y":{"type":"number","description":"0.0 (top) .. 1.0 (bottom)."}}})),
+            tool("drag",
+                 "Click-and-drag with the ABSOLUTE pointer: press at (x1,y1), move to (x2,y2) with the button held, then release. All coordinates are screen fractions 0.0..1.0 (see click_at). Requires the generic-absolute persona.",
+                 json!({"type":"object","required":["x1","y1","x2","y2"],
+                        "properties":{
+                            "x1":{"type":"number"},"y1":{"type":"number"},
+                            "x2":{"type":"number"},"y2":{"type":"number"},
+                            "button":{"type":"string","enum":["left","right","middle"],"default":"left"}}})),
             tool("set_persona",
-                 "Hot-swap the USB HID persona the target sees. Triggers a USB re-enumeration (about 1 s blip).",
+                 "Hot-swap the USB HID persona the target sees (USB re-enumerates, ~1 s blip). Use `generic-absolute` to enable click_at / move_pointer / drag — absolute positioning is the most reliable way for an agent to target on-screen elements (Linux/Windows). `generic-composite` is the relative-mouse default; logitech-mx / apple-magic[-stable] mimic those vendors (logitech-mx can wedge on Linux — prefer generic-* there).",
                  json!({"type":"object","required":["persona"],
-                        "properties":{"persona":{"type":"string","enum":["generic-composite","logitech-mx","apple-magic"]}}})),
+                        "properties":{"persona":{"type":"string","enum":["generic-composite","generic-absolute","logitech-mx","apple-magic-stable","apple-magic"]}}})),
             tool("release_all",
                  "Panic button. Releases every modifier and mouse button and issues a HID reset. Rare with atomic-op design, but available.",
                  json!({"type":"object","properties":{}})),
@@ -410,6 +431,38 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             proxy::post_hid(state, "/scroll", body).await?;
             Ok(text_result("ok"))
         }
+        "click_at" => {
+            let x = args.get("x").and_then(|v| v.as_f64()).ok_or("click_at needs `x` (0..1)")?;
+            let y = args.get("y").and_then(|v| v.as_f64()).ok_or("click_at needs `y` (0..1)")?;
+            let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let mask: i64 = match button { "right" => 2, "middle" => 4, _ => 1 };
+            let reps = if args.get("double").and_then(|v| v.as_bool()).unwrap_or(false) { 2 } else { 1 };
+            for _ in 0..reps {
+                proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x,"y":y,"buttons":mask})).unwrap()).await?;
+                proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x,"y":y,"buttons":0})).unwrap()).await?;
+            }
+            Ok(text_result(&format!("clicked {button} at ({x:.3}, {y:.3})")))
+        }
+        "move_pointer" => {
+            let x = args.get("x").and_then(|v| v.as_f64()).ok_or("move_pointer needs `x` (0..1)")?;
+            let y = args.get("y").and_then(|v| v.as_f64()).ok_or("move_pointer needs `y` (0..1)")?;
+            proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x,"y":y,"buttons":0})).unwrap()).await?;
+            Ok(text_result(&format!("pointer at ({x:.3}, {y:.3})")))
+        }
+        "drag" => {
+            let x1 = args.get("x1").and_then(|v| v.as_f64()).ok_or("drag needs x1 (0..1)")?;
+            let y1 = args.get("y1").and_then(|v| v.as_f64()).ok_or("drag needs y1 (0..1)")?;
+            let x2 = args.get("x2").and_then(|v| v.as_f64()).ok_or("drag needs x2 (0..1)")?;
+            let y2 = args.get("y2").and_then(|v| v.as_f64()).ok_or("drag needs y2 (0..1)")?;
+            let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let mask: i64 = match button { "right" => 2, "middle" => 4, _ => 1 };
+            // press at start → move to end with button held → release.
+            proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x1,"y":y1,"buttons":0})).unwrap()).await?;
+            proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x1,"y":y1,"buttons":mask})).unwrap()).await?;
+            proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x2,"y":y2,"buttons":mask})).unwrap()).await?;
+            proxy::post_hid(state, "/move_abs", serde_json::to_vec(&json!({"x":x2,"y":y2,"buttons":0})).unwrap()).await?;
+            Ok(text_result(&format!("dragged {button} ({x1:.3},{y1:.3}) -> ({x2:.3},{y2:.3})")))
+        }
         "set_persona" => {
             let persona = args.get("persona").and_then(|v| v.as_str())
                 .ok_or("persona required")?;
@@ -444,7 +497,13 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             // it shells out to aeon-vpn-status which is expensive; agents
             // should call it explicitly via REST when they need it.
             let usb = crate::network::get_state(axum::extract::State(state.clone())).await;
-            let dns = crate::network::get_dnscrypt(axum::extract::State(state.clone())).await;
+            // Status overview — omit the ~141 KB resolver catalog (agents
+            // pick resolvers by criteria via set_dnscrypt_criteria, not by
+            // browsing the raw list; dnscrypt_state returns it if needed).
+            let dns = crate::network::get_dnscrypt(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::network::DnscryptQuery { catalog: false }),
+            ).await;
             let vpn = crate::network::get_vpn(axum::extract::State(state.clone())).await;
             let combined = json!({
                 "usb_ethernet": usb.0,
@@ -582,7 +641,12 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
 
         // ── DNSCrypt criteria + state ──
         "dnscrypt_state" => {
-            let v = crate::network::get_dnscrypt(axum::extract::State(state.clone())).await;
+            // Dedicated DNSCrypt detail tool — include the full catalog so
+            // an agent inspecting state can see the available resolvers.
+            let v = crate::network::get_dnscrypt(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::network::DnscryptQuery { catalog: true }),
+            ).await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
         "set_dnscrypt_criteria" => {

@@ -32,6 +32,14 @@ pub enum Persona {
     /// programmatic Apple-VID gesture path (use the experimental
     /// `apple-magic` persona on a robust power supply for that).
     AppleMagicStable,
+
+    /// Generic composite with an ABSOLUTE pointer instead of a relative
+    /// mouse: keyboard + absolute pointing device (16-bit X/Y, logical
+    /// 0..32767) + consumer. Lets the UI place the remote cursor exactly
+    /// where the user points over the video, instead of accumulating
+    /// relative deltas. Linux/Windows honor absolute USB pointers natively;
+    /// macOS is quirkier (prefer generic-composite there).
+    GenericAbsolute,
 }
 
 impl Default for Persona {
@@ -75,6 +83,7 @@ impl Persona {
             "logitech-mx" => Some(Self::LogitechMx),
             "apple-magic" => Some(Self::AppleMagic),
             "apple-magic-stable" => Some(Self::AppleMagicStable),
+            "generic-absolute" => Some(Self::GenericAbsolute),
             _ => None,
         }
     }
@@ -85,6 +94,7 @@ impl Persona {
             Self::LogitechMx => "logitech-mx",
             Self::AppleMagic => "apple-magic",
             Self::AppleMagicStable => "apple-magic-stable",
+            Self::GenericAbsolute => "generic-absolute",
         }
     }
 }
