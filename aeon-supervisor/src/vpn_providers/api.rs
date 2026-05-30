@@ -82,23 +82,61 @@ pub async fn setup(
         let (priv_key, pub_key) = super::generate_wg_keypair()?;
         match provider_id.as_str() {
             "mullvad" => {
-                let dev = mullvad::register_device(&cred, &pub_key, &device_name)?;
+                // v67.6: fetch relays FIRST (public, no device impact) so a
+                // relay-list problem can't burn a Mullvad device slot — the
+                // old order registered a device before the relay parse, and
+                // every failed retry left an orphaned device behind (Mullvad
+                // caps accounts at 5). Then REUSE an existing device for the
+                // same account instead of registering a new one each run.
                 let servers = mullvad::fetch_relays(trust)?;
-                let s = mullvad::MullvadState {
-                    account_number: cred,
-                    device_id: dev.id,
-                    device_name: dev.name,
-                    peer_ipv4: dev.ipv4,
-                    peer_ipv6: dev.ipv6,
-                    wg_private_key: priv_key,
-                    wg_public_key: pub_key,
-                    selected_server: String::new(),
-                    selection_mode: "manual".into(),
-                    servers_updated_ms: now_ms(),
-                    servers: servers.clone(),
+                let existing = mullvad::read_state();
+                let reuse = existing.account_number == cred
+                    && !existing.device_id.is_empty()
+                    && !existing.wg_private_key.is_empty();
+                let keep_selected = if reuse
+                    && servers.iter().any(|sv| sv.id == existing.selected_server)
+                {
+                    existing.selected_server.clone()
+                } else {
+                    String::new()
+                };
+                let s = if reuse {
+                    mullvad::MullvadState {
+                        account_number: cred,
+                        device_id: existing.device_id,
+                        device_name: existing.device_name,
+                        peer_ipv4: existing.peer_ipv4,
+                        peer_ipv6: existing.peer_ipv6,
+                        wg_private_key: existing.wg_private_key,
+                        wg_public_key: existing.wg_public_key,
+                        selected_server: keep_selected,
+                        selection_mode: "manual".into(),
+                        servers_updated_ms: now_ms(),
+                        servers: servers.clone(),
+                    }
+                } else {
+                    let dev = mullvad::register_device(&cred, &pub_key, &device_name)?;
+                    mullvad::MullvadState {
+                        account_number: cred,
+                        device_id: dev.id,
+                        device_name: dev.name,
+                        peer_ipv4: dev.ipv4,
+                        peer_ipv6: dev.ipv6,
+                        wg_private_key: priv_key,
+                        wg_public_key: pub_key,
+                        selected_server: String::new(),
+                        selection_mode: "manual".into(),
+                        servers_updated_ms: now_ms(),
+                        servers: servers.clone(),
+                    }
                 };
                 mullvad::write_state(&s).map_err(|e| format!("persist: {e}"))?;
-                Ok(json!({"ok": true, "server_count": servers.len(), "peer_ipv4": s.peer_ipv4}))
+                Ok(json!({
+                    "ok": true,
+                    "server_count": servers.len(),
+                    "peer_ipv4": s.peer_ipv4,
+                    "reused_device": reuse,
+                }))
             }
             "ivpn" => {
                 // v67.5: REUSE an existing valid session instead of always

@@ -130,43 +130,62 @@ pub struct DeviceRecord {
 
 /// GET /public/relays/wireguard/v1 — fetch the live WireGuard relay
 /// list. Public (no auth needed). Refreshed on demand.
+///
+/// v67.6: the response is NOT a flat `{"relays":[…]}` — it's nested
+/// `{"countries":[{name,code,cities:[{name,code,relays:[…]}]}]}`. The
+/// old flat lookup found no top-level `relays` array → "no relays array
+/// in response" and setup failed. Traverse countries→cities→relays.
+///
+/// Relay shape (verbatim):
+///   {"hostname":"al-tia-wg-003","ipv4_addr_in":"103.124.165.130",
+///    "ipv6_addr_in":"2a04:…","public_key":"rWiQ…","multihop_port":3574}
+/// Country/city names + codes come from the enclosing objects.
 pub fn fetch_relays(provider_trust: u8) -> Result<Vec<Server>, String> {
     let url = format!("{API_BASE}/public/relays/wireguard/v1");
     let v = http_get_json(&url, None)?;
-    let relays = v.get("relays").and_then(|x| x.as_array())
-        .ok_or_else(|| "no relays array in response".to_string())?;
-    let mut out = Vec::with_capacity(relays.len());
-    for r in relays {
-        // Each entry shape (documented):
-        //   {"hostname":"se-got-wg-001","ipv4_addr_in":"185.65.x.x",
-        //    "public_key":"...","location":"se-got",
-        //    "include_in_country":true, ...}
-        let hostname = r.get("hostname").and_then(|x| x.as_str()).unwrap_or("");
-        let ipv4 = r.get("ipv4_addr_in").and_then(|x| x.as_str()).unwrap_or("");
-        let pubkey = r.get("public_key").and_then(|x| x.as_str()).unwrap_or("");
-        let location = r.get("location").and_then(|x| x.as_str()).unwrap_or("");
-        if hostname.is_empty() || ipv4.is_empty() || pubkey.is_empty() {
-            continue;
+    let countries = v.get("countries").and_then(|x| x.as_array())
+        .ok_or_else(|| "no countries array in Mullvad relay response".to_string())?;
+    let mut out = Vec::new();
+    for country in countries {
+        let cc = country.get("code").and_then(|x| x.as_str()).unwrap_or("").to_uppercase();
+        let cname = country.get("name").and_then(|x| x.as_str()).unwrap_or(&cc).to_string();
+        let cities = match country.get("cities").and_then(|x| x.as_array()) {
+            Some(c) => c,
+            None => continue,
+        };
+        for city in cities {
+            let city_name = city.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let relays = match city.get("relays").and_then(|x| x.as_array()) {
+                Some(r) => r,
+                None => continue,
+            };
+            for r in relays {
+                let hostname = r.get("hostname").and_then(|x| x.as_str()).unwrap_or("");
+                let ipv4 = r.get("ipv4_addr_in").and_then(|x| x.as_str()).unwrap_or("");
+                let pubkey = r.get("public_key").and_then(|x| x.as_str()).unwrap_or("");
+                if hostname.is_empty() || ipv4.is_empty() || pubkey.is_empty() {
+                    continue;
+                }
+                let eyes = eyes_for_country(&cc);
+                let score = compute_server_score(provider_trust, eyes);
+                out.push(Server {
+                    id: hostname.to_string(),
+                    label: format!("{cname} — {city_name} ({hostname})"),
+                    country: cc.clone(),
+                    country_name: cname.clone(),
+                    city: city_name.clone(),
+                    hostname: hostname.to_string(),
+                    endpoint_ip: ipv4.to_string(),
+                    endpoint_port: 51820, // Mullvad WireGuard standard port
+                    public_key: pubkey.to_string(),
+                    eyes,
+                    server_score: score,
+                });
+            }
         }
-        // location is "se-got" → country "se", city "got"
-        let (country, city) = location.split_once('-')
-            .map(|(c, ci)| (c.to_uppercase(), ci.to_string()))
-            .unwrap_or_else(|| ("?".into(), "".into()));
-        let eyes = eyes_for_country(&country);
-        let score = compute_server_score(provider_trust, eyes);
-        out.push(Server {
-            id: hostname.to_string(),
-            label: format!("{country} {city} ({hostname})"),
-            country: country.clone(),
-            country_name: country.clone(),
-            city,
-            hostname: hostname.to_string(),
-            endpoint_ip: ipv4.to_string(),
-            endpoint_port: 51820,
-            public_key: pubkey.to_string(),
-            eyes,
-            server_score: score,
-        });
+    }
+    if out.is_empty() {
+        return Err("parsed 0 Mullvad WireGuard relays from countries/cities/relays".into());
     }
     Ok(out)
 }
