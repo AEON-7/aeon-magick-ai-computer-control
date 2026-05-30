@@ -212,19 +212,34 @@ fn spawn_ustreamer(state: &SharedState, mode: &capture::CaptureMode) -> Result<C
         .arg("--unix-rm")
         .arg("--unix-mode=0660")
         .arg("--exit-on-parent-death")
-        .arg("--notify-parent")
+        // NOTE: deliberately NOT --notify-parent. That flag makes ustreamer
+        // send SIGUSR2 to us on every stream online/offline transition, but
+        // aeon-streamer installs no SIGUSR2 handler — the default disposition
+        // is "terminate", so the first notify killed the supervisor and the
+        // service crash-looped (status=12/USR2). It was masked for as long as
+        // ustreamer never started (the old invalid --encoder value made it
+        // exit before notifying); fixing the encoder unmasked the kill. We
+        // don't need the notify anyway — watchdog.rs independently detects
+        // ustreamer online/offline via the API socket and signals relaunch.
         .arg("--no-log-colors");
 
-    // Hardware encoding path: on Pi 4 we can use the M2M H.264 encoder for
-    // a JPEG-MJPEG-equivalent latency reduction. ustreamer's --encoder takes
-    // "cpu" or "m2m-image" (Pi-specific). We use m2m-image on Pi 4. Pi 5
-    // doesn't have H.264 HW encode, so we stick with CPU.
+    // Encoder selection. CRITICAL: ustreamer's --encoder only accepts
+    // CPU | HW | NOOP (verified on the shipped ustreamer 4.9). The
+    // previous value `m2m-image` does NOT exist in this build — ustreamer
+    // exited 1 immediately ("Unknown encoder type: m2m-image"), so the
+    // ENTIRE ustreamer path (every ≤1080p YUYV capture) crash-looped and
+    // displayed nothing. Only the 4K→ffmpeg path worked, which is why
+    // high-res "worked but slow" while dialing down to 720p went black.
+    //
+    // `HW` uses the Pi's V4L2 M2M hardware JPEG encoder — exactly what
+    // `m2m-image` was trying (and failing) to name. Pi 5 has no HW JPEG
+    // M2M block exposed the same way, so it falls back to multi-worker CPU.
     match cfg.platform {
         Platform::Pi4 => {
-            cmd.arg("--encoder=m2m-image");
+            cmd.arg("--encoder=HW");
         }
         _ => {
-            cmd.arg("--encoder=cpu").arg("--workers=4");
+            cmd.arg("--encoder=CPU").arg("--workers=4");
         }
     }
 
