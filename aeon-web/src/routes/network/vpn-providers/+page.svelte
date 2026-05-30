@@ -13,8 +13,34 @@
 
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
+  import VpnLogo from '$lib/components/VpnLogo.svelte';
 
+  const PROVIDER_IDS = ['mullvad', 'ivpn', 'azirevpn'];
+
+  // v66: which provider tab is showing. Defaults to mullvad, but the
+  // deep-link from /network ("open setup wizard →" on the IVPN/Azire
+  // banner) passes ?provider=<id> — without honoring it, every link
+  // landed on the Mullvad tab regardless of which provider you clicked.
   let active: string = 'mullvad';
+
+  /// Select a provider tab + keep the URL query in sync so the choice
+  /// survives a reload / bookmark and the back button does the right
+  /// thing. Resets the transient per-tab UI state (probe ranking,
+  /// banners) so stale output from the previous provider doesn't bleed
+  /// across.
+  function selectProvider(id: string, pushUrl = true) {
+    if (!PROVIDER_IDS.includes(id)) return;
+    active = id;
+    ranking = [];
+    error = '';
+    msg = '';
+    credentialInput = '';
+    if (pushUrl && typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('provider', id);
+      history.replaceState(history.state, '', url);
+    }
+  }
   let catalog: any[] = [];
   let states: Record<string, any> = {};
   let credentialInput = '';
@@ -41,6 +67,13 @@
   }
 
   onMount(() => {
+    // v66: honor ?provider=<id> deep-link from the /network banners.
+    if (typeof window !== 'undefined') {
+      const want = new URLSearchParams(window.location.search).get('provider');
+      if (want && PROVIDER_IDS.includes(want)) {
+        active = want; // set directly — no URL rewrite needed, it's already there
+      }
+    }
     refresh();
     poll = setInterval(refresh, 10000);
   });
@@ -162,15 +195,16 @@
 
       <!-- Provider tabs -->
       <div class="flex gap-2 border-b border-ink-700 pb-2">
-        {#each ['mullvad', 'ivpn', 'azirevpn'] as id}
-          <button class="px-4 py-2 text-sm font-mono uppercase tracking-wider transition-colors
+        {#each PROVIDER_IDS as id}
+          <button class="flex items-center gap-2 px-4 py-2 text-sm font-mono uppercase tracking-wider transition-colors
                          {active === id
                            ? 'bg-cursed-500/10 text-cursed-300 border-b-2 border-cursed-500'
                            : 'text-zinc-500 hover:text-zinc-300'}"
-                  on:click={() => { active = id; ranking = []; error = ''; msg = ''; }}>
+                  on:click={() => selectProvider(id)}>
+            <VpnLogo provider={id} size={18} muted={active !== id} />
             {id}
             {#if states[id]?.configured}
-              <span class="text-live-400 ml-1">●</span>
+              <span class="text-live-400 ml-1" title="configured">●</span>
             {/if}
           </button>
         {/each}
@@ -183,7 +217,8 @@
         <!-- Provider info card -->
         <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-2">
           <header class="flex items-baseline justify-between gap-2">
-            <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            <h2 class="flex items-center gap-2 font-mono text-sm uppercase tracking-wider text-zinc-300">
+              <VpnLogo provider={active} size={22} />
               {meta.label}
             </h2>
             <div class="flex items-center gap-2 text-[10px]">

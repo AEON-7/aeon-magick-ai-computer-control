@@ -2044,7 +2044,7 @@ AllowedIPs = 0.0.0.0/0`}
                           {:else}
                             No server pinned yet —
                             <a class="text-cursed-300 hover:underline"
-                               href="/network/vpn-providers">pick one in the wizard</a>
+                               href="/network/vpn-providers?provider={vpnProvider}">pick one in the wizard</a>
                             or let "fastest" probe and apply.
                           {/if}
                           Save & Apply below to bring the tunnel up.
@@ -2052,7 +2052,7 @@ AllowedIPs = 0.0.0.0/0`}
                       </div>
                     </div>
                     <a class="btn-secondary text-xs ml-7 inline-block"
-                       href="/network/vpn-providers">
+                       href="/network/vpn-providers?provider={vpnProvider}">
                       change server / refresh keys →
                     </a>
                   </div>
@@ -2096,7 +2096,7 @@ AllowedIPs = 0.0.0.0/0`}
                       </div>
                     </div>
                     <a class="btn-primary text-xs ml-7 inline-block"
-                       href="/network/vpn-providers">
+                       href="/network/vpn-providers?provider={vpnProvider}">
                       open setup wizard →
                     </a>
                   </div>
