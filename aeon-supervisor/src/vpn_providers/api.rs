@@ -101,22 +101,65 @@ pub async fn setup(
                 Ok(json!({"ok": true, "server_count": servers.len(), "peer_ipv4": s.peer_ipv4}))
             }
             "ivpn" => {
-                let session = ivpn::new_session(&cred, &pub_key)?;
+                // v67.5: REUSE an existing valid session instead of always
+                // calling /v4/session/new. Every new_session registers a
+                // fresh WireGuard device with IVPN and consumes a device
+                // slot — re-running setup (e.g. to refresh the server list)
+                // would burn through the account's per-plan device limit
+                // and eventually fail. The server list itself comes from a
+                // PUBLIC endpoint (servers.json, no auth, no device impact),
+                // so when we already hold a non-expired session for THIS
+                // account we keep it and just refresh servers.
+                let existing = ivpn::read_state();
+                let reuse = existing.account_id == cred
+                    && !existing.session_token.is_empty()
+                    && !existing.wg_private_key.is_empty()
+                    && existing.session_expires_ms > now_ms();
+
                 let servers = ivpn::fetch_servers(trust)?;
-                let s = ivpn::IvpnState {
-                    account_id: cred,
-                    session_token: session.token,
-                    session_expires_ms: now_ms() + 12 * 3600 * 1000,
-                    peer_ipv4: session.ipv4,
-                    wg_private_key: priv_key,
-                    wg_public_key: pub_key,
-                    selected_server: String::new(),
-                    selection_mode: "manual".into(),
-                    servers_updated_ms: now_ms(),
-                    servers: servers.clone(),
+                // keep a previously-selected server only if it still exists.
+                let keep_selected = if reuse
+                    && servers.iter().any(|sv| sv.id == existing.selected_server)
+                {
+                    existing.selected_server.clone()
+                } else {
+                    String::new()
+                };
+                let s = if reuse {
+                    ivpn::IvpnState {
+                        account_id: cred,
+                        session_token: existing.session_token,
+                        session_expires_ms: existing.session_expires_ms,
+                        peer_ipv4: existing.peer_ipv4,
+                        wg_private_key: existing.wg_private_key,
+                        wg_public_key: existing.wg_public_key,
+                        selected_server: keep_selected,
+                        selection_mode: "manual".into(),
+                        servers_updated_ms: now_ms(),
+                        servers: servers.clone(),
+                    }
+                } else {
+                    let session = ivpn::new_session(&cred, &pub_key)?;
+                    ivpn::IvpnState {
+                        account_id: cred,
+                        session_token: session.token,
+                        session_expires_ms: now_ms() + 12 * 3600 * 1000,
+                        peer_ipv4: session.ipv4,
+                        wg_private_key: priv_key,
+                        wg_public_key: pub_key,
+                        selected_server: String::new(),
+                        selection_mode: "manual".into(),
+                        servers_updated_ms: now_ms(),
+                        servers: servers.clone(),
+                    }
                 };
                 ivpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
-                Ok(json!({"ok": true, "server_count": servers.len(), "peer_ipv4": s.peer_ipv4}))
+                Ok(json!({
+                    "ok": true,
+                    "server_count": servers.len(),
+                    "peer_ipv4": s.peer_ipv4,
+                    "reused_session": reuse,
+                }))
             }
             "azirevpn" => {
                 // v63.1: AzireVPN's "register key" actually goes through
