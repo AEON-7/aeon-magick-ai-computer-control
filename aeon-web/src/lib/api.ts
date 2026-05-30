@@ -378,7 +378,7 @@ export type VpnProvider =
  * inline banner pointing users there.
  */
 export const WIZARD_PROVIDERS: ReadonlySet<VpnProvider> =
-  new Set(['mullvad', 'ivpn', 'azirevpn']);
+  new Set(['mullvad', 'ivpn']);
 
 export interface VpnProviderInfo {
   id: VpnProvider;

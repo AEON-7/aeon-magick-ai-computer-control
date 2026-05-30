@@ -15,7 +15,7 @@
   import * as api from '$lib/api';
   import VpnLogo from '$lib/components/VpnLogo.svelte';
 
-  const PROVIDER_IDS = ['mullvad', 'ivpn', 'azirevpn'];
+  const PROVIDER_IDS = ['mullvad', 'ivpn'];
 
   // v66: which provider tab is showing. Defaults to mullvad, but the
   // deep-link from /network ("open setup wizard →" on the IVPN/Azire
@@ -56,7 +56,7 @@
     try {
       const c = await fetch('/api/network/vpn/providers/catalog').then(r => r.json());
       catalog = c.providers ?? [];
-      for (const id of ['mullvad', 'ivpn', 'azirevpn']) {
+      for (const id of PROVIDER_IDS) {
         const s = await fetch(`/api/network/vpn/providers/${id}/state`).then(r => r.json());
         states[id] = s;
       }

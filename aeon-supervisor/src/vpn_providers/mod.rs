@@ -108,21 +108,12 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         website: "https://www.ivpn.net/",
         notes: "Gibraltar HQ keeps it outside major intelligence-sharing pacts. Audited code + infra. Smaller server fleet than Mullvad.",
     },
-    ProviderMeta {
-        id: "azirevpn",
-        label: "AzireVPN",
-        headquarters_country: "SE",
-        headquarters_eyes: EyesTier::Fourteen,
-        audited: false,                 // no public 3rd-party audit
-        last_audit_year: None,
-        last_audit_firm: None,
-        anonymous_signup: true,
-        accepts_cash: true,
-        accepts_crypto: true,
-        trust_score: 3,
-        website: "https://www.azirevpn.com/",
-        notes: "Smaller boutique provider. Long-running no-log claim, well-regarded in privacy circles, but no formal 3rd-party audit yet. Limited server geography.",
-    },
+    // AzireVPN removed (v67.9): acquired, trust dropped, and crucially
+    // it does NOT take crypto — a hard misfit for the at-risk-user /
+    // journalist threat model this device targets. The azirevpn.rs module
+    // + api.rs match arms remain compiled but are unreachable now that
+    // it's out of this catalog (provider_meta() gates every entry point),
+    // so re-adding it later is a one-line revert.
 ];
 
 pub fn provider_meta(id: &str) -> Option<&'static ProviderMeta> {
