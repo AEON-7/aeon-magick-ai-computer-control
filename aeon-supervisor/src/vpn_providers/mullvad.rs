@@ -197,13 +197,17 @@ pub fn render_wg_config(state: &MullvadState) -> Result<String, String> {
     let server = state.servers.iter()
         .find(|s| s.id == state.selected_server)
         .ok_or_else(|| format!("selected_server '{}' not in cache — refresh server list", state.selected_server))?;
+    // No `DNS =` line: wg-quick applies it via `resolvconf`, which is absent on
+    // Pi OS (no resolvconf/openresolv/systemd-resolved) → wg-quick aborts with
+    // "resolvconf: command not found" (exit 127) and the tunnel never comes up.
+    // DNS privacy comes from the device's DNSCrypt layer, whose encrypted
+    // queries ride through this VPN (AllowedIPs 0.0.0.0/0). See ivpn.rs.
     Ok(format!(r#"# Managed by aeon-supervisor (Mullvad provider).
 # Re-generated on every save — do not edit by hand.
 
 [Interface]
 PrivateKey = {priv}
 Address    = {ipv4}/32, {ipv6}/128
-DNS        = 10.64.0.1
 MTU        = 1380
 # (LAN bypass + kill-switch live in aeon-net-services iptables, not here.)
 

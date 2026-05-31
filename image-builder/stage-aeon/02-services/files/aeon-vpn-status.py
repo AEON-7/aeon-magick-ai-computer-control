@@ -42,23 +42,40 @@ def load_net_config() -> dict:
 
 
 def public_ip_via_curl() -> tuple[str | None, str | None]:
-    """Fetch our externally-visible IP + country code.
+    """Fetch our externally-visible IP (+ country code when the provider
+    gives one).
 
     Uses curl (rather than urllib) so it picks up the system's proxy
     chain, transparent iptables redirects, and /etc/resolv.conf.
+
+    Tries several providers in turn: a single flaky or rate-limited
+    endpoint must not blank the status panel's Public IP line (the old
+    single-endpoint version did exactly that). Country is best-effort —
+    we return the IP even if the country lookup provider is down.
     """
-    try:
-        out = subprocess.run(
-            ["curl", "-s", "--max-time", "8", "https://ifconfig.co/json"],
-            capture_output=True,
-            timeout=12,
-        )
-        if out.returncode != 0:
-            return None, None
-        data = json.loads(out.stdout.decode("utf-8", "replace"))
-        return data.get("ip"), data.get("country_iso")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return None, None
+    # (url, ip_key, country_key|None)
+    endpoints = (
+        ("https://ifconfig.co/json", "ip", "country_iso"),
+        ("https://ipinfo.io/json", "ip", "country"),
+        ("https://api.ipify.org?format=json", "ip", None),
+    )
+    for url, ip_key, country_key in endpoints:
+        try:
+            out = subprocess.run(
+                ["curl", "-s", "--max-time", "6", url],
+                capture_output=True,
+                timeout=10,
+            )
+            if out.returncode != 0 or not out.stdout:
+                continue
+            data = json.loads(out.stdout.decode("utf-8", "replace"))
+            ip = data.get(ip_key)
+            if ip:
+                country = data.get(country_key) if country_key else None
+                return ip, country
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            continue
+    return None, None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -462,5 +479,26 @@ def main() -> int:
     return 0
 
 
+def tor_bootstrap_only() -> int:
+    """Print just Tor's bootstrap percent (0-100), or -1 if unknown.
+
+    Lightweight mode used by aeon-netwatch's transparent-Tor stall safety
+    net — it must answer "has Tor finished bootstrapping?" without the full
+    status JSON (and without depending on the provider-selection logic)."""
+    resp = tor_control("GETINFO status/bootstrap-phase")
+    if resp:
+        for line in resp.splitlines():
+            if "bootstrap-phase=" in line and "PROGRESS=" in line:
+                try:
+                    print(int(line.split("PROGRESS=")[1].split()[0]))
+                    return 0
+                except (ValueError, IndexError):
+                    pass
+    print(-1)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--tor-bootstrap" in sys.argv:
+        sys.exit(tor_bootstrap_only())
     sys.exit(main())

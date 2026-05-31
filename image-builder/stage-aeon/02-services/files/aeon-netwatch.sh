@@ -34,10 +34,120 @@ AP_STATUS_LOG=/var/lib/aeon/ap-status.log
 # Drop this empty file on the FAT boot partition to force setup-AP mode.
 FORCE_AP_FLAG=/boot/firmware/aeon-force-ap
 
+# v74: transparent-Tor stall safety net. "All traffic via Tor" redirects
+# EVERY TCP connection (incl. the web UI + SSH management plane) into Tor.
+# If Tor never finishes bootstrapping (bad over_vpn routing, a censored
+# network needing bridges, etc.), the device is blackholed and locked out
+# — and have_internet()'s ICMP probe can't detect it (ICMP isn't
+# Tor-redirected, so it can still succeed while every TCP flow is dead).
+# So if transparent Tor stays un-bootstrapped past TOR_STALL_GRACE, we
+# auto-revert tor.mode to split_tunnel (management never rides Tor there)
+# and re-apply, leaving a marker the web UI can surface.
+NETTOML=/etc/aeon/network.toml
+VPN_STATUS_HELPER=/usr/local/bin/aeon-vpn-status
+TOR_STALL_STATE=/var/lib/aeon/tor-stall.state
+TOR_REVERT_MARKER=/var/lib/aeon/tor-auto-reverted
+# Tier 1 (transparent only): drop the all-traffic redirect → split_tunnel,
+# restoring the management plane fast. Tier 2 (ANY mode): if Tor is still
+# stuck this long, disable it entirely — the bulletproof known-good state,
+# so a stalled Tor can never strand the box regardless of mode.
+TOR_STALL_GRACE=180
+TOR_DISABLE_GRACE=360
+
 mkdir -p "$(dirname "$STATE_FILE")"
 [[ -f "$STATE_FILE" ]] || echo "0" > "$STATE_FILE"
 
 log() { logger -t aeon-netwatch -- "$*"; }
+
+# v74: read tor.enabled + tor.mode from network.toml. Echoes "ENABLED MODE"
+# (e.g. "true transparent"). python3+tomllib is already a dependency
+# (aeon-net-services renders the WG config with it).
+read_tor_cfg() {
+    python3 - "$NETTOML" 2>/dev/null <<'PY'
+import sys, tomllib
+try:
+    d = tomllib.load(open(sys.argv[1], "rb"))
+except Exception:
+    print("false split_tunnel"); raise SystemExit(0)
+t = d.get("tor", {})
+print("true" if t.get("enabled") else "false", t.get("mode", "split_tunnel"))
+PY
+}
+
+# v74: set a key in the [tor] section of network.toml (in place). VAL is
+# inserted verbatim, so quote string values yourself (e.g. '"split_tunnel"').
+toml_set_tor() {
+    local key="$1" val="$2" tmp
+    tmp="$(mktemp)" || return 1
+    if awk -v k="$key" -v v="$val" '
+        /^\[/{s=$0}
+        s=="[tor]" && $0 ~ ("^[[:space:]]*" k "[[:space:]]*=") {sub(/=.*/, "= " v)}
+        {print}' "$NETTOML" > "$tmp" && [[ -s "$tmp" ]]; then
+        cat "$tmp" > "$NETTOML"; rm -f "$tmp"; return 0
+    fi
+    rm -f "$tmp"; return 1
+}
+
+# v74: Tor stall watchdog. No-op unless Tor is enabled. If Tor can't reach
+# 100% bootstrap, two-tier auto-recovery (mode-agnostic so it covers BOTH
+# the transparent all-traffic blackhole AND a split-mode stall):
+#   Tier 1 (transparent only, TOR_STALL_GRACE): revert mode→split_tunnel,
+#           dropping the all-traffic redirect so the management plane (which
+#           only rides Tor in transparent mode) comes back immediately.
+#   Tier 2 (any mode, TOR_DISABLE_GRACE): disable Tor entirely — the
+#           bulletproof known-good state, so a Tor that simply cannot
+#           bootstrap (bad network, missing bridges) never strands the box.
+# The bootstrap % comes from aeon-vpn-status --tor-bootstrap (root reads
+# Tor's control cookie); have_internet()'s ICMP probe can't see this.
+tor_stall_guard() {
+    local cfg te tm
+    cfg="$(read_tor_cfg)"
+    te="${cfg%% *}"; tm="${cfg##* }"
+    if [[ "$te" != "true" ]]; then
+        rm -f "$TOR_STALL_STATE" 2>/dev/null
+        return 0
+    fi
+    local pct
+    pct="$("$VPN_STATUS_HELPER" --tor-bootstrap 2>/dev/null)"
+    [[ "$pct" =~ ^-?[0-9]+$ ]] || pct=-1
+    if (( pct >= 100 )); then
+        rm -f "$TOR_STALL_STATE" 2>/dev/null   # healthy — clear the stall timer
+        return 0
+    fi
+    local now stall_since elapsed
+    now=$(date +%s)
+    stall_since=$(cat "$TOR_STALL_STATE" 2>/dev/null || echo 0)
+    [[ "$stall_since" =~ ^[0-9]+$ ]] || stall_since=0
+    if (( stall_since == 0 )); then
+        echo "$now" > "$TOR_STALL_STATE"
+        log "Tor enabled but only ${pct}% bootstrapped (mode=$tm) — arming stall watchdog (${TOR_STALL_GRACE}s→split, ${TOR_DISABLE_GRACE}s→off)"
+        return 0
+    fi
+    elapsed=$(( now - stall_since ))
+    # Tier 2 first: a persistent stall in ANY mode → disable Tor outright.
+    if (( elapsed >= TOR_DISABLE_GRACE )); then
+        log "Tor STILL at ${pct}% after ${elapsed}s — disabling Tor (tor.enabled=false) so the device stays usable"
+        if toml_set_tor enabled false; then
+            { date -Iseconds; echo "Tor auto-disabled: stuck at ${pct}% bootstrap for ${elapsed}s"; } > "$TOR_REVERT_MARKER" 2>/dev/null
+            systemctl restart --no-block aeon-net-services 2>/dev/null || true
+        else
+            log "WARN: failed to set tor.enabled=false in $NETTOML"
+        fi
+        rm -f "$TOR_STALL_STATE" 2>/dev/null
+        return 0
+    fi
+    # Tier 1: transparent blackhole → drop to split_tunnel fast (keep ticking
+    # the same stall timer so Tier 2 can still fire if split stays stuck).
+    if [[ "$tm" == "transparent" ]] && (( elapsed >= TOR_STALL_GRACE )); then
+        log "transparent Tor stuck at ${pct}% for ${elapsed}s — reverting tor.mode to split_tunnel to restore management access"
+        if toml_set_tor mode '"split_tunnel"'; then
+            { date -Iseconds; echo "transparent Tor stalled at ${pct}% — auto-reverted to split_tunnel"; } > "$TOR_REVERT_MARKER" 2>/dev/null
+            systemctl restart --no-block aeon-net-services 2>/dev/null || true
+        else
+            log "WARN: failed to set tor.mode=split_tunnel in $NETTOML"
+        fi
+    fi
+}
 
 ap_active() {
     nmcli -t -f NAME con show --active 2>/dev/null | grep -qx "$AP_CON"
@@ -261,6 +371,11 @@ if [[ -f "$FORCE_AP_FLAG" ]]; then
     activate_ap || true
     exit 0
 fi
+
+# v74: Tor stall watchdog. Runs every tick BEFORE the have_internet() ICMP
+# check below, because that check can't see a Tor TCP-blackhole (ICMP isn't
+# redirected through Tor). No-op unless Tor is enabled and stalled.
+tor_stall_guard
 
 if have_internet; then
     if [[ "$down_since" != "0" ]]; then

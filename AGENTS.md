@@ -1150,3 +1150,45 @@ your own services. The naturalism layer (if you enable it via the persona
 config) exists for accessibility and reliability, **not** as cover for
 impersonation. If you ship something sketchy on top of this, that's on
 you.
+
+---
+
+## Rebuilding the image (maintainers)
+
+The pi-gen bake builds from a **copy** of the stage at `~/pi-gen/stage-aeon`,
+NOT from `image-builder/stage-aeon/` in this repo. It has to be a real copy:
+the Docker build mounts `~/pi-gen`, and a symlink pointing outside that mount
+would dangle inside the container. **So you MUST sync the stage into pi-gen
+before every bake — otherwise the image silently ships stale files** (this
+exact mistake produced a "v74" image that was missing an entire session of
+work, including the whole web UI, and looked fine until flashed).
+
+Full sequence — do every step, in order:
+
+```bash
+cd ~/aeon-magick-ai-computer-control
+./scripts/build-binaries.sh          # cross-compile aarch64 → stage-aeon/01-base/files/bin
+./scripts/build-web.sh               # SvelteKit build  → stage-aeon/01-base/files/web
+rsync -a --delete \                  # ⚠ THE STEP THAT IS EASY TO FORGET
+  image-builder/stage-aeon/ ~/pi-gen/stage-aeon/
+# bump IMG_DATE in ~/pi-gen/config (e.g. v75 → v76)
+cd ~/pi-gen && docker rm -v pigen_work 2>/dev/null
+CLEAN=1 DOCKER=docker ./build-docker.sh   # on macOS Docker Desktop, no sudo needed
+```
+
+The bake's auto copy-out to `deploy/` fails when older images there are
+root-owned (from past `sudo` bakes) — that's harmless. Pull the image out
+of the build container instead:
+
+```bash
+docker cp pigen_work:/pi-gen/deploy/image_<IMG_DATE>-aeon-magick.img.xz ~/
+xz -t ~/image_<IMG_DATE>-aeon-magick.img.xz   # integrity check before flashing
+```
+
+**Verify image CONTENTS, not just inputs**, before handing it to anyone to
+flash — `docker cp` a known file out of the built rootfs and grep it:
+
+```bash
+docker cp pigen_work:/pi-gen/work/aeon-magick/stage-aeon/rootfs/usr/local/bin/aeon-net-services /tmp/ns
+grep -c '<a string from your latest change>' /tmp/ns   # must be present
+```

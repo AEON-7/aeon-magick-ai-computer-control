@@ -209,6 +209,29 @@ pub fn detect_content_crop(
     if w >= sw && h >= sh && x == 0 && y == 0 {
         return Ok(None);
     }
+    // Guard against over-cropping on low-content screens. A BIOS/boot screen
+    // (also a mostly-black desktop or a logo splash) is largely black with a
+    // small centered glyph, so cropdetect latches onto that tiny region and
+    // crops the whole stream down to a narrow sliver — the "portrait segment"
+    // symptom, made worse because cropdetect runs once at stream start and
+    // sticks. Only accept a crop that plausibly removes letterbox/pillarbox
+    // bars: it must keep most of the frame AND stay landscape-ish. Anything
+    // smaller or portrait-shaped is almost certainly a false positive, so we
+    // ignore it and stream the full frame.
+    let frac_w = w as f32 / sw as f32;
+    let frac_h = h as f32 / sh as f32;
+    let aspect = if h > 0 { w as f32 / h as f32 } else { 0.0 };
+    if frac_w < 0.5 || frac_h < 0.5 || !(1.1..=3.2).contains(&aspect) {
+        tracing::warn!(
+            w, h, x, y,
+            frac_w = format!("{frac_w:.2}"),
+            frac_h = format!("{frac_h:.2}"),
+            aspect = format!("{aspect:.2}"),
+            "cropdetect looks like an over-crop (low-content / boot screen?) — \
+             ignoring it and streaming the full frame"
+        );
+        return Ok(None);
+    }
     Ok(Some(ContentCrop { width: w, height: h, x, y }))
 }
 

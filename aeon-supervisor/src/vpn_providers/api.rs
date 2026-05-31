@@ -152,6 +152,10 @@ pub async fn setup(
                 let reuse = existing.account_id == cred
                     && !existing.session_token.is_empty()
                     && !existing.wg_private_key.is_empty()
+                    // Don't reuse a session whose WG IP never got captured — that
+                    // would perpetuate the broken empty "Address = /32" config.
+                    // Forcing a fresh /session/new re-allocates + re-parses it.
+                    && !existing.peer_ipv4.is_empty()
                     && existing.session_expires_ms > now_ms();
 
                 let servers = ivpn::fetch_servers(trust)?;
@@ -401,17 +405,15 @@ pub async fn pick_fastest(
         return (StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "err": "no servers in cache — finish setup first"}))).into_response();
     }
-    let probed = tokio::task::spawn_blocking(move || {
-        servers.into_iter().map(|s| {
-            let addr = format!("{}:{}", s.endpoint_ip, s.endpoint_port);
-            let t0 = std::time::Instant::now();
-            let rtt_ms = match std::net::TcpStream::connect_timeout(
-                &addr.parse().unwrap_or_else(|_| "127.0.0.1:1".parse().unwrap()),
-                std::time::Duration::from_millis(1500),
-            ) {
-                Ok(_) => Some(t0.elapsed().as_millis() as u32),
-                Err(_) => None,
-            };
+    // ICMP-ping each endpoint, concurrently. WireGuard endpoints are UDP-only,
+    // so the previous TCP connect to endpoint_port (2049) ALWAYS failed and
+    // EVERY server came back "unreachable". ICMP to the host IP is the right
+    // latency proxy — same network path, and VPN servers answer it. Parallel
+    // (JoinSet) so the whole 80–200 server list finishes in ~1s.
+    let mut set = tokio::task::JoinSet::new();
+    for s in servers {
+        set.spawn(async move {
+            let rtt_ms = ping_rtt_ms(&s.endpoint_ip).await;
             json!({
                 "id": s.id,
                 "label": s.label,
@@ -420,17 +422,39 @@ pub async fn pick_fastest(
                 "rtt_ms": rtt_ms,
                 "server_score": s.server_score,
             })
-        }).collect::<Vec<_>>()
-    }).await;
-    match probed {
-        Ok(mut v) => {
-            // Sort: reachable first (lowest rtt_ms), then unreachable.
-            v.sort_by_key(|e| e.get("rtt_ms").and_then(|x| x.as_u64()).unwrap_or(u64::MAX));
-            Json(json!({"ok": true, "ranking": v})).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "err": format!("probe: {e}")}))).into_response(),
+        });
     }
+    let mut v = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(entry) = res {
+            v.push(entry);
+        }
+    }
+    // Sort: reachable first (lowest rtt_ms), unreachable (None → MAX) last.
+    v.sort_by_key(|e| e.get("rtt_ms").and_then(|x| x.as_u64()).unwrap_or(u64::MAX));
+    Json(json!({"ok": true, "ranking": v})).into_response()
+}
+
+/// ICMP round-trip to `ip` (1 packet, 1s deadline) in ms, or None if the host
+/// didn't answer. Uses the `ping` binary (setcap'd on Pi OS; the supervisor
+/// runs as root regardless) to avoid pulling in a raw-socket dependency.
+async fn ping_rtt_ms(ip: &str) -> Option<u32> {
+    let out = tokio::process::Command::new("ping")
+        .args(["-n", "-c", "1", "-W", "1", ip])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Parse the "time=12.3 ms" token from the reply line.
+    let s = String::from_utf8_lossy(&out.stdout);
+    let after = s.split("time=").nth(1)?;
+    let num: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    num.parse::<f32>().ok().map(|f| f.round() as u32)
 }
 
 // ── POST /api/network/vpn/providers/:id/refresh ─────────────────────

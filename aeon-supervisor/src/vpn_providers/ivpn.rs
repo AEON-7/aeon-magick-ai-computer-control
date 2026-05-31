@@ -100,14 +100,35 @@ pub fn new_session(account_id: &str, wg_pubkey: &str) -> Result<SessionResult, S
         .or_else(|| v.get("session_token").and_then(|x| x.as_str()))
         .ok_or_else(|| "no session token in response".to_string())?
         .to_string();
-    // Response shape:
-    //   {"status":200,"token":"...","wg_ip":"172.30.x.x","vpn_username":"..."}
-    // Some older builds nested it under `wireguard.ipv4_address` —
-    // try both for resilience across future API revisions.
+    // Pull the allocated WireGuard client IP. IVPN's current API nests it as
+    // `wireguard.ip_address` (e.g. "172.x.x.x/32" — WITH a CIDR suffix); older
+    // shapes used top-level `wg_ip` or `wireguard.ipv4_address`. Check all of
+    // them, then STRIP any "/NN" suffix because render_wg_config appends "/32"
+    // itself. The previous code only checked `wg_ip` + `wireguard.ipv4_address`
+    // — neither matches the live response — so it silently fell through to ""
+    // and wrote `Address = /32`, which makes wg-quick fail ("inet prefix is
+    // expected rather than '/32'") and the tunnel never comes up.
     let ipv4 = v.get("wg_ip").and_then(|x| x.as_str())
+        .or_else(|| v.get("wireguard").and_then(|w| w.get("ip_address")).and_then(|x| x.as_str()))
         .or_else(|| v.get("wireguard").and_then(|w| w.get("ipv4_address")).and_then(|x| x.as_str()))
+        .or_else(|| v.get("ip_address").and_then(|x| x.as_str()))
         .unwrap_or("")
+        .split('/').next().unwrap_or("")
+        .trim()
         .to_string();
+    if ipv4.is_empty() {
+        // Never persist an empty IP — that yields a broken wg.conf. Surface the
+        // response's top-level keys (names only, no secret values) so a future
+        // IVPN API change is obvious instead of a cryptic "wg show: not running".
+        let keys: Vec<&str> = v.as_object()
+            .map(|o| o.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        return Err(format!(
+            "IVPN session returned no WireGuard IP (checked wg_ip, \
+             wireguard.ip_address, wireguard.ipv4_address, ip_address). \
+             Response keys: {keys:?}"
+        ));
+    }
     Ok(SessionResult { token, ipv4 })
 }
 
@@ -189,13 +210,20 @@ pub fn render_wg_config(state: &IvpnState) -> Result<String, String> {
     let server = state.servers.iter()
         .find(|s| s.id == state.selected_server)
         .ok_or_else(|| format!("selected_server '{}' not in cache — refresh server list", state.selected_server))?;
+    // No `DNS =` line. wg-quick applies it via `resolvconf`, which isn't present
+    // on Pi OS (no resolvconf/openresolv, systemd-resolved inactive, NM writes a
+    // plain /etc/resolv.conf) → wg-quick aborts with "resolvconf: command not
+    // found" (exit 127) and the tunnel never comes up. DNS privacy is instead
+    // provided by the device's DNSCrypt layer, whose encrypted queries ride
+    // through this tunnel (AllowedIPs 0.0.0.0/0) — no leak. Re-adding DNS= would
+    // require installing openresolv, which fights NetworkManager's resolv.conf
+    // management on this image.
     Ok(format!(r#"# Managed by aeon-supervisor (IVPN provider).
 # Re-generated on every save — do not edit by hand.
 
 [Interface]
 PrivateKey = {priv}
 Address    = {ipv4}/32
-DNS        = 172.16.0.1
 MTU        = 1420
 
 [Peer]

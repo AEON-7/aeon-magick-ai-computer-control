@@ -35,6 +35,7 @@
     error = '';
     msg = '';
     credentialInput = '';
+    forceResetup = false;
     if (pushUrl && typeof window !== 'undefined') {
       const url = new URL(window.location.href);
       url.searchParams.set('provider', id);
@@ -44,6 +45,10 @@
   let catalog: any[] = [];
   let states: Record<string, any> = {};
   let credentialInput = '';
+  // v74: when a provider is already configured, this reveals the setup form
+  // again so the user can change the account ID / re-submit (switched to a new
+  // account, or re-running setup to repair a broken session).
+  let forceResetup = false;
   let deviceName = 'aeon-magick';
   let busy = false;
   let msg = '';
@@ -109,6 +114,7 @@
       if (r.ok) {
         msg = `✓ setup complete — ${r.server_count} servers in catalog, peer IP ${r.peer_ipv4}`;
         credentialInput = '';
+        forceResetup = false;
         await refresh();
       } else {
         error = `setup failed: ${r.err}`;
@@ -276,19 +282,34 @@
           </div>
         </section>
 
-        {#if !state?.configured}
-          <!-- Setup wizard -->
+        {#if !state?.configured || forceResetup}
+          <!-- Setup wizard. Also reachable when already configured via the
+               "change account" button (forceResetup) — for switching to a new
+               account or repairing a stuck session. -->
           <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
-            <header>
-              <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-                Setup
-              </h2>
-              <p class="text-xs text-zinc-500">
-                Paste your credential below. The Pi generates a fresh
-                WireGuard keypair locally and registers the public key with
-                {meta.label}'s API — your account is never sent to anyone
-                else.
-              </p>
+            <header class="flex items-start justify-between gap-3">
+              <div class="space-y-1">
+                <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+                  {state?.configured ? 'Change account / re-run setup' : 'Setup'}
+                </h2>
+                <p class="text-xs text-zinc-500">
+                  {#if state?.configured}
+                    Submitting an account ID (a new one, or the same) registers a
+                    fresh WireGuard key + session and re-fetches the server list —
+                    use this for a new {meta.label} account or to repair a stuck
+                    session.
+                  {:else}
+                    Paste your credential below. The Pi generates a fresh
+                    WireGuard keypair locally and registers the public key with
+                    {meta.label}'s API — your account is never sent to anyone else.
+                  {/if}
+                </p>
+              </div>
+              {#if state?.configured}
+                <button class="btn text-xs flex-shrink-0" on:click={() => (forceResetup = false)}>
+                  cancel
+                </button>
+              {/if}
             </header>
             <div class="space-y-2">
               <input type="password" bind:value={credentialInput}
@@ -318,13 +339,20 @@
         {:else}
           <!-- Configured + server picker -->
           <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
-            <header class="flex items-baseline justify-between gap-2">
+            <header class="flex items-baseline justify-between gap-2 flex-wrap">
               <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
                 Pick a server
               </h2>
-              <p class="text-[10px] text-zinc-500 font-mono">
-                peer IP {state.peer_ipv4} · {servers.length} servers cached
-              </p>
+              <div class="flex items-center gap-3">
+                <p class="text-[10px] text-zinc-500 font-mono">
+                  peer IP {state.peer_ipv4} · {servers.length} servers cached
+                </p>
+                <button class="btn text-xs"
+                        on:click={() => { forceResetup = true; error = ''; msg = ''; }}
+                        title="Change the account ID or re-run setup — for a new {meta.label} account or to repair a stuck session">
+                  ↻ change account
+                </button>
+              </div>
             </header>
 
             <div class="flex flex-wrap gap-2">

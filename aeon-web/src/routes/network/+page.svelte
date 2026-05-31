@@ -71,7 +71,10 @@
   // Tor is the active VPN. We mirror that filter in the UI's
   // "matching" preview so the count + highlighting matches what
   // the backend actually picks.
-  $: srvTorActive = vpnEnabled && vpnProvider === 'tor';
+  // v73: Tor is "active" when its overlay toggle is on — it's no longer a VPN
+  // provider. Drives the DNSCrypt :443-only server filter (Tor exits block
+  // other ports) below.
+  $: srvTorActive = torEnabled;
   // Resolvers that pass the user's privacy/trust criteria. Mirrors
   // ResolverCriteria::passes() on the supervisor side.
   $: srvMatching = srvCatalog.filter((r) => {
@@ -159,6 +162,16 @@
     ivpn: '',
     azirevpn: '',
   };
+  // v74: cached server list per provider (from the /state endpoint) so the
+  // VPN section can offer an INLINE server picker + "pick fastest" once a
+  // provider is configured — no trip to the wizard just to change server.
+  let wizardProviderServers: Record<string, any[]> = {
+    mullvad: [],
+    ivpn: [],
+    azirevpn: [],
+  };
+  let serverBusy = ''; // provider id currently selecting/probing
+  let fastestMsg = '';
 
   // v58.1: independent Tor / I2P toggles. They can run alongside any
   // clearnet VPN provider — when both are enabled, .onion goes through
@@ -241,6 +254,12 @@
       detail: vpnStatus.detail,
     }];
   })();
+
+  // v73: the single live Tor overlay (bootstrap % + circuit relays), polled
+  // every 4s. Drives the Tor section's status panel — the bootstrap progress
+  // bar + relay-node listing that the v62 section restructure dropped even
+  // though aeon-vpn-status.py still emits the data (GETINFO circuit-status).
+  $: torOverlay = statusOverlays.find((o) => o.kind === 'tor');
 
   // Labels for the overlay header — "Mullvad VPN" beats "wireguard"
   // when we know the user configured a wizard provider.
@@ -437,7 +456,10 @@
       }
       vpnState = v;
       vpnEnabled = v.enabled;
-      vpnProvider = v.provider;
+      // v73: Tor/I2P are configured in the Privacy Overlay section now, not as
+      // VPN providers. Migrate any legacy vpnProvider=tor/i2p to 'none' so the
+      // old VPN-section blocks never render and there's a single enable path.
+      vpnProvider = (v.provider === 'tor' || v.provider === 'i2p') ? 'none' : v.provider;
       vpnKillSwitch = v.kill_switch;
       vpnLanBypass = v.lan_bypass;
       tsHostname = v.tailscale.hostname;
@@ -475,14 +497,17 @@
             ).then((rr) => rr.json());
             wizardProviderConfigured[id] = !!r?.configured;
             wizardProviderServer[id] = r?.selected_server ?? '';
+            wizardProviderServers[id] = Array.isArray(r?.servers) ? r.servers : [];
           } catch {
             wizardProviderConfigured[id] = false;
             wizardProviderServer[id] = '';
+            wizardProviderServers[id] = [];
           }
         }),
       );
       wizardProviderConfigured = { ...wizardProviderConfigured };
       wizardProviderServer = { ...wizardProviderServer };
+      wizardProviderServers = { ...wizardProviderServers };
     } catch (e: any) {
       error = e?.message ?? 'failed to load network state';
     } finally {
@@ -496,6 +521,49 @@
     } catch (e) {
       // Silent on poll errors — surfacing a banner every 3s would be noisy
       console.warn('vpn status poll failed', e);
+    }
+  }
+
+  // v74: inline server picker. Both actions persist the selection (POST
+  // /select); the tunnel comes up on Save & Apply, consistent with the rest
+  // of the VPN section. pick-fastest probes TCP RTT to each cached server and
+  // selects the lowest.
+  async function selectVpnServer(id: string, serverId: string) {
+    serverBusy = id;
+    try {
+      await fetch(`/api/network/vpn/providers/${id}/select`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server_id: serverId }),
+      });
+      wizardProviderServer[id] = serverId;
+      wizardProviderServer = { ...wizardProviderServer };
+    } catch (e: any) {
+      fastestMsg = `✗ ${e?.message ?? 'select failed'}`;
+    } finally {
+      serverBusy = '';
+    }
+  }
+
+  async function pickFastestVpnServer(id: string) {
+    serverBusy = id;
+    fastestMsg = 'probing latency to each server…';
+    try {
+      const r = await fetch(`/api/network/vpn/providers/${id}/pick-fastest`, {
+        method: 'POST',
+      }).then((rr) => rr.json());
+      const top = (r?.ranking ?? []).find((e: any) => e.rtt_ms != null);
+      if (top?.id) {
+        await selectVpnServer(id, top.id);
+        fastestMsg = `fastest: ${top.label} (${top.rtt_ms} ms) — Save & Apply to connect`;
+      } else {
+        fastestMsg = 'no servers responded to the probe — try "refresh" in the wizard';
+      }
+    } catch (e: any) {
+      fastestMsg = `✗ ${e?.message ?? 'probe failed'}`;
+    } finally {
+      serverBusy = '';
+      setTimeout(() => (fastestMsg = ''), 8000);
     }
   }
 
@@ -736,22 +804,18 @@
         patch.openvpn = { auth_username: ovUser };
         if (ovConfig) patch.openvpn.config = ovConfig;
         if (ovPass) patch.openvpn.auth_password = ovPass;
-      } else if (vpnProvider === 'tor') {
-        patch.tor = { preset: torPreset };
-        if (torBridges) patch.tor.bridges = torBridges;
-      } else if (vpnProvider === 'i2p') {
-        patch.i2p = { outproxy: i2pOutproxy };
       }
-      // v58.1: always send the independent toggle state for tor + i2p.
-      // The PUT migrates legacy vpnProvider=tor/i2p but the top-level
-      // toggles are the new source of truth — saving them with every
-      // request ensures the user's choice from the new UI sticks even
-      // when they don't touch the legacy radio.
+      // v58.1/v73: Tor + I2P are configured in the Privacy Overlay section,
+      // not as VPN providers. Their toggles — and Tor's bridge preset, custom
+      // bridges, mode + exit country — are the single source of truth, saved
+      // on every request regardless of which clearnet VPN provider is picked.
       patch.tor = {
         ...(patch.tor ?? {}),
         enabled: torEnabled,
         mode: torMode,
         over_vpn: torOverVpn,
+        preset: torPreset,
+        bridges: torBridges || undefined,
         exit_country: torExitCountry,
       };
       patch.i2p = {
@@ -1006,7 +1070,7 @@
                  can't leak — but Tor exit nodes frequently block TCP
                  to non-standard ports like 8443, which manifests as
                  silent timeouts. Recommend AdGuard / OpenDNS / etc. -->
-            {#if dnsEnabled && vpnEnabled && vpnProvider === 'tor'
+            {#if dnsEnabled && torEnabled
                  && (dnsProvider === 'quad9' || dnsProvider === 'quad9-unfiltered'
                      || dnsProvider === 'cleanbrowsing')}
               <div class="p-3 rounded border border-amber-500/40 bg-amber-500/10 ml-7
@@ -1694,6 +1758,54 @@
                 </span>
               </label>
 
+              <!-- v73: live Tor status — bootstrap progress bar + relay
+                   circuit listing (restored; v62 dropped this view). Stays
+                   visible (not dimmed) whenever Tor is enabled. Data polls
+                   every 4s from aeon-vpn-status (GETINFO bootstrap + circuits). -->
+              {#if torEnabled}
+                <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-2">
+                  {#if torOverlay}
+                    {@const pct = torOverlay.bootstrap_percent ?? 0}
+                    {@const circuits = torOverlay.detail?.circuits ?? []}
+                    {@const connected = torOverlay.state === 'connected' || pct >= 100}
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-xs font-mono uppercase tracking-wider
+                                   {connected ? 'text-live-300' : 'text-amber-300'}">
+                        {connected ? '● Tor connected' : '◐ Bootstrapping Tor'}
+                      </span>
+                      <span class="text-[11px] font-mono text-zinc-400">{pct}%</span>
+                    </div>
+                    <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
+                      <div class="h-full rounded-full transition-[width] duration-500
+                                  {connected ? 'bg-live-400' : 'bg-amber-400'}"
+                           style="width: {pct}%"></div>
+                    </div>
+                    {#if torOverlay.summary}
+                      <p class="text-[11px] text-zinc-500 leading-snug">{torOverlay.summary}</p>
+                    {/if}
+                    {#if circuits.length}
+                      <div class="pt-1 space-y-1">
+                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                          Relay circuits ({circuits.length}){#if torOverlay.public_country} · exit {torOverlay.public_country}{/if}
+                        </p>
+                        {#each circuits as c (c.id)}
+                          <div class="font-mono text-[11px] text-zinc-400 flex items-baseline gap-2">
+                            <span class="text-zinc-600 flex-shrink-0">#{c.id}</span>
+                            <span class="truncate">
+                              {#each c.hops as hop, i}<span class="{i === 0 ? 'text-cursed-300' : i === c.hops.length - 1 ? 'text-live-300' : 'text-zinc-300'}">{hop}</span>{#if i < c.hops.length - 1}<span class="text-zinc-600"> → </span>{/if}{/each}
+                            </span>
+                          </div>
+                        {/each}
+                      </div>
+                    {:else if connected}
+                      <p class="text-[11px] text-zinc-500">Connected — no circuits built yet (idle / split-tunnel).</p>
+                    {/if}
+                  {:else}
+                    <p class="text-[11px] text-zinc-500 font-mono">Starting Tor… status appears within a few seconds.</p>
+                  {/if}
+                </div>
+              {/if}
+
               <div class="space-y-3 pl-7"
                    class:opacity-40={!torEnabled}
                    class:pointer-events-none={!torEnabled}>
@@ -1760,6 +1872,44 @@
                     </p>
                   </div>
                 </label>
+
+                <!-- v73: Tor bridge preset + custom bridges — moved here from
+                     the legacy VPN "Tor" provider. Tor is no longer a VPN
+                     provider, so this is the single place to configure it.
+                     Leave "direct" on open networks; obfs4/meek/snowflake help
+                     where Tor is blocked. Dimmed with the rest when Tor is off. -->
+                <div class="space-y-2 pt-3 border-t border-ink-800" role="radiogroup" aria-label="Tor bridge preset">
+                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">Bridge preset</p>
+                  {#if vpnState?.tor.presets}
+                    {#each vpnState.tor.presets as p}
+                      <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="radio" bind:group={torPreset} value={p.id}
+                               class="mt-1 w-4 h-4 accent-cursed-500" />
+                        <div class="space-y-1 min-w-0">
+                          <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
+                          <p class="text-[11px] text-zinc-500">{p.blurb}</p>
+                        </div>
+                      </label>
+                    {/each}
+                  {/if}
+                </div>
+                {#if torPreset === 'custom'}
+                  <div class="space-y-1 pt-2">
+                    <label class="text-[11px] uppercase tracking-wider text-zinc-500 block" for="tor-br-ov">
+                      Custom bridge lines
+                      {#if vpnState?.tor.has_bridges}
+                        <span class="text-cursed-400 normal-case ml-1 text-[10px]">(saved — paste to replace, blank keeps)</span>
+                      {/if}
+                    </label>
+                    <textarea id="tor-br-ov" bind:value={torBridges} rows="4"
+                              placeholder="obfs4 12.34.56.78:443 FINGERPRINT cert=… iat-mode=0"
+                              class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                    <p class="text-[11px] text-zinc-500">
+                      Fresh bridges from
+                      <a class="text-cursed-300 hover:underline" href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">bridges.torproject.org</a> — one per line. Most users won't need this.
+                    </p>
+                  </div>
+                {/if}
               </div>
             </div>
 
@@ -1812,11 +1962,16 @@
               </div>
             </div>
 
-            <p class="text-[11px] text-zinc-600 leading-relaxed">
-              Tor service config (bridges, exit country, etc.) lives in the
-              VPN section below under the legacy "Tor (legacy)" provider —
-              that will move up here in a future release.
-            </p>
+            <!-- v73: the overlay section now owns Tor + I2P end-to-end, so it
+                 gets its own Save & Apply. saveVpn() persists the toggles +
+                 Tor's bridge preset/bridges/mode/exit-country (and the VPN
+                 config too — it's one atomic network save). -->
+            <div class="flex items-center gap-3 pt-3 border-t border-ink-700">
+              <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
+                {vpnSaving ? 'saving…' : 'Save & Apply'}
+              </button>
+              {#if vpnMsg}<span class="text-xs text-live-300">{vpnMsg}</span>{/if}
+            </div>
           </section>
         </div>
       </details>
@@ -1844,13 +1999,25 @@
         </summary>
         <div class="border-t border-ink-700 p-6 space-y-4">
           <section class="space-y-4">
-            <header class="space-y-1">
+            <header class="space-y-2">
               <p class="text-zinc-400 text-sm">
                 Route this device's WAN traffic — including anything
                 NAT'd through the USB ethernet — over an outbound VPN
                 tunnel. Combine with <em>restricted</em> mode to make the
                 tunnel the only exit path for the connected host.
               </p>
+              <!-- v74: always-visible entry to the provider setup wizard.
+                   Mullvad/IVPN need account registration there before they can
+                   connect; the only links before were buried inside per-provider
+                   conditionals you couldn't see until you'd already selected one. -->
+              <a href="/network/vpn-providers"
+                 class="inline-flex items-center gap-1.5 text-xs font-mono px-2.5 py-1.5 rounded
+                        border border-cursed-500/40 text-cursed-300
+                        hover:bg-cursed-500/10 transition-colors">
+                ⚙ VPN provider setup wizard
+                <span class="text-zinc-500 normal-case">— register / manage Mullvad · IVPN</span>
+                →
+              </a>
             </header>
 
             <label class="flex items-center gap-3 cursor-pointer">
@@ -1862,7 +2029,7 @@
             <div class="space-y-3 pl-7" class:opacity-40={!vpnEnabled} class:pointer-events-none={!vpnEnabled}>
               <p class="text-xs uppercase tracking-wider text-zinc-500">Provider</p>
               {#if vpnState}
-                {#each vpnState.providers as p}
+                {#each vpnState.providers.filter((p) => p.id !== 'tor' && p.id !== 'i2p') as p}
                   <label class="flex items-start gap-3 cursor-pointer">
                     <input type="radio" bind:group={vpnProvider} value={p.id}
                            class="mt-1 w-4 h-4 accent-cursed-500" />
@@ -2029,32 +2196,40 @@ AllowedIPs = 0.0.0.0/0`}
                    wg-quick failure. -->
               <div class="space-y-3 pl-7">
                 {#if wizardProviderConfigured[vpnProvider]}
-                  <div class="p-4 rounded-lg border border-live-500/40
-                              bg-live-500/10 space-y-2">
-                    <div class="flex items-start gap-3">
-                      <span class="text-live-400 text-lg leading-none mt-0.5">✓</span>
-                      <div class="space-y-1">
-                        <div class="text-live-200 text-sm font-medium">
-                          {vpnProvider} is configured
-                        </div>
-                        <p class="text-xs text-live-100/70 leading-relaxed">
-                          {#if wizardProviderServer[vpnProvider]}
-                            Currently pinned to
-                            <code class="font-mono">{wizardProviderServer[vpnProvider]}</code>.
-                          {:else}
-                            No server pinned yet —
-                            <a class="text-cursed-300 hover:underline"
-                               href="/network/vpn-providers?provider={vpnProvider}">pick one in the wizard</a>
-                            or let "fastest" probe and apply.
-                          {/if}
-                          Save & Apply below to bring the tunnel up.
-                        </p>
-                      </div>
+                  <div class="p-4 rounded-lg border border-live-500/40 bg-live-500/10 space-y-3">
+                    <div class="flex items-center gap-2 text-live-200 text-sm font-medium">
+                      <span class="text-live-400">✓</span> {vpnProvider} is configured
                     </div>
-                    <a class="btn-secondary text-xs ml-7 inline-block"
-                       href="/network/vpn-providers?provider={vpnProvider}">
-                      change server / refresh keys →
-                    </a>
+                    <!-- v74: inline server picker — choose a server or auto-pick
+                         the fastest right here; no trip to the wizard to switch. -->
+                    <div class="space-y-1.5">
+                      <label class="text-[11px] uppercase tracking-wider text-zinc-500 block" for="vpn-srv">
+                        Server <span class="text-zinc-600">({(wizardProviderServers[vpnProvider] ?? []).length} available)</span>
+                      </label>
+                      <div class="flex flex-wrap items-center gap-2">
+                        <select id="vpn-srv"
+                                class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-2 py-1.5 text-sm text-zinc-200 disabled:opacity-50"
+                                value={wizardProviderServer[vpnProvider]}
+                                on:change={(e) => selectVpnServer(vpnProvider, e.currentTarget.value)}
+                                disabled={serverBusy === vpnProvider}>
+                          <option value="">— none pinned (provider picks) —</option>
+                          {#each (wizardProviderServers[vpnProvider] ?? []) as sv}
+                            <option value={sv.id}>{sv.label} · {sv.hostname}</option>
+                          {/each}
+                        </select>
+                        <button class="btn text-xs whitespace-nowrap"
+                                on:click={() => pickFastestVpnServer(vpnProvider)}
+                                disabled={serverBusy === vpnProvider}>
+                          {serverBusy === vpnProvider ? 'probing…' : '⚡ Pick fastest now'}
+                        </button>
+                      </div>
+                      {#if fastestMsg}<p class="text-[11px] text-live-300 leading-snug">{fastestMsg}</p>{/if}
+                    </div>
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      Pick a server (or the fastest), then <strong>Save &amp; Apply</strong> below to bring the tunnel up.
+                      <a class="text-cursed-300 hover:underline ml-1"
+                         href="/network/vpn-providers?provider={vpnProvider}">advanced / refresh keys →</a>
+                    </p>
                   </div>
                 {:else}
                   <div class="p-4 rounded-lg border border-amber-500/40
@@ -2412,8 +2587,11 @@ obfs4 …`}
                       </div>
                     {/if}
 
-                    <!-- Tailscale peer list -->
-                    {#if ov.detail.peers && ov.detail.peers.length > 0}
+                    <!-- Tailscale peer list — Tailscale-only. WireGuard
+                         providers (wireguard/mullvad/ivpn) also expose a WG
+                         "peer" but with no host/ips, which rendered here as
+                         "undefined undefined". Gate strictly to tailscale. -->
+                    {#if ov.provider === 'tailscale' && ov.detail.peers && ov.detail.peers.length > 0}
                       <div class="space-y-1">
                         <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
                           Tailnet peers ({ov.detail.peers.length})

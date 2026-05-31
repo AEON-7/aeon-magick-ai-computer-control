@@ -426,18 +426,13 @@ EOF
 # VPN
 # ──────────────────────────────────────────────────────────────────────
 
-stop_clearnet_vpns() {
-    # v58: tighter version of stop_all_vpns that leaves tor + i2pd
-    # alone. Called by apply_vpn so toggling a clearnet provider
-    # doesn't bounce the independent Tor/I2P services.
-    systemctl stop wg-quick@aeon0.service 2>/dev/null || true
-    systemctl disable wg-quick@aeon0.service 2>/dev/null || true
-    systemctl stop openvpn-client@aeon.service 2>/dev/null || true
-    systemctl disable openvpn-client@aeon.service 2>/dev/null || true
-    /usr/bin/tailscale down 2>/dev/null || true
-    # Sweep iptables rules tagged "aeon-vpn". Tor + I2P rules go
-    # under "aeon-tor" / "aeon-i2p" tags in their own apply paths,
-    # so this sweep doesn't touch them.
+# Sweep iptables rules tagged "aeon-vpn" (a legacy tag carried over from
+# when Tor was itself a VPN-provider option). Tor + I2P rules use the
+# "aeon-tor" / "aeon-i2p" tags in their own apply paths, so this sweep
+# never touches them. IMPORTANT: this does NOT stop any VPN service — it
+# only removes stale iptables rules. Callers that also want the clearnet
+# VPN torn down must do that separately (see stop_clearnet_vpns).
+sweep_aeon_vpn_rules() {
     for table in filter nat mangle; do
         for chain in OUTPUT INPUT FORWARD PREROUTING POSTROUTING; do
             local lines
@@ -448,6 +443,18 @@ stop_clearnet_vpns() {
             done
         done
     done
+}
+
+stop_clearnet_vpns() {
+    # v58: tighter version of stop_all_vpns that leaves tor + i2pd
+    # alone. Called by apply_vpn so toggling a clearnet provider
+    # doesn't bounce the independent Tor/I2P services.
+    systemctl stop wg-quick@aeon0.service 2>/dev/null || true
+    systemctl disable wg-quick@aeon0.service 2>/dev/null || true
+    systemctl stop openvpn-client@aeon.service 2>/dev/null || true
+    systemctl disable openvpn-client@aeon.service 2>/dev/null || true
+    /usr/bin/tailscale down 2>/dev/null || true
+    sweep_aeon_vpn_rules
 }
 
 stop_all_vpns() {
@@ -670,16 +677,25 @@ try:
         print(f'server {sel!r} not in cache', file=sys.stderr)
         sys.exit(3)
 
-    # Per-provider Interface defaults (DNS + MTU). Mullvad uses their
-    # own resolver at 10.64.0.1; IVPN uses 172.16.0.1; AzireVPN uses
-    # 91.231.153.2. Pick the right one based on provider arg.
+    # Per-provider MTU only. Mullvad uses 1380; IVPN and others use 1420.
+    #
+    # There is intentionally NO DNS line here. wg-quick applies a DNS
+    # directive by shelling out to resolvconf, which is ABSENT on Pi OS
+    # (no resolvconf/openresolv package, systemd-resolved inactive, and
+    # NetworkManager owns a plain /etc/resolv.conf). With a DNS line
+    # present, wg-quick aborts mid-bringup with a resolvconf-not-found
+    # error (exit 127) and the tunnel never comes up. DNS privacy comes
+    # instead from the device DNSCrypt layer at 127.0.2.1, whose encrypted
+    # upstream queries ride through this tunnel (AllowedIPs 0.0.0.0/0), so
+    # there is no DNS leak. Mirrors the supervisor ivpn.rs/mullvad.rs note.
+    # NOTE: this entire block sits inside a bash double-quoted python3 -c
+    # string, so it must never contain a double-quote, backtick, dollar or
+    # backslash character (any of those would break out of the bash string).
     provider = '$provider'
     if provider == 'mullvad':
-        dns = '10.64.0.1'; mtu = '1380'
-    elif provider == 'ivpn':
-        dns = '172.16.0.1'; mtu = '1420'
+        mtu = '1380'
     else:
-        dns = '91.231.153.2'; mtu = '1420'
+        mtu = '1420'
 
     ipv4 = s.get('peer_ipv4','')
     ipv6 = s.get('peer_ipv6','')
@@ -688,10 +704,10 @@ try:
         addr += f', {ipv6}/128'
 
     cfg = f'''# Managed by aeon-net-services (provider={provider}).
+# No DNS= line on purpose — Pi OS has no resolvconf; DNSCrypt handles DNS.
 [Interface]
 PrivateKey = {s.get('wg_private_key','')}
 Address    = {addr}
-DNS        = {dns}
 MTU        = {mtu}
 
 [Peer]
@@ -715,8 +731,21 @@ except Exception as e:
     install -d -m 0700 /etc/wireguard
     printf '%s' "$rendered" > "$WG_CONF"
     chmod 0600 "$WG_CONF"
-    systemctl enable --now wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
-    log "wireguard up via wg-quick@aeon0 (provider=$provider)"
+    # Bring the tunnel up with the freshly-rendered config. We must
+    # `restart`, not `enable --now`: --now only *starts* a stopped unit, so
+    # if wg-quick@aeon0 is already running (re-apply after picking a new
+    # server) it would keep the STALE config, and if a prior attempt left
+    # the unit in `failed` state (e.g. the old DNS-line resolvconf abort),
+    # --now refuses to start it at all. reset-failed clears that latched
+    # state, enable persists across boots, restart reloads the new config.
+    systemctl reset-failed wg-quick@aeon0.service 2>/dev/null || true
+    systemctl enable wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    systemctl restart wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    if systemctl is-active --quiet wg-quick@aeon0.service; then
+        log "wireguard up via wg-quick@aeon0 (provider=$provider)"
+    else
+        log "WARN: wg-quick@aeon0 did not come up (provider=$provider) — check 'journalctl -u wg-quick@aeon0'"
+    fi
 }
 
 apply_vpn_openvpn() {
@@ -1170,7 +1199,14 @@ detect_vpn_iface() {
     fi
     case "$provider" in
         tailscale) ip link show tailscale0 >/dev/null 2>&1 && echo "tailscale0" ;;
-        wireguard) ip link show aeon0     >/dev/null 2>&1 && echo "aeon0" ;;
+        # v74: mullvad + ivpn are the commercial wizard providers — they
+        # ride the SAME wg-quick@aeon0 tunnel as a hand-rolled "wireguard"
+        # provider. They were missing here, so detect_vpn_iface returned ""
+        # for them, apply_tor_over_vpn logged "no clearnet VPN is up" and
+        # skipped table 100, and Tor-over-VPN could never route through the
+        # tunnel (Tor stalled at bootstrap → transparent mode then
+        # blackholed the whole box). All three map to aeon0.
+        wireguard|mullvad|ivpn) ip link show aeon0 >/dev/null 2>&1 && echo "aeon0" ;;
         openvpn)
             # OpenVPN's tun device name varies (tun0 / tun1 …).
             # Pick the first tun*  with an IP.
@@ -1195,7 +1231,11 @@ apply_tor_over_vpn() {
     fi
     log "tor: nesting through clearnet VPN ($iface) via fwmark 0x100 + table 100"
 
-    # Mark Tor's outbound packets in the mangle table.
+    # Mark Tor's outbound packets in the mangle table. Delete-before-add so
+    # this is idempotent — reassert_policy_routing calls us a second time
+    # after DNSCrypt's NM churn, and we must not stack duplicate MARK rules.
+    iptables -t mangle -D OUTPUT -m owner --uid-owner debian-tor \
+        -j MARK --set-mark 0x100 -m comment --comment "aeon-vpn" 2>/dev/null || true
     iptables -t mangle -A OUTPUT -m owner --uid-owner debian-tor \
         -j MARK --set-mark 0x100 -m comment --comment "aeon-vpn"
 
@@ -1222,6 +1262,9 @@ apply_i2p_over_vpn() {
     fi
     log "i2p: nesting through clearnet VPN ($iface) via fwmark 0x200 + table 200"
 
+    # Delete-before-add for idempotency (reassert_policy_routing re-runs us).
+    iptables -t mangle -D OUTPUT -m owner --uid-owner i2pd \
+        -j MARK --set-mark 0x200 -m comment --comment "aeon-vpn" 2>/dev/null || true
     iptables -t mangle -A OUTPUT -m owner --uid-owner i2pd \
         -j MARK --set-mark 0x200 -m comment --comment "aeon-vpn"
 
@@ -1328,7 +1371,11 @@ apply_kill_switch() {
         tailscale)
             iptables -A OUTPUT -o tailscale0 -j ACCEPT -m comment --comment "aeon-vpn"
             ;;
-        wireguard)
+        wireguard|mullvad|ivpn)
+            # v74: mullvad/ivpn ride wg-quick@aeon0 just like "wireguard".
+            # They were missing here, so enabling the kill-switch on a
+            # commercial provider blocked ALL outbound (including the tunnel
+            # itself) — a self-inflicted lockout. All three exit via aeon0.
             iptables -A OUTPUT -o aeon0 -j ACCEPT -m comment --comment "aeon-vpn"
             ;;
         openvpn)
@@ -1413,7 +1460,16 @@ apply_tor() {
     # entries per dropped packet (visible in the Security Console as
     # repeated identical drops at the same timestamp). The earlier
     # `grep -v 'aeon-tor'` was a no-op — wrong tag.
-    stop_clearnet_vpns 2>/dev/null || stop_all_vpns 2>/dev/null || true
+    #
+    # v74 FIX: this used to call stop_clearnet_vpns here, which ALSO runs
+    # `systemctl stop wg-quick@aeon0`. apply_tor runs right after apply_vpn
+    # in main(), so it tore down the clearnet VPN that apply_vpn had JUST
+    # brought up — even when Tor is disabled. The tunnel flapped up then
+    # immediately down and egress fell back to the bare ISP. We only ever
+    # wanted the iptables-rule sweep here, never to stop the VPN (Tor-over-
+    # VPN nesting in fact REQUIRES the clearnet tunnel to stay up). So
+    # sweep the stale aeon-vpn rules only — leave every VPN service alone.
+    sweep_aeon_vpn_rules
     iptables -t nat -F AEON_TOR_OUT 2>/dev/null && iptables -t nat -X AEON_TOR_OUT 2>/dev/null || true
 
     if [ "$enabled" != "true" ]; then
@@ -1485,6 +1541,76 @@ apply_i2p() {
     fi
 }
 
+# v74: Re-assert ALL policy routing after apply_dnscrypt's NM churn.
+#
+# apply_dnscrypt reactivates every active NetworkManager connection
+# (`nmcli con up <uuid>`) so the 127.0.2.1 resolver takes effect on each
+# link. That reactivation FLUSHES the custom routing tables we depend on:
+#   * wg-quick's tunnel default route (table == its fwmark, e.g. 51820) —
+#     the `default dev aeon0` for an AllowedIPs=0.0.0.0/0 tunnel. The ip
+#     RULES (suppress_prefixlength / not-fwmark) survive, but with the
+#     table's default route gone, traffic falls through to main and leaks
+#     out the bare ISP (tunnel still UP + handshaking, yet every packet
+#     bypasses it).
+#   * Tor's over_vpn table 100 and I2P's over_vpn table 200 (`default dev
+#     aeon0`) — without these, Tor/I2P's fwmarked packets have no route
+#     through the tunnel, so Tor can never reach its guards and stalls at
+#     ~5% (the "All traffic via Tor" lockout: transparent mode then
+#     blackholes every TCP connection, including the management plane).
+#
+# Since apply_dnscrypt is the LAST apply step, we restore everything here,
+# AFTER all NM churn. Crucially we re-add routes IN PLACE (ip route
+# replace) rather than bouncing wg-quick: an interface bounce would delete
+# + recreate aeon0 and invalidate the Tor/I2P tables that reference it.
+reassert_policy_routing() {
+    local vpn_enabled vpn_provider
+    vpn_enabled="$(toml_get vpn enabled false)"
+    vpn_provider="$(toml_get vpn provider none)"
+    [ "$vpn_enabled" = "true" ] || return 0
+    case "$vpn_provider" in
+        wireguard|mullvad|ivpn) ;;
+        *) return 0 ;;
+    esac
+    systemctl is-active --quiet wg-quick@aeon0.service || return 0
+
+    # wg-quick numbers its table after the fwmark it set (0xca6c == 51820).
+    # Check whether NM's reactivation flushed the tunnel default route from
+    # THAT specific table (not "any table" — Tor's table 100 also carries a
+    # `default dev aeon0`, which would mask a missing VPN route).
+    local fwmark_hex table=0 need_bounce=0
+    fwmark_hex="$(wg show aeon0 fwmark 2>/dev/null)"
+    case "$fwmark_hex" in 0x*) table=$(( fwmark_hex )) ;; esac
+    if [ "$table" -gt 0 ]; then
+        ip route show table "$table" 2>/dev/null | grep -q "^default" || need_bounce=1
+    else
+        ip route show table all 2>/dev/null | grep -q "default dev aeon0" || need_bounce=1
+    fi
+
+    if [ "$need_bounce" = "1" ]; then
+        # Bounce wg-quick — the PROVEN, reliable restore (re-adds the route,
+        # the fwmark, and the not-fwmark / suppress_prefixlength rules in one
+        # shot). We deliberately bounce rather than re-add the route alone: a
+        # lone `ip route` can lose a race with NM's still-settling
+        # reactivation, whereas a full wg-quick restart lands cleanly (this
+        # is what worked reliably across reboots before v74). The bounce
+        # drops Tor/I2P's table 100/200, but we rebuild those just below.
+        log "vpn: tunnel route missing after NM reactivation — bouncing wg-quick@aeon0 to reinstate it"
+        systemctl restart wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    fi
+
+    # Re-assert Tor / I2P over_vpn policy routing AFTER any bounce (the
+    # bounce recreates aeon0 and drops their tables; NM churn can flush them
+    # independently too). Both helpers are idempotent.
+    if [ "$(toml_get tor enabled false)" = "true" ] && [ "$(toml_get tor over_vpn false)" = "true" ]; then
+        apply_tor_over_vpn
+        log "vpn: re-asserted Tor over_vpn policy routing (fwmark 0x100 -> table 100)"
+    fi
+    if [ "$(toml_get i2p enabled false)" = "true" ] && [ "$(toml_get i2p over_vpn false)" = "true" ]; then
+        apply_i2p_over_vpn
+        log "vpn: re-asserted I2P over_vpn policy routing (fwmark 0x200 -> table 200)"
+    fi
+}
+
 # ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
@@ -1497,8 +1623,12 @@ apply_i2p() {
 #   3. I2P — independent; HTTP proxy bind needs usb0 + nothing else.
 #   4. DNSCrypt — bootstrap_resolvers may point at Tor's DNSPort
 #      when Tor is on, so set up Tor first.
+#   5. (v74) re-assert ALL policy routing — DNSCrypt's NM reactivation
+#      flushes wg-quick's table AND Tor/I2P's over_vpn tables (100/200);
+#      restore them in place once all NM churn is done.
 apply_vpn
 apply_tor
 apply_i2p
 apply_dnscrypt
+reassert_policy_routing
 log "aeon-net-services done"

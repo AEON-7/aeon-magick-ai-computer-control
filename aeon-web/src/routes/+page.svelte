@@ -2,6 +2,37 @@
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
   import H264Canvas from '$lib/components/H264Canvas.svelte';
+  import Icon from '$lib/components/Icon.svelte';
+  import TargetPowerMenu from '$lib/components/TargetPowerMenu.svelte';
+  import SpecialKeys from '$lib/components/SpecialKeys.svelte';
+
+  // v74: launcher information-architecture — group the flat 10-button nav into
+  // iconed clusters so humans scan by category instead of reading 10 identical
+  // pills. Pages/routes are unchanged (agents + deep links unaffected); this is
+  // purely the human presentation layer. One source drives BOTH the desktop
+  // toolbar and the mobile menu (kills the previously-duplicated link lists).
+  const NAV_GROUPS: { label: string; items: { href: string; label: string; icon: string; title?: string }[] }[] = [
+    { label: 'Network', items: [
+      { href: '/network', label: 'Network', icon: 'globe', title: 'VPN · encrypted DNS · Tor/I2P · firewall' },
+      { href: '/wifi',    label: 'WiFi',    icon: 'wifi',  title: 'WiFi mode, saved networks, setup AP' },
+    ]},
+    { label: 'Logs', items: [
+      { href: '/security', label: 'Security', icon: 'shield', title: 'blocked packets, firewall + intrusion events' },
+      { href: '/dns',      label: 'DNS',      icon: 'funnel', title: 'DNS query log + blacklist' },
+      { href: '/audit',    label: 'Audit',    icon: 'list',   title: 'access + privileged-action audit log' },
+    ]},
+    { label: 'Storage & Files', items: [
+      { href: '/files',   label: 'Files', icon: 'folder', title: 'file transfer + clipboard bridge' },
+      { href: '/storage', label: 'Disk',  icon: 'disc',   title: 'USB CD / disk-drive emulation (mount ISOs)' },
+    ]},
+    { label: 'Access', items: [
+      { href: '/ssh-keys', label: 'SSH', icon: 'key',    title: 'SSH authorized keys' },
+      { href: '/tokens',   label: 'API', icon: 'braces', title: 'API tokens for agents / REST / MCP' },
+    ]},
+    { label: 'System', items: [
+      { href: '/system', label: 'Pi', icon: 'cpu', title: 'Pi health + reboot/poweroff + stream tuning' },
+    ]},
+  ];
 
   let stream_url = '';
   // v64: prefer the low-latency H.264 WebCodecs canvas when the browser
@@ -168,12 +199,21 @@
   function enterCapture() {
     if (captured) return;
     canvas.requestPointerLock();
+    // v74: Keyboard Lock API — capture browser/OS-reserved keys (F11, F12,
+    // Ctrl/Cmd+W, Esc, etc.) so they reach our keydown handler and forward to
+    // the target instead of firing local browser actions. Best-effort:
+    // Chromium-only, captures the most keys in fullscreen, and CANNOT override
+    // macOS hardware fn-key mappings (brightness / Mission Control happen below
+    // the browser). For those, use the on-screen "Keys" pad or enable macOS
+    // "Use F1, F2, etc. keys as standard function keys". Released on exit.
+    try { (navigator as any).keyboard?.lock?.(); } catch { /* unsupported */ }
     captured = true;
   }
 
   function exitCapture() {
     if (!captured) return;
     if (document.pointerLockElement) document.exitPointerLock();
+    try { (navigator as any).keyboard?.unlock?.(); } catch { /* noop */ }
     captured = false;
     // Release any modifier keys the OS might think we're still holding.
     api.releaseAll().catch(console.warn);
@@ -792,21 +832,24 @@
                 title="Fullscreen control mode — best on phones / tablets">
           ⛶ fullscreen
         </button>
+        <SpecialKeys />
       </div>
       <!-- divider -->
       <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
-      <!-- Group B: nav -->
+      <!-- Group B: nav — grouped + iconed (v74). Clusters split by thin
+           dividers; icon + short label makes each category scannable. Driven
+           from NAV_GROUPS (same source as the mobile menu). -->
       <div class="flex items-center gap-2 px-3">
-        <a href="/network"   class="btn text-xs">network</a>
-        <a href="/wifi"      class="btn text-xs" title="WiFi mode, known networks, AP credentials">WiFi</a>
-        <a href="/security"  class="btn text-xs">security</a>
-        <a href="/dns"       class="btn text-xs">DNS</a>
-        <a href="/storage"   class="btn text-xs">disk&nbsp;drive</a>
-        <a href="/files"     class="btn text-xs">files&nbsp;+&nbsp;clip</a>
-        <a href="/ssh-keys"  class="btn text-xs">SSH&nbsp;keys</a>
-        <a href="/tokens"    class="btn text-xs">API&nbsp;tokens</a>
-        <a href="/audit"     class="btn text-xs">audit&nbsp;log</a>
-        <a href="/system"    class="btn text-xs" title="Pi maintenance — health + reboot/poweroff">Pi&nbsp;system</a>
+        {#each NAV_GROUPS as g, gi}
+          {#each g.items as it}
+            <a href={it.href} class="btn text-xs inline-flex items-center gap-1.5" title={it.title}>
+              <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/80" />{it.label}
+            </a>
+          {/each}
+          {#if gi < NAV_GROUPS.length - 1}
+            <span class="h-5 w-px bg-ink-800" aria-hidden="true"></span>
+          {/if}
+        {/each}
       </div>
       <!-- divider -->
       <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
@@ -817,26 +860,11 @@
       <div class="flex items-center gap-2 pl-3">
         <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
-        <button class="btn text-xs hover:bg-live-500/20 hover:text-live-300 hover:border-live-500/40"
-                on:click={onTargetWake}
-                title="Send Wake-on-LAN magic packet to the USB-connected target (needs WoL enabled in target BIOS)">
-          ⏼ wake&nbsp;target
-        </button>
-        <button class="btn text-xs hover:bg-zinc-500/20 hover:text-zinc-200 hover:border-zinc-400/40"
-                on:click={onTargetPowerTap}
-                title="Short power-button tap on the target — OS-managed (graceful shutdown / power menu)">
-          ⏻ tap&nbsp;target
-        </button>
-        <button class="btn text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
-                on:click={onTargetReboot}
-                title="Force-off + 5s wait + WoL — full power cycle for the USB-connected target">
-          ⟳ reboot&nbsp;target
-        </button>
-        <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
-                on:click={onTargetPoweroff}
-                title="Hold power button 8s on target — forces hardware-level shutdown">
-          ⏻ force&nbsp;off&nbsp;target
-        </button>
+        <TargetPowerMenu
+          onWake={onTargetWake}
+          onTap={onTargetPowerTap}
+          onReboot={onTargetReboot}
+          onForceOff={onTargetPoweroff} />
         <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>
       </div>
     </div>
@@ -861,6 +889,7 @@
               title="Fullscreen control mode — best on phones / tablets">
         ⛶ <span class="hidden sm:inline">fullscreen</span>
       </button>
+      <SpecialKeys />
     </div>
   </header>
 
@@ -906,32 +935,35 @@
           </a>
         {/if}
       </div>
-      <!-- Nav links — two columns for thumb reach. -->
-      <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
-        <a href="/network"  class="btn text-xs">network</a>
-        <a href="/wifi"     class="btn text-xs">WiFi</a>
-        <a href="/security" class="btn text-xs">security</a>
-        <a href="/dns"      class="btn text-xs">DNS</a>
-        <a href="/storage"  class="btn text-xs">disk drive</a>
-        <a href="/files"    class="btn text-xs">files + clip</a>
-        <a href="/ssh-keys" class="btn text-xs">SSH keys</a>
-        <a href="/tokens"   class="btn text-xs">API tokens</a>
-        <a href="/audit"    class="btn text-xs">audit log</a>
-        <a href="/system"   class="btn text-xs col-span-2">Pi system (health + reboot)</a>
+      <!-- Nav — grouped with category headers + icons (v74), two columns
+           for thumb reach. Driven from NAV_GROUPS (same as desktop). -->
+      <div class="space-y-2 pt-1 border-t border-ink-800">
+        {#each NAV_GROUPS as g}
+          <div class="space-y-1">
+            <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-600">{g.label}</p>
+            <div class="grid grid-cols-2 gap-2">
+              {#each g.items as it}
+                <a href={it.href} class="btn text-xs inline-flex items-center gap-1.5" title={it.title}>
+                  <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/80" />{it.label}
+                </a>
+              {/each}
+            </div>
+          </div>
+        {/each}
       </div>
-      <div class="grid grid-cols-2 gap-2 pt-1 border-t border-ink-800">
-        <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
-        <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
-        <!-- Target (USB-connected machine) power controls -->
-        <button class="btn text-xs hover:bg-live-500/20 hover:text-live-300 hover:border-live-500/40 col-span-2"
-                on:click={onTargetWake}>⏼ wake target (WoL)</button>
-        <button class="btn text-xs hover:bg-zinc-500/20 hover:text-zinc-200"
-                on:click={onTargetPowerTap}>⏻ tap target</button>
-        <button class="btn text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
-                on:click={onTargetReboot}>⟳ reboot target</button>
-        <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40 col-span-2"
-                on:click={onTargetPoweroff}>⏻ force off target</button>
-        <button class="btn text-xs col-span-2" on:click={onLogout}>sign out</button>
+      <div class="space-y-2 pt-1 border-t border-ink-800">
+        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-600">Session &amp; target</p>
+        <div class="grid grid-cols-2 gap-2">
+          <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
+          <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
+        </div>
+        <!-- Target (USB-connected machine) power — consolidated dropdown. -->
+        <TargetPowerMenu block
+          onWake={onTargetWake}
+          onTap={onTargetPowerTap}
+          onReboot={onTargetReboot}
+          onForceOff={onTargetPoweroff} />
+        <button class="btn text-xs w-full" on:click={onLogout}>sign out</button>
       </div>
     </div>
   {/if}

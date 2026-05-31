@@ -1048,20 +1048,15 @@ pub async fn put_vpn(
     State(_state): State<AppState>,
     Json(req): Json<VpnPutReq>,
 ) -> impl IntoResponse {
-    const VALID_PROVIDERS: &[&str] = &[
-        "none", "tailscale", "wireguard", "openvpn", "tor", "i2p",
-    ];
-
     let mut nf = read_state();
 
     if let Some(p) = req.provider.as_deref() {
-        if !VALID_PROVIDERS.contains(&p) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"ok": false, "err": format!("unknown vpn provider '{p}'")})),
-            )
-                .into_response();
-        }
+        // Assign as-is; the canonical validation + the tor/i2p → overlay-toggle
+        // migration both run downstream (see VALID_VPN_PROVIDERS below). The
+        // early allow-list that used to sit here was stale — it still listed
+        // tor/i2p (moved to overlay toggles in v58) and never gained mullvad/
+        // ivpn (v59), so it 400'd a perfectly valid IVPN/Mullvad save with
+        // "unknown vpn provider" before the correct check downstream ever ran.
         nf.vpn.provider = p.to_string();
     }
     if let Some(enabled) = req.enabled {
