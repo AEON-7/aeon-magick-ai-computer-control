@@ -12,6 +12,16 @@ RestartSec=2
 User=aeon
 Group=aeon
 SupplementaryGroups=video
+# CPU ceiling (defense-in-depth). The shipped ustreamer has no hardware
+# JPEG encoder, so the MJPEG path software-encodes; an uncapped 720p60
+# stream pegs ~2.3 cores and starves the supervisor (sluggish web UI,
+# dropped sessions). The --desired-fps cap (default 30) keeps it near
+# ~1 core in normal use, but if someone selects 60fps MJPEG on /system
+# this ceiling guarantees the rest of the system stays responsive — the
+# stream just drops frames instead of taking the box down. Covers the
+# ffmpeg/H.264 child too (same cgroup), where it never bites (HW encode
+# is cheap). 200% = 2 of the Pi 4's 4 cores.
+CPUQuota=200%
 
 [Install]
 WantedBy=multi-user.target

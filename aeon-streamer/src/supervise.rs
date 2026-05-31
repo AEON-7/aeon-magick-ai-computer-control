@@ -223,17 +223,40 @@ fn spawn_ustreamer(state: &SharedState, mode: &capture::CaptureMode) -> Result<C
         // ustreamer online/offline via the API socket and signals relaunch.
         .arg("--no-log-colors");
 
-    // Encoder selection. CRITICAL: ustreamer's --encoder only accepts
-    // CPU | HW | NOOP (verified on the shipped ustreamer 4.9). The
-    // previous value `m2m-image` does NOT exist in this build — ustreamer
-    // exited 1 immediately ("Unknown encoder type: m2m-image"), so the
-    // ENTIRE ustreamer path (every ≤1080p YUYV capture) crash-looped and
-    // displayed nothing. Only the 4K→ffmpeg path worked, which is why
-    // high-res "worked but slow" while dialing down to 720p went black.
+    // Cap the capture/encode rate. ustreamer's HW encoder only handles
+    // (M)JPEG input — our capture is raw YUYV, so ustreamer silently falls
+    // back to its CPU encoder and software-encodes EVERY grabbed frame.
+    // Left uncapped it grabs at the source rate (the Cam Link offers 60fps),
+    // which at 720p pegs ~2.3 CPU cores and starves the supervisor (sluggish
+    // web UI, dropped sessions, HTTP/2 stream resets). `--desired-fps`
+    // throttles the grab+encode rate; 0 means "unlimited" to ustreamer, so
+    // only pass it when a positive cap is configured. This finally wires up
+    // output.fps for the direct-MJPEG path — previously it affected only the
+    // ffmpeg/H.264 pipeline (capture.rs `-r target_fps`), never this one.
+    if cfg.output.fps > 0 {
+        cmd.arg(format!("--desired-fps={}", cfg.output.fps));
+    }
+
+    // Encoder selection. CRITICAL — and counter-intuitive:
     //
-    // `HW` uses the Pi's V4L2 M2M hardware JPEG encoder — exactly what
-    // `m2m-image` was trying (and failing) to name. Pi 5 has no HW JPEG
-    // M2M block exposed the same way, so it falls back to multi-worker CPU.
+    // The shipped ustreamer 4.9 (Debian/Pi OS `ustreamer` package) is built
+    // WITHOUT M2M support. `ustreamer --help` lists only: CPU, HW, NOOP.
+    // (`m2m-image`/`M2M-IMAGE` → "Unknown encoder type" → exit 1, which is
+    // what crash-looped the whole ≤1080p path before.)
+    //
+    // `HW` here is NOT the Pi's hardware JPEG block — it's ustreamer's
+    // "device hardware internal encoder", i.e. a (M)JPEG→(M)JPEG passthrough.
+    // Our capture is raw YUYV, so ustreamer logs "Switching to CPU encoder:
+    // the input format is not (M)JPEG" and software-encodes anyway. So on
+    // this build HW ≈ CPU for our input — there is NO hardware JPEG path.
+    // (True HW offload would need ustreamer rebuilt WITH_M2M, or the ffmpeg
+    // h264_v4l2m2m pipeline — output.format="h264" — which DOES use the Pi's
+    // hardware H.264 encoder. That's the real low-CPU answer; see capture.rs.)
+    //
+    // We keep HW for Pi4 (harmless passthrough if a future device ever hands
+    // us MJPEG; identical to CPU otherwise) and explicit multi-worker CPU
+    // elsewhere. The actual CPU containment is the --desired-fps cap above
+    // plus the CPUQuota ceiling on aeon-streamer.service.
     match cfg.platform {
         Platform::Pi4 => {
             cmd.arg("--encoder=HW");
@@ -352,9 +375,12 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
             alg = scale_algorithm
         )
     };
+    // Decimate before scale (same reasoning as the h264 path): swscale runs
+    // per input frame, so without this it processes the full 60fps capture
+    // even when target_fps is lower. fps filter at the head fixes that.
     let scale_filter = match crop_filter {
-        Some(c) => format!("{c},{scale_part}"),
-        None => scale_part,
+        Some(c) => format!("fps={target_fps},{c},{scale_part}"),
+        None => format!("fps={target_fps},{scale_part}"),
     };
 
     // Q:v for ffmpeg MJPEG: 1 = best, 31 = worst. We map our 1–100 jpeg_quality
@@ -575,19 +601,28 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         format!("scale={out_w}:{out_h}:flags={scale_algorithm}:in_range=full:out_range=tv")
     };
     // Assemble crop + (optional) scale; either may be absent.
-    let base = [crop_filter.as_deref().unwrap_or(""), scale_part.as_str()]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(",");
+    // Decimate to the target rate FIRST, before the (software) scale/convert.
+    // The Cam Link delivers 60fps and we ingest at 60 (source_fps), but the
+    // swscale NV12→yuv420p + full→tv range conversion is the dominant CPU
+    // cost — and it runs per *input* frame. Dropping `-r` only at the encoder
+    // leaves swscale chewing all 60fps, so lowering output fps did NOT reduce
+    // CPU (measured on-device: 20fps and 30fps both pegged ~2 cores). Putting
+    // an `fps` filter at the HEAD of the graph means crop/scale/convert only
+    // touch target_fps frames — roughly halving CPU at 30fps and making the
+    // fps knob actually control cost. The `fps` filter itself is cheap (it
+    // selects frames by PTS; no per-pixel work).
+    let fps_part = format!("fps={target_fps}");
+    let base = [
+        fps_part.as_str(),
+        crop_filter.as_deref().unwrap_or(""),
+        scale_part.as_str(),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(",");
     // One filtered source split into two outputs (H.264 + JPEG snapshot).
-    // When `base` is empty (match_source, no crop, no scale) the source feeds
-    // split directly.
-    let filter_complex = if base.is_empty() {
-        "[0:v]split=2[vh][vj]".to_string()
-    } else {
-        format!("[0:v]{base},split=2[vh][vj]")
-    };
+    let filter_complex = format!("[0:v]{base},split=2[vh][vj]");
 
     // MJPEG snapshot quality (same 1–100 → q:v 2–15 mapping as the MJPEG path).
     let qv = {
