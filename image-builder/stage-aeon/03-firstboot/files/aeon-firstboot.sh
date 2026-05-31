@@ -25,13 +25,33 @@ if [ ! -f /etc/aeon/auth.toml ]; then
     cat > /boot/firmware/aeon-credentials.txt <<'EOF'
 # Aeon Magick AI Computer Control — first-boot setup
 #
-# Your device is in SETUP mode. Open the web UI to create your password:
+# Your device is in SETUP mode. There are two ways to reach the web UI:
 #
-#     https://aeon-magick.local/
-#     (or use the device's LAN IP if mDNS isn't resolving)
+# A) Over your LAN (if you pre-seeded WiFi via aeon-setup.toml, or plugged
+#    in Ethernet):
+#
+#       https://aeon-magick.local/
+#       (or use the device's LAN IP if mDNS isn't resolving)
+#
+# B) Over the built-in setup Wi-Fi access point (when no known network is
+#    reachable — e.g. a brand-new device with only power connected). The
+#    device broadcasts its own network shortly after boot:
+#
+#       Wi-Fi network: aeon-setup
+#       password:      aeon-setup-pw
+#       then open:     https://192.168.50.1/   (a setup page should also
+#                      pop up automatically as a captive portal)
 #
 # The first page is the setup wizard. After you set a password, that's
 # what you'll use for the web UI, the REST API, and MCP clients.
+#
+# ── If the `aeon-setup` Wi-Fi never appears ──
+#   * Give it ~60-90 seconds after power-on.
+#   * Pull this SD card and read `aeon-ap-status.txt` on this same
+#     partition — it records exactly why the AP did/didn't start.
+#   * To FORCE setup-AP mode (even on a configured device), create an
+#     empty file named `aeon-force-ap` on this partition, reinsert, and
+#     boot. Delete it later to return to normal Wi-Fi-client behaviour.
 #
 # SSH login (separate from the web UI password):
 #     ssh admin@aeon-magick.local

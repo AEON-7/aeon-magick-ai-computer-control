@@ -1,11 +1,20 @@
 #!/bin/bash
 # Aeon Magick AI Computer Control — WiFi watchdog.
 #
-# Goal: if NO known WiFi network is reachable for MAX_DOWN_SECONDS, spin up
-# a setup AP named `aeon-setup` so the user can connect from a phone or
-# laptop and configure WiFi via the web UI.
+# Goal: keep the device reachable for setup.
+#   * A never-configured device (no saved WiFi) brings up the setup AP
+#     `aeon-setup` on the first tick (~60s after boot) so first-time setup
+#     is immediate — not after a 2.5-minute grace timer.
+#   * A configured device that loses its known WiFi for MAX_DOWN_SECONDS
+#     falls back to the same AP (the grace period keeps brief outages /
+#     roams from flapping it).
+# Connect from a phone/laptop and configure WiFi via the web UI. When known
+# WiFi comes back, the AP drops and client mode resumes.
 #
-# When known WiFi comes back, drop the AP and rejoin client mode.
+# AP activation is robust (radio unblock + regdomain + 2.4GHz channel
+# fallback + last-resort profile recreate) and writes its status to
+# /boot/firmware/aeon-ap-status.txt — so "the setup AP never appeared" is
+# diagnosable by pulling the SD card into any computer, no network needed.
 
 set -u
 PRIMARY_CON_FILTER="!Eye-Setup,!aeon-setup"
@@ -17,6 +26,13 @@ AP_RETRY_SECONDS=300
 STATE_FILE=/var/lib/aeon/netwatch.state
 PING_TARGET="1.1.1.1"
 DNSMASQ_CAPTIVE=/etc/NetworkManager/dnsmasq-shared.d/01-aeon-captive.conf
+# Out-of-band AP status. AP_STATUS_BOOT lives on the FAT /boot/firmware
+# partition so "why didn't the setup AP appear?" is answerable by pulling
+# the SD card into any computer — no network, SSH, or console needed.
+AP_STATUS_BOOT=/boot/firmware/aeon-ap-status.txt
+AP_STATUS_LOG=/var/lib/aeon/ap-status.log
+# Drop this empty file on the FAT boot partition to force setup-AP mode.
+FORCE_AP_FLAG=/boot/firmware/aeon-force-ap
 
 mkdir -p "$(dirname "$STATE_FILE")"
 [[ -f "$STATE_FILE" ]] || echo "0" > "$STATE_FILE"
@@ -116,8 +132,135 @@ have_internet() {
     ping -c 1 -W 2 "$PING_TARGET" >/dev/null 2>&1
 }
 
+# ── AP activation helpers (v70) ──
+
+write_status() {
+    # $1 = state (OK|RETRY|FAIL), $2 = human detail. Mirrors to syslog, a
+    # rolling log under /var, and a single-file snapshot on the FAT boot
+    # partition (the out-of-band diagnostic channel — readable by pulling
+    # the SD card, no network/console/SSH required).
+    local ts line
+    ts=$(date -Iseconds)
+    line="${ts} [$1] $2"
+    log "$line"
+    echo "$line" >> "$AP_STATUS_LOG" 2>/dev/null || true
+    {
+        echo "Aeon Magick — setup AP (SSID: ${AP_CON}) status"
+        echo "Updated: ${ts}"
+        echo "State:   $1"
+        echo "Detail:  $2"
+        echo
+        echo "OK   = setup AP is broadcasting at ${AP_GATEWAY}."
+        echo "FAIL = NetworkManager could not start the AP; Detail carries the"
+        echo "       exact error + radio/rfkill/regdomain state. Safe to delete."
+    } > "$AP_STATUS_BOOT" 2>/dev/null || true
+}
+
+radio_kick() {
+    # Defeat the common reasons AP activation silently fails on a fresh
+    # Pi 4 (brcmfmac): radio soft-blocked by rfkill, NM's wireless toggle
+    # off, or the regulatory domain not yet applied so the driver rejects
+    # the AP channel. Also wait briefly for wlan0 — brcmfmac loads over
+    # SDIO asynchronously and can lag NetworkManager on a cold boot. All
+    # idempotent + cheap.
+    rfkill unblock wifi >/dev/null 2>&1 || true
+    rfkill unblock all  >/dev/null 2>&1 || true
+    nmcli radio wifi on >/dev/null 2>&1 || true
+    local reg; reg=$(cat /etc/regdomain 2>/dev/null || true)
+    iw reg set "${reg:-US}" >/dev/null 2>&1 || true
+    local i
+    for i in $(seq 1 10); do
+        nmcli -t -f DEVICE device 2>/dev/null | grep -qx "$AP_IFACE" && break
+        sleep 1
+    done
+}
+
+known_client_wifi_count() {
+    # Count saved *client* WiFi profiles (excludes the AP itself). 0 means
+    # a never-configured device → bring the setup AP up immediately rather
+    # than waiting out the full grace timer.
+    nmcli -t -f NAME,TYPE con show 2>/dev/null \
+        | grep ':802-11-wireless$' \
+        | grep -vc "^${AP_CON}:"
+}
+
+ensure_ap_profile() {
+    # (Re)create the AP connection profile with default SSID/PSK if absent.
+    if ! nmcli con show "$AP_CON" >/dev/null 2>&1; then
+        nmcli con add type wifi con-name "$AP_CON" ifname "$AP_IFACE" ssid "$AP_CON" \
+            mode ap autoconnect no >/dev/null 2>&1
+        nmcli con mod "$AP_CON" \
+            wifi-sec.key-mgmt wpa-psk wifi-sec.psk "aeon-setup-pw" >/dev/null 2>&1
+    fi
+}
+
+ap_set_l3() {
+    # Enforce mode/IP/band on every activation (self-heals a profile a
+    # different code path wrote on the wrong subnet). $1 = channel number,
+    # or "" for driver auto-pick. PRESERVES any custom SSID/PSK.
+    nmcli con mod "$AP_CON" \
+        802-11-wireless.mode ap \
+        802-11-wireless.powersave 2 \
+        ipv4.method shared ipv4.addresses "${AP_GATEWAY}/24" \
+        ipv6.method disabled \
+        wifi.band bg wifi.channel "$1" >/dev/null 2>&1
+}
+
+activate_ap() {
+    # Robust AP bring-up. Returns 0 on success (AP broadcasting), 1 on
+    # failure. Tries several 2.4GHz channels, then a from-scratch profile
+    # recreate, capturing NetworkManager's real error to the out-of-band
+    # status file so a persistent failure is always diagnosable.
+    radio_kick
+    ensure_ap_profile
+
+    local ch err
+    for ch in 6 1 11 ""; do
+        ap_set_l3 "$ch"
+        if err=$(nmcli con up "$AP_CON" 2>&1); then
+            write_status OK "AP up (channel ${ch:-auto}) at ${AP_GATEWAY}"
+            apply_captive_portal_hijack
+            return 0
+        fi
+        write_status RETRY "channel ${ch:-auto} failed: ${err}"
+    done
+
+    # Last resort: the profile may be wedged — delete + recreate, try once more.
+    nmcli con delete "$AP_CON" >/dev/null 2>&1 || true
+    ensure_ap_profile
+    ap_set_l3 6
+    if err=$(nmcli con up "$AP_CON" 2>&1); then
+        write_status OK "AP up after profile recreate at ${AP_GATEWAY}"
+        apply_captive_portal_hijack
+        return 0
+    fi
+
+    local radio rk reg
+    radio=$(nmcli -t radio wifi 2>/dev/null)
+    rk=$(rfkill list wifi 2>/dev/null | tr '\n' ' ')
+    reg=$(iw reg get 2>/dev/null | awk -F'country |:' '/country/{print $2; exit}')
+    write_status FAIL "nmcli con up failed: ${err} || radio=${radio} rfkill=[${rk}] regdomain=${reg}"
+    return 1
+}
+
 now=$(date +%s)
 down_since=$(<"$STATE_FILE")
+
+# ── Forced setup-AP escape hatch ──
+# Drop an empty file `aeon-force-ap` on the FAT /boot/firmware partition
+# (trivial from any computer holding the SD card) to force the setup AP up
+# unconditionally — regardless of WiFi/Ethernet/online state. This is the
+# deterministic way into setup mode when the offline-detection heuristics
+# don't fire (e.g. a configured device you want to reconfigure). Remove the
+# file to return to normal client/online behaviour on the next tick.
+if [[ -f "$FORCE_AP_FLAG" ]]; then
+    if ap_active; then
+        exit 0
+    fi
+    log "force-AP flag present (${FORCE_AP_FLAG}) — bringing up setup AP"
+    activate_ap || true
+    exit 0
+fi
 
 if have_internet; then
     if [[ "$down_since" != "0" ]]; then
@@ -150,53 +293,46 @@ if ap_active; then
             echo "0" > "$STATE_FILE"
         else
             log "still offline, resuming AP"
-            nmcli con up "$AP_CON" >/dev/null 2>&1 || true
-            echo "$now" > "$STATE_FILE"
+            if activate_ap; then
+                echo "$now" > "$STATE_FILE"
+            fi
         fi
     fi
     exit 0
 fi
 
-# Not in AP, not online — start countdown.
+# Not in AP, not online.
+
+KNOWN_WIFI=$(known_client_wifi_count)
+
+# Grace: a device with KNOWN client networks waits MAX_DOWN_SECONDS before
+# falling back (rides out brief outages / roams without flapping the AP).
+# A device with NO known networks is in first-time setup — bring the setup
+# AP up on the next tick instead of making the user wait ~2.5 minutes.
+grace=$MAX_DOWN_SECONDS
+(( KNOWN_WIFI == 0 )) && grace=0
+
+# Start / continue the countdown.
 if [[ "$down_since" == "0" ]]; then
     echo "$now" > "$STATE_FILE"
-    log "no internet, starting ${MAX_DOWN_SECONDS}s grace timer"
-    exit 0
+    down_since=$now
+    if (( grace > 0 )); then
+        log "no internet, starting ${grace}s grace timer (known WiFi: ${KNOWN_WIFI})"
+        exit 0
+    fi
+    log "no known WiFi configured — bringing up setup AP now"
 fi
 
-if (( now - down_since >= MAX_DOWN_SECONDS )); then
-    log "offline $((now - down_since))s, activating $AP_CON"
-    # Ensure the AP profile exists with default SSID/PSK on first creation.
-    if ! nmcli con show "$AP_CON" >/dev/null 2>&1; then
-        nmcli con add type wifi con-name "$AP_CON" ifname wlan0 ssid "$AP_CON" \
-            mode ap autoconnect no >/dev/null 2>&1
-        nmcli con mod "$AP_CON" \
-            wifi-sec.key-mgmt wpa-psk wifi-sec.psk "aeon-setup-pw" >/dev/null 2>&1
+if (( now - down_since >= grace )); then
+    log "offline $((now - down_since))s — activating $AP_CON (known WiFi: ${KNOWN_WIFI})"
+    if activate_ap; then
+        # AP up — stamp NOW so the ap_active branch's AP_RETRY_SECONDS
+        # 'retry primary' clock starts from when the AP actually came up.
+        echo "$now" > "$STATE_FILE"
     fi
-    # v67: ALWAYS enforce the AP network config before bringing it up.
-    # The /wifi page's AP form (wifi.rs ap_set) also writes this profile,
-    # and an earlier version created it on a different subnet (10.42.0.1)
-    # which left the captive DNAT + the supervisor's setup redirect
-    # (both hardcoded to AP_GATEWAY=192.168.50.1) pointing at an
-    # unreachable address — the AP came up but the setup page was dead.
-    # Re-asserting these fields every activation makes netwatch
-    # authoritative for the fallback AP's L3 config regardless of who
-    # created the profile, while PRESERVING any custom SSID/PSK the user
-    # set via /wifi (we don't touch wifi-sec/ssid here).
-    nmcli con mod "$AP_CON" \
-        802-11-wireless.mode ap \
-        ipv4.method shared "ipv4.addresses" "${AP_GATEWAY}/24" \
-        ipv6.method disabled \
-        wifi.band bg wifi.channel 6 >/dev/null 2>&1
-    # Capture NM's actual error so we don't silently keep retrying — the
-    # journal will now show *why* AP activation failed (regdomain, wpa
-    # mode, iface busy, etc.).
-    if ! AP_ERR=$(nmcli con up "$AP_CON" 2>&1); then
-        log "AP activation failed: ${AP_ERR}"
-    else
-        # AP is up — enable the captive portal hijack so clients that
-        # connect immediately see the setup page.
-        apply_captive_portal_hijack
-    fi
-    echo "$now" > "$STATE_FILE"
+    # On failure: deliberately DON'T touch the state file. Leaving
+    # down_since at the offline-start time means the next 20s tick still
+    # satisfies the threshold and retries — instead of resetting the clock
+    # and waiting another full grace period between attempts (the prior bug
+    # that turned a transient activation hiccup into a ~90s stall).
 fi
