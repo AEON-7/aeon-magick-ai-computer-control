@@ -369,11 +369,21 @@ fn generic_absolute() -> PersonaDescriptors {
 
 fn logitech_mx() -> PersonaDescriptors {
     PersonaDescriptors {
-        id_vendor: 0x046d,  // Logitech
-        id_product: 0xc52b, // Unifying Receiver
+        id_vendor: 0x046d, // Logitech
+        // 0xc31c = Logitech USB Keyboard (plain HID, driven by usbhid).
+        //
+        // Was 0xc52b (Unifying Receiver). On Linux that ID makes the kernel
+        // bind `hid-logitech-dj`, which expects the wireless-receiver HID++/DJ
+        // protocol and never polls our plain boot-HID interrupt-IN endpoints —
+        // so every report write blocked forever and wedged the daemon (input
+        // dead, persona switch frozen). Verified on-device: swapping c52b→c31c
+        // made the Linux target drain the endpoint and accept input instantly.
+        // macOS/Windows drive both IDs with generic HID, so this is a strict
+        // win. Still presents as genuine Logitech (VID 0x046d) for blending in.
+        id_product: 0xc31c,
         bcd_device: 0x1210,
         manufacturer: "Logitech",
-        product: "USB Receiver",
+        product: "USB Keyboard",
         serial: String::new(), // injected by main.rs
         ecm: None,
         mass_storage: None,

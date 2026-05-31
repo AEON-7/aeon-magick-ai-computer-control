@@ -10,7 +10,15 @@ use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// Max time to wait for a hidg endpoint to accept a report before giving up.
+/// A host draining normally accepts instantly; this bound only bites when the
+/// host enumerated the gadget but never polls our HID interfaces (the
+/// hid-logitech-dj / wrong-persona wedge). Failing fast beats hanging forever.
+const HID_WRITE_TIMEOUT_MS: u64 = 200;
 
 /// Maps logical persona function names to /dev/hidg device paths.
 /// On a Pi with our gadget bound, devices appear in symlink order:
@@ -267,13 +275,51 @@ impl Hid {
 }
 
 fn write_report(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    // O_NONBLOCK + bounded retry instead of a plain blocking write_all.
+    //
+    // A hidg write blocks until the HOST drains the interrupt-IN endpoint. If
+    // the host enumerated the gadget but never polls our HID interfaces — e.g.
+    // Linux bound hid-logitech-dj to the Unifying-Receiver USB ID and ignores
+    // plain boot HID — a blocking write hangs FOREVER, wedging the daemon and
+    // freezing the input API + persona switch (the reported symptom). With
+    // O_NONBLOCK the write returns WouldBlock; we retry briefly, then fail with
+    // a clear error so one mis-handling host can never lock up aeon-hid. In the
+    // normal case (host draining) the first write succeeds instantly — the
+    // retry loop never runs, so there's no added latency on the hot path.
     let mut f = OpenOptions::new()
         .write(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    f.write_all(bytes)
-        .with_context(|| format!("writing {} bytes → {}", bytes.len(), path.display()))?;
-    Ok(())
+    let deadline = Instant::now() + Duration::from_millis(HID_WRITE_TIMEOUT_MS);
+    loop {
+        match f.write(bytes) {
+            Ok(n) if n == bytes.len() => return Ok(()),
+            Ok(n) => {
+                return Err(anyhow!(
+                    "short hidg write: {n}/{} bytes → {}",
+                    bytes.len(),
+                    path.display()
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "hidg write to {} timed out after {}ms — host not draining the \
+                         endpoint (wrong USB persona for this target?)",
+                        path.display(),
+                        HID_WRITE_TIMEOUT_MS
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("writing {} bytes → {}", bytes.len(), path.display())
+                })
+            }
+        }
+    }
 }
 
 /// Map an ASCII character to (modifier byte, HID keycode). Returns None for

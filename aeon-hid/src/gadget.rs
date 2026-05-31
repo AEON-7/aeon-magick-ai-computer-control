@@ -240,11 +240,34 @@ pub fn teardown(cfg: &Config) -> Result<()> {
         fs::remove_dir(&configs_c1).ok();
     }
 
-    // Functions
+    // Functions. Each HID function dir may contain a nested strings/<lang>
+    // subdir (the iInterface label written by add_function). `remove_dir` is
+    // a non-recursive rmdir, so it FAILS on a non-empty function dir — and
+    // because the failure was swallowed with `.ok()`, the stale function dir
+    // survived teardown. That was the persona-switch bug: a leftover function
+    // keeps its report_desc/report_length, which the kernel locks read-only
+    // once the gadget has been bound, so the NEXT persona's setup write to
+    // report_desc fails (EBUSY/EINVAL) and the switch errors out. First boot
+    // worked (clean tree); the first switch broke. Remove nested strings dirs
+    // first so the function dir is actually empty before we rmdir it.
     let functions = root.join("functions");
     if functions.exists() {
         for entry in fs::read_dir(&functions)? {
-            fs::remove_dir(entry?.path()).ok();
+            let fdir = entry?.path();
+            let fstrings = fdir.join("strings");
+            if fstrings.exists() {
+                if let Ok(langs) = fs::read_dir(&fstrings) {
+                    for lang in langs.flatten() {
+                        fs::remove_dir(lang.path()).ok();
+                    }
+                }
+                fs::remove_dir(&fstrings).ok();
+            }
+            if let Err(e) = fs::remove_dir(&fdir) {
+                // Surface it now instead of silently leaving a stale function
+                // that will break the next persona switch.
+                tracing::warn!(dir = %fdir.display(), ?e, "failed to remove gadget function dir during teardown");
+            }
         }
     }
 
