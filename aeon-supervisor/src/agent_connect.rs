@@ -1710,9 +1710,10 @@ fn gather_containers(sys: &System) -> Result<serde_json::Value, String> {
             }
             let running = c.get("state").and_then(|x| x.as_str()) == Some("running");
             if running {
-                // The label can carry several comma/space-separated config files.
+                // config_files is comma-separated when there are several (a
+                // single path may itself contain spaces, so DON'T split on space).
                 let cfg = c.get("compose_config_files").and_then(|x| x.as_str()).unwrap_or("");
-                for p in cfg.split(|ch| ch == ',' || ch == ' ').map(str::trim).filter(|p| !p.is_empty()) {
+                for p in cfg.split(',').map(str::trim).filter(|p| !p.is_empty()) {
                     up_config_files.insert(p.to_string());
                 }
             }
