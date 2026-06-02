@@ -96,6 +96,33 @@ fn load_systems() -> Vec<System> {
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
+
+/// The agent-connect SSH private key path, authorized on every registered
+/// system (ssh_user). The E2 web terminal SSHes in using THIS key.
+pub fn agent_key_path() -> PathBuf {
+    key_path()
+}
+
+/// SSH connection parameters for a registered system (resolved by id).
+/// Used by the E2 web-terminal bridge to spawn `ssh` against the box.
+pub struct SshTarget {
+    pub label: String,
+    pub address: String,
+    pub ssh_user: String,
+    pub port: u16,
+}
+
+/// Look up a registered system by id and return its SSH connection params,
+/// or `None` if no such system. (Keeps the `System` struct private.)
+pub fn ssh_target(id: &str) -> Option<SshTarget> {
+    load_systems().into_iter().find(|s| s.id == id).map(|s| SshTarget {
+        label: s.label,
+        address: s.address,
+        ssh_user: s.ssh_user,
+        port: s.port,
+    })
+}
+
 fn save_systems(v: &[System]) -> Result<(), String> {
     let _ = std::fs::create_dir_all(DIR);
     let text = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;

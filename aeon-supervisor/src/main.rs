@@ -37,6 +37,7 @@ mod storage;
 mod streamer_config;
 mod system;
 mod target;
+mod terminal;
 mod tls;
 mod vpn_providers;
 mod webui;

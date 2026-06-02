@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
+  import { browser } from '$app/environment';
   import * as api from '$lib/api';
 
-  let tab: 'overview' | 'systems' | 'containers' = 'overview';
+  let tab: 'overview' | 'systems' | 'containers' | 'terminal' = 'overview';
   let pubkey = '';
   let systems: api.ConnectedSystem[] = [];
   let metrics: Record<string, api.SystemMetrics> = {};
@@ -91,6 +92,247 @@
   let deployResult: api.DeployResult | null = null;
   let deployErr = '';
 
+  // ── E2: multi-pane web SSH terminal ──
+  // xterm.js + addon-fit are loaded lazily in the browser (they touch the DOM
+  // on import, so a static import would break the SSR/prerender build).
+  type XtermMod = typeof import('@xterm/xterm');
+  type FitMod = typeof import('@xterm/addon-fit');
+  let XTerm: XtermMod['Terminal'] | null = null;
+  let FitAddonCtor: FitMod['FitAddon'] | null = null;
+  let xtermLoading = false;
+  type Pane = {
+    key: number; // unique pane id (allows duplicates of one system)
+    sysId: string;
+    label: string;
+    el: HTMLDivElement | null; // bound container
+    term: any | null; // xterm Terminal
+    fit: any | null; // FitAddon
+    ws: WebSocket | null;
+    ro: ResizeObserver | null;
+    status: 'connecting' | 'open' | 'closed';
+  };
+  let panes: Pane[] = [];
+  let paneSeq = 1;
+
+  /** Lazy-load xterm + the fit addon + its CSS (browser only, once). */
+  async function ensureXterm(): Promise<boolean> {
+    if (!browser) return false;
+    if (XTerm && FitAddonCtor) return true;
+    if (xtermLoading) {
+      // Wait for the in-flight load to settle.
+      while (xtermLoading) await new Promise((r) => setTimeout(r, 30));
+      return !!(XTerm && FitAddonCtor);
+    }
+    xtermLoading = true;
+    try {
+      const [x, f] = await Promise.all([
+        import('@xterm/xterm'),
+        import('@xterm/addon-fit'),
+        import('@xterm/xterm/css/xterm.css'),
+      ]);
+      XTerm = x.Terminal;
+      FitAddonCtor = f.FitAddon;
+      return true;
+    } catch (e) {
+      console.error('xterm load failed', e);
+      return false;
+    } finally {
+      xtermLoading = false;
+    }
+  }
+
+  /** Open a new terminal pane for a system and switch to the Terminal tab. */
+  async function openTerminal(sysId: string) {
+    const sys = systems.find((s) => s.id === sysId);
+    if (!sys) return;
+    tab = 'terminal';
+    const pane: Pane = {
+      key: paneSeq++,
+      sysId,
+      label: sys.label,
+      el: null,
+      term: null,
+      fit: null,
+      ws: null,
+      ro: null,
+      status: 'connecting',
+    };
+    panes = [...panes, pane];
+    // Wait for the {#each} to render the pane's container, then mount xterm.
+    await tick();
+    await mountPane(pane);
+  }
+
+  async function mountPane(pane: Pane) {
+    const ok = await ensureXterm();
+    if (!ok || !pane.el || !XTerm || !FitAddonCtor) {
+      pane.status = 'closed';
+      panes = panes;
+      return;
+    }
+    const term = new XTerm({
+      cursorBlink: true,
+      fontFamily:
+        'ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Code", "Source Code Pro", monospace',
+      fontSize: 13,
+      scrollback: 5000,
+      allowProposedApi: true,
+      theme: {
+        background: '#0b0b12',
+        foreground: '#d4d4d8',
+        cursor: '#a78bfa',
+        cursorAccent: '#0b0b12',
+        selectionBackground: 'rgba(167,139,250,0.35)',
+        black: '#18181b',
+        red: '#f87171',
+        green: '#34d399',
+        yellow: '#fbbf24',
+        blue: '#60a5fa',
+        magenta: '#c4b5fd',
+        cyan: '#22d3ee',
+        white: '#e4e4e7',
+        brightBlack: '#52525b',
+        brightRed: '#fca5a5',
+        brightGreen: '#6ee7b7',
+        brightYellow: '#fde68a',
+        brightBlue: '#93c5fd',
+        brightMagenta: '#ddd6fe',
+        brightCyan: '#67e8f9',
+        brightWhite: '#fafafa',
+      },
+    });
+    const fit = new FitAddonCtor();
+    term.loadAddon(fit);
+    term.open(pane.el);
+    pane.term = term;
+    pane.fit = fit;
+    try {
+      fit.fit();
+    } catch {
+      /* element not laid out yet — the ResizeObserver below will refit */
+    }
+
+    // Open the WebSocket to the PTY bridge (same-origin → admin cookie auth).
+    const ws = new WebSocket(api.terminalWsURL(pane.sysId));
+    ws.binaryType = 'arraybuffer';
+    pane.ws = ws;
+
+    ws.onopen = () => {
+      pane.status = 'open';
+      panes = panes;
+      sendResize(pane);
+      term.focus();
+    };
+    ws.onmessage = (ev: MessageEvent) => {
+      const d = ev.data;
+      if (typeof d === 'string') {
+        term.write(d);
+      } else if (d instanceof ArrayBuffer) {
+        term.write(new Uint8Array(d));
+      } else if (d instanceof Blob) {
+        d.arrayBuffer().then((b) => term.write(new Uint8Array(b)));
+      }
+    };
+    ws.onclose = () => {
+      pane.status = 'closed';
+      panes = panes;
+      try {
+        term.write('\r\n\x1b[2m[connection closed]\x1b[0m\r\n');
+      } catch {
+        /* term may already be disposed */
+      }
+    };
+    ws.onerror = () => {
+      pane.status = 'closed';
+      panes = panes;
+    };
+
+    // Keystrokes / paste → PTY stdin.
+    term.onData((data: string) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    });
+
+    // Refit + tell the PTY whenever the pane resizes.
+    const ro = new ResizeObserver(() => {
+      try {
+        fit.fit();
+      } catch {
+        /* ignore transient layout errors */
+      }
+      sendResize(pane);
+    });
+    ro.observe(pane.el);
+    pane.ro = ro;
+    panes = panes;
+  }
+
+  /** Send the current xterm geometry to the PTY as a resize control frame. */
+  function sendResize(pane: Pane) {
+    if (!pane.term || !pane.ws || pane.ws.readyState !== WebSocket.OPEN) return;
+    const cols = pane.term.cols;
+    const rows = pane.term.rows;
+    if (cols > 0 && rows > 0) {
+      pane.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }
+  }
+
+  function teardownPane(pane: Pane) {
+    try {
+      pane.ro?.disconnect();
+    } catch {
+      /* noop */
+    }
+    try {
+      pane.ws?.close();
+    } catch {
+      /* noop */
+    }
+    try {
+      pane.term?.dispose();
+    } catch {
+      /* noop */
+    }
+    pane.ro = null;
+    pane.ws = null;
+    pane.term = null;
+    pane.fit = null;
+  }
+
+  function closePane(key: number) {
+    const pane = panes.find((p) => p.key === key);
+    if (pane) teardownPane(pane);
+    panes = panes.filter((p) => p.key !== key);
+  }
+
+  function closeAllPanes() {
+    for (const p of panes) teardownPane(p);
+    panes = [];
+  }
+
+  /** Re-fit every pane (e.g. after the grid column count changes). */
+  async function refitAll() {
+    await tick();
+    for (const p of panes) {
+      try {
+        p.fit?.fit();
+      } catch {
+        /* noop */
+      }
+      sendResize(p);
+    }
+  }
+  // When the pane count changes the grid template changes → refit all panes.
+  $: if (browser && tab === 'terminal') {
+    void panes.length;
+    refitAll();
+  }
+  /** Tailwind-ish grid column count for the pane grid (1/2/3). */
+  function paneGridCols(n: number): number {
+    if (n <= 1) return 1;
+    if (n === 2) return 2;
+    return 3;
+  }
+
   $: openclawSystems = systems.filter((s) => s.roles?.includes('openclaw'));
   $: cSysObj = systems.find((s) => s.id === cSys) ?? null;
   $: cIsDgx = cSysObj?.roles?.includes('dgx') ?? false;
@@ -157,6 +399,7 @@
   onDestroy(() => {
     clearInterval(timer);
     clearInterval(cTimer);
+    closeAllPanes();
   });
 
   // ── formatting helpers ──────────────────────────────────────────────
@@ -938,6 +1181,9 @@
             on:click={() => { tab = 'overview'; loadMetrics(); }}>Overview</button>
     <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('containers')}"
             on:click={() => { tab = 'containers'; if (!cSys && systems.length) selectSystem(systems[0].id); else if (cSys) loadContainers(); }}>Containers</button>
+    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('terminal')}"
+            on:click={() => { tab = 'terminal'; refitAll(); }}>
+      Terminal{#if panes.length}<span class="tab-count">{panes.length}</span>{/if}</button>
     <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('systems')}"
             on:click={() => (tab = 'systems')}>Connected Systems</button>
   </div>
@@ -973,6 +1219,8 @@
                 <span class="pill" class:on={m?.reachable} class:off={m && !m.reachable}>
                   {m ? (m.reachable ? 'online' : 'offline') : '…'}
                 </span>
+                <button class="term-btn" title="Open an SSH terminal to this system"
+                        on:click|stopPropagation={() => openTerminal(s.id)}>&gt;_</button>
                 <button class="docker-btn" title="Manage containers on this system"
                         on:click|stopPropagation={() => openContainers(s.id)}>🐳</button>
               </div>
@@ -1332,6 +1580,58 @@
               </div>
             </section>
           {/if}
+        {/if}
+      </div>
+    {/if}
+
+    <!-- ── TERMINAL (E2): multi-pane web SSH ───────────────────────────── -->
+    {#if tab === 'terminal'}
+      <div class="term-wrap">
+        <!-- toolbar: open a pane for any registered system -->
+        <div class="term-toolbar">
+          <span class="term-tb-label">Open shell:</span>
+          {#if systems.length}
+            {#each systems as s (s.id)}
+              <button class="term-open-btn" on:click={() => openTerminal(s.id)}
+                      title={`SSH to ${s.ssh_user}@${s.address}:${s.port}`}>
+                <span>{roleIcon(s.roles)}</span> {s.label}
+              </button>
+            {/each}
+          {:else}
+            <span class="text-zinc-500 text-xs">No systems yet — add them in the
+              <button class="underline text-cursed-300" on:click={() => (tab = 'systems')}>Connected Systems</button> tab.</span>
+          {/if}
+          {#if panes.length}
+            <button class="term-closeall" on:click={closeAllPanes} title="Close all terminals">close all ✕</button>
+          {/if}
+        </div>
+
+        {#if !panes.length}
+          <div class="term-empty">
+            <div class="term-empty-glyph">&gt;_</div>
+            <p>No terminals open.</p>
+            <p class="term-empty-sub">Pick a system above (or hit the <code>&gt;_</code> button on a system card) to open an interactive SSH shell. Open as many as you like — they tile into a grid.</p>
+          </div>
+        {:else}
+          <div class="term-grid" style="--cols:{paneGridCols(panes.length)}">
+            {#each panes as p (p.key)}
+              <div class="term-pane">
+                <div class="term-pane-head">
+                  <span class="term-dot"
+                        class:on={p.status === 'open'}
+                        class:connecting={p.status === 'connecting'}
+                        class:off={p.status === 'closed'}></span>
+                  <span class="term-pane-label" title={p.label}>{p.label}</span>
+                  <span class="term-pane-state">{p.status}</span>
+                  {#if p.status === 'closed'}
+                    <button class="term-reconnect" title="Reconnect" on:click={() => { teardownPane(p); mountPane(p); }}>↻</button>
+                  {/if}
+                  <button class="term-pane-close" title="Close terminal" on:click={() => closePane(p.key)}>✕</button>
+                </div>
+                <div class="term-pane-body" bind:this={p.el}></div>
+              </div>
+            {/each}
+          </div>
         {/if}
       </div>
     {/if}
@@ -1745,6 +2045,19 @@
     background: rgba(96, 165, 250, 0.1); border: 1px solid rgba(96, 165, 250, 0.3); cursor: pointer;
   }
   .docker-btn:hover { background: rgba(96, 165, 250, 0.2); border-color: rgba(96, 165, 250, 0.55); }
+  .term-btn {
+    font-size: 0.72rem; font-weight: 700; line-height: 1; padding: 0.22rem 0.34rem;
+    border-radius: 0.35rem; font-family: ui-monospace, monospace; letter-spacing: -0.02em;
+    color: #c4b5fd; background: rgba(167, 139, 250, 0.1);
+    border: 1px solid rgba(167, 139, 250, 0.3); cursor: pointer;
+  }
+  .term-btn:hover { background: rgba(167, 139, 250, 0.22); border-color: rgba(167, 139, 250, 0.6); color: #ddd6fe; }
+  .tab-count {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 1.1rem; height: 1.1rem; margin-left: 0.35rem; padding: 0 0.25rem;
+    font-size: 0.62rem; font-weight: 700; border-radius: 999px;
+    background: rgba(167, 139, 250, 0.2); color: #c4b5fd; border: 1px solid rgba(167, 139, 250, 0.4);
+  }
 
   /* ── E4: Containers ── */
   .c-sel { display: flex; flex-wrap: wrap; gap: 0.35rem; }
@@ -2109,4 +2422,93 @@
   .agd-chip-add:disabled { opacity: 0.5; cursor: default; }
   .agd-skill-upload { display: flex; flex-direction: column; gap: 0.35rem; border-top: 1px solid #1c1c26; padding-top: 0.5rem; }
   .agd-skill-upload input[type='file'] { font-size: 0.62rem; color: #a1a1aa; }
+
+  /* ── E2: multi-pane web SSH terminal ── */
+  .term-wrap {
+    height: 100%; display: flex; flex-direction: column;
+    padding: 0.85rem 1rem 1rem; gap: 0.75rem;
+  }
+  .term-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+    padding-bottom: 0.6rem; border-bottom: 1px solid #16161f;
+  }
+  .term-tb-label {
+    font-family: ui-monospace, monospace; font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: #71717a; margin-right: 0.15rem;
+  }
+  .term-open-btn {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    padding: 0.28rem 0.6rem; border-radius: 0.45rem; cursor: pointer;
+    font-size: 0.72rem; color: #d4d4d8;
+    background: #101019; border: 1px solid #26263a;
+    transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  .term-open-btn:hover { color: #ddd6fe; border-color: rgba(167, 139, 250, 0.55); background: rgba(167, 139, 250, 0.1); }
+  .term-closeall {
+    margin-left: auto; font-size: 0.68rem; font-family: ui-monospace, monospace;
+    color: #fca5a5; background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.3); border-radius: 0.4rem;
+    padding: 0.26rem 0.55rem; cursor: pointer;
+  }
+  .term-closeall:hover { background: rgba(248, 113, 113, 0.18); border-color: rgba(248, 113, 113, 0.55); }
+
+  .term-empty {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 0.4rem; text-align: center; color: #71717a;
+  }
+  .term-empty-glyph {
+    font-family: ui-monospace, monospace; font-size: 2.4rem; font-weight: 700;
+    color: rgba(167, 139, 250, 0.45); letter-spacing: -0.05em; margin-bottom: 0.3rem;
+  }
+  .term-empty p { font-size: 0.85rem; }
+  .term-empty-sub { max-width: 30rem; font-size: 0.72rem; color: #52525b; line-height: 1.5; }
+  .term-empty code {
+    font-family: ui-monospace, monospace; font-weight: 700; color: #c4b5fd;
+    background: rgba(167, 139, 250, 0.12); padding: 0 0.25rem; border-radius: 0.25rem;
+  }
+
+  .term-grid {
+    flex: 1; min-height: 0; display: grid; gap: 0.7rem;
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+    grid-auto-rows: minmax(16rem, 1fr);
+  }
+  @media (max-width: 900px) {
+    .term-grid { grid-template-columns: 1fr; }
+  }
+  .term-pane {
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+    border: 1px solid #23233360; border-radius: 0.6rem; background: #0b0b12;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 6px 18px rgba(0, 0, 0, 0.35);
+  }
+  .term-pane-head {
+    display: flex; align-items: center; gap: 0.45rem; flex: none;
+    padding: 0.35rem 0.55rem; background: #101019; border-bottom: 1px solid #1c1c28;
+  }
+  .term-dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: #3f3f46; flex: none; }
+  .term-dot.on { background: #34d399; box-shadow: 0 0 7px #34d399; }
+  .term-dot.connecting { background: #fbbf24; box-shadow: 0 0 7px #fbbf24; animation: term-pulse 1s ease-in-out infinite; }
+  .term-dot.off { background: #f87171; box-shadow: 0 0 6px #f8717180; }
+  @keyframes term-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .term-pane-label {
+    font-size: 0.74rem; color: #e4e4e7; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .term-pane-state {
+    font-family: ui-monospace, monospace; font-size: 0.6rem; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #71717a; margin-left: 0.1rem;
+  }
+  .term-reconnect, .term-pane-close {
+    line-height: 1; border-radius: 0.3rem; cursor: pointer; padding: 0.12rem 0.3rem;
+    background: transparent; border: 1px solid transparent; color: #a1a1aa; font-size: 0.8rem;
+  }
+  .term-reconnect { margin-left: auto; }
+  .term-pane-close { margin-left: 0.1rem; }
+  .term-reconnect:hover { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.4); }
+  .term-pane-close:hover { color: #fca5a5; border-color: rgba(248, 113, 113, 0.4); }
+  /* the xterm container — fills the pane below the header */
+  .term-pane-body { flex: 1; min-height: 0; padding: 0.3rem 0.1rem 0.1rem 0.4rem; overflow: hidden; }
+  .term-pane-body :global(.xterm) { height: 100%; }
+  .term-pane-body :global(.xterm-viewport) { background: transparent !important; }
+  .term-pane-body :global(.xterm-viewport)::-webkit-scrollbar { width: 8px; }
+  .term-pane-body :global(.xterm-viewport)::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 4px; }
 </style>

@@ -504,6 +504,14 @@ export const streamWsURL = () =>
   location.host +
   '/api/streamer/ws';
 
+// E2: per-system interactive SSH terminal over WebSocket. Same-origin wss://
+// so the aeon_session cookie authenticates the upgrade (Admin scope) — the
+// supervisor spawns ssh inside a PTY against the registered system.
+export const terminalWsURL = (id: string) =>
+  (location.protocol === 'https:' ? 'wss://' : 'ws://') +
+  location.host +
+  `/api/agent/systems/${encodeURIComponent(id)}/terminal/ws`;
+
 // ── HID ────────────────────────────────────────────────────────────────
 
 export const getHidStatus = () => req<HidStatus>('GET', '/hid/status');

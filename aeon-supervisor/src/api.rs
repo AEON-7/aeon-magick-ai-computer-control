@@ -138,6 +138,10 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/agent/systems/:id/test", post(crate::agent_connect::test_system))
         .route("/agent/systems/:id/metrics", get(crate::agent_connect::system_metrics))
         .route("/agent/systems/:id/power", post(crate::agent_connect::power_system))
+        // E2: multi-pane web SSH terminal. WebSocket upgrade → interactive
+        // ssh PTY against the system (agent-connect key). Admin-only via the
+        // /api/agent/ deny-list; the same-origin session cookie authenticates.
+        .route("/agent/systems/:id/terminal/ws", get(crate::terminal::terminal_ws))
         // E4: Container Management — list/start/stop/restart + compose read/
         // write/up/down (all over the agent-connect SSH key; admin scope).
         .route("/agent/systems/:id/containers", get(crate::agent_connect::list_containers))

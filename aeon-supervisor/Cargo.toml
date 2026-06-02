@@ -41,6 +41,10 @@ ureq = { version = "2.10", features = ["json", "tls"] }
 # v77: extract AirVPN's config-generator zip packages (download=zip) in
 # process. Minimal features — AirVPN packages are deflate/stored only.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# E2: web SSH terminal — a real PTY so full-screen TUIs (vim/htop), colors,
+# resize and ctrl-keys work end-to-end. The agent-connect `ssh` is spawned
+# inside this PTY and bridged to an xterm.js client over a WebSocket.
+portable-pty = "0.8"
 
 [[bin]]
 name = "aeon-supervisor"
