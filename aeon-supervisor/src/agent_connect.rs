@@ -303,7 +303,8 @@ fn gather_metrics(sys: &System) -> serde_json::Value {
         echo LOAD:$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null); \
         echo MEM:$(free -m 2>/dev/null | awk '/Mem:/{print $3\"/\"$2}'); \
         echo GPU:$(nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -4 | tr '\\n' ';'); \
-        echo DOCKER:$(docker ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ',')";
+        echo DOCKER:$(docker ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ','); \
+        echo MAC:$(cat /sys/class/net/$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')/address 2>/dev/null)";
     let out = Command::new("ssh")
         .arg("-i")
         .arg(key_path())
@@ -328,6 +329,7 @@ fn gather_metrics(sys: &System) -> serde_json::Value {
 
 fn parse_metrics(s: &str) -> serde_json::Value {
     let (mut host, mut load, mut mem) = (String::new(), String::new(), String::new());
+    let mut mac = String::new();
     let mut gpus: Vec<serde_json::Value> = Vec::new();
     let mut containers: Vec<String> = Vec::new();
     for line in s.lines() {
@@ -346,9 +348,11 @@ fn parse_metrics(s: &str) -> serde_json::Value {
             }
         } else if let Some(v) = line.strip_prefix("DOCKER:") {
             containers = v.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
+        } else if let Some(v) = line.strip_prefix("MAC:") {
+            mac = v.trim().to_string();
         }
     }
-    json!({"reachable": true, "host": host, "load": load, "mem": mem, "gpus": gpus, "containers": containers})
+    json!({"reachable": true, "host": host, "load": load, "mem": mem, "gpus": gpus, "containers": containers, "mac": mac})
 }
 
 // ── per-agent roster (the OpenClaw pantheon) ─────────────────────────────
@@ -939,4 +943,73 @@ pub async fn revoke_ssh(Path((id, agent_id)): Path<(String, String)>) -> impl In
     }
     save_ssh_prov(&sp);
     Json(json!({"ok": true, "user": user}))
+}
+
+// ── E3: per-system power controls (shutdown / reboot / Wake-on-LAN) ───────
+
+#[derive(Deserialize)]
+pub struct PowerReq {
+    action: String, // "shutdown" | "reboot" | "wake"
+    #[serde(default)]
+    mac: String,
+}
+
+/// POST /agent/systems/:id/power — shutdown/reboot (ssh sudo) or wake (WoL).
+pub async fn power_system(Path(id): Path<String>, Json(req): Json<PowerReq>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    match req.action.as_str() {
+        "wake" => match send_wol(&req.mac) {
+            Ok(_) => Json(json!({"ok": true, "action": "wake", "mac": req.mac})),
+            Err(e) => Json(json!({"ok": false, "err": e})),
+        },
+        "shutdown" | "reboot" => {
+            let cmd = if req.action == "reboot" {
+                "sudo -n systemctl reboot"
+            } else {
+                "sudo -n systemctl poweroff"
+            };
+            let action = req.action.clone();
+            let res = tokio::task::spawn_blocking(move || ssh_capture(&sys, cmd))
+                .await
+                .unwrap_or_else(|_| Err("join".into()));
+            match res {
+                Ok(_) => Json(json!({"ok": true, "action": action})),
+                Err(e) => {
+                    let el = e.to_lowercase();
+                    if el.is_empty()
+                        || el.contains("closed")
+                        || el.contains("reset")
+                        || el.contains("timed out")
+                        || el.contains("timeout")
+                    {
+                        Json(json!({"ok": true, "action": action, "note": "connection dropped (expected on power-down)"}))
+                    } else {
+                        Json(json!({"ok": false, "err": e, "hint": "the ssh user likely needs passwordless sudo for systemctl poweroff/reboot"}))
+                    }
+                }
+            }
+        }
+        other => Json(json!({"ok": false, "err": format!("unknown action: {other}")})),
+    }
+}
+
+/// Send a Wake-on-LAN magic packet to a MAC (broadcast UDP :9).
+fn send_wol(mac: &str) -> Result<(), String> {
+    let bytes: Vec<u8> = mac
+        .split(|c| c == ':' || c == '-')
+        .filter_map(|h| u8::from_str_radix(h.trim(), 16).ok())
+        .collect();
+    if bytes.len() != 6 {
+        return Err(format!("invalid MAC: {mac:?}"));
+    }
+    let mut packet = vec![0xFFu8; 6];
+    for _ in 0..16 {
+        packet.extend_from_slice(&bytes);
+    }
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    sock.set_broadcast(true).map_err(|e| e.to_string())?;
+    sock.send_to(&packet, "255.255.255.255:9").map_err(|e| e.to_string())?;
+    Ok(())
 }

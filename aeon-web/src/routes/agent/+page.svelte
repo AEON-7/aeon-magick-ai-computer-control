@@ -28,6 +28,9 @@
   let sshCmd = '';
   let sshDropMsg = '';
   let grantSudo = false;
+  // per-system power controls
+  let lastMac: Record<string, string> = {};
+  let powerBusy = '';
   let metricsLoading = false;
   let err = '';
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -68,6 +71,7 @@
         try {
           const r = await api.getSystemMetrics(s.id);
           metrics[s.id] = r.metrics;
+          if (r.metrics?.mac) lastMac[s.id] = r.metrics.mac; // remember for WoL when offline
         } catch {
           metrics[s.id] = { reachable: false };
         }
@@ -424,6 +428,21 @@
   }
   const copy = (t: string) => navigator.clipboard?.writeText(t);
 
+  async function doPower(s: api.ConnectedSystem, action: 'shutdown' | 'reboot' | 'wake') {
+    if (action !== 'wake') {
+      const verb = action === 'reboot' ? 'Reboot' : 'Shut down';
+      if (!confirm(`${verb} ${s.label}? This SSHes in and runs systemctl ${action === 'reboot' ? 'reboot' : 'poweroff'}.`)) return;
+    }
+    powerBusy = s.id;
+    try {
+      const r = await api.powerSystem(s.id, action, action === 'wake' ? lastMac[s.id] ?? '' : '');
+      if (!r.ok) alert(r.err ?? 'power action failed');
+      setTimeout(loadMetrics, 3500);
+    } finally {
+      powerBusy = '';
+    }
+  }
+
   // ── agent detail + provisioning ─────────────────────────────────────
   async function openDetail(sysId: string, a: api.AgentInfo) {
     detailSys = sysId;
@@ -628,6 +647,12 @@
               {:else}
                 <div class="errline dim">gathering…</div>
               {/if}
+              <div class="sys-power">
+                <button class="pw-btn" on:click={() => doPower(s, 'reboot')} disabled={powerBusy === s.id} title="Reboot (ssh systemctl reboot)">⟳ reboot</button>
+                <button class="pw-btn" on:click={() => doPower(s, 'shutdown')} disabled={powerBusy === s.id} title="Shut down (ssh systemctl poweroff)">⏻ shutdown</button>
+                <button class="pw-btn wake" on:click={() => doPower(s, 'wake')} disabled={powerBusy === s.id || !lastMac[s.id]}
+                        title={lastMac[s.id] ? `Wake-on-LAN → ${lastMac[s.id]}` : 'WoL needs a MAC (captured while the system is online)'}>⏾ wake</button>
+              </div>
             </div>
           {/each}
         </div>
@@ -1002,6 +1027,11 @@
   }
   .errline { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #fca5a5; }
   .errline.dim { color: #52525b; }
+  .sys-power { display: flex; gap: 0.3rem; margin-top: 0.1rem; padding-top: 0.55rem; border-top: 1px solid #1c1c26; }
+  .pw-btn { font-family: ui-monospace, monospace; font-size: 0.58rem; color: #a1a1aa; background: #14141d; border: 1px solid #2a2a38; border-radius: 0.3rem; padding: 0.22rem 0.45rem; cursor: pointer; flex: 1; }
+  .pw-btn:hover:not(:disabled) { border-color: rgba(248, 113, 113, 0.5); color: #fca5a5; }
+  .pw-btn.wake:hover:not(:disabled) { border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7; }
+  .pw-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* ── agent roster ── */
   .roster-stats { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #a1a1aa; display: flex; gap: 0.4rem; align-items: center; }

@@ -137,6 +137,7 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/agent/systems/:id/register", post(crate::agent_connect::register_system))
         .route("/agent/systems/:id/test", post(crate::agent_connect::test_system))
         .route("/agent/systems/:id/metrics", get(crate::agent_connect::system_metrics))
+        .route("/agent/systems/:id/power", post(crate::agent_connect::power_system))
         .route("/agent/systems/:id/agents", get(crate::agent_connect::system_agents))
         .route("/agent/systems/:id/usage", get(crate::agent_connect::system_usage))
         .route("/agent/systems/:id/agents/:aid/detail", get(crate::agent_connect::agent_detail))

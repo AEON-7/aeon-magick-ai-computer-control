@@ -195,10 +195,17 @@ export interface SystemMetrics {
   mem?: string;
   gpus?: { name: string; util: string; mem_used: string; mem_total: string; temp: string }[];
   containers?: string[];
+  mac?: string;
   err?: string;
 }
 export const getSystemMetrics = (id: string) =>
   req<{ ok: boolean; metrics: SystemMetrics }>('GET', `/agent/systems/${id}/metrics`);
+export const powerSystem = (id: string, action: 'shutdown' | 'reboot' | 'wake', mac = '') =>
+  req<{ ok: boolean; action?: string; note?: string; err?: string; hint?: string }>(
+    'POST',
+    `/agent/systems/${id}/power`,
+    { action, mac },
+  );
 
 /** One agent in an OpenClaw gateway's pantheon (from its /agents API). */
 export interface AgentInfo {
