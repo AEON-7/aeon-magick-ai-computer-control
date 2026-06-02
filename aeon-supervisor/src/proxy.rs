@@ -149,6 +149,12 @@ pub async fn delete_recording(
 ) -> Response<Body> {
     proxy(&state, &state.cfg.streamer_sock, Method::DELETE, &format!("/recordings/{id}"), None).await
 }
+pub async fn get_recording_thumb(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, &format!("/recordings/{id}/thumb"), None).await
+}
 
 // ── v64: H.264 low-latency WebSocket bridge ─────────────────────────────
 //

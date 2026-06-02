@@ -625,11 +625,13 @@
   }
 
   // ── Screen recording ──
-  let rec: { active: api.RecordingInfo | null; recordings: api.RecordingInfo[] } = {
-    active: null,
-    recordings: [],
-  };
+  let rec: {
+    active: api.RecordingInfo | null;
+    recordings: api.RecordingInfo[];
+    note?: string | null;
+  } = { active: null, recordings: [] };
   let recBusy = false;
+  let recListOpen = false;
   async function refreshRec() {
     try {
       rec = await api.getRecordingState();
@@ -642,7 +644,7 @@
     recBusy = true;
     try {
       if (rec.active) await api.recordStop();
-      else await api.recordStart(30);
+      else await api.recordStart(0); // open-ended — records until stopped (3h hard cap)
       await refreshRec();
     } catch (e) {
       alert('recording: ' + ((e as any)?.message ?? e));
@@ -657,6 +659,16 @@
     } catch (e) {
       console.warn(e);
     }
+  }
+  function fmtRecTime(ms: number): string {
+    return new Date(ms).toLocaleString();
+  }
+  function fmtRecName(ms: number): string {
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `aeon-recording-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(
+      d.getHours(),
+    )}-${p(d.getMinutes())}-${p(d.getSeconds())}.mp4`;
   }
 
   async function onLogout() {
@@ -928,6 +940,37 @@
       <div class="flex items-center gap-2 pl-3">
         <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
+        <!-- Screen recording — records the live H.264 to MP4 (agents also drive this via MCP/REST). -->
+        <div class="relative flex items-center gap-1">
+          <button class="btn text-xs whitespace-nowrap {rec.active ? 'border-red-500 text-red-300 animate-pulse' : ''}"
+                  on:click={toggleRecord} disabled={recBusy}
+                  title="Record the target screen to MP4 (30s default)">
+            {#if rec.active}■&nbsp;stop&nbsp;rec&nbsp;·&nbsp;{rec.active.elapsed_s ?? 0}s{:else}●&nbsp;record{/if}
+          </button>
+          {#if rec.recordings.length}
+            <button class="btn text-xs" on:click={() => (recListOpen = !recListOpen)} title="Recordings">▾&nbsp;{rec.recordings.length}</button>
+            {#if recListOpen}
+              <div class="absolute right-0 top-full mt-1 w-72 max-h-72 overflow-y-auto bg-ink-900 border border-ink-700 rounded-lg p-2 z-50 space-y-1 text-[10px] font-mono shadow-xl">
+                {#if rec.note}
+                  <p class="text-red-400 leading-snug pb-1 mb-1 border-b border-ink-800">{rec.note}</p>
+                {/if}
+                {#each rec.recordings.slice(0, 12) as r (r.id)}
+                  <div class="flex items-center gap-2 py-0.5">
+                    {#if r.has_thumb}
+                      <img src={api.recordingThumbURL(r.id)} alt="" loading="lazy"
+                           class="w-12 h-7 object-cover rounded border border-ink-700 flex-shrink-0" />
+                    {/if}
+                    <a class="text-cursed-300 hover:underline truncate flex-1 min-w-0"
+                       href={api.recordingURL(r.id)} download={fmtRecName(r.started_ms)}>{fmtRecTime(r.started_ms)}</a>
+                    <span class="text-zinc-600 whitespace-nowrap">{Math.round((r.size_bytes ?? 0) / 1024)} KB</span>
+                    <button class="text-zinc-600 hover:text-red-400 flex-shrink-0" title="delete"
+                            on:click={() => onDeleteRecording(r.id)}>✕</button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {/if}
+        </div>
         <TargetPowerMenu
           onWake={onTargetWake}
           onTap={onTargetPowerTap}
@@ -1025,19 +1068,26 @@
           <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
           <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
         </div>
-        <!-- Screen recording — records the live H.264 to MP4 on demand. -->
+        <!-- Screen recording — records the live H.264 to MP4 (records until stopped; 3h cap). -->
         <button class="btn text-xs w-full {rec.active ? 'border-red-500 text-red-300' : ''}"
                 on:click={toggleRecord} disabled={recBusy}>
-          {#if rec.active}■ stop recording · {rec.active.elapsed_s ?? 0}s{:else}● record screen (30s){/if}
+          {#if rec.active}■ stop recording · {rec.active.elapsed_s ?? 0}s{:else}● record screen{/if}
         </button>
+        {#if rec.note}
+          <p class="text-red-400 text-[10px] leading-snug">{rec.note}</p>
+        {/if}
         {#if rec.recordings.length}
-          <div class="max-h-24 overflow-y-auto space-y-0.5 text-[10px] font-mono text-zinc-400">
+          <div class="max-h-40 overflow-y-auto space-y-1 text-[10px] font-mono text-zinc-400">
             {#each rec.recordings.slice(0, 8) as r (r.id)}
-              <div class="flex items-center justify-between gap-2">
-                <a class="text-cursed-300 hover:underline truncate" href={api.recordingURL(r.id)}
-                   target="_blank" rel="noreferrer">{r.id}.mp4</a>
+              <div class="flex items-center gap-2">
+                {#if r.has_thumb}
+                  <img src={api.recordingThumbURL(r.id)} alt="" loading="lazy"
+                       class="w-12 h-7 object-cover rounded border border-ink-700 flex-shrink-0" />
+                {/if}
+                <a class="text-cursed-300 hover:underline truncate flex-1 min-w-0"
+                   href={api.recordingURL(r.id)} download={fmtRecName(r.started_ms)}>{fmtRecTime(r.started_ms)}</a>
                 <span class="text-zinc-600 whitespace-nowrap">{Math.round((r.size_bytes ?? 0) / 1024)} KB</span>
-                <button class="text-zinc-600 hover:text-red-400" title="delete"
+                <button class="text-zinc-600 hover:text-red-400 flex-shrink-0" title="delete"
                         on:click={() => onDeleteRecording(r.id)}>✕</button>
               </div>
             {/each}

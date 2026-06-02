@@ -46,6 +46,7 @@ pub async fn serve(state: SharedState) -> Result<()> {
         .route("/record/state", get(record_state))
         .route("/recordings", get(list_recordings))
         .route("/recordings/:id", get(get_recording).delete(delete_recording))
+        .route("/recordings/:id/thumb", get(get_thumb))
         .with_state(state.clone());
 
     // axum::serve only takes TcpListener; for unix sockets we run an
@@ -434,7 +435,27 @@ async fn record_state(State(state): State<SharedState>) -> impl IntoResponse {
         "ok": true,
         "active": state.0.record.active_info(),
         "recordings": state.0.record.list(),
+        "note": state.0.record.note(),
     }))
+}
+
+/// GET /recordings/:id/thumb — first-frame JPEG thumbnail.
+async fn get_thumb(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response<Body> {
+    let Some(path) = state.0.record.thumb_path(&id) else {
+        return (StatusCode::NOT_FOUND, "no thumbnail").into_response();
+    };
+    match tokio::fs::read(&path).await {
+        Ok(b) => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "image/jpeg")
+            .header("Cache-Control", "max-age=86400")
+            .body(Body::from(b))
+            .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "x").into_response()),
+        Err(_) => (StatusCode::NOT_FOUND, "no thumbnail").into_response(),
+    }
 }
 
 /// GET /recordings — finished recordings, newest first.

@@ -128,6 +128,7 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/streamer/recordings", get(crate::proxy::list_recordings))
         .route("/streamer/recordings/:id",
             get(crate::proxy::get_recording).delete(crate::proxy::delete_recording))
+        .route("/streamer/recordings/:id/thumb", get(crate::proxy::get_recording_thumb))
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.

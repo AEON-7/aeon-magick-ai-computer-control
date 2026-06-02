@@ -138,19 +138,23 @@ export interface RecordingInfo {
   status: string;
   elapsed_s?: number;
   size_bytes?: number;
+  has_thumb?: boolean;
 }
 export const recordStart = (duration_s?: number) =>
   req<{ ok: boolean; recording: RecordingInfo }>('POST', '/streamer/record/start', { duration_s });
 export const recordStop = () =>
   req<{ ok: boolean; recording: RecordingInfo }>('POST', '/streamer/record/stop');
 export const getRecordingState = () =>
-  req<{ ok: boolean; active: RecordingInfo | null; recordings: RecordingInfo[] }>(
-    'GET',
-    '/streamer/record/state',
-  );
+  req<{
+    ok: boolean;
+    active: RecordingInfo | null;
+    recordings: RecordingInfo[];
+    note?: string | null;
+  }>('GET', '/streamer/record/state');
 export const deleteRecording = (id: string) =>
   req<{ ok: boolean }>('DELETE', `/streamer/recordings/${id}`);
 export const recordingURL = (id: string) => `${API}/streamer/recordings/${id}`;
+export const recordingThumbURL = (id: string) => `${API}/streamer/recordings/${id}/thumb`;
 
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
