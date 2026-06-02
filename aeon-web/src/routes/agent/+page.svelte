@@ -41,6 +41,11 @@
   let corpusFilter = '';
   // E1: voice
   let voice: api.AgentVoice | null = null;
+  // E1: add-skill
+  let skillBusy = '';                 // skill name currently being added ('' = idle)
+  let skillResult: api.AddSkillResult | null = null;
+  let customSkillName = '';
+  let customSkillFile: File | null = null;
   // per-system power controls
   let lastMac: Record<string, string> = {};
   let powerBusy = '';
@@ -470,6 +475,10 @@
     corpusFilePath = '';
     corpusFilter = '';
     voice = null;
+    skillBusy = '';
+    skillResult = null;
+    customSkillName = '';
+    customSkillFile = null;
     detailLoading = true;
     try {
       detail = await api.getAgentDetail(sysId, a.id);
@@ -538,6 +547,59 @@
   $: corpusFiles = (corpus?.files ?? []).filter(
     (f) => !corpusFilter.trim() || f.path.toLowerCase().includes(corpusFilter.toLowerCase()),
   );
+  // ── E1: add-skill ───────────────────────────────────────────────────
+  // Skills already on the agent (so quick-add chips can hide ones it has).
+  $: agentSkillSet = new Set(detail?.skills ?? []);
+  $: quickAddSkills = (detail?.available_skills ?? []).filter((s) => !agentSkillSet.has(s));
+  async function quickAddSkill(name: string) {
+    if (!detailAgent || skillBusy) return;
+    skillBusy = name;
+    skillResult = null;
+    try {
+      const r = await api.addAgentSkill(detailSys, detailAgent.id, name, 'existing');
+      skillResult = r;
+      if (!r.ok) alert(r.err ?? 'add skill failed');
+    } catch (e) {
+      skillResult = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      skillBusy = '';
+    }
+  }
+  function onSkillFile(e: Event) {
+    const f = (e.currentTarget as HTMLInputElement).files?.[0] ?? null;
+    customSkillFile = f;
+    // Default the skill name from the filename (strip extension) if blank.
+    if (f && !customSkillName.trim()) {
+      customSkillName = f.name.replace(/\.(md|tar\.gz|tgz|tar)$/i, '');
+    }
+  }
+  /** Classify the chosen file as a SKILL.md vs a tar archive. */
+  function skillKindFor(f: File): 'md' | 'tar' {
+    return /\.(tar\.gz|tgz|tar)$/i.test(f.name) ? 'tar' : 'md';
+  }
+  async function uploadCustomSkill() {
+    if (!detailAgent || !customSkillFile || !customSkillName.trim() || skillBusy) return;
+    const name = customSkillName.trim();
+    skillBusy = name;
+    skillResult = null;
+    try {
+      const kind = skillKindFor(customSkillFile);
+      const b64 = await fileToB64(customSkillFile);
+      const r = await api.addAgentSkill(detailSys, detailAgent.id, name, kind, b64);
+      skillResult = r;
+      if (r.ok) {
+        customSkillFile = null;
+        // refresh the detail so available_skills picks up the new dir
+        detail = await api.getAgentDetail(detailSys, detailAgent.id);
+      } else {
+        alert(r.err ?? 'upload failed');
+      }
+    } catch (e) {
+      skillResult = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      skillBusy = '';
+    }
+  }
   // ── E1: profile photo → Matrix avatar ───────────────────────────────
   async function onAvatarPick(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -1045,9 +1107,42 @@
           {#if detail?.skills?.length}
             <div class="agd-chips">{#each detail.skills as sk}<span class="agd-chip" class:am={sk === 'aeon-magick'}>{sk}</span>{/each}</div>
           {:else if detail}<p class="agd-dim">none assigned</p>{/if}
-          {#if detail?.available_skills?.length}
-            <p class="agd-dim agd-avail">available on gateway: {detail.available_skills.join(' · ')}</p>
+
+          {#if quickAddSkills.length}
+            <p class="agd-dim agd-avail">Quick-add a gateway skill (shows the config-change to apply):</p>
+            <div class="agd-chips">
+              {#each quickAddSkills as sk}
+                <button class="agd-chip agd-chip-add" disabled={!!skillBusy} on:click={() => quickAddSkill(sk)}>
+                  {skillBusy === sk ? '…' : '+ ' + sk}
+                </button>
+              {/each}
+            </div>
           {/if}
+
+          <div class="agd-skill-upload">
+            <p class="agd-dim">Upload a custom skill — a <code class="agd-inline">SKILL.md</code> file or a <code class="agd-inline">.tar</code>/<code class="agd-inline">.tgz</code> of the skill folder. Drops into <code class="agd-inline">~/.openclaw/workspace/skills/&lt;name&gt;/</code> on the gateway.</p>
+            <input class={inputCls + ' w-full'} placeholder="skill name (dir under workspace/skills/)" bind:value={customSkillName} />
+            <input type="file" accept=".md,.tar,.tgz,.gz,application/x-tar,application/gzip,text/markdown" on:change={onSkillFile} />
+            <button
+              class="btn-primary text-xs agd-filebtn"
+              class:agd-disabled={!customSkillFile || !customSkillName.trim() || !!skillBusy}
+              on:click={uploadCustomSkill}
+            >
+              {skillBusy && customSkillFile ? 'uploading…' : 'Upload skill'}
+            </button>
+          </div>
+
+          {#if skillResult}
+            {#if skillResult.ok}
+              <div class="agd-token">
+                <div class="agd-mono agd-dim">added “{skillResult.skill}”{#if skillResult.dropped} → {skillResult.dropped}{/if}</div>
+                {#if skillResult.config_change}<div class="agd-note">Enable: {skillResult.config_change}</div>{/if}
+              </div>
+            {:else}
+              <p class="agd-warn">{skillResult.err}</p>
+            {/if}
+          {/if}
+          <p class="agd-dim agd-avail">AEON-7 GitHub skill marketplace: TODO (needs <code class="agd-inline">gh</code>, not installed on the Pi).</p>
         </section>
 
         <div class="agd-grid2">
@@ -1134,7 +1229,7 @@
           <p class="agd-dim agd-avail">Upload / edit: TODO — read-only browse for v1.</p>
         </section>
 
-        <p class="agd-soon">Coming next: corpus upload/edit · voice clone upload · Add-Skill marketplace.</p>
+        <p class="agd-soon">Stretch TODOs: corpus upload/edit · voice designer-edit / clone upload · AEON-7 GitHub skill marketplace.</p>
       </div>
     </div>
   {/if}
@@ -1508,4 +1603,10 @@
     border-radius: 0.35rem; padding: 0.5rem; max-height: 16rem; overflow: auto; white-space: pre-wrap;
     word-break: break-word; line-height: 1.45;
   }
+  /* ── E1: add-skill ── */
+  .agd-chip-add { cursor: pointer; }
+  .agd-chip-add:hover:not(:disabled) { color: #6ee7b7; background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.4); }
+  .agd-chip-add:disabled { opacity: 0.5; cursor: default; }
+  .agd-skill-upload { display: flex; flex-direction: column; gap: 0.35rem; border-top: 1px solid #1c1c26; padding-top: 0.5rem; }
+  .agd-skill-upload input[type='file'] { font-size: 0.62rem; color: #a1a1aa; }
 </style>

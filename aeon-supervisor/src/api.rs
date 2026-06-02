@@ -167,6 +167,14 @@ pub fn build_router(cfg: Config) -> Router {
         // E1: per-agent effective TTS voice (override or gateway default) +
         // clone-name vs designer-description classification.
         .route("/agent/systems/:id/agents/:aid/voice", get(crate::agent_connect::agent_voice))
+        // E1: add-skill — custom upload (drop into the gateway's shared skills
+        // dir) or quick-add an existing skill; returns the non-invasive
+        // skills-array config_change. Base64 file payload → raise body limit.
+        .route(
+            "/agent/systems/:id/agents/:aid/skill",
+            post(crate::agent_connect::add_skill)
+                .layer(axum::extract::DefaultBodyLimit::max(48 * 1024 * 1024)),
+        )
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.

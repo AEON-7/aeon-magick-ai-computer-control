@@ -369,6 +369,28 @@ export interface AgentVoice {
 export const getAgentVoice = (sysId: string, agentId: string) =>
   req<AgentVoice>('GET', `/agent/systems/${sysId}/agents/${agentId}/voice`);
 
+// ── E1: per-agent add-skill ──
+export interface AddSkillResult {
+  ok: boolean;
+  skill?: string;
+  dropped?: string | null;     // gateway dir the custom skill landed in
+  config_change?: string;      // the non-invasive skills-array change to apply
+  err?: string;
+}
+/** kind: 'existing' (quick-add, no file) | 'md' (SKILL.md) | 'tar' (tar/tgz). */
+export const addAgentSkill = (
+  sysId: string,
+  agentId: string,
+  name: string,
+  kind: 'existing' | 'md' | 'tar',
+  file_b64 = '',
+) =>
+  req<AddSkillResult>('POST', `/agent/systems/${sysId}/agents/${agentId}/skill`, {
+    name,
+    kind,
+    file_b64,
+  });
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

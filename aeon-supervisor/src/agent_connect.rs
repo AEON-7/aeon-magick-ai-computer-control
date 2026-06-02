@@ -1329,6 +1329,129 @@ pub struct CorpusFileQuery {
     path: String,
 }
 
+// ── E1: per-agent add-skill ──────────────────────────────────────────────
+//
+// Two non-invasive ways to add a skill to an agent (mirrors provision_agent:
+// we drop files into the gateway + RETURN the exact one-line skills-array
+// change to apply, never blind-editing the live config):
+//
+//  (a) custom upload — the admin uploads a skill as a single file: a `.md`
+//      SKILL file (dropped as <name>/SKILL.md) or a tar/tgz (extracted into
+//      <name>/). Lands in ~/.openclaw/workspace/skills/<name>/ on the gateway.
+//  (b) quick-add — an existing gateway skill (from `available_skills`): nothing
+//      to drop, just return the config_change to add it to this agent.
+//
+// (The AEON-7 GitHub marketplace path needs `gh`, which isn't installed — left
+// as a TODO in the UI.)
+
+/// Sanitize a skill name to a safe dir component (letters/digits/_-.).
+fn sanitize_skill_name(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '-' })
+        .collect();
+    s.trim_matches(|c| c == '.' || c == '-').to_string()
+}
+
+/// The exact non-invasive skills-array change to apply on the gateway.
+fn skill_config_change(skill: &str, agent_id: &str) -> String {
+    format!(
+        "Add \"{skill}\" to the skills array of the agents.list entry with id==\"{agent_id}\" in ~/.openclaw/openclaw.json (create a \"skills\":[] array on that entry if absent), then reload OpenClaw."
+    )
+}
+
+#[derive(Deserialize)]
+pub struct AddSkillReq {
+    /// Skill name → the dir under workspace/skills/<name>/ + the value added to
+    /// the agent's skills array.
+    name: String,
+    /// "existing" = quick-add a gateway skill (no upload). "md" = file_b64 is a
+    /// SKILL.md. "tar" = file_b64 is a tar / tar.gz of the skill dir contents.
+    #[serde(default)]
+    kind: String,
+    /// base64'd file bytes (for kind = "md" | "tar"); empty for "existing".
+    #[serde(default)]
+    file_b64: String,
+}
+
+/// POST /agent/systems/:id/agents/:aid/skill — add a skill to an agent.
+/// For custom uploads, drops the skill into the gateway's shared skills dir;
+/// for any kind, returns the non-invasive config_change to enable it.
+pub async fn add_skill(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<AddSkillReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let safe_aid = sanitize_id(&agent_id);
+    let skill = sanitize_skill_name(&req.name);
+    if skill.is_empty() {
+        return Json(json!({"ok": false, "err": "skill name required"}));
+    }
+    let kind = req.kind.trim();
+    // Quick-add an existing gateway skill: nothing to drop.
+    if kind.is_empty() || kind == "existing" {
+        return Json(json!({
+            "ok": true,
+            "skill": skill,
+            "dropped": serde_json::Value::Null,
+            "config_change": skill_config_change(&skill, &safe_aid),
+        }));
+    }
+    if kind != "md" && kind != "tar" {
+        return Json(json!({"ok": false, "err": format!("unknown kind: {kind}")}));
+    }
+    // Decode + size-cap the upload before shipping it over SSH.
+    use base64::Engine;
+    let raw = match base64::engine::general_purpose::STANDARD.decode(req.file_b64.trim()) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => return Json(json!({"ok": false, "err": "empty file"})),
+        Err(e) => return Json(json!({"ok": false, "err": format!("bad base64: {e}")})),
+    };
+    if raw.len() > 32 * 1024 * 1024 {
+        return Json(json!({"ok": false, "err": "file too large (max 32 MB)"}));
+    }
+    let file_b64 = b64(&raw);
+    let kind_s = kind.to_string();
+    let drop_res = {
+        let (sys, sk, k, fb) = (sys.clone(), skill.clone(), kind_s.clone(), file_b64);
+        tokio::task::spawn_blocking(move || drop_skill(&sys, &sk, &k, &fb))
+            .await
+            .unwrap_or_else(|_| Err("join error".into()))
+    };
+    match drop_res {
+        Ok(dir) => Json(json!({
+            "ok": true,
+            "skill": skill,
+            "dropped": dir,
+            "config_change": skill_config_change(&skill, &safe_aid),
+        })),
+        Err(e) => Json(json!({"ok": false, "err": e, "skill": skill})),
+    }
+}
+
+/// Drop a custom skill into ~/.openclaw/workspace/skills/<name>/ on the gateway.
+/// `md` → write the bytes as <name>/SKILL.md. `tar` → extract (auto-detect gzip)
+/// into <name>/. Returns the created dir path.
+fn drop_skill(sys: &System, skill: &str, kind: &str, file_b64: &str) -> Result<String, String> {
+    let dir = format!("$HOME/.openclaw/workspace/skills/{skill}");
+    let remote = if kind == "md" {
+        format!(
+            "mkdir -p {dir} && echo {file_b64} | base64 -d > {dir}/SKILL.md && echo {dir}",
+        )
+    } else {
+        // tar: write to a temp file, detect gzip by magic bytes, extract into dir.
+        format!(
+            "mkdir -p {dir} && TMP=$(mktemp) && echo {file_b64} | base64 -d > \"$TMP\" && \
+             if gzip -t \"$TMP\" 2>/dev/null; then tar -xzf \"$TMP\" -C {dir}; else tar -xf \"$TMP\" -C {dir}; fi && \
+             rm -f \"$TMP\" && echo {dir}",
+        )
+    };
+    ssh_capture(sys, &remote).map(|s| s.trim().to_string())
+}
+
 // ── E1: per-agent voice ──────────────────────────────────────────────────
 //
 // The agent objects carry NO per-agent voice field — the effective TTS voice
