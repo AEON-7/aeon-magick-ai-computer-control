@@ -1571,3 +1571,618 @@ pub async fn agent_corpus_file(
         Err(e) => Json(json!({"ok": false, "err": e})),
     }
 }
+
+// ── E4: Container Management ──────────────────────────────────────────────
+//
+// Human-admin only (gated by the /api/agent/ deny-list in auth.rs). Drives
+// `docker` over the agent-connect SSH key on a registered system:
+//   - list containers (running + stopped) with a live `docker stats` snapshot
+//     merged in per-container, plus discovered docker-compose files and whether
+//     each compose project is currently up;
+//   - start / stop / restart a single container by name;
+//   - read / write a compose file (traversal-guarded), and bring a compose
+//     project up / down.
+//
+// All `docker` boxes here run Compose v2 (`docker compose …`), not the v1
+// `docker-compose` shim, so we always invoke the v2 subcommand form.
+
+/// Sanitize a docker object name (container / project) to a safe shell token:
+/// docker names are [a-zA-Z0-9][a-zA-Z0-9_.-]+, so anything outside that set is
+/// rejected by returning empty (callers treat empty as "invalid name").
+fn sanitize_docker_name(name: &str) -> String {
+    let s = name.trim();
+    if s.is_empty()
+        || s.len() > 256
+        || !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return String::new();
+    }
+    s.to_string()
+}
+
+/// Parse one `docker ps -a --format '{{json .}}'` line into our slim shape +
+/// pull out the compose project + config-file from the labels if present.
+fn parse_container_line(line: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    // Labels is a comma-joined "k=v,k2=v2" string; dig the compose project +
+    // its config file path out of it (used to mark compose projects up/down).
+    let labels = get("Labels");
+    let mut project = String::new();
+    let mut config_files = String::new();
+    for kv in labels.split(',') {
+        if let Some(p) = kv.strip_prefix("com.docker.compose.project=") {
+            project = p.to_string();
+        } else if let Some(c) = kv.strip_prefix("com.docker.compose.project.config_files=") {
+            config_files = c.to_string();
+        }
+    }
+    Some(json!({
+        "name": get("Names"),
+        "image": get("Image"),
+        "state": get("State"),     // running | exited | created | paused | …
+        "status": get("Status"),   // "Up 4 hours" | "Exited (137) 2 months ago"
+        "ports": get("Ports"),
+        "compose_project": project,
+        "compose_config_files": config_files,
+    }))
+}
+
+/// Parse a `docker stats` MemUsage token ("53.43MiB / 30.14GiB") → just the
+/// used side, trimmed. Returns "" if it doesn't look right.
+fn stats_mem_used(mem_usage: &str) -> String {
+    mem_usage.split('/').next().unwrap_or("").trim().to_string()
+}
+
+/// GET /agent/systems/:id/containers — running + stopped containers with a live
+/// stats snapshot merged per container, plus discovered compose files (path +
+/// whether the project is up).
+pub async fn list_containers(Path(id): Path<String>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let res = tokio::task::spawn_blocking(move || gather_containers(&sys))
+        .await
+        .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// One SSH round-trip: emit three delimited sections (ps / stats / compose) we
+/// split + parse, so the whole container view is a single connection.
+fn gather_containers(sys: &System) -> Result<serde_json::Value, String> {
+    // `||true` on each block so a section being empty (e.g. no compose files)
+    // never fails the whole pipeline. Markers delimit the three outputs.
+    let remote = "echo '@@PS@@'; \
+        docker ps -a --no-trunc --format '{{json .}}' 2>/dev/null || true; \
+        echo '@@STATS@@'; \
+        docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' 2>/dev/null || true; \
+        echo '@@COMPOSE@@'; \
+        find /home /opt /srv /root /etc ~ -maxdepth 4 \\( -name docker-compose.yml -o -name docker-compose.yaml -o -name compose.yaml -o -name compose.yml \\) 2>/dev/null || true";
+    let out = ssh_capture(sys, remote)?;
+
+    // Split into the three sections.
+    let mut section = "";
+    let mut ps_lines: Vec<&str> = Vec::new();
+    let mut stats_lines: Vec<&str> = Vec::new();
+    let mut compose_lines: Vec<&str> = Vec::new();
+    for line in out.lines() {
+        match line.trim() {
+            "@@PS@@" => section = "ps",
+            "@@STATS@@" => section = "stats",
+            "@@COMPOSE@@" => section = "compose",
+            _ => match section {
+                "ps" => ps_lines.push(line),
+                "stats" => stats_lines.push(line),
+                "compose" => compose_lines.push(line),
+                _ => {}
+            },
+        }
+    }
+
+    // Live stats: name → {cpu, mem, mem_pct}.
+    let mut stats: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    for l in stats_lines {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() >= 4 && !f[0].trim().is_empty() {
+            stats.insert(
+                f[0].trim().to_string(),
+                json!({"cpu": f[1].trim(), "mem": stats_mem_used(f[2]), "mem_full": f[2].trim(), "mem_pct": f[3].trim()}),
+            );
+        }
+    }
+
+    // Containers, with stats merged in by name.
+    let mut containers: Vec<serde_json::Value> = Vec::new();
+    // Track which compose config-file paths have a *running* container (→ up).
+    let mut up_config_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for l in ps_lines {
+        if l.trim().is_empty() {
+            continue;
+        }
+        if let Some(mut c) = parse_container_line(l) {
+            let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let st = stats.get(&name).cloned().unwrap_or(serde_json::Value::Null);
+            if let Some(o) = c.as_object_mut() {
+                o.insert("stats".into(), st);
+            }
+            let running = c.get("state").and_then(|x| x.as_str()) == Some("running");
+            if running {
+                // The label can carry several comma/space-separated config files.
+                let cfg = c.get("compose_config_files").and_then(|x| x.as_str()).unwrap_or("");
+                for p in cfg.split(|ch| ch == ',' || ch == ' ').map(str::trim).filter(|p| !p.is_empty()) {
+                    up_config_files.insert(p.to_string());
+                }
+            }
+            containers.push(c);
+        }
+    }
+    // Sort: running first, then by name.
+    containers.sort_by(|a, b| {
+        let ar = a.get("state").and_then(|x| x.as_str()) == Some("running");
+        let br = b.get("state").and_then(|x| x.as_str()) == Some("running");
+        br.cmp(&ar).then_with(|| {
+            a.get("name").and_then(|x| x.as_str()).unwrap_or("")
+                .cmp(b.get("name").and_then(|x| x.as_str()).unwrap_or(""))
+        })
+    });
+
+    // Compose files: dedup (the `~`/`/home` overlap in the find roots dupes
+    // paths) and mark each up if a running container references it.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut compose: Vec<serde_json::Value> = Vec::new();
+    for p in compose_lines {
+        let p = p.trim();
+        if p.is_empty() || !seen.insert(p.to_string()) {
+            continue;
+        }
+        let up = up_config_files.contains(p);
+        compose.push(json!({"path": p, "up": up}));
+    }
+    compose.sort_by(|a, b| {
+        a.get("path").and_then(|x| x.as_str()).unwrap_or("")
+            .cmp(b.get("path").and_then(|x| x.as_str()).unwrap_or(""))
+    });
+
+    let running = containers.iter().filter(|c| c.get("state").and_then(|x| x.as_str()) == Some("running")).count();
+    Ok(json!({
+        "ok": true,
+        "containers": containers,
+        "running": running,
+        "total": containers.len(),
+        "compose": compose,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ContainerActionReq {
+    action: String, // "start" | "stop" | "restart"
+}
+
+/// POST /agent/systems/:id/containers/:name/action — start/stop/restart one
+/// container (name sanitized to a safe docker token).
+pub async fn container_action(
+    Path((id, name)): Path<(String, String)>,
+    Json(req): Json<ContainerActionReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let safe = sanitize_docker_name(&name);
+    if safe.is_empty() {
+        return Json(json!({"ok": false, "err": "invalid container name"}));
+    }
+    let verb = match req.action.as_str() {
+        "start" => "start",
+        "stop" => "stop",
+        "restart" => "restart",
+        other => return Json(json!({"ok": false, "err": format!("unknown action: {other}")})),
+    };
+    let action = req.action.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // `docker <verb> <name>` prints the name on success.
+        ssh_capture(&sys, &format!("docker {verb} {safe} 2>&1"))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => Json(json!({"ok": true, "action": action, "out": out.trim()})),
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ComposeQuery {
+    path: String,
+}
+
+/// Guard a compose-file path: must be absolute, contain no `..` segment, and end
+/// in a recognized compose filename. (We also re-confirm existence on the box in
+/// the read/write remote commands.) Returns the cleaned path or an error string.
+fn guard_compose_path(path: &str) -> Result<String, String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("path required".into());
+    }
+    if !p.starts_with('/') {
+        return Err("path must be absolute".into());
+    }
+    if p.split('/').any(|seg| seg == "..") {
+        return Err("path may not contain ..".into());
+    }
+    // Reject shell-meta so the path can't break out of the single-quoted remote.
+    if p.contains('\'') || p.contains('\n') || p.contains('\0') {
+        return Err("illegal characters in path".into());
+    }
+    let fname = p.rsplit('/').next().unwrap_or("");
+    let ok = matches!(
+        fname,
+        "docker-compose.yml" | "docker-compose.yaml" | "compose.yaml" | "compose.yml"
+    );
+    if !ok {
+        return Err("not a compose filename (docker-compose.yml / compose.yaml / …)".into());
+    }
+    Ok(p.to_string())
+}
+
+/// GET /agent/systems/:id/compose?path=<file> — read a compose file (guarded).
+pub async fn compose_get(
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ComposeQuery>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let path = match guard_compose_path(&q.path) {
+        Ok(p) => p,
+        Err(e) => return Json(json!({"ok": false, "err": e})),
+    };
+    let path_c = path.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // base64-encode the contents on the box so arbitrary YAML rides back
+        // cleanly; guard existence + a sane size cap remotely too.
+        let remote = format!(
+            "F='{path_c}'; if [ ! -f \"$F\" ]; then echo '@@NOFILE@@'; \
+             elif [ $(wc -c < \"$F\") -gt 1048576 ]; then echo '@@TOOBIG@@'; \
+             else base64 \"$F\"; fi"
+        );
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => {
+            let t = out.trim();
+            if t == "@@NOFILE@@" {
+                return Json(json!({"ok": false, "err": "file not found on system"}));
+            }
+            if t == "@@TOOBIG@@" {
+                return Json(json!({"ok": false, "err": "file too large to edit (>1 MB)"}));
+            }
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(t.replace(['\n', '\r'], "")) {
+                Ok(bytes) => Json(json!({
+                    "ok": true,
+                    "path": path,
+                    "content": String::from_utf8_lossy(&bytes),
+                })),
+                Err(e) => Json(json!({"ok": false, "err": format!("decode: {e}")})),
+            }
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ComposeWriteReq {
+    content: String,
+}
+
+/// PUT /agent/systems/:id/compose?path=<file> — write a compose file back
+/// (guarded). The file must already exist (we don't create new compose roots
+/// here — Easy Deploy owns that). Writes via base64-over-ssh.
+pub async fn compose_put(
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ComposeQuery>,
+    Json(req): Json<ComposeWriteReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let path = match guard_compose_path(&q.path) {
+        Ok(p) => p,
+        Err(e) => return Json(json!({"ok": false, "err": e})),
+    };
+    if req.content.len() > 1024 * 1024 {
+        return Json(json!({"ok": false, "err": "content too large (>1 MB)"}));
+    }
+    let content_b64 = b64(req.content.as_bytes());
+    let path_c = path.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // Refuse to create a brand-new file: it must already exist (we only edit
+        // discovered compose files here). Write atomically via a temp + mv.
+        let remote = format!(
+            "F='{path_c}'; if [ ! -f \"$F\" ]; then echo '@@NOFILE@@'; \
+             else TMP=$(mktemp) && echo {content_b64} | base64 -d > \"$TMP\" && mv \"$TMP\" \"$F\" && echo '@@OK@@'; fi"
+        );
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => {
+            let t = out.trim();
+            if t.contains("@@NOFILE@@") {
+                Json(json!({"ok": false, "err": "file not found on system (refusing to create new compose roots here)"}))
+            } else if t.contains("@@OK@@") {
+                Json(json!({"ok": true, "path": path}))
+            } else {
+                Json(json!({"ok": false, "err": format!("write failed: {t}")}))
+            }
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ComposeActionReq {
+    path: String,
+    action: String, // "up" | "down"
+}
+
+/// POST /agent/systems/:id/compose/action — `docker compose -f <path> up -d|down`
+/// in the file's directory (path guarded, action validated).
+pub async fn compose_action(
+    Path(id): Path<String>,
+    Json(req): Json<ComposeActionReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let path = match guard_compose_path(&req.path) {
+        Ok(p) => p,
+        Err(e) => return Json(json!({"ok": false, "err": e})),
+    };
+    let sub = match req.action.as_str() {
+        "up" => "up -d",
+        "down" => "down",
+        other => return Json(json!({"ok": false, "err": format!("unknown action: {other}")})),
+    };
+    let action = req.action.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // cd into the compose dir (so relative volumes/env_file resolve) then run
+        // the v2 subcommand. Capture combined output for the UI.
+        let remote = format!("cd \"$(dirname '{path}')\" && docker compose -f '{path}' {sub} 2>&1");
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => Json(json!({"ok": true, "action": action, "out": out.trim()})),
+        Err(e) => Json(json!({"ok": false, "err": e, "action": action})),
+    }
+}
+
+// ── E5: Easy Deploy (AEON-7 GHCR images on the DGX) ───────────────────────
+//
+// Framework + v1. Restricted to systems with role "dgx" (the GB10 box). We hold
+// a small *seeded, admin-editable* list of GHCR images (model servers + a
+// ComfyUI image) — the live AEON-7 GHCR catalog needs `gh` / a registry token
+// which isn't available here, so live-fetch is a TODO. From a chosen image +
+// flags (max model length, max batch size, GPU allocation, max concurrent
+// sessions) we generate a docker-compose snippet and, by default, SAVE it into a
+// per-deploy dir on the DGX *without* pulling the (multi-GB) image. An explicit
+// "deploy now" then runs `docker compose up -d` for it.
+//
+// TODO (needs the agent-task plumbing): "hand the repo's agents.md to an agent
+// to set this up for me" — i.e. dispatch the generated compose + an agents.md
+// brief to an OpenClaw agent that has SSH access to the DGX and let it do the
+// pull/tune/launch. That requires an agent-task dispatch channel we don't have
+// wired yet; left as a placeholder here + in the UI.
+
+const DEPLOY_DIR: &str = "$HOME/aeon-deploy";
+
+/// Seeded GHCR image catalog (admin-editable in the UI; this is just the
+/// server-side default the UI seeds from). Marked clearly as placeholders.
+fn seeded_deploy_catalog() -> serde_json::Value {
+    json!([
+        {
+            "image": "ghcr.io/aeon-7/vllm-model-server:latest",
+            "label": "vLLM model server (placeholder)",
+            "kind": "model-server",
+            "note": "Edit to your real AEON-7 GHCR tag. Flags map to vLLM args."
+        },
+        {
+            "image": "ghcr.io/aeon-7/comfyui:latest",
+            "label": "ComfyUI (placeholder)",
+            "kind": "comfyui",
+            "note": "Edit to your real AEON-7 GHCR tag."
+        }
+    ])
+}
+
+/// GET /agent/systems/:id/deploy/catalog — the seeded GHCR image list + the
+/// deploy dir on the box. dgx-only.
+pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    if !sys.roles.iter().any(|r| r == "dgx") {
+        return Json(json!({"ok": false, "err": "Easy Deploy is only available for systems with the \"dgx\" role"}));
+    }
+    Json(json!({
+        "ok": true,
+        "catalog": seeded_deploy_catalog(),
+        "deploy_dir": DEPLOY_DIR,
+        "live_catalog_todo": "Live AEON-7 GHCR catalog fetch needs `gh`/a registry token (not available here) — edit the list above instead.",
+    }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct DeployFlags {
+    #[serde(default)]
+    model_len: Option<i64>,
+    #[serde(default)]
+    max_batch: Option<i64>,
+    /// GPU allocation: "all" | a count ("1") | a device list ("0,1").
+    #[serde(default)]
+    gpu: Option<String>,
+    #[serde(default)]
+    max_sessions: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct DeployReq {
+    image: String,
+    name: String,
+    #[serde(default)]
+    flags: DeployFlags,
+    /// "model-server" (vLLM-style flags) | "comfyui" | anything else (generic).
+    #[serde(default)]
+    kind: String,
+    /// When true, actually `docker compose up -d` after writing (pulls + runs).
+    /// Default false = generate + save only (safe; no multi-GB pull).
+    #[serde(default)]
+    deploy_now: bool,
+}
+
+/// Validate a GHCR-ish image ref to a safe token (no shell-meta, sane charset).
+fn sanitize_image_ref(image: &str) -> String {
+    let s = image.trim();
+    let ok = !s.is_empty()
+        && s.len() <= 256
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ':' | '@'));
+    if ok { s.to_string() } else { String::new() }
+}
+
+/// Build a docker-compose.yml string for the deploy from the chosen flags. We
+/// keep it minimal + readable: GPU via `deploy.resources.reservations.devices`,
+/// the model/batch flags as the container `command`, and max-sessions surfaced
+/// as an env var the server can read.
+fn render_deploy_compose(name: &str, image: &str, kind: &str, f: &DeployFlags) -> String {
+    let gpu = f.gpu.as_deref().unwrap_or("all").trim().to_string();
+    // GPU reservation: "all" → count: all; a bare number → that count; a device
+    // list "0,1" → device_ids.
+    let gpu_block = if gpu == "all" || gpu.is_empty() {
+        "          - driver: nvidia\n            count: all\n            capabilities: [gpu]".to_string()
+    } else if gpu.chars().all(|c| c.is_ascii_digit()) {
+        format!("          - driver: nvidia\n            count: {gpu}\n            capabilities: [gpu]")
+    } else {
+        // device list
+        let ids = gpu
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("          - driver: nvidia\n            device_ids: [{ids}]\n            capabilities: [gpu]")
+    };
+
+    // Command + env derived from flags. For a model-server we emit vLLM-style
+    // args; otherwise we just surface the values as env so any server can read
+    // them, and leave command unset (image default entrypoint).
+    let mut cmd_args: Vec<String> = Vec::new();
+    let mut env_lines: Vec<String> = Vec::new();
+    if kind == "model-server" {
+        if let Some(ml) = f.model_len {
+            cmd_args.push(format!("--max-model-len {ml}"));
+        }
+        if let Some(mb) = f.max_batch {
+            cmd_args.push(format!("--max-num-seqs {mb}"));
+        }
+    } else {
+        if let Some(ml) = f.model_len {
+            env_lines.push(format!("      MAX_MODEL_LEN: \"{ml}\""));
+        }
+        if let Some(mb) = f.max_batch {
+            env_lines.push(format!("      MAX_BATCH_SIZE: \"{mb}\""));
+        }
+    }
+    if let Some(ms) = f.max_sessions {
+        env_lines.push(format!("      MAX_CONCURRENT_SESSIONS: \"{ms}\""));
+    }
+    let command_line = if cmd_args.is_empty() {
+        String::new()
+    } else {
+        format!("    command: {}\n", cmd_args.join(" "))
+    };
+    let env_block = if env_lines.is_empty() {
+        String::new()
+    } else {
+        format!("    environment:\n{}\n", env_lines.join("\n"))
+    };
+
+    format!(
+        "# Generated by AEON Magick — Agent Dash Easy Deploy (E5).\n\
+         # Review before deploying. Flags: model_len={ml:?} max_batch={mb:?} gpu={gpu} max_sessions={ms:?}\n\
+         services:\n  \
+         {name}:\n    \
+         image: {image}\n    \
+         container_name: {name}\n    \
+         restart: unless-stopped\n\
+         {command_line}\
+         {env_block}    \
+         deploy:\n      \
+         resources:\n        \
+         reservations:\n          \
+         devices:\n{gpu_block}\n",
+        ml = f.model_len,
+        mb = f.max_batch,
+        ms = f.max_sessions,
+    )
+}
+
+/// POST /agent/systems/:id/deploy — generate a compose snippet from the image +
+/// flags, write it to a per-deploy dir on the DGX, and (only if deploy_now)
+/// `docker compose up -d`. dgx-only. Returns the generated compose + the path.
+pub async fn deploy_image(Path(id): Path<String>, Json(req): Json<DeployReq>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    if !sys.roles.iter().any(|r| r == "dgx") {
+        return Json(json!({"ok": false, "err": "Easy Deploy is only available for systems with the \"dgx\" role"}));
+    }
+    let image = sanitize_image_ref(&req.image);
+    if image.is_empty() {
+        return Json(json!({"ok": false, "err": "invalid image reference"}));
+    }
+    let name = sanitize_docker_name(&req.name);
+    if name.is_empty() {
+        return Json(json!({"ok": false, "err": "invalid deploy name (use [A-Za-z0-9._-])"}));
+    }
+    let compose = render_deploy_compose(&name, &image, req.kind.trim(), &req.flags);
+    let deploy_now = req.deploy_now;
+    let compose_b64 = b64(compose.as_bytes());
+    let name_c = name.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // Write the compose into $DEPLOY_DIR/<name>/docker-compose.yml. Only run
+        // it when deploy_now — otherwise just save (no pull, no launch).
+        let dir = format!("{DEPLOY_DIR}/{name_c}");
+        let run = if deploy_now {
+            format!(" && cd \"{dir}\" && docker compose up -d 2>&1")
+        } else {
+            String::new()
+        };
+        let remote = format!(
+            "mkdir -p \"{dir}\" && echo {compose_b64} | base64 -d > \"{dir}/docker-compose.yml\" && echo \"WROTE {dir}/docker-compose.yml\"{run}"
+        );
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => Json(json!({
+            "ok": true,
+            "deployed": deploy_now,
+            "name": name,
+            "image": image,
+            "compose": compose,
+            "path": format!("{DEPLOY_DIR}/{name}/docker-compose.yml"),
+            "out": out.trim(),
+        })),
+        Err(e) => Json(json!({"ok": false, "err": e, "compose": compose})),
+    }
+}

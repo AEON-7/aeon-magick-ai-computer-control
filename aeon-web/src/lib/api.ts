@@ -207,6 +207,108 @@ export const powerSystem = (id: string, action: 'shutdown' | 'reboot' | 'wake', 
     { action, mac },
   );
 
+// ── E4: Container Management ──
+/** Live `docker stats` snapshot merged onto a container (null if not running). */
+export interface ContainerStats {
+  cpu: string;       // "0.95%"
+  mem: string;       // used side, e.g. "56.73MiB"
+  mem_full: string;  // "56.73MiB / 30.14GiB"
+  mem_pct: string;   // "0.18%"
+}
+export interface ContainerInfo {
+  name: string;
+  image: string;
+  state: string;     // running | exited | created | paused | …
+  status: string;    // "Up 4 hours" | "Exited (137) 2 months ago"
+  ports: string;
+  compose_project: string;
+  compose_config_files: string;
+  stats: ContainerStats | null;
+}
+export interface ComposeFileEntry {
+  path: string;      // absolute path on the system
+  up: boolean;       // a running container references this compose file
+}
+export interface ContainerList {
+  ok: boolean;
+  containers?: ContainerInfo[];
+  running?: number;
+  total?: number;
+  compose?: ComposeFileEntry[];
+  err?: string;
+}
+export const getContainers = (sysId: string) =>
+  req<ContainerList>('GET', `/agent/systems/${sysId}/containers`);
+
+export const containerAction = (
+  sysId: string,
+  name: string,
+  action: 'start' | 'stop' | 'restart',
+) =>
+  req<{ ok: boolean; action?: string; out?: string; err?: string }>(
+    'POST',
+    `/agent/systems/${sysId}/containers/${encodeURIComponent(name)}/action`,
+    { action },
+  );
+
+export const getComposeFile = (sysId: string, path: string) =>
+  req<{ ok: boolean; path?: string; content?: string; err?: string }>(
+    'GET',
+    `/agent/systems/${sysId}/compose?path=${encodeURIComponent(path)}`,
+  );
+
+export const putComposeFile = (sysId: string, path: string, content: string) =>
+  req<{ ok: boolean; path?: string; err?: string }>(
+    'PUT',
+    `/agent/systems/${sysId}/compose?path=${encodeURIComponent(path)}`,
+    { content },
+  );
+
+export const composeAction = (sysId: string, path: string, action: 'up' | 'down') =>
+  req<{ ok: boolean; action?: string; out?: string; err?: string }>(
+    'POST',
+    `/agent/systems/${sysId}/compose/action`,
+    { path, action },
+  );
+
+// ── E5: Easy Deploy (dgx-only) ──
+export interface DeployCatalogEntry {
+  image: string;
+  label: string;
+  kind: string;      // "model-server" | "comfyui" | …
+  note?: string;
+}
+export interface DeployCatalog {
+  ok: boolean;
+  catalog?: DeployCatalogEntry[];
+  deploy_dir?: string;
+  live_catalog_todo?: string;
+  err?: string;
+}
+export const getDeployCatalog = (sysId: string) =>
+  req<DeployCatalog>('GET', `/agent/systems/${sysId}/deploy/catalog`);
+
+export interface DeployFlags {
+  model_len?: number | null;
+  max_batch?: number | null;
+  gpu?: string;            // "all" | "1" | "0,1"
+  max_sessions?: number | null;
+}
+export interface DeployResult {
+  ok: boolean;
+  deployed?: boolean;      // true = compose up -d ran
+  name?: string;
+  image?: string;
+  compose?: string;        // the generated docker-compose.yml
+  path?: string;           // where it was written on the box
+  out?: string;            // command output
+  err?: string;
+}
+export const deployImage = (
+  sysId: string,
+  body: { image: string; name: string; kind: string; flags: DeployFlags; deploy_now: boolean },
+) => req<DeployResult>('POST', `/agent/systems/${sysId}/deploy`, body);
+
 /** One agent in an OpenClaw gateway's pantheon (from its /agents API). */
 export interface AgentInfo {
   id: string;

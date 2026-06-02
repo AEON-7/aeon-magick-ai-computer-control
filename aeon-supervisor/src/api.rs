@@ -138,6 +138,19 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/agent/systems/:id/test", post(crate::agent_connect::test_system))
         .route("/agent/systems/:id/metrics", get(crate::agent_connect::system_metrics))
         .route("/agent/systems/:id/power", post(crate::agent_connect::power_system))
+        // E4: Container Management — list/start/stop/restart + compose read/
+        // write/up/down (all over the agent-connect SSH key; admin scope).
+        .route("/agent/systems/:id/containers", get(crate::agent_connect::list_containers))
+        .route("/agent/systems/:id/containers/:name/action", post(crate::agent_connect::container_action))
+        .route(
+            "/agent/systems/:id/compose",
+            get(crate::agent_connect::compose_get).put(crate::agent_connect::compose_put),
+        )
+        .route("/agent/systems/:id/compose/action", post(crate::agent_connect::compose_action))
+        // E5: Easy Deploy (dgx-only) — seeded GHCR image list + generate/save
+        // (optionally launch) a compose from tuning flags.
+        .route("/agent/systems/:id/deploy/catalog", get(crate::agent_connect::deploy_catalog))
+        .route("/agent/systems/:id/deploy", post(crate::agent_connect::deploy_image))
         .route("/agent/systems/:id/agents", get(crate::agent_connect::system_agents))
         .route("/agent/systems/:id/usage", get(crate::agent_connect::system_usage))
         .route("/agent/systems/:id/agents/:aid/detail", get(crate::agent_connect::agent_detail))

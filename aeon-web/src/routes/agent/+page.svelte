@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
-  let tab: 'overview' | 'systems' = 'overview';
+  let tab: 'overview' | 'systems' | 'containers' = 'overview';
   let pubkey = '';
   let systems: api.ConnectedSystem[] = [];
   let metrics: Record<string, api.SystemMetrics> = {};
@@ -65,7 +65,35 @@
   let busyId = '';
   let fallback: Record<string, string> = {};
 
+  // ── E4: Container Management ──
+  let cSys = '';                                   // selected system id
+  let cData: api.ContainerList | null = null;
+  let cLoading = false;
+  let cErr = '';
+  let cBusy = '';                                  // container name being acted on
+  let cTimer: ReturnType<typeof setInterval> | undefined;
+  // compose editor
+  let composeEdit: { path: string; content: string } | null = null;
+  let composeBusy = '';                            // compose path being acted on
+  let composeSaving = false;
+  let composeMsg = '';
+  // ── E5: Easy Deploy (dgx-only) ──
+  let deployCat: api.DeployCatalog | null = null;
+  let deployImages: api.DeployCatalogEntry[] = []; // editable working copy
+  let deploySel = 0;                               // index into deployImages
+  let deployName = '';
+  let dfModelLen: number | null = 4096;
+  let dfMaxBatch: number | null = 256;
+  let dfGpu = 'all';
+  let dfMaxSessions: number | null = 8;
+  let deployNow = false;
+  let deployBusy = false;
+  let deployResult: api.DeployResult | null = null;
+  let deployErr = '';
+
   $: openclawSystems = systems.filter((s) => s.roles?.includes('openclaw'));
+  $: cSysObj = systems.find((s) => s.id === cSys) ?? null;
+  $: cIsDgx = cSysObj?.roles?.includes('dgx') ?? false;
 
   const inputCls =
     'bg-ink-900 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cursed-500';
@@ -120,8 +148,16 @@
     timer = setInterval(() => {
       if (tab === 'overview' && !document.hidden) loadMetrics();
     }, 15000);
+    // E4: refresh the container view (incl. live stats) every 5s while the
+    // Containers tab is open + a system is selected + the page is visible.
+    cTimer = setInterval(() => {
+      if (tab === 'containers' && cSys && !cLoading && !document.hidden) loadContainers(true);
+    }, 5000);
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    clearInterval(timer);
+    clearInterval(cTimer);
+  });
 
   // ── formatting helpers ──────────────────────────────────────────────
   function fmtTok(n?: number): string {
@@ -461,6 +497,155 @@
     }
   }
 
+  // ── E4: Container Management ────────────────────────────────────────────
+  /** Jump to the Containers tab focused on a system (from the sys-card icon). */
+  function openContainers(sysId: string) {
+    tab = 'containers';
+    selectSystem(sysId);
+  }
+  function selectSystem(sysId: string) {
+    if (cSys === sysId && cData) return;
+    cSys = sysId;
+    cData = null;
+    cErr = '';
+    composeEdit = null;
+    composeMsg = '';
+    deployResult = null;
+    deployErr = '';
+    loadContainers();
+    if (systems.find((s) => s.id === sysId)?.roles?.includes('dgx')) loadDeployCatalog();
+  }
+  async function loadContainers(silent = false) {
+    if (!cSys) return;
+    if (!silent) cLoading = true;
+    cErr = '';
+    try {
+      const r = await api.getContainers(cSys);
+      if (r.ok) cData = r;
+      else cErr = r.err ?? 'failed to list containers';
+    } catch (e) {
+      cErr = (e as any)?.message ?? String(e);
+    } finally {
+      cLoading = false;
+    }
+  }
+  async function doContainerAction(name: string, action: 'start' | 'stop' | 'restart') {
+    if (action === 'stop' && !confirm(`Stop container "${name}"?`)) return;
+    cBusy = name;
+    try {
+      const r = await api.containerAction(cSys, name, action);
+      if (!r.ok) alert(r.err ?? `${action} failed`);
+      await loadContainers(true);
+    } finally {
+      cBusy = '';
+    }
+  }
+  async function doComposeAction(path: string, action: 'up' | 'down') {
+    if (action === 'down' && !confirm(`Bring DOWN the compose project at\n${path}?`)) return;
+    composeBusy = path;
+    composeMsg = '';
+    try {
+      const r = await api.composeAction(cSys, path, action);
+      if (!r.ok) alert(r.err ?? `compose ${action} failed`);
+      else composeMsg = (r.out || `${action} ok`).slice(0, 400);
+      await loadContainers(true);
+    } finally {
+      composeBusy = '';
+    }
+  }
+  async function openComposeEditor(path: string) {
+    composeBusy = path;
+    composeMsg = '';
+    try {
+      const r = await api.getComposeFile(cSys, path);
+      if (r.ok) composeEdit = { path, content: r.content ?? '' };
+      else alert(r.err ?? 'could not read compose file');
+    } finally {
+      composeBusy = '';
+    }
+  }
+  async function saveComposeFile() {
+    if (!composeEdit) return;
+    composeSaving = true;
+    composeMsg = '';
+    try {
+      const r = await api.putComposeFile(cSys, composeEdit.path, composeEdit.content);
+      if (r.ok) composeMsg = 'saved';
+      else alert(r.err ?? 'save failed');
+    } finally {
+      composeSaving = false;
+    }
+  }
+  function cStateCls(state: string): string {
+    if (state === 'running') return 'cst-run';
+    if (state === 'exited' || state === 'dead') return 'cst-exit';
+    return 'cst-other';
+  }
+  /** "12.3%" → clamped 0-100 number for a bar width. */
+  function pctNum(s?: string): number {
+    if (!s) return 0;
+    const n = parseFloat(s.replace('%', ''));
+    return isNaN(n) ? 0 : Math.max(0, Math.min(100, n));
+  }
+
+  // ── E5: Easy Deploy ─────────────────────────────────────────────────────
+  async function loadDeployCatalog() {
+    deployErr = '';
+    try {
+      const r = await api.getDeployCatalog(cSys);
+      if (r.ok) {
+        deployCat = r;
+        deployImages = (r.catalog ?? []).map((c) => ({ ...c }));
+        deploySel = 0;
+        if (deployImages.length && !deployName) deployName = suggestName(deployImages[0]);
+      } else {
+        deployCat = r; // carries err (e.g. not a dgx)
+      }
+    } catch (e) {
+      deployErr = (e as any)?.message ?? String(e);
+    }
+  }
+  function suggestName(c: api.DeployCatalogEntry): string {
+    // ghcr.io/aeon-7/vllm-model-server:latest → "vllm-model-server"
+    const base = (c?.image ?? '').split('/').pop() ?? '';
+    return base.split(':')[0] || 'aeon-deploy';
+  }
+  function onPickImage(i: number) {
+    deploySel = i;
+    deployName = suggestName(deployImages[i]);
+  }
+  async function doDeploy() {
+    const entry = deployImages[deploySel];
+    if (!entry) return;
+    if (deployNow && !confirm(
+      `Deploy now will PULL ${entry.image} (can be multi-GB) and run docker compose up -d on ${cSysObj?.label}.\n\nContinue?`,
+    )) return;
+    deployBusy = true;
+    deployErr = '';
+    deployResult = null;
+    try {
+      const r = await api.deployImage(cSys, {
+        image: entry.image,
+        name: deployName,
+        kind: entry.kind,
+        flags: {
+          model_len: dfModelLen,
+          max_batch: dfMaxBatch,
+          gpu: dfGpu,
+          max_sessions: dfMaxSessions,
+        },
+        deploy_now: deployNow,
+      });
+      deployResult = r;
+      if (!r.ok) deployErr = r.err ?? 'deploy failed';
+      if (r.ok && deployNow) await loadContainers(true);
+    } catch (e) {
+      deployErr = (e as any)?.message ?? String(e);
+    } finally {
+      deployBusy = false;
+    }
+  }
+
   // ── agent detail + provisioning ─────────────────────────────────────
   async function openDetail(sysId: string, a: api.AgentInfo) {
     detailSys = sysId;
@@ -751,6 +936,8 @@
   <div class="flex gap-1 px-5 pt-2 border-b border-ink-800 bg-ink-900/40">
     <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('overview')}"
             on:click={() => { tab = 'overview'; loadMetrics(); }}>Overview</button>
+    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('containers')}"
+            on:click={() => { tab = 'containers'; if (!cSys && systems.length) selectSystem(systems[0].id); else if (cSys) loadContainers(); }}>Containers</button>
     <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('systems')}"
             on:click={() => (tab = 'systems')}>Connected Systems</button>
   </div>
@@ -786,6 +973,8 @@
                 <span class="pill" class:on={m?.reachable} class:off={m && !m.reachable}>
                   {m ? (m.reachable ? 'online' : 'offline') : '…'}
                 </span>
+                <button class="docker-btn" title="Manage containers on this system"
+                        on:click|stopPropagation={() => openContainers(s.id)}>🐳</button>
               </div>
 
               {#if m?.reachable}
@@ -940,6 +1129,209 @@
               {/if}
             </div>
           {/each}
+        {/if}
+      </div>
+    {/if}
+
+    <!-- ── CONTAINERS (E4) + EASY DEPLOY (E5) ──────────────────────────── -->
+    {#if tab === 'containers'}
+      <div class="p-5 max-w-5xl mx-auto w-full space-y-5">
+        {#if !systems.length}
+          <p class="text-zinc-500 text-xs">No systems yet — add them in the
+            <button class="underline text-cursed-300" on:click={() => (tab = 'systems')}>Connected Systems</button> tab.</p>
+        {:else}
+          <!-- system selector -->
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div class="c-sel">
+              {#each systems as s (s.id)}
+                <button class="c-sel-btn" class:active={cSys === s.id} on:click={() => selectSystem(s.id)}>
+                  <span>{roleIcon(s.roles)}</span> {s.label}
+                </button>
+              {/each}
+            </div>
+            <button class="refresh-btn" on:click={() => loadContainers()} disabled={cLoading || !cSys}>
+              <span class:spin={cLoading}>↻</span> {cLoading ? 'loading' : 'refresh'}
+            </button>
+          </div>
+
+          {#if cErr}<p class="text-red-400 text-xs font-mono">{cErr}</p>{/if}
+
+          {#if cData}
+            <div class="text-[11px] font-mono text-zinc-500">
+              {cData.running ?? 0} running · {cData.total ?? 0} total
+              <span class="dot-sep">·</span> live stats refresh every 5s
+            </div>
+
+            <!-- container list -->
+            {#if cData.containers?.length}
+              <div class="ctr-list">
+                {#each cData.containers as c (c.name)}
+                  <div class="ctr">
+                    <div class="ctr-main">
+                      <span class="ctr-state {cStateCls(c.state)}">{c.state}</span>
+                      <div class="ctr-id">
+                        <div class="ctr-name">{c.name}</div>
+                        <div class="ctr-img" title={c.image}>{c.image}</div>
+                      </div>
+                      <div class="ctr-actions">
+                        {#if c.state === 'running'}
+                          <button class="ctr-btn" disabled={cBusy === c.name}
+                                  on:click={() => doContainerAction(c.name, 'restart')} title="Restart">⟳</button>
+                          <button class="ctr-btn stop" disabled={cBusy === c.name}
+                                  on:click={() => doContainerAction(c.name, 'stop')} title="Stop">■</button>
+                        {:else}
+                          <button class="ctr-btn start" disabled={cBusy === c.name}
+                                  on:click={() => doContainerAction(c.name, 'start')} title="Start">▶</button>
+                        {/if}
+                      </div>
+                    </div>
+                    <div class="ctr-status">{c.status}{#if c.compose_project} · <span class="ctr-proj">{c.compose_project}</span>{/if}</div>
+                    {#if c.ports}<div class="ctr-ports" title={c.ports}>{c.ports}</div>{/if}
+                    {#if c.stats}
+                      <div class="ctr-meters">
+                        <div class="meter">
+                          <div class="meter-top"><span>CPU</span><span>{c.stats.cpu}</span></div>
+                          <div class="gauge sm"><div class="gauge-fill" style="width:{pctNum(c.stats.cpu)}%; background:#60a5fa; box-shadow:0 0 8px #60a5fa66"></div></div>
+                        </div>
+                        <div class="meter">
+                          <div class="meter-top"><span>MEM</span><span title={c.stats.mem_full}>{c.stats.mem} · {c.stats.mem_pct}</span></div>
+                          <div class="gauge sm"><div class="gauge-fill" style="width:{pctNum(c.stats.mem_pct)}%; background:#a78bfa; box-shadow:0 0 8px #a78bfa66"></div></div>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else if !cLoading}
+              <p class="text-zinc-600 text-xs">No containers on this system.</p>
+            {/if}
+
+            <!-- compose files -->
+            {#if cData.compose?.length}
+              <div class="space-y-2">
+                <h2 class="section-title">Compose projects</h2>
+                <div class="cmp-list">
+                  {#each cData.compose as f (f.path)}
+                    <div class="cmp">
+                      <span class="cmp-dot" class:up={f.up}></span>
+                      <span class="cmp-path" title={f.path}>{f.path}</span>
+                      <span class="cmp-state">{f.up ? 'up' : 'down'}</span>
+                      <div class="cmp-actions">
+                        <button class="ctr-btn start" disabled={composeBusy === f.path}
+                                on:click={() => doComposeAction(f.path, 'up')} title="docker compose up -d">up</button>
+                        <button class="ctr-btn stop" disabled={composeBusy === f.path}
+                                on:click={() => doComposeAction(f.path, 'down')} title="docker compose down">down</button>
+                        <button class="ctr-btn" disabled={composeBusy === f.path}
+                                on:click={() => openComposeEditor(f.path)} title="Edit compose file">edit</button>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+                {#if composeMsg}<pre class="cmp-out">{composeMsg}</pre>{/if}
+              </div>
+            {/if}
+
+            <!-- compose editor -->
+            {#if composeEdit}
+              <div class="cmp-editor">
+                <div class="flex items-center justify-between gap-2">
+                  <code class="text-[11px] font-mono text-cursed-300 truncate">{composeEdit.path}</code>
+                  <div class="flex gap-2">
+                    <button class="btn-primary text-xs" on:click={saveComposeFile} disabled={composeSaving}>{composeSaving ? 'saving…' : 'save'}</button>
+                    <button class="btn text-xs" on:click={() => (composeEdit = null)}>close</button>
+                  </div>
+                </div>
+                <textarea class="cmp-ta" spellcheck="false" bind:value={composeEdit.content}></textarea>
+                {#if composeMsg}<div class="text-[11px] font-mono text-live-300">{composeMsg}</div>{/if}
+              </div>
+            {/if}
+          {:else if cLoading}
+            <p class="text-zinc-500 text-sm">loading containers…</p>
+          {/if}
+
+          <!-- ── E5: Easy Deploy (dgx-only) ── -->
+          {#if cIsDgx}
+            <section class="deploy">
+              <div class="flex items-baseline justify-between flex-wrap gap-2">
+                <h2 class="section-title">Easy Deploy <span class="text-zinc-600 font-normal">· AEON-7 GHCR → {cSysObj?.label}</span></h2>
+                <span class="text-[10px] font-mono text-amber-300/80">dgx-only</span>
+              </div>
+              <p class="agd-dim">
+                Pick a GHCR image, tune the flags, and generate a compose file on the box.
+                Default is <b>generate &amp; save only</b> (no multi-GB pull). Tick “deploy now” to also run
+                <code>docker compose up -d</code>.
+              </p>
+
+              {#if deployCat && !deployCat.ok}
+                <p class="text-amber-300 text-xs font-mono">{deployCat.err}</p>
+              {/if}
+              {#if deployErr}<p class="text-red-400 text-xs font-mono">{deployErr}</p>{/if}
+
+              <!-- editable image list (seeded placeholders) -->
+              <div class="dep-images">
+                {#each deployImages as img, i (i)}
+                  <div class="dep-img" class:active={deploySel === i}>
+                    <button class="dep-pick" on:click={() => onPickImage(i)} title="Select this image">
+                      <span class="dep-radio" class:on={deploySel === i}></span>
+                    </button>
+                    <div class="dep-img-body">
+                      <input class="dep-in dep-img-ref" bind:value={img.image} placeholder="ghcr.io/aeon-7/…" />
+                      <div class="dep-img-meta">
+                        <input class="dep-in dep-img-label" bind:value={img.label} placeholder="label" />
+                        <select class="dep-in dep-kind" bind:value={img.kind}>
+                          <option value="model-server">model-server</option>
+                          <option value="comfyui">comfyui</option>
+                          <option value="generic">generic</option>
+                        </select>
+                      </div>
+                      {#if img.note}<div class="dep-note">{img.note}</div>{/if}
+                    </div>
+                  </div>
+                {/each}
+                <div class="dep-todo">
+                  TODO: live AEON-7 GHCR catalog fetch needs <code>gh</code> / a registry token (not available here).
+                  Edit the entries above by hand for now.
+                </div>
+              </div>
+
+              <!-- flags -->
+              <div class="dep-flags">
+                <label class="dep-f"><span>name</span>
+                  <input class="dep-in" bind:value={deployName} placeholder="container name" /></label>
+                <label class="dep-f"><span>max model length</span>
+                  <input class="dep-in" type="number" min="0" bind:value={dfModelLen} /></label>
+                <label class="dep-f"><span>max batch size</span>
+                  <input class="dep-in" type="number" min="0" bind:value={dfMaxBatch} /></label>
+                <label class="dep-f"><span>GPU (all / N / 0,1)</span>
+                  <input class="dep-in" bind:value={dfGpu} placeholder="all" /></label>
+                <label class="dep-f"><span>max concurrent sessions</span>
+                  <input class="dep-in" type="number" min="0" bind:value={dfMaxSessions} /></label>
+              </div>
+
+              <div class="dep-go">
+                <label class="dep-now"><input type="checkbox" bind:checked={deployNow} /> deploy now (pull + up -d)</label>
+                <button class="btn-primary text-xs" on:click={doDeploy} disabled={deployBusy || !deployName.trim()}>
+                  {deployBusy ? 'working…' : deployNow ? 'generate + deploy' : 'generate + save compose'}
+                </button>
+              </div>
+
+              {#if deployResult?.ok}
+                <div class="dep-result">
+                  <div class="text-[11px] font-mono text-live-300">
+                    {deployResult.deployed ? 'deployed' : 'compose written'} → {deployResult.path}
+                  </div>
+                  {#if deployResult.compose}<pre class="cmp-ta-pre">{deployResult.compose}</pre>{/if}
+                  {#if deployResult.out}<pre class="cmp-out">{deployResult.out}</pre>{/if}
+                </div>
+              {/if}
+
+              <div class="dep-agenttodo">
+                <b>TODO (agent hand-off):</b> dispatch the repo’s <code>agents.md</code> + this generated compose to an
+                OpenClaw agent with SSH access to the DGX to pull / tune / launch it. Needs the agent-task dispatch
+                channel (not wired yet).
+              </div>
+            </section>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -1348,6 +1740,114 @@
   .pw-btn:hover:not(:disabled) { border-color: rgba(248, 113, 113, 0.5); color: #fca5a5; }
   .pw-btn.wake:hover:not(:disabled) { border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7; }
   .pw-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .docker-btn {
+    font-size: 0.9rem; line-height: 1; padding: 0.15rem 0.3rem; border-radius: 0.35rem;
+    background: rgba(96, 165, 250, 0.1); border: 1px solid rgba(96, 165, 250, 0.3); cursor: pointer;
+  }
+  .docker-btn:hover { background: rgba(96, 165, 250, 0.2); border-color: rgba(96, 165, 250, 0.55); }
+
+  /* ── E4: Containers ── */
+  .c-sel { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .c-sel-btn {
+    font-family: ui-monospace, monospace; font-size: 0.66rem; color: #a1a1aa;
+    background: #12121a; border: 1px solid #2a2a38; border-radius: 0.4rem; padding: 0.3rem 0.6rem; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 0.3rem;
+  }
+  .c-sel-btn:hover { color: #e4e4e7; border-color: #3f3f5a; }
+  .c-sel-btn.active { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.5); background: rgba(167, 139, 250, 0.1); }
+
+  .ctr-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.6rem; }
+  .ctr {
+    border: 1px solid #23232f; border-radius: 0.6rem; padding: 0.6rem 0.7rem;
+    background: linear-gradient(160deg, rgba(24, 24, 34, 0.6), rgba(12, 12, 20, 0.6));
+    display: flex; flex-direction: column; gap: 0.4rem;
+  }
+  .ctr-main { display: flex; align-items: center; gap: 0.5rem; }
+  .ctr-state {
+    font-family: ui-monospace, monospace; font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 0.1rem 0.4rem; border-radius: 999px; flex: none; white-space: nowrap;
+  }
+  .cst-run { background: rgba(52, 211, 153, 0.14); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.4); }
+  .cst-exit { background: rgba(248, 113, 113, 0.12); color: #fca5a5; border: 1px solid rgba(248, 113, 113, 0.35); }
+  .cst-other { background: #1c1c26; color: #a1a1aa; border: 1px solid #2a2a38; }
+  .ctr-id { min-width: 0; flex: 1; }
+  .ctr-name { font-size: 0.8rem; color: #f4f4f5; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ctr-img { font-family: ui-monospace, monospace; font-size: 0.58rem; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ctr-actions { display: flex; gap: 0.25rem; flex: none; }
+  .ctr-btn {
+    font-family: ui-monospace, monospace; font-size: 0.62rem; color: #a1a1aa; background: #14141d;
+    border: 1px solid #2a2a38; border-radius: 0.3rem; padding: 0.18rem 0.4rem; cursor: pointer; min-width: 1.6rem;
+  }
+  .ctr-btn:hover:not(:disabled) { color: #e4e4e7; border-color: #3f3f5a; }
+  .ctr-btn.start:hover:not(:disabled) { border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7; }
+  .ctr-btn.stop:hover:not(:disabled) { border-color: rgba(248, 113, 113, 0.5); color: #fca5a5; }
+  .ctr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ctr-status { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #8b8b96; }
+  .ctr-proj { color: #a5b4fc; }
+  .ctr-ports { font-family: ui-monospace, monospace; font-size: 0.56rem; color: #5b6478; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ctr-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.1rem; }
+  .meter { display: flex; flex-direction: column; gap: 0.2rem; }
+  .meter-top { display: flex; justify-content: space-between; font-family: ui-monospace, monospace; font-size: 0.56rem; color: #8b8b96; }
+
+  /* compose */
+  .cmp-list { display: flex; flex-direction: column; gap: 0.35rem; }
+  .cmp {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.55rem;
+    border: 1px solid #20202b; border-radius: 0.5rem; background: rgba(12, 12, 20, 0.5);
+  }
+  .cmp-dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; flex: none; background: #52525b; }
+  .cmp-dot.up { background: #34d399; box-shadow: 0 0 7px #34d399; }
+  .cmp-path { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #c4c4cc; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cmp-state { font-family: ui-monospace, monospace; font-size: 0.55rem; color: #71717a; text-transform: uppercase; flex: none; }
+  .cmp-actions { display: flex; gap: 0.25rem; flex: none; }
+  .cmp-out {
+    font-family: ui-monospace, monospace; font-size: 0.6rem; color: #c4c4cc; background: #0a0a10;
+    border-radius: 0.35rem; padding: 0.5rem; max-height: 12rem; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .cmp-editor { border: 1px dashed #3f3f5a; border-radius: 0.6rem; padding: 0.6rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .cmp-ta {
+    width: 100%; min-height: 18rem; font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc;
+    background: #0a0a10; border: 1px solid #20202b; border-radius: 0.4rem; padding: 0.6rem; resize: vertical; line-height: 1.5;
+  }
+  .cmp-ta-pre {
+    font-family: ui-monospace, monospace; font-size: 0.62rem; color: #c4c4cc; background: #0a0a10;
+    border: 1px solid #20202b; border-radius: 0.4rem; padding: 0.6rem; max-height: 18rem; overflow: auto;
+    white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  }
+
+  /* ── E5: Easy Deploy ── */
+  .deploy {
+    border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 0.75rem; padding: 0.9rem 1rem;
+    background: linear-gradient(160deg, rgba(50, 40, 20, 0.25), rgba(12, 12, 20, 0.5)); display: flex; flex-direction: column; gap: 0.65rem;
+  }
+  .dep-images { display: flex; flex-direction: column; gap: 0.45rem; }
+  .dep-img { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.5rem; border: 1px solid #23232f; border-radius: 0.5rem; background: rgba(12, 12, 20, 0.5); }
+  .dep-img.active { border-color: rgba(167, 139, 250, 0.5); background: rgba(167, 139, 250, 0.08); }
+  .dep-pick { background: none; border: none; cursor: pointer; padding: 0.2rem 0; }
+  .dep-radio { display: inline-block; width: 0.85rem; height: 0.85rem; border-radius: 999px; border: 2px solid #52525b; }
+  .dep-radio.on { border-color: #a78bfa; background: #a78bfa; box-shadow: 0 0 8px #a78bfa88; }
+  .dep-img-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+  .dep-img-meta { display: flex; gap: 0.4rem; }
+  .dep-in {
+    background: #0a0a10; border: 1px solid #2a2a38; border-radius: 0.35rem; padding: 0.25rem 0.45rem;
+    font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc;
+  }
+  .dep-in:focus { outline: none; border-color: #6d5fd0; }
+  .dep-img-ref { width: 100%; }
+  .dep-img-label { flex: 1; }
+  .dep-kind { flex: none; }
+  .dep-note { font-size: 0.58rem; color: #71717a; font-style: italic; }
+  .dep-todo, .dep-agenttodo {
+    font-size: 0.6rem; color: #d4b483; background: rgba(245, 158, 11, 0.08);
+    border: 1px dashed rgba(245, 158, 11, 0.3); border-radius: 0.4rem; padding: 0.45rem 0.55rem; line-height: 1.45;
+  }
+  .dep-flags { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.5rem; }
+  .dep-f { display: flex; flex-direction: column; gap: 0.2rem; }
+  .dep-f > span { font-family: ui-monospace, monospace; font-size: 0.56rem; color: #8b8b96; text-transform: uppercase; letter-spacing: 0.04em; }
+  .dep-f .dep-in { width: 100%; }
+  .dep-go { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
+  .dep-now { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc; display: inline-flex; align-items: center; gap: 0.35rem; }
+  .dep-result { display: flex; flex-direction: column; gap: 0.4rem; }
 
   /* ── agent roster ── */
   .roster-stats { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #a1a1aa; display: flex; gap: 0.4rem; align-items: center; }
