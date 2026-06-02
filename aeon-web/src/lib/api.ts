@@ -327,6 +327,34 @@ export const setAgentAvatar = (
     content_type,
   });
 
+// ── E1: per-agent corpus browse/view ──
+export interface CorpusFileEntry {
+  path: string;   // relative to the corpus root
+  size: number;
+}
+export interface CorpusList {
+  ok: boolean;
+  root?: string | null;
+  exists?: boolean;
+  count?: number;
+  files?: CorpusFileEntry[];
+  err?: string;
+}
+export interface CorpusFile {
+  ok: boolean;
+  path?: string;
+  size?: number;
+  content?: string;
+  err?: string;
+}
+export const getAgentCorpus = (sysId: string, agentId: string) =>
+  req<CorpusList>('GET', `/agent/systems/${sysId}/agents/${agentId}/corpus`);
+export const getAgentCorpusFile = (sysId: string, agentId: string, path: string) =>
+  req<CorpusFile>(
+    'GET',
+    `/agent/systems/${sysId}/agents/${agentId}/corpus/file?path=${encodeURIComponent(path)}`,
+  );
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

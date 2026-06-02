@@ -1215,5 +1215,158 @@ fn sanitize_content_type(ct: &str) -> String {
     let ok = ct.len() <= 64
         && ct.starts_with("image/")
         && ct.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '+'));
-    if ok { ct.to_string() } else { "image/png".into() }
+    if ct.is_empty() || !ok { "image/png".into() } else { ct.to_string() }
+}
+
+// ── E1: per-agent corpus browse / view ───────────────────────────────────
+//
+// Each agent's knowledge corpus is an Obsidian-style vault of markdown notes
+// at  <workspace>/memory/<id>-corpus  on the gateway (the build_*_corpus.py
+// scripts write there). We resolve the root from the agent's actual `workspace`
+// config (falling back to the ~/.openclaw/workspace-<id> convention), list its
+// files (relative path + size), and read a single file. The read path is
+// guarded against traversal: the python resolves realpath(root + path) and
+// refuses anything that escapes the corpus root, so `?path=../../secret` can't
+// reach outside the vault.
+
+/// LIST mode python: resolve the corpus root + emit {root, files:[{path,size}]}.
+/// argv[1] = agent id. base64'd over SSH.
+const CORPUS_LIST_PY: &str = r#"import json,os,sys
+h=os.path.expanduser('~')
+aid=sys.argv[1]
+# Resolve root from the agent's workspace config, else the convention.
+root=None
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+    for a in ((d.get('agents') or {}).get('list') or []):
+        if isinstance(a,dict) and a.get('id')==aid:
+            ws=a.get('workspace')
+            if ws: root=os.path.join(ws,'memory',aid+'-corpus')
+            break
+except Exception:
+    pass
+if not root:
+    root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+out={'root':root,'exists':os.path.isdir(root),'files':[]}
+if os.path.isdir(root):
+    for dp,_,fns in os.walk(root):
+        for fn in fns:
+            fp=os.path.join(dp,fn)
+            try: sz=os.path.getsize(fp)
+            except OSError: sz=0
+            out['files'].append({'path':os.path.relpath(fp,root),'size':sz})
+    out['files'].sort(key=lambda x:x['path'])
+out['count']=len(out['files'])
+print(json.dumps(out))
+"#;
+
+/// READ mode python: print one corpus file's contents, traversal-guarded.
+/// argv[1] = agent id, argv[2] = base64'd relative path. base64'd over SSH.
+const CORPUS_READ_PY: &str = r#"import json,os,sys,base64
+h=os.path.expanduser('~')
+aid=sys.argv[1]
+rel=base64.b64decode(sys.argv[2]).decode('utf-8','replace')
+root=None
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+    for a in ((d.get('agents') or {}).get('list') or []):
+        if isinstance(a,dict) and a.get('id')==aid:
+            ws=a.get('workspace')
+            if ws: root=os.path.join(ws,'memory',aid+'-corpus')
+            break
+except Exception:
+    pass
+if not root:
+    root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+rootr=os.path.realpath(root)
+target=os.path.realpath(os.path.join(rootr,rel))
+# Guard: target must stay under the corpus root.
+if not (target==rootr or target.startswith(rootr+os.sep)):
+    print(json.dumps({'err':'path escapes corpus root'})); sys.exit(0)
+if not os.path.isfile(target):
+    print(json.dumps({'err':'not a file'})); sys.exit(0)
+try:
+    sz=os.path.getsize(target)
+    if sz>2*1024*1024:
+        print(json.dumps({'err':'file too large to view (%d bytes)'%sz})); sys.exit(0)
+    data=open(target,'rb').read()
+    txt=data.decode('utf-8','replace')
+    print(json.dumps({'path':rel,'size':sz,'content':txt}))
+except Exception as e:
+    print(json.dumps({'err':'read: '+str(e)}))
+"#;
+
+/// GET /agent/systems/:id/agents/:aid/corpus — list the agent's corpus files
+/// (relative path + size) + the resolved root.
+pub async fn agent_corpus_list(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let aid = sanitize_id(&agent_id);
+    let res = tokio::task::spawn_blocking(move || {
+        let remote = format!("echo {} | base64 -d | python3 - {}", b64(CORPUS_LIST_PY.as_bytes()), aid);
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(stdout) => {
+            let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({}));
+            Json(json!({
+                "ok": true,
+                "root": p.get("root").cloned().unwrap_or(serde_json::Value::Null),
+                "exists": p.get("exists").cloned().unwrap_or(json!(false)),
+                "count": p.get("count").cloned().unwrap_or(json!(0)),
+                "files": p.get("files").cloned().unwrap_or_else(|| json!([])),
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CorpusFileQuery {
+    path: String,
+}
+
+/// GET /agent/systems/:id/agents/:aid/corpus/file?path=… — read one corpus
+/// file's contents (read-only, traversal-guarded, 2 MB cap).
+pub async fn agent_corpus_file(
+    Path((id, agent_id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<CorpusFileQuery>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    if q.path.trim().is_empty() {
+        return Json(json!({"ok": false, "err": "path required"}));
+    }
+    let aid = sanitize_id(&agent_id);
+    let path_b64 = b64(q.path.as_bytes());
+    let res = tokio::task::spawn_blocking(move || {
+        let remote = format!(
+            "echo {} | base64 -d | python3 - {} {}",
+            b64(CORPUS_READ_PY.as_bytes()),
+            aid,
+            path_b64
+        );
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(stdout) => {
+            let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({"err": "bad response"}));
+            if let Some(e) = p.get("err").and_then(|x| x.as_str()) {
+                return Json(json!({"ok": false, "err": e}));
+            }
+            Json(json!({
+                "ok": true,
+                "path": p.get("path").cloned().unwrap_or(serde_json::Value::Null),
+                "size": p.get("size").cloned().unwrap_or(json!(0)),
+                "content": p.get("content").cloned().unwrap_or(json!("")),
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
 }

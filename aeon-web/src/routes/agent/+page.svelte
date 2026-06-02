@@ -32,6 +32,13 @@
   let avatar: api.AgentAvatar | null = null;
   let avatarBusy = false;
   let avatarMsg = '';
+  // E1: corpus browser
+  let corpus: api.CorpusList | null = null;
+  let corpusLoading = false;
+  let corpusFile: api.CorpusFile | null = null;
+  let corpusFilePath = '';
+  let corpusFileLoading = false;
+  let corpusFilter = '';
   // per-system power controls
   let lastMac: Record<string, string> = {};
   let powerBusy = '';
@@ -456,6 +463,10 @@
     grantSudo = false;
     avatar = null;
     avatarMsg = '';
+    corpus = null;
+    corpusFile = null;
+    corpusFilePath = '';
+    corpusFilter = '';
     detailLoading = true;
     try {
       detail = await api.getAgentDetail(sysId, a.id);
@@ -476,7 +487,49 @@
     detail = null;
     newToken = '';
     avatar = null;
+    corpus = null;
+    corpusFile = null;
   }
+  // ── E1: corpus browse/view ──────────────────────────────────────────
+  async function loadCorpus() {
+    if (!detailAgent || corpusLoading) return;
+    corpusLoading = true;
+    corpusFile = null;
+    corpusFilePath = '';
+    try {
+      corpus = await api.getAgentCorpus(detailSys, detailAgent.id);
+    } catch (e) {
+      corpus = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      corpusLoading = false;
+    }
+  }
+  async function viewCorpusFile(path: string) {
+    if (!detailAgent) return;
+    corpusFilePath = path;
+    corpusFile = null;
+    corpusFileLoading = true;
+    try {
+      corpusFile = await api.getAgentCorpusFile(detailSys, detailAgent.id, path);
+    } catch (e) {
+      corpusFile = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      corpusFileLoading = false;
+    }
+  }
+  function closeCorpusFile() {
+    corpusFile = null;
+    corpusFilePath = '';
+  }
+  function fmtBytes(n?: number): string {
+    n = n ?? 0;
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'M';
+    if (n >= 1024) return (n / 1024).toFixed(1) + 'k';
+    return n + 'B';
+  }
+  $: corpusFiles = (corpus?.files ?? []).filter(
+    (f) => !corpusFilter.trim() || f.path.toLowerCase().includes(corpusFilter.toLowerCase()),
+  );
   // ── E1: profile photo → Matrix avatar ───────────────────────────────
   async function onAvatarPick(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -991,10 +1044,71 @@
 
         <div class="agd-grid2">
           <section class="agd-sec"><h3 class="agd-h3">Voice</h3><p class="agd-mono agd-clip">{detail?.voice || '—'}</p></section>
-          <section class="agd-sec"><h3 class="agd-h3">Corpus</h3><p class="agd-mono">{detail?.corpus || '—'}</p></section>
+          <section class="agd-sec"><h3 class="agd-h3">Corpus mode</h3><p class="agd-mono">{detail?.corpus || '—'}</p></section>
         </div>
 
-        <p class="agd-soon">Coming next: corpus upload/browse · voice clone · Add-Skill marketplace.</p>
+        <section class="agd-sec">
+          <h3 class="agd-h3">Corpus Files <span class="agd-adminonly">read-only</span></h3>
+          {#if !corpus && !corpusLoading}
+            <p class="agd-dim">The agent's knowledge vault (markdown notes) on the gateway.</p>
+            <button class="btn-primary text-xs agd-filebtn" on:click={loadCorpus}>Browse corpus</button>
+          {:else if corpusLoading}
+            <p class="agd-dim">loading corpus…</p>
+          {:else if corpus && !corpus.ok}
+            <p class="agd-warn">{corpus.err}</p>
+          {:else if corpus}
+            <p class="agd-mono agd-dim agd-clip">{corpus.root} · {corpus.count} files</p>
+            {#if !corpus.exists}
+              <p class="agd-dim">No corpus vault found for this agent yet.</p>
+            {:else if corpus.count}
+              <input
+                class={inputCls + ' w-full'}
+                placeholder="filter files…"
+                bind:value={corpusFilter}
+              />
+              <div class="agd-corpus-list">
+                {#each corpusFiles.slice(0, 400) as f}
+                  <button
+                    class="agd-corpus-row"
+                    class:sel={corpusFilePath === f.path}
+                    on:click={() => viewCorpusFile(f.path)}
+                  >
+                    <span class="agd-corpus-path">{f.path}</span>
+                    <span class="agd-corpus-size">{fmtBytes(f.size)}</span>
+                  </button>
+                {/each}
+                {#if corpusFiles.length > 400}
+                  <p class="agd-dim">…{corpusFiles.length - 400} more (refine the filter)</p>
+                {/if}
+                {#if corpusFiles.length === 0}
+                  <p class="agd-dim">no files match “{corpusFilter}”</p>
+                {/if}
+              </div>
+              <button class="agd-copy" on:click={loadCorpus}>refresh list</button>
+            {/if}
+            {#if corpusFilePath}
+              <div class="agd-corpus-view">
+                <div class="agd-token-row">
+                  <span class="agd-mono agd-dim agd-clip">{corpusFilePath}{#if corpusFile?.size != null} · {fmtBytes(corpusFile.size)}{/if}</span>
+                  <span>
+                    {#if corpusFile?.content}<button class="agd-copy" on:click={() => copy(corpusFile?.content ?? '')}>copy</button>{/if}
+                    <button class="agd-copy" on:click={closeCorpusFile}>close</button>
+                  </span>
+                </div>
+                {#if corpusFileLoading}
+                  <p class="agd-dim">loading file…</p>
+                {:else if corpusFile && !corpusFile.ok}
+                  <p class="agd-warn">{corpusFile.err}</p>
+                {:else if corpusFile}
+                  <pre class="agd-corpus-pre">{corpusFile.content}</pre>
+                {/if}
+              </div>
+            {/if}
+          {/if}
+          <p class="agd-dim agd-avail">Upload / edit: TODO — read-only browse for v1.</p>
+        </section>
+
+        <p class="agd-soon">Coming next: corpus upload/edit · voice clone · Add-Skill marketplace.</p>
       </div>
     </div>
   {/if}
@@ -1348,4 +1462,24 @@
   .agd-avatar-body { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; flex: 1; }
   .agd-filebtn { display: inline-block; width: fit-content; cursor: pointer; }
   .agd-disabled { opacity: 0.5; pointer-events: none; }
+  /* ── E1: corpus browser ── */
+  .agd-corpus-list {
+    max-height: 12rem; overflow-y: auto; border: 1px solid #23232f; border-radius: 0.4rem;
+    background: #0a0a10; display: flex; flex-direction: column;
+  }
+  .agd-corpus-row {
+    display: flex; justify-content: space-between; gap: 0.5rem; align-items: center;
+    padding: 0.2rem 0.5rem; font-family: ui-monospace, monospace; font-size: 0.62rem;
+    color: #a1a1aa; text-align: left; border-bottom: 1px solid #16161f;
+  }
+  .agd-corpus-row:hover { background: #16161f; color: #e4e4e7; }
+  .agd-corpus-row.sel { background: rgba(99, 102, 241, 0.14); color: #c4b5fd; }
+  .agd-corpus-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agd-corpus-size { color: #52525b; flex: none; }
+  .agd-corpus-view { border: 1px dashed #3f3f5a; border-radius: 0.5rem; padding: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
+  .agd-corpus-pre {
+    font-family: ui-monospace, monospace; font-size: 0.62rem; color: #c4c4cc; background: #0a0a10;
+    border-radius: 0.35rem; padding: 0.5rem; max-height: 16rem; overflow: auto; white-space: pre-wrap;
+    word-break: break-word; line-height: 1.45;
+  }
 </style>

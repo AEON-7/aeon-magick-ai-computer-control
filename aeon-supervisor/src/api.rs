@@ -160,6 +160,10 @@ pub fn build_router(cfg: Config) -> Router {
                 .post(crate::agent_connect::agent_avatar_set)
                 .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
+        // E1: per-agent corpus browse/view (read-only). List files + read one
+        // (traversal-guarded under <workspace>/memory/<id>-corpus on the gateway).
+        .route("/agent/systems/:id/agents/:aid/corpus", get(crate::agent_connect::agent_corpus_list))
+        .route("/agent/systems/:id/agents/:aid/corpus/file", get(crate::agent_connect::agent_corpus_file))
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.
