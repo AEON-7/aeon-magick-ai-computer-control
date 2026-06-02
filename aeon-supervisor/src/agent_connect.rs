@@ -1013,3 +1013,207 @@ fn send_wol(mac: &str) -> Result<(), String> {
     sock.send_to(&packet, "255.255.255.255:9").map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// ── E1: per-agent profile photo → Matrix avatar ──────────────────────────
+//
+// Each pantheon agent has its own Matrix account on the gateway's Dendrite
+// homeserver (server_name matrix.unhash.me, reachable as 127.0.0.1:8008 on
+// .155). Creds live in ~/.openclaw_<id>_creds.json (and/or
+// ~/.openclaw/credentials/<id>.json) as {user_id, access_token, ...}. We run
+// the whole avatar flow ON the gateway via ssh_capture so the token + the
+// homeserver never leave .155: resolve creds → POST image to the media repo
+// → PUT the agent's avatar_url. A GET path returns the current avatar_url +
+// a download URL the browser can render. ON_HS is localhost on the gateway.
+
+const MATRIX_HS: &str = "http://127.0.0.1:8008";
+
+/// Resolve-creds python shared by GET + POST: finds the agent's Matrix
+/// user_id + access_token from the known cred locations, prints them as
+/// `USER_ID\nTOKEN` (or `ERR ...`). base64'd over SSH (argv[1] = agent id).
+const MATRIX_CREDS_PY: &str = r#"import json,os,sys,glob
+aid=sys.argv[1]
+h=os.path.expanduser('~')
+cands=[h+'/.openclaw_%s_creds.json'%aid,
+       h+'/.openclaw/credentials/%s.json'%aid,
+       h+'/.openclaw/credentials/%s_creds.json'%aid,
+       h+'/.openclaw/matrix/%s.json'%aid]
+cands+= [p for p in glob.glob(h+'/.openclaw/credentials/*%s*.json'%aid) if p not in cands]
+for p in cands:
+    try:
+        d=json.load(open(p))
+    except Exception:
+        continue
+    uid=d.get('user_id') or d.get('userId') or d.get('mxid')
+    tok=d.get('access_token') or d.get('accessToken') or d.get('token')
+    if uid and tok:
+        print(uid); print(tok); sys.exit(0)
+print('ERR no Matrix creds for "%s" (looked in ~/.openclaw_%s_creds.json and ~/.openclaw/credentials/)'%(aid,aid))
+"#;
+
+/// Resolve `(user_id, access_token)` for an agent by running MATRIX_CREDS_PY
+/// on the gateway. Returns a UI-friendly error if creds can't be found.
+fn matrix_creds(sys: &System, agent_id: &str) -> Result<(String, String), String> {
+    let remote = format!(
+        "echo {} | base64 -d | python3 - {}",
+        b64(MATRIX_CREDS_PY.as_bytes()),
+        agent_id
+    );
+    let out = ssh_capture(sys, &remote)?;
+    let mut lines = out.lines();
+    let first = lines.next().unwrap_or("").trim();
+    if first.is_empty() || first.starts_with("ERR") {
+        return Err(if first.is_empty() { "no Matrix creds found".into() } else { first[3..].trim().to_string() });
+    }
+    let tok = lines.next().unwrap_or("").trim().to_string();
+    if tok.is_empty() {
+        return Err("creds file missing access_token".into());
+    }
+    Ok((first.to_string(), tok))
+}
+
+/// GET /agent/systems/:id/agents/:aid/avatar — the agent's current Matrix
+/// avatar: user_id + avatar_url (mxc://…) + a download URL the browser can
+/// render. (The download URL is served by the gateway's homeserver; the
+/// browser must be able to reach matrix.unhash.me to actually load it.)
+pub async fn agent_avatar_get(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let aid = sanitize_id(&agent_id);
+    let res = tokio::task::spawn_blocking(move || {
+        let (uid, tok) = matrix_creds(&sys, &aid)?;
+        // Fetch current avatar_url via the agent's own token (works even if
+        // the profile is non-public).
+        let remote = format!(
+            "curl -s --max-time 8 -H 'Authorization: Bearer {tok}' \
+             '{MATRIX_HS}/_matrix/client/v3/profile/{uid}/avatar_url'"
+        );
+        let body = ssh_capture(&sys, &remote)?;
+        Ok::<_, String>((uid, body))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((uid, body)) => {
+            let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap_or_else(|_| json!({}));
+            let mxc = v.get("avatar_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let download = mxc_download_url(&uid, &mxc);
+            Json(json!({"ok": true, "user_id": uid, "avatar_url": mxc, "download_url": download}))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// mxc://server/mediaId → a public download URL the browser can <img src=>.
+/// Uses the homeserver derived from the user_id (matrix.unhash.me) so the
+/// browser doesn't need to reach the Pi's localhost-only 8008.
+fn mxc_download_url(user_id: &str, mxc: &str) -> Option<String> {
+    let rest = mxc.strip_prefix("mxc://")?;
+    let (server, media_id) = rest.split_once('/')?;
+    if server.is_empty() || media_id.is_empty() {
+        return None;
+    }
+    let hs = user_id.split(':').nth(1).unwrap_or(server);
+    Some(format!("https://{hs}/_matrix/media/v3/download/{server}/{media_id}"))
+}
+
+#[derive(Deserialize)]
+pub struct AvatarReq {
+    /// base64-encoded image bytes (the browser strips the data: prefix).
+    image_b64: String,
+    #[serde(default = "default_image_ct")]
+    content_type: String,
+}
+fn default_image_ct() -> String {
+    "image/png".into()
+}
+
+/// POST /agent/systems/:id/agents/:aid/avatar — set the agent's Matrix avatar:
+/// upload the image to the gateway's Dendrite media repo, then PUT the agent's
+/// avatar_url to the returned mxc:// URI. Runs entirely on .155 so the token
+/// stays local. Returns ok + the mxc uri + a browser download URL.
+pub async fn agent_avatar_set(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<AvatarReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    // Validate the base64 up front (and cap size: Matrix media repos reject
+    // huge uploads; 8 MB is plenty for an avatar).
+    use base64::Engine;
+    let raw = match base64::engine::general_purpose::STANDARD.decode(req.image_b64.trim()) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => return Json(json!({"ok": false, "err": "empty image"})),
+        Err(e) => return Json(json!({"ok": false, "err": format!("bad base64: {e}")})),
+    };
+    if raw.len() > 8 * 1024 * 1024 {
+        return Json(json!({"ok": false, "err": "image too large (max 8 MB)"}));
+    }
+    let img_b64 = b64(&raw);
+    let ct = sanitize_content_type(&req.content_type);
+    let aid = sanitize_id(&agent_id);
+    let res = tokio::task::spawn_blocking(move || {
+        let (uid, tok) = matrix_creds(&sys, &aid)?;
+        // 1) Upload to the media repo. Write the bytes to a temp file on the
+        //    gateway (base64-decoded) and curl --data-binary it. Capture the
+        //    content_uri from the JSON response.
+        let upload = format!(
+            "TMP=$(mktemp); echo {img_b64} | base64 -d > \"$TMP\"; \
+             RESP=$(curl -s --max-time 30 -X POST \
+               -H 'Authorization: Bearer {tok}' \
+               -H 'Content-Type: {ct}' \
+               --data-binary @\"$TMP\" \
+               '{MATRIX_HS}/_matrix/media/v3/upload'); \
+             rm -f \"$TMP\"; echo \"$RESP\""
+        );
+        let up_body = ssh_capture(&sys, &upload)?;
+        let upv: serde_json::Value = serde_json::from_str(up_body.trim())
+            .map_err(|_| format!("upload returned non-JSON: {}", up_body.trim().chars().take(200).collect::<String>()))?;
+        let mxc = upv
+            .get("content_uri")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                let err = upv.get("error").and_then(|x| x.as_str()).unwrap_or("no content_uri in response");
+                format!("media upload failed: {err}")
+            })?
+            .to_string();
+        // 2) Set avatar_url on the agent's profile.
+        let body = json!({"avatar_url": mxc}).to_string();
+        let setav = format!(
+            "echo {} | base64 -d | curl -s --max-time 12 -X PUT \
+               -H 'Authorization: Bearer {tok}' \
+               -H 'Content-Type: application/json' \
+               --data-binary @- \
+               '{MATRIX_HS}/_matrix/client/v3/profile/{uid}/avatar_url'",
+            b64(body.as_bytes())
+        );
+        let set_body = ssh_capture(&sys, &setav)?;
+        // A successful PUT returns "{}". Anything with an "errcode" is a failure.
+        let setv: serde_json::Value = serde_json::from_str(set_body.trim()).unwrap_or_else(|_| json!({}));
+        if let Some(ec) = setv.get("errcode").and_then(|x| x.as_str()) {
+            let em = setv.get("error").and_then(|x| x.as_str()).unwrap_or("");
+            return Err(format!("set avatar_url failed: {ec} {em}"));
+        }
+        Ok::<_, String>((uid, mxc))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((uid, mxc)) => {
+            let download = mxc_download_url(&uid, &mxc);
+            Json(json!({"ok": true, "user_id": uid, "avatar_url": mxc, "download_url": download}))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// Keep a content-type to a safe `image/<token>` so it can't break out of the
+/// curl header. Falls back to image/png.
+fn sanitize_content_type(ct: &str) -> String {
+    let ct = ct.trim();
+    let ok = ct.len() <= 64
+        && ct.starts_with("image/")
+        && ct.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '+'));
+    if ok { ct.to_string() } else { "image/png".into() }
+}

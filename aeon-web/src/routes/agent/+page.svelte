@@ -28,6 +28,10 @@
   let sshCmd = '';
   let sshDropMsg = '';
   let grantSudo = false;
+  // E1: Matrix avatar
+  let avatar: api.AgentAvatar | null = null;
+  let avatarBusy = false;
+  let avatarMsg = '';
   // per-system power controls
   let lastMac: Record<string, string> = {};
   let powerBusy = '';
@@ -450,6 +454,8 @@
     detail = null;
     newToken = configChange = dropMsg = newPrivKey = sshCmd = sshDropMsg = '';
     grantSudo = false;
+    avatar = null;
+    avatarMsg = '';
     detailLoading = true;
     try {
       detail = await api.getAgentDetail(sysId, a.id);
@@ -458,11 +464,59 @@
     } finally {
       detailLoading = false;
     }
+    // Matrix avatar loads independently — a missing creds file shouldn't
+    // block the rest of the detail panel.
+    api
+      .getAgentAvatar(sysId, a.id)
+      .then((r) => (avatar = r))
+      .catch((e) => (avatar = { ok: false, err: (e as any)?.message ?? String(e) }));
   }
   function closeDetail() {
     detailAgent = null;
     detail = null;
     newToken = '';
+    avatar = null;
+  }
+  // ── E1: profile photo → Matrix avatar ───────────────────────────────
+  async function onAvatarPick(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file || !detailAgent) return;
+    if (file.size > 8 * 1024 * 1024) {
+      avatarMsg = 'image too large (max 8 MB)';
+      input.value = '';
+      return;
+    }
+    avatarBusy = true;
+    avatarMsg = '';
+    try {
+      const b64 = await fileToB64(file);
+      const r = await api.setAgentAvatar(detailSys, detailAgent.id, b64, file.type || 'image/png');
+      if (r.ok) {
+        avatar = r;
+        avatarMsg = 'avatar updated on Matrix';
+      } else {
+        avatarMsg = r.err ?? 'avatar update failed';
+      }
+    } catch (e) {
+      avatarMsg = (e as any)?.message ?? String(e);
+    } finally {
+      avatarBusy = false;
+      input.value = '';
+    }
+  }
+  /** Read a File into bare base64 (no data: prefix). */
+  function fileToB64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => {
+        const s = String(r.result);
+        const comma = s.indexOf(',');
+        resolve(comma >= 0 ? s.slice(comma + 1) : s);
+      };
+      r.onerror = () => reject(new Error('read failed'));
+      r.readAsDataURL(file);
+    });
   }
   async function doProvision() {
     if (!detailAgent) return;
@@ -843,6 +897,33 @@
         {#if detail?.err}<p class="text-amber-300 text-xs font-mono">{detail.err}</p>{/if}
 
         <section class="agd-sec">
+          <h3 class="agd-h3">Profile Photo <span class="agd-adminonly">Matrix avatar</span></h3>
+          <div class="agd-avatar">
+            <div class="agd-avatar-pic">
+              {#if avatar?.download_url}
+                <img src={avatar.download_url} alt="avatar" />
+              {:else}
+                <span class="agd-avatar-emoji">{detailAgent.emoji || '🤖'}</span>
+              {/if}
+            </div>
+            <div class="agd-avatar-body">
+              {#if avatar && !avatar.ok}
+                <p class="agd-warn">{avatar.err}</p>
+              {:else if avatar?.user_id}
+                <p class="agd-mono agd-dim agd-clip">{avatar.user_id}{#if !avatar.avatar_url} · no avatar set{/if}</p>
+              {:else}
+                <p class="agd-dim">resolving Matrix account…</p>
+              {/if}
+              <label class="btn-primary text-xs agd-filebtn" class:agd-disabled={avatarBusy}>
+                {avatarBusy ? 'uploading…' : avatar?.avatar_url ? 'Replace photo' : 'Upload photo'}
+                <input type="file" accept="image/*" on:change={onAvatarPick} disabled={avatarBusy} hidden />
+              </label>
+              {#if avatarMsg}<div class="agd-mono agd-dim">{avatarMsg}</div>{/if}
+            </div>
+          </div>
+        </section>
+
+        <section class="agd-sec">
           <h3 class="agd-h3">Aeon Magick Access</h3>
           {#if detail?.provisioned}
             <div class="agd-prov">
@@ -913,7 +994,7 @@
           <section class="agd-sec"><h3 class="agd-h3">Corpus</h3><p class="agd-mono">{detail?.corpus || '—'}</p></section>
         </div>
 
-        <p class="agd-soon">Coming next: profile photo → Matrix avatar · SSH key · corpus upload/browse · voice clone · Add-Skill marketplace.</p>
+        <p class="agd-soon">Coming next: corpus upload/browse · voice clone · Add-Skill marketplace.</p>
       </div>
     </div>
   {/if}
@@ -1256,4 +1337,15 @@
   .agd-warn { font-size: 0.62rem; color: #fbbf24; line-height: 1.45; }
   .agd-key { white-space: pre-wrap; word-break: break-all; max-height: 7rem; overflow-y: auto; color: #fca5a5; }
   .agd-inline { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #a5b4fc; background: #0a0a10; border-radius: 3px; padding: 0 0.25rem; }
+  /* ── E1: avatar ── */
+  .agd-avatar { display: flex; gap: 0.7rem; align-items: center; }
+  .agd-avatar-pic {
+    width: 3.4rem; height: 3.4rem; flex: none; border-radius: 0.6rem; overflow: hidden;
+    background: #0a0a10; border: 1px solid #2a2a38; display: flex; align-items: center; justify-content: center;
+  }
+  .agd-avatar-pic img { width: 100%; height: 100%; object-fit: cover; }
+  .agd-avatar-emoji { font-size: 1.8rem; line-height: 1; }
+  .agd-avatar-body { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; flex: 1; }
+  .agd-filebtn { display: inline-block; width: fit-content; cursor: pointer; }
+  .agd-disabled { opacity: 0.5; pointer-events: none; }
 </style>

@@ -306,6 +306,27 @@ export const deprovisionAgent = (sysId: string, agentId: string) =>
     `/agent/systems/${sysId}/agents/${agentId}/provision`,
   );
 
+// ── E1: per-agent profile photo → Matrix avatar ──
+export interface AgentAvatar {
+  ok: boolean;
+  user_id?: string;
+  avatar_url?: string;         // mxc://…  (empty string = none set)
+  download_url?: string | null; // browser-renderable URL for the mxc
+  err?: string;
+}
+export const getAgentAvatar = (sysId: string, agentId: string) =>
+  req<AgentAvatar>('GET', `/agent/systems/${sysId}/agents/${agentId}/avatar`);
+export const setAgentAvatar = (
+  sysId: string,
+  agentId: string,
+  image_b64: string,
+  content_type: string,
+) =>
+  req<AgentAvatar>('POST', `/agent/systems/${sysId}/agents/${agentId}/avatar`, {
+    image_b64,
+    content_type,
+  });
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

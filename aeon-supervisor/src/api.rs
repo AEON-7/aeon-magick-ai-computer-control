@@ -151,6 +151,15 @@ pub fn build_router(cfg: Config) -> Router {
                 .patch(crate::agent_connect::toggle_ssh_admin)
                 .delete(crate::agent_connect::revoke_ssh),
         )
+        // E1: per-agent profile photo → Matrix avatar (upload to the gateway's
+        // Dendrite media repo + set avatar_url). POST body is base64 image so
+        // raise the default 2MB body limit for the JSON payload.
+        .route(
+            "/agent/systems/:id/agents/:aid/avatar",
+            get(crate::agent_connect::agent_avatar_get)
+                .post(crate::agent_connect::agent_avatar_set)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.
