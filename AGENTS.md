@@ -67,7 +67,7 @@ table is at the end ("API + MCP endpoint reference").
 | **HDMI capture** | Elgato Cam Link 4K (recommended), or a generic MS2109-chipset USB capture stick (~$15, common on Amazon). Both auto-detected via udev. |
 | **HDMI cable** | From the target's HDMI out (or USB-C-to-HDMI adapter for laptops without HDMI) into the capture device. |
 | **USB-C data cable** | Pi USB-C → target USB-C/Thunderbolt. **Must carry data** — most charging-only cables won't work. |
-| **Ethernet (optional but recommended for first boot)** | Skips the AP-fallback dance for first-time setup. |
+| **Ethernet (optional)** | A wired fallback for setup. Not required — **WiFi is the recommended uplink** (enroll via the AP wizard below), and in testing it was *lower-latency* for streaming than wired Ethernet. |
 
 The Pi is the box that pretends to be USB peripherals. The target is the
 computer you want to control.
@@ -76,7 +76,14 @@ computer you want to control.
 
 ## First boot
 
-### Path 1 — Easy mode (you have ethernet near the Pi)
+> **Recommended: enroll over WiFi (Path 2).** Beyond the obvious flexibility —
+> no cable, so you can place the Pi anywhere near the target — in our testing
+> the Pi streamed with **lower end-to-end latency over WiFi than over wired
+> Ethernet**. So WiFi is the better default for both performance *and*
+> placement. Ethernet still works (Path 1) as a fallback when WiFi isn't
+> handy, but the **automated WiFi enrollment** below is the recommended way in.
+
+### Path 1 — Wired Ethernet (fallback)
 
 1. Plug ethernet into the Pi. Plug power.
 2. Wait ~60 seconds.
@@ -92,20 +99,34 @@ computer you want to control.
 6. SSH uses a separate credential: user `admin`, default password
    `aeon-default-change-me`. Change it with `passwd` after first login.
 
-### Path 2 — On-the-go (no ethernet, configure WiFi via the device's own AP)
+### Path 2 — WiFi via the device's own AP (recommended)
 
-1. Plug power into the Pi. Don't plug ethernet.
-2. Wait ~2 minutes. After 90 seconds of "no internet" the Pi spins up its
-   own WiFi access point: **`aeon-setup`** (password **`aeon-setup-pw`**).
-3. From your phone or laptop, join `aeon-setup`. On every modern OS this
-   triggers a **captive portal sheet** that auto-opens to the WiFi
-   picker — no need to remember the IP. (If it doesn't, browse to
-   `http://anything`; we hijack DNS + HTTP to redirect.)
-4. The picker live-scans nearby networks with signal-strength bars.
-   Click one, type the password, watch the device join — the
-   `aeon-setup` AP tears itself down automatically.
-5. Reconnect your laptop to your normal WiFi, then open
-   `https://aeon-magick.local/` to land on the main UI.
+No cable needed — the Pi hosts a setup hotspot, you pick your network through a
+captive portal, and it enrolls itself onto your WiFi. Step by step:
+
+1. **Power on, no Ethernet.** Plug in the 27 W USB-C PSU; leave Ethernet
+   unplugged (if a cable is connected the Pi uses it and won't start the setup
+   AP).
+2. **Wait ~90 s for the setup hotspot.** After ~90 seconds without internet the
+   Pi spins up its own WiFi access point — SSID **`aeon-setup`**, password
+   **`aeon-setup-pw`**.
+3. **Join `aeon-setup`** from your phone or laptop. Every modern OS pops a
+   **captive-portal sheet** that auto-opens the WiFi picker — no IP to
+   remember. If it doesn't appear, open a browser to any `http://` address
+   (e.g. `http://setup`); the Pi hijacks DNS + HTTP and redirects you to the
+   portal.
+4. **Pick your preferred network.** The portal live-scans nearby SSIDs with
+   signal-strength bars. Tap your network, enter its password, and submit. The
+   Pi joins it and **tears the `aeon-setup` AP down automatically** — your
+   phone/laptop will drop off the hotspot, which is expected.
+5. **Reconnect to your normal WiFi**, then open `https://aeon-magick.local/`,
+   accept the per-device self-signed cert, and complete the one-page admin-
+   password setup. You're in.
+
+To switch networks later (or if enrollment lands somewhere unintended), the web
+UI's **WiFi** page scans / joins / forgets networks; or force the setup AP back
+up by creating an empty `aeon-force-ap` file on the SD card's boot partition
+(`/boot/firmware/aeon-force-ap`) and rebooting.
 
 ### Path 3 — Pre-configured before first boot (best for fleets)
 
