@@ -442,6 +442,11 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         || path == "/api/target/wake"
         || path == "/api/target/reboot"
         || path == "/api/target/config"
+        // SSH access management (authorized_keys) is a HUMAN-ADMIN-ONLY action.
+        // The web UI uses the admin session (Admin scope, allowed at the top of
+        // this fn); an agent's API token (Full/Macros/Read) is denied here, and
+        // there is no MCP tool for it. Agents never manage SSH.
+        || path.starts_with("/api/ssh/")
     {
         return false;
     }
