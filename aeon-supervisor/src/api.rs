@@ -121,6 +121,13 @@ pub fn build_router(cfg: Config) -> Router {
         // v64: H.264 low-latency live view over WebSocket (WebCodecs client).
         .route("/streamer/ws", get(crate::proxy::streamer_ws))
         .route("/streamer/relaunch", post(crate::proxy::streamer_relaunch))
+        // P1: on-demand screen recording (proxied to the streamer's record API).
+        .route("/streamer/record/start", post(crate::proxy::record_start))
+        .route("/streamer/record/stop", post(crate::proxy::record_stop))
+        .route("/streamer/record/state", get(crate::proxy::record_state))
+        .route("/streamer/recordings", get(crate::proxy::list_recordings))
+        .route("/streamer/recordings/:id",
+            get(crate::proxy::get_recording).delete(crate::proxy::delete_recording))
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.

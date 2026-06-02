@@ -76,6 +76,10 @@ pub struct Shared {
     /// `.subscribe()`; a client that overruns the channel capacity gets a
     /// `Lagged` signal and resyncs at the next keyframe.
     pub h264_tx: broadcast::Sender<H264Au>,
+
+    /// On-demand screen recording. Subscribes to `h264_tx` and muxes the
+    /// live stream to MP4 on request. See [`crate::record`].
+    pub record: Arc<crate::record::RecordManager>,
 }
 
 #[derive(Clone)]
@@ -101,6 +105,9 @@ impl SharedState {
             frame_rx,
             frames_published: Arc::new(AtomicU64::new(0)),
             h264_tx,
+            record: crate::record::RecordManager::new(std::path::PathBuf::from(
+                "/var/lib/aeon/recordings",
+            )),
         }))
     }
 

@@ -98,6 +98,10 @@ fn tools_catalog() -> Value {
         "tools": [
             tool("state", "Get the current device state — streamer online, capture resolution, FPS, HID persona, keyboard/mouse online flags.", json!({"type":"object","properties":{}})),
             tool("snapshot", "Capture one JPEG frame of the target host's screen. Returns the frame as an MCP image content block (base64 JPEG, ~50–150ms latency).", json!({"type":"object","properties":{}})),
+            tool("record_start", "Record the target's screen to an MP4. Optional `duration_s` auto-stops after N seconds (default 30; 0 = open-ended / manual stop, capped at 1h). One recording at a time; requires H.264 stream mode. Returns the recording id — download later with list_recordings + GET /api/streamer/recordings/<id>.", json!({"type":"object","properties":{"duration_s":{"type":"integer","description":"auto-stop after N seconds; omit for the 30s default, 0 for manual-stop-only"}}})),
+            tool("record_stop", "Stop the in-progress screen recording and finalize the MP4.", json!({"type":"object","properties":{}})),
+            tool("recording_state", "Screen-recording status: the active recording (id, elapsed) if any, plus finished recordings with sizes.", json!({"type":"object","properties":{}})),
+            tool("list_recordings", "List finished screen recordings (id, size, timestamp), newest first.", json!({"type":"object","properties":{}})),
             tool("type_text",
                  "Type a string on the target as the emulated USB keyboard. Each character is press→release, paced on-device.",
                  json!({"type":"object","required":["text"],
@@ -398,6 +402,24 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 }],
                 "isError": false,
             }))
+        }
+        "record_start" => {
+            let dur = args.get("duration_s").and_then(|v| v.as_u64());
+            let body = serde_json::to_vec(&json!({ "duration_s": dur })).unwrap();
+            let v = proxy::post_streamer_json(state, "/record/start", body).await?;
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "record_stop" => {
+            let v = proxy::post_streamer_json(state, "/record/stop", Vec::new()).await?;
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "recording_state" => {
+            let v = proxy::fetch_streamer_json(state, "/record/state").await?;
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "list_recordings" => {
+            let v = proxy::fetch_streamer_json(state, "/recordings").await?;
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
         }
         "type_text" => {
             let text = args.get("text").and_then(|v| v.as_str())

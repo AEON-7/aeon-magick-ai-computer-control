@@ -130,6 +130,28 @@ export const getSystemState = () => req<SupervisorState>('GET', '/state');
 export const getStreamerState = () => req<StreamerState>('GET', '/streamer/state');
 export const relaunchStreamer = () => req<{ ok: boolean }>('POST', '/streamer/relaunch');
 
+// ── screen recording ──
+export interface RecordingInfo {
+  id: string;
+  started_ms: number;
+  duration_s: number;
+  status: string;
+  elapsed_s?: number;
+  size_bytes?: number;
+}
+export const recordStart = (duration_s?: number) =>
+  req<{ ok: boolean; recording: RecordingInfo }>('POST', '/streamer/record/start', { duration_s });
+export const recordStop = () =>
+  req<{ ok: boolean; recording: RecordingInfo }>('POST', '/streamer/record/stop');
+export const getRecordingState = () =>
+  req<{ ok: boolean; active: RecordingInfo | null; recordings: RecordingInfo[] }>(
+    'GET',
+    '/streamer/record/state',
+  );
+export const deleteRecording = (id: string) =>
+  req<{ ok: boolean }>('DELETE', `/streamer/recordings/${id}`);
+export const recordingURL = (id: string) => `${API}/streamer/recordings/${id}`;
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

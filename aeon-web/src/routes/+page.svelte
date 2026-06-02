@@ -123,6 +123,7 @@
     } catch (e) {
       console.warn('state refresh failed', e);
     }
+    refreshRec();
   }
 
   // Refresh VPN + DNSCrypt enabled flags. getDnscrypt() with no args
@@ -622,6 +623,42 @@
     await api.relaunchStreamer();
     setTimeout(refreshState, 1000);
   }
+
+  // ── Screen recording ──
+  let rec: { active: api.RecordingInfo | null; recordings: api.RecordingInfo[] } = {
+    active: null,
+    recordings: [],
+  };
+  let recBusy = false;
+  async function refreshRec() {
+    try {
+      rec = await api.getRecordingState();
+    } catch {
+      /* recording API may be unavailable (e.g. MJPEG mode) */
+    }
+  }
+  async function toggleRecord() {
+    if (recBusy) return;
+    recBusy = true;
+    try {
+      if (rec.active) await api.recordStop();
+      else await api.recordStart(30);
+      await refreshRec();
+    } catch (e) {
+      alert('recording: ' + ((e as any)?.message ?? e));
+    } finally {
+      recBusy = false;
+    }
+  }
+  async function onDeleteRecording(id: string) {
+    try {
+      await api.deleteRecording(id);
+      await refreshRec();
+    } catch (e) {
+      console.warn(e);
+    }
+  }
+
   async function onLogout() {
     try {
       await api.logout();
@@ -988,6 +1025,24 @@
           <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
           <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
         </div>
+        <!-- Screen recording — records the live H.264 to MP4 on demand. -->
+        <button class="btn text-xs w-full {rec.active ? 'border-red-500 text-red-300' : ''}"
+                on:click={toggleRecord} disabled={recBusy}>
+          {#if rec.active}■ stop recording · {rec.active.elapsed_s ?? 0}s{:else}● record screen (30s){/if}
+        </button>
+        {#if rec.recordings.length}
+          <div class="max-h-24 overflow-y-auto space-y-0.5 text-[10px] font-mono text-zinc-400">
+            {#each rec.recordings.slice(0, 8) as r (r.id)}
+              <div class="flex items-center justify-between gap-2">
+                <a class="text-cursed-300 hover:underline truncate" href={api.recordingURL(r.id)}
+                   target="_blank" rel="noreferrer">{r.id}.mp4</a>
+                <span class="text-zinc-600 whitespace-nowrap">{Math.round((r.size_bytes ?? 0) / 1024)} KB</span>
+                <button class="text-zinc-600 hover:text-red-400" title="delete"
+                        on:click={() => onDeleteRecording(r.id)}>✕</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
         <!-- Target (USB-connected machine) power — consolidated dropdown. -->
         <TargetPowerMenu block
           onWake={onTargetWake}

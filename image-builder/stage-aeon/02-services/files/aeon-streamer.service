@@ -5,6 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Persistent recordings dir must exist + be owned by the service user.
+# /var/lib/aeon is root-owned, so the leading `+` runs this as root
+# (ignoring User=aeon) to create + chown it before the daemon starts.
+ExecStartPre=+/usr/bin/install -d -o aeon -g aeon -m 0755 /var/lib/aeon/recordings
 ExecStart=/usr/local/bin/aeon-streamer --config /etc/aeon/streamer.toml
 Restart=on-failure
 RestartSec=2

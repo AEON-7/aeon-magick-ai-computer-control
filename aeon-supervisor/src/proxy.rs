@@ -124,6 +124,32 @@ pub async fn streamer_relaunch(State(state): State<AppState>) -> Response<Body> 
     proxy(&state, &state.cfg.streamer_sock, Method::POST, "/relaunch", Some(vec![])).await
 }
 
+// ── Screen recording (proxied to the streamer's record API) ─────────────────
+pub async fn record_start(State(state): State<AppState>, body: bytes::Bytes) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::POST, "/record/start", Some(body.to_vec())).await
+}
+pub async fn record_stop(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::POST, "/record/stop", Some(vec![])).await
+}
+pub async fn record_state(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, "/record/state", None).await
+}
+pub async fn list_recordings(State(state): State<AppState>) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, "/recordings", None).await
+}
+pub async fn get_recording(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::GET, &format!("/recordings/{id}"), None).await
+}
+pub async fn delete_recording(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response<Body> {
+    proxy(&state, &state.cfg.streamer_sock, Method::DELETE, &format!("/recordings/{id}"), None).await
+}
+
 // ── v64: H.264 low-latency WebSocket bridge ─────────────────────────────
 //
 // Browser (WebCodecs) ⇄ WSS /api/streamer/ws ⇄ streamer unix-socket /h264.
@@ -365,6 +391,60 @@ pub async fn post_hid_json(
     }
     serde_json::from_slice(&body_bytes)
         .map_err(|e| format!("hid response parse: {e}"))
+}
+
+/// POST a JSON body to the streamer's API socket, returning its parsed JSON
+/// response. Used by the recording MCP tools.
+pub async fn post_streamer_json(
+    state: &AppState,
+    path: &str,
+    body: Vec<u8>,
+) -> Result<serde_json::Value, String> {
+    streamer_request_json(state, Method::POST, path, Some(body)).await
+}
+
+/// GET JSON from the streamer's API socket.
+pub async fn fetch_streamer_json(state: &AppState, path: &str) -> Result<serde_json::Value, String> {
+    streamer_request_json(state, Method::GET, path, None).await
+}
+
+async fn streamer_request_json(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<serde_json::Value, String> {
+    let sock = &state.cfg.streamer_sock;
+    if !sock.exists() {
+        return Err("streamer socket missing".into());
+    }
+    let uri: hyper::Uri = hyperlocal::Uri::new(sock, path).into();
+    let client = Client::builder(TokioExecutor::new())
+        .build::<_, Full<bytes::Bytes>>(hyperlocal::UnixConnector);
+    let req = hyper::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .body(Full::new(body.unwrap_or_default().into()))
+        .map_err(|e| e.to_string())?;
+    let resp = client.request(req).await.map_err(|e| format!("streamer: {e}"))?;
+    let status = resp.status();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("streamer body: {e}"))?
+        .to_bytes();
+    if !status.is_success() {
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_str) {
+            if let Some(e) = v.get("err").and_then(|x| x.as_str()) {
+                return Err(format!("streamer status {status}: {e}"));
+            }
+        }
+        return Err(format!("streamer status {status}"));
+    }
+    serde_json::from_slice(&body_bytes).map_err(|e| format!("streamer response parse: {e}"))
 }
 
 /// Fetch one snapshot from the streamer and write it to `out`.

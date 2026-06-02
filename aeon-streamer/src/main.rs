@@ -24,6 +24,7 @@ mod capture;
 mod config;
 mod h264_pipe;
 mod jpeg_pipe;
+mod record;
 mod state;
 mod supervise;
 mod watchdog;

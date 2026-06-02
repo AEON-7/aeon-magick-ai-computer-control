@@ -41,6 +41,11 @@ pub async fn serve(state: SharedState) -> Result<()> {
         .route("/snapshot", get(snapshot_proxy))
         .route("/stream", get(stream_proxy))
         .route("/h264", get(h264_stream))
+        .route("/record/start", post(record_start))
+        .route("/record/stop", post(record_stop))
+        .route("/record/state", get(record_state))
+        .route("/recordings", get(list_recordings))
+        .route("/recordings/:id", get(get_recording).delete(delete_recording))
         .with_state(state.clone());
 
     // axum::serve only takes TcpListener; for unix sockets we run an
@@ -381,6 +386,110 @@ async fn stream_mjpeg_from_file(state: &SharedState) -> Response<Body> {
             format!("multipart/x-mixed-replace; boundary={boundary}"),
         )
         .header("Cache-Control", "no-store")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response())
+}
+
+// ── Screen recording (v1) ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct RecordStartReq {
+    /// Auto-stop after this many seconds. Omit → 30 s default; 0 → open-ended
+    /// (manual stop, capped at 1 h).
+    #[serde(default)]
+    duration_s: Option<u64>,
+}
+
+/// POST /record/start {duration_s?} — begin recording the live H.264 stream to
+/// MP4. Requires the ffmpeg-h264 pipeline (the only one that publishes AUs).
+async fn record_start(State(state): State<SharedState>, body: bytes::Bytes) -> impl IntoResponse {
+    if state.read().pipeline_kind != Some("ffmpeg-h264") {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "err": "recording requires H.264 stream mode — set the stream format to h264 first"})),
+        );
+    }
+    let duration_s = serde_json::from_slice::<RecordStartReq>(&body)
+        .ok()
+        .and_then(|r| r.duration_s);
+    let fps = state.0.cfg.output.fps;
+    let ffmpeg = state.0.cfg.ffmpeg_bin.clone();
+    match state.0.record.start(&state.0.h264_tx, ffmpeg, fps, duration_s) {
+        Ok(info) => (StatusCode::OK, Json(json!({"ok": true, "recording": info}))),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"ok": false, "err": e}))),
+    }
+}
+
+/// POST /record/stop — finalize the in-progress recording.
+async fn record_stop(State(state): State<SharedState>) -> impl IntoResponse {
+    match state.0.record.stop() {
+        Ok(info) => (StatusCode::OK, Json(json!({"ok": true, "recording": info}))),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"ok": false, "err": e}))),
+    }
+}
+
+/// GET /record/state — active recording (if any) + the finished list.
+async fn record_state(State(state): State<SharedState>) -> impl IntoResponse {
+    Json(json!({
+        "ok": true,
+        "active": state.0.record.active_info(),
+        "recordings": state.0.record.list(),
+    }))
+}
+
+/// GET /recordings — finished recordings, newest first.
+async fn list_recordings(State(state): State<SharedState>) -> impl IntoResponse {
+    Json(json!({"ok": true, "recordings": state.0.record.list()}))
+}
+
+/// DELETE /recordings/:id
+async fn delete_recording(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match state.0.record.delete(&id) {
+        Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "deleted": id}))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "err": e}))),
+    }
+}
+
+/// GET /recordings/:id — download the MP4 (streamed in chunks, bounded memory).
+async fn get_recording(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response<Body> {
+    let Some(path) = state.0.record.path(&id) else {
+        return (StatusCode::NOT_FOUND, "no such recording").into_response();
+    };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => return (StatusCode::NOT_FOUND, "open failed").into_response(),
+    };
+    let len = file.metadata().await.map(|m| m.len()).ok();
+    let body_stream = async_stream::stream! {
+        use tokio::io::AsyncReadExt;
+        let mut file = file;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match file.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])),
+                Err(_) => break,
+            }
+        }
+    };
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "video/mp4")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{id}.mp4\""),
+        )
+        .header("Cache-Control", "no-store");
+    if let Some(l) = len {
+        builder = builder.header("Content-Length", l);
+    }
+    builder
         .body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response())
 }
