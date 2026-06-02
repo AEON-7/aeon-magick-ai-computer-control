@@ -129,6 +129,14 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/streamer/recordings/:id",
             get(crate::proxy::get_recording).delete(crate::proxy::delete_recording))
         .route("/streamer/recordings/:id/thumb", get(crate::proxy::get_recording_thumb))
+        // Agent Dash — Connected Systems registry + SSH key provisioning.
+        .route("/agent/pubkey", get(crate::agent_connect::get_pubkey))
+        .route("/agent/systems",
+            get(crate::agent_connect::list_systems).post(crate::agent_connect::add_system))
+        .route("/agent/systems/:id", axum::routing::delete(crate::agent_connect::remove_system))
+        .route("/agent/systems/:id/register", post(crate::agent_connect::register_system))
+        .route("/agent/systems/:id/test", post(crate::agent_connect::test_system))
+        .route("/agent/systems/:id/metrics", get(crate::agent_connect::system_metrics))
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.

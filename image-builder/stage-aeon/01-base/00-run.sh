@@ -27,6 +27,7 @@ apt-get install -y --no-install-recommends \
     openvpn \
     stunnel4 \
     autossh \
+    sshpass \
     tor \
     obfs4proxy \
     i2pd

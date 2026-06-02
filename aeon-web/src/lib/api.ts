@@ -156,6 +156,50 @@ export const deleteRecording = (id: string) =>
 export const recordingURL = (id: string) => `${API}/streamer/recordings/${id}`;
 export const recordingThumbURL = (id: string) => `${API}/streamer/recordings/${id}/thumb`;
 
+// ── Agent Dash — Connected Systems ──
+export interface ConnectedSystem {
+  id: string;
+  label: string;
+  address: string;
+  ssh_user: string;
+  port: number;
+  roles: string[];
+  status: string;
+  last_checked_ms: number;
+}
+export const getAgentPubkey = () =>
+  req<{ ok: boolean; pubkey: string; authorize_command: string }>('GET', '/agent/pubkey');
+export const listSystems = () =>
+  req<{ ok: boolean; systems: ConnectedSystem[] }>('GET', '/agent/systems');
+export const addSystem = (body: {
+  label: string;
+  address: string;
+  ssh_user: string;
+  port: number;
+  roles: string[];
+}) => req<{ ok: boolean; id?: string; err?: string }>('POST', '/agent/systems', body);
+export const removeSystem = (id: string) =>
+  req<{ ok: boolean }>('DELETE', `/agent/systems/${id}`);
+export const registerSystem = (id: string, password: string) =>
+  req<{ ok: boolean; status?: string; err?: string; authorize_command?: string; hint?: string }>(
+    'POST',
+    `/agent/systems/${id}/register`,
+    { password },
+  );
+export const testSystem = (id: string) =>
+  req<{ ok: boolean; status?: string }>('POST', `/agent/systems/${id}/test`);
+export interface SystemMetrics {
+  reachable: boolean;
+  host?: string;
+  load?: string;
+  mem?: string;
+  gpus?: { name: string; util: string; mem_used: string; mem_total: string; temp: string }[];
+  containers?: string[];
+  err?: string;
+}
+export const getSystemMetrics = (id: string) =>
+  req<{ ok: boolean; metrics: SystemMetrics }>('GET', `/agent/systems/${id}/metrics`);
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

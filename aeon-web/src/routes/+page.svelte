@@ -29,6 +29,9 @@
       { href: '/ssh-keys', label: 'SSH', icon: 'key',    title: 'SSH authorized keys' },
       { href: '/tokens',   label: 'API', icon: 'braces', title: 'API tokens for agents / REST / MCP' },
     ]},
+    { label: 'Agents', items: [
+      { href: '/agent', label: 'Agent Dash', icon: 'braces', title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
+    ]},
     { label: 'System', items: [
       { href: '/system', label: 'Pi', icon: 'cpu', title: 'Pi health + reboot/poweroff + stream tuning' },
     ]},

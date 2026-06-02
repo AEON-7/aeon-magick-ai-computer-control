@@ -14,6 +14,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
 
+mod agent_connect;
 mod api;
 mod audit;
 mod auth;
