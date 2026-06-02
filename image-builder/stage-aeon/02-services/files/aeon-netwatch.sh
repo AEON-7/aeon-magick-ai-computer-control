@@ -51,8 +51,17 @@ TOR_REVERT_MARKER=/var/lib/aeon/tor-auto-reverted
 # restoring the management plane fast. Tier 2 (ANY mode): if Tor is still
 # stuck this long, disable it entirely — the bulletproof known-good state,
 # so a stalled Tor can never strand the box regardless of mode.
-TOR_STALL_GRACE=180
-TOR_DISABLE_GRACE=360
+#
+# v76: tightened from 180/360. Transparent Tor through a commercial VPN
+# (Mullvad/IVPN/AirVPN-WireGuard) effectively NEVER bootstraps — the Tor
+# network tarpits commercial-VPN exit IPs — so a stall there is doomed, not
+# slow. The old 180s→split / 360s→off windows meant ~3 min of locked-out
+# management before recovery (felt like a freeze). 60s→split restores the
+# management plane fast; 150s→off fully clears a Tor that just can't start.
+# A legitimately-slow bootstrap (bridges on a censored uplink) still gets
+# 60s before the non-destructive downgrade to split_tunnel.
+TOR_STALL_GRACE=60
+TOR_DISABLE_GRACE=150
 
 mkdir -p "$(dirname "$STATE_FILE")"
 [[ -f "$STATE_FILE" ]] || echo "0" > "$STATE_FILE"

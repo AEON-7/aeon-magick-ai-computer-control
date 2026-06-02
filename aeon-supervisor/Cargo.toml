@@ -38,6 +38,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 # call is infrequent (setup wizard + occasional refresh) so the
 # simple sync path beats spinning up an async client.
 ureq = { version = "2.10", features = ["json", "tls"] }
+# v77: extract AirVPN's config-generator zip packages (download=zip) in
+# process. Minimal features — AirVPN packages are deflate/stored only.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "aeon-supervisor"

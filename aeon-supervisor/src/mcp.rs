@@ -316,10 +316,10 @@ fn tools_catalog() -> Value {
                  "Current VPN clearnet routing state: provider, enabled, kill-switch, lan_bypass, provider-specific config flags. Independent of Tor + I2P which live elsewhere.",
                  json!({"type":"object","properties":{}})),
             tool("set_vpn_provider",
-                 "Switch the active clearnet VPN provider (none / tailscale / wireguard / openvpn / mullvad / ivpn / azirevpn). For mullvad/ivpn/azirevpn you must run the setup wizard via REST first to register your account.",
+                 "Switch the active clearnet VPN provider (none / tailscale / wireguard / openvpn / mullvad / ivpn / azirevpn / airvpn). For mullvad/ivpn/azirevpn/airvpn you must run the setup wizard via REST first. AirVPN additionally supports stealth modes (OpenVPN-over-SSL / over-SSH) chosen during its setup.",
                  json!({"type":"object","required":["provider"],
                         "properties":{
-                            "provider":{"type":"string","enum":["none","tailscale","wireguard","openvpn","mullvad","ivpn","azirevpn"]},
+                            "provider":{"type":"string","enum":["none","tailscale","wireguard","openvpn","mullvad","ivpn","azirevpn","airvpn"]},
                             "enabled":{"type":"boolean"},
                             "kill_switch":{"type":"boolean"}
                         }})),
@@ -331,19 +331,21 @@ fn tools_catalog() -> Value {
             tool("vpn_provider_state",
                  "Get setup state of a specific provider — whether account is configured, cached server list with privacy badges, current selected server.",
                  json!({"type":"object","required":["provider"],
-                        "properties":{"provider":{"type":"string","enum":["mullvad","ivpn","azirevpn"]}}})),
+                        "properties":{"provider":{"type":"string","enum":["mullvad","ivpn","azirevpn","airvpn"]}}})),
             tool("vpn_provider_select",
                  "Pick a specific server for an already-configured provider. server_id is the hostname from vpn_provider_state's server list.",
                  json!({"type":"object","required":["provider","server_id"],
                         "properties":{
-                            "provider":{"type":"string","enum":["mullvad","ivpn","azirevpn"]},
+                            "provider":{"type":"string","enum":["mullvad","ivpn","azirevpn","airvpn"]},
                             "server_id":{"type":"string"},
                             "mode":{"type":"string","enum":["manual","auto"]}
                         }})),
             tool("vpn_provider_pick_fastest",
-                 "TCP-probe every cached server for the given provider, return ranking by RTT. The supervisor doesn't auto-apply — agent inspects the result and calls vpn_provider_select on the winner.",
+                 "ICMP-probe cached servers for the given provider, return ranking by RTT (each entry includes its eyes tier). Set no_eyes=true to rank ONLY servers in countries outside the 5/9/14-Eyes alliances. The supervisor doesn't auto-apply — agent inspects the result and calls vpn_provider_select on the winner.",
                  json!({"type":"object","required":["provider"],
-                        "properties":{"provider":{"type":"string","enum":["mullvad","ivpn","azirevpn"]}}})),
+                        "properties":{
+                            "provider":{"type":"string","enum":["mullvad","ivpn","azirevpn","airvpn"]},
+                            "no_eyes":{"type":"boolean","description":"Restrict to No-Eyes jurisdictions (outside 5/9/14-Eyes)"}}})),
 
             // ── API token management ──
             tool("list_tokens",
@@ -834,9 +836,15 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
         }
         "vpn_provider_pick_fastest" => {
             let p = args.get("provider").and_then(|v| v.as_str()).ok_or("provider required")?;
+            // v76: optional no_eyes — rank only servers outside the 5/9/14-Eyes alliances.
+            let no_eyes = args.get("no_eyes").and_then(|v| v.as_bool()).unwrap_or(false);
+            let params = crate::vpn_providers::api::PickFastestParams {
+                eyes: if no_eyes { Some("none".to_string()) } else { None },
+            };
             let resp = crate::vpn_providers::api::pick_fastest(
                 axum::extract::State(state.clone()),
                 axum::extract::Path(p.to_string()),
+                axum::extract::Query(params),
             ).await.into_response();
             Ok(text_result(&body_to_string(resp).await))
         }

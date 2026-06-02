@@ -374,7 +374,12 @@ EOF
     # chain catches the TCP and routes it through TransPort, and
     # any browser reaches the hidden service transparently.
     install -d -m 0755 /etc/NetworkManager/dnsmasq-shared.d
-    if [ "$vpn_provider" = "tor" ] && [ "$vpn_enabled" = "true" ]; then
+    # v77: Tor is an INDEPENDENT toggle now (tor.enabled), not a VPN provider.
+    # The old gate (vpn.provider=="tor") never matched when Tor runs OVER a real
+    # VPN (provider=airvpn + tor.enabled) — the exact Tor-over-VPN case — so
+    # client .onion lookups fell through to DNSCrypt and NXDOMAIN'd. Gate on
+    # tor.enabled so the .onion → Tor-DNSPort route is written whenever Tor is on.
+    if [ "$(toml_get tor enabled false)" = "true" ]; then
         cat > /etc/NetworkManager/dnsmasq-shared.d/00-aeon-dnscrypt.conf <<'EOF'
 # Forward all DNS through local dnscrypt-proxy by default.
 no-resolv
@@ -405,8 +410,13 @@ EOF
     # to ignore DHCP-provided DNS and use 127.0.2.1 instead. NM then
     # rewrites /etc/resolv.conf with that nameserver. This survives
     # reboots (per-connection setting is persisted).
+    # Match nmcli's connection TYPE strings: ethernet = "802-3-ethernet",
+    # Wi-Fi = "802-11-wireless" (NOT "wifi"!). The old /ethernet|wifi/ silently
+    # skipped every Wi-Fi connection, so on a Wi-Fi-connected Pi the DNS
+    # override never applied and /etc/resolv.conf kept the router's DHCP DNS —
+    # a plaintext DNS leak past DNSCrypt. Include "wireless" (+ aliases).
     local uuids; uuids=$(nmcli -t -f UUID,TYPE con show 2>/dev/null \
-        | awk -F: '$2 ~ /ethernet|wifi/ {print $1}')
+        | awk -F: '$2 ~ /ethernet|wireless|wifi/ {print $1}')
     local count=0
     for uuid in $uuids; do
         nmcli con modify "$uuid" ipv4.ignore-auto-dns yes 2>/dev/null || continue
@@ -454,6 +464,7 @@ stop_clearnet_vpns() {
     systemctl stop openvpn-client@aeon.service 2>/dev/null || true
     systemctl disable openvpn-client@aeon.service 2>/dev/null || true
     /usr/bin/tailscale down 2>/dev/null || true
+    stop_airvpn_wrappers 2>/dev/null || true
     sweep_aeon_vpn_rules
 }
 
@@ -694,14 +705,32 @@ try:
     provider = '$provider'
     if provider == 'mullvad':
         mtu = '1380'
+    elif provider == 'airvpn':
+        # AirVPN recommends 1320; the value the user pasted is in the toml.
+        mtu = str(s.get('mtu', 1320))
     else:
         mtu = '1420'
 
-    ipv4 = s.get('peer_ipv4','')
-    ipv6 = s.get('peer_ipv6','')
+    # Strip any CIDR suffix the provider may have stored. Mullvad keeps
+    # x.x.x.x/32 from register_device while IVPN already strips it; we re-add
+    # /32 and /128 ourselves, so without this the address gets a doubled
+    # suffix like x.x.x.x/32/32 and wg-quick aborts on the inet prefix.
+    # NOTE: this block is inside a python3 -c bash double-quoted string, so it
+    # must never contain a double-quote, backtick, dollar or backslash char.
+    ipv4 = s.get('peer_ipv4','').split('/')[0]
+    ipv6 = s.get('peer_ipv6','').split('/')[0]
     addr = f'{ipv4}/32'
     if ipv6:
         addr += f', {ipv6}/128'
+
+    # Optional WireGuard PresharedKey (AirVPN Config-Generator files may
+    # include one). Built with chr(10) for the trailing newline so this
+    # stays free of the backslash-n escape the bash-string note forbids.
+    psk = s.get('wg_preshared_key','')
+    if psk:
+        psk_line = 'PresharedKey = ' + psk + chr(10)
+    else:
+        psk_line = ''
 
     cfg = f'''# Managed by aeon-net-services (provider={provider}).
 # No DNS= line on purpose — Pi OS has no resolvconf; DNSCrypt handles DNS.
@@ -712,7 +741,7 @@ MTU        = {mtu}
 
 [Peer]
 PublicKey  = {server.get('public_key','')}
-AllowedIPs = 0.0.0.0/0, ::/0
+{psk_line}AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint   = {server.get('endpoint_ip','')}:{server.get('endpoint_port', 51820)}
 PersistentKeepalive = 25
 '''
@@ -785,6 +814,176 @@ except Exception:
     log "openvpn up via openvpn-client@aeon"
 }
 
+# ── AirVPN OpenVPN family (plain / over-SSL / over-SSH) ──────────────
+# AirVPN's API doesn't mint creds; the user pastes a .ovpn (Config
+# Generator) which we store in airvpn.toml. Plain OpenVPN rides the same
+# openvpn-client@aeon unit as apply_vpn_openvpn. The two stealth modes
+# stand up a local obfuscation wrapper and rewrite the .ovpn so OpenVPN
+# connects to 127.0.0.1:<wrapper port> instead of straight to the server:
+#   openvpn_ssl — stunnel client wraps the OpenVPN/TCP stream in TLS to
+#                 the AirVPN server's SSL entry port (443). On the wire it
+#                 is indistinguishable from ordinary HTTPS web traffic.
+#   openvpn_ssh — an SSH tunnel carries the OpenVPN/TCP stream to the
+#                 server. On the wire it looks like a normal SSH session.
+AIRVPN_SECRETS=/etc/aeon/vpn-secrets/airvpn.toml
+AIRVPN_PKG_ROOT=/etc/aeon/vpn-secrets/airvpn   # per-mode generator packages
+STUNNEL_CONF=/etc/stunnel/aeon-airvpn.conf
+AIRVPN_SSH_KEY_RUN=/run/aeon-airvpn-ssh.key    # runtime copy of the package key
+
+airvpn_mode() {
+    python3 -c "
+import tomllib
+try:
+    with open('$AIRVPN_SECRETS','rb') as f:
+        print(tomllib.load(f).get('mode','wireguard'))
+except Exception:
+    print('wireguard')
+"
+}
+
+# Entry IP of the currently-selected AirVPN server (wrapper connect host).
+airvpn_selected_ip() {
+    python3 -c "
+import tomllib
+try:
+    with open('$AIRVPN_SECRETS','rb') as f:
+        s = tomllib.load(f)
+    sel = s.get('selected_server','')
+    srv = next((x for x in s.get('servers',[]) if x.get('id') == sel), None)
+    print(srv.get('endpoint_ip','') if srv else '')
+except Exception:
+    print('')
+"
+}
+
+# v77: AirVPN WireGuard from a generator package. The .conf is complete
+# (keys + endpoint); we only strip the DNS= line (Pi OS has no resolvconf, so
+# wg-quick would abort on it) then hand it to wg-quick@aeon0. reassert_policy_
+# routing handles the NM-churn route restore for WG.
+apply_vpn_airvpn_wg() {
+    local conf; conf="$(ls "$AIRVPN_PKG_ROOT/wireguard"/*.conf 2>/dev/null | head -1)"
+    if [ -z "$conf" ]; then
+        log "airvpn (wireguard): no generated config — generate one at /network/vpn-providers"
+        return 0
+    fi
+    install -d -m 0700 /etc/wireguard
+    grep -ivE '^[[:space:]]*DNS[[:space:]]*=' "$conf" > "$WG_CONF"
+    chmod 0600 "$WG_CONF"
+    systemctl reset-failed wg-quick@aeon0.service 2>/dev/null || true
+    systemctl enable wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    systemctl restart wg-quick@aeon0.service 2>&1 | tee -a "$LOG" || true
+    if systemctl is-active --quiet wg-quick@aeon0.service; then
+        log "airvpn wireguard up via wg-quick@aeon0 (generated config)"
+    else
+        log "WARN: wg-quick@aeon0 did not come up (airvpn wireguard) — check 'journalctl -u wg-quick@aeon0'"
+    fi
+}
+
+stop_airvpn_wrappers() {
+    # We run both wrappers as our own transient systemd units (not Debian's
+    # all-configs stunnel4.service, which defaults to ENABLED=0 and has no
+    # per-instance template) so teardown is just stop + reset-failed.
+    for u in aeon-airvpn-stunnel aeon-airvpn-ssh; do
+        systemctl stop "${u}.service" 2>/dev/null || true
+        systemctl reset-failed "${u}.service" 2>/dev/null || true
+    done
+    rm -f "$STUNNEL_CONF" "$AIRVPN_SSH_KEY_RUN" 2>/dev/null || true
+}
+
+apply_vpn_airvpn_openvpn() {
+    local mode="$1"
+    local dir="$AIRVPN_PKG_ROOT/$mode"
+    local ovpn; ovpn="$(ls "$dir"/*.ovpn 2>/dev/null | head -1)"
+    if [ -z "$ovpn" ]; then
+        log "airvpn ($mode): no generated config — generate one at /network/vpn-providers"
+        return 0
+    fi
+    stop_airvpn_wrappers
+    install -d -m 0755 /etc/openvpn/client
+    # AirVPN's generated .ovpn is self-contained and (for SSL/SSH) already
+    # points at 127.0.0.1:<port> matching the wrapper below — run it verbatim.
+    cp -f "$ovpn" "$OVPN_CONF"
+    # DNS ownership: when DNSCrypt is active it owns /etc/resolv.conf
+    # (127.0.2.1 — encrypted + tunneled), so strip OpenVPN's resolv.conf
+    # management (AirVPN ships `up/down update-resolv-conf`) to stop it
+    # clobbering DNSCrypt + leaking the pushed DNS. When DNSCrypt is OFF we
+    # leave it, so the VPN's own pushed DNS is used (the sane fallback).
+    if [ "$(toml_get dnscrypt enabled false)" = "true" ]; then
+        sed -i -E '/^[[:space:]]*(up|down)[[:space:]].*update-resolv/d; /^[[:space:]]*script-security[[:space:]]/d' "$OVPN_CONF"
+        printf '\n# aeon: DNSCrypt owns DNS — ignore any pushed resolver\npull-filter ignore "dhcp-option DNS"\n' >> "$OVPN_CONF"
+    fi
+    chmod 0600 "$OVPN_CONF"
+
+    case "$mode" in
+        openvpn_ssl)
+            local stunnel_bin sslf crtf
+            stunnel_bin="$(command -v stunnel4 || command -v stunnel || true)"
+            sslf="$(ls "$dir"/*.ssl 2>/dev/null | head -1)"
+            crtf="$(ls "$dir"/*.crt 2>/dev/null | head -1)"
+            if [ -z "$stunnel_bin" ] || [ -z "$sslf" ]; then
+                log "airvpn (ssl): missing stunnel binary or .ssl config — cannot start SSL stealth"; return 0
+            fi
+            install -d -m 0755 /etc/stunnel
+            [ -n "$crtf" ] && cp -f "$crtf" /etc/stunnel/aeon-airvpn-ca.crt
+            # Run AirVPN's own stunnel client config (real SSL endpoint +
+            # verify=3) verbatim, but force foreground (systemd supervises) and
+            # rewrite the relative CAfile to our absolute copy.
+            {
+                echo "foreground = yes"
+                grep -ivE '^[[:space:]]*(CAfile|foreground|pid)[[:space:]]*=' "$sslf"
+                echo "CAfile = /etc/stunnel/aeon-airvpn-ca.crt"
+            } > "$STUNNEL_CONF"
+            chmod 0644 "$STUNNEL_CONF"
+            systemctl reset-failed aeon-airvpn-stunnel.service 2>/dev/null || true
+            systemd-run --unit=aeon-airvpn-stunnel --collect \
+                -p Restart=always -p RestartSec=5 \
+                "$stunnel_bin" "$STUNNEL_CONF" 2>&1 | tee -a "$LOG" || true
+            log "airvpn ssl: stunnel up from AirVPN config ($(basename "$sslf")) — looks like HTTPS"
+            ;;
+        openvpn_ssh)
+            local keyf shf sshline lfwd userhost sshport
+            keyf="$(ls "$dir"/*.key 2>/dev/null | head -1)"
+            shf="$(ls "$dir"/*.sh 2>/dev/null | head -1)"
+            if ! command -v autossh >/dev/null 2>&1 || [ -z "$keyf" ] || [ -z "$shf" ]; then
+                log "airvpn (ssh): missing autossh / sshtunnel.key / launcher — cannot start SSH stealth"; return 0
+            fi
+            # Parse AirVPN's launcher for the exact ssh forward + endpoint:
+            #   ssh -i sshtunnel.key -L <local>:127.0.0.1:<remote> sshtunnel@<ip> -p <port> -N -T
+            sshline="$(grep -E '^[[:space:]]*ssh ' "$shf" | head -1)"
+            lfwd="$(echo "$sshline" | grep -oE '\-L [0-9.:]+' | awk '{print $2}')"
+            userhost="$(echo "$sshline" | grep -oE '[A-Za-z0-9._-]+@[0-9.]+' | head -1)"
+            sshport="$(echo "$sshline" | grep -oE '\-p [0-9]+' | awk '{print $2}')"
+            [ -z "$sshport" ] && sshport=22
+            if [ -z "$lfwd" ] || [ -z "$userhost" ]; then
+                log "airvpn (ssh): could not parse launcher ($(basename "$shf")) — leaving down"; return 0
+            fi
+            install -m 0600 "$keyf" "$AIRVPN_SSH_KEY_RUN"
+            # autossh keeps the tunnel up; -M 0 (no monitor port, rely on
+            # ServerAlive). The forward + endpoint come straight from AirVPN.
+            systemctl reset-failed aeon-airvpn-ssh.service 2>/dev/null || true
+            systemd-run --unit=aeon-airvpn-ssh --collect \
+                -p Restart=always -p RestartSec=5 -E AUTOSSH_GATETIME=0 \
+                /usr/bin/autossh -M 0 -N -T \
+                -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -i "$AIRVPN_SSH_KEY_RUN" -p "$sshport" -L "$lfwd" "$userhost" 2>&1 | tee -a "$LOG" || true
+            log "airvpn ssh: tunnel up ($userhost:$sshport, fwd $lfwd) — looks like SSH"
+            ;;
+        *)
+            : # plain openvpn — AirVPN's .ovpn is self-contained (direct TCP 443)
+            ;;
+    esac
+
+    systemctl reset-failed openvpn-client@aeon.service 2>/dev/null || true
+    systemctl enable openvpn-client@aeon.service 2>&1 | tee -a "$LOG" || true
+    systemctl restart openvpn-client@aeon.service 2>&1 | tee -a "$LOG" || true
+    if systemctl is-active --quiet openvpn-client@aeon.service; then
+        log "airvpn openvpn up via openvpn-client@aeon (mode=$mode)"
+    else
+        log "WARN: openvpn-client@aeon did not come up (mode=$mode) — check 'journalctl -u openvpn-client@aeon'"
+    fi
+}
+
 apply_tor_service() {
     # Bridge preset selection — see apply_tor_bridges below.
     local preset; preset="$(toml_get tor preset direct)"
@@ -831,6 +1030,12 @@ DNSPort 127.0.0.1:5353
 # Automap onion addresses so apps resolving .onion get a real IP.
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
+# Map .onion into 10.192.0.0/10 so the virtual IP matches the iptables
+# REDIRECT range below. Tor's DEFAULT is 127.192.0.0/10 — but 127.x is
+# loopback (unroutable from USB clients) AND doesn't match our redirect, so
+# .onion would resolve to a dead IP and never connect. This is the key line
+# that makes transparent/split .onion routing actually work.
+VirtualAddrNetworkIPv4 10.192.0.0/10
 # Don't run a SOCKS port on a privileged interface.
 SOCKSPort 127.0.0.1:9050
 EOF
@@ -1207,6 +1412,16 @@ detect_vpn_iface() {
         # tunnel (Tor stalled at bootstrap → transparent mode then
         # blackholed the whole box). All three map to aeon0.
         wireguard|mullvad|ivpn) ip link show aeon0 >/dev/null 2>&1 && echo "aeon0" ;;
+        airvpn)
+            # WireGuard rides aeon0; the OpenVPN family (incl. SSL/SSH
+            # stealth) rides a tun device.
+            case "$(airvpn_mode)" in
+                openvpn|openvpn_ssl|openvpn_ssh)
+                    ip -o link show 2>/dev/null \
+                        | awk -F': ' '/tun[0-9]+:/ {print $2}' | head -1 ;;
+                *) ip link show aeon0 >/dev/null 2>&1 && echo "aeon0" ;;
+            esac
+            ;;
         openvpn)
             # OpenVPN's tun device name varies (tun0 / tun1 …).
             # Pick the first tun*  with an IP.
@@ -1382,6 +1597,23 @@ apply_kill_switch() {
             iptables -A OUTPUT -o tun0 -j ACCEPT -m comment --comment "aeon-vpn"
             iptables -A OUTPUT -o tun1 -j ACCEPT -m comment --comment "aeon-vpn"
             ;;
+        airvpn)
+            case "$(airvpn_mode)" in
+                openvpn|openvpn_ssl|openvpn_ssh)
+                    iptables -A OUTPUT -o tun0 -j ACCEPT -m comment --comment "aeon-vpn"
+                    iptables -A OUTPUT -o tun1 -j ACCEPT -m comment --comment "aeon-vpn"
+                    # The SSL/SSH wrapper dials the AirVPN server over the
+                    # bare uplink BEFORE the tunnel exists — without a hole
+                    # for that one server IP the kill-switch would block the
+                    # very handshake that establishes the tunnel.
+                    local av_ip; av_ip="$(airvpn_selected_ip)"
+                    if [ -n "$av_ip" ]; then
+                        iptables -A OUTPUT -d "$av_ip" -j ACCEPT -m comment --comment "aeon-vpn"
+                    fi
+                    ;;
+                *) iptables -A OUTPUT -o aeon0 -j ACCEPT -m comment --comment "aeon-vpn" ;;
+            esac
+            ;;
         tor|i2p)
             # For Tor + I2P the transparent-redirect rules already
             # enforce "everything goes through them". Allow connections
@@ -1429,6 +1661,17 @@ apply_vpn() {
         wireguard)            apply_vpn_wireguard ;;
         openvpn)              apply_vpn_openvpn ;;
         mullvad|ivpn|azirevpn) apply_vpn_provider_wg "$provider" ;;
+        airvpn)
+            # v77: all modes run from auto-pulled generator packages under
+            # /etc/aeon/vpn-secrets/airvpn/<mode>/. WireGuard → wg-quick@aeon0;
+            # the OpenVPN family (plain/SSL/SSH) → openvpn-client@aeon (+ stunnel
+            # or autossh wrapper). The selected mode lives in airvpn.toml.
+            local av_m; av_m="$(airvpn_mode)"
+            case "$av_m" in
+                openvpn|openvpn_ssl|openvpn_ssh) apply_vpn_airvpn_openvpn "$av_m" ;;
+                *)                               apply_vpn_airvpn_wg ;;
+            esac
+            ;;
         *)                    log "WARN: unknown vpn provider '$provider' — leaving tunnel down" ;;
     esac
 
@@ -1567,10 +1810,40 @@ reassert_policy_routing() {
     vpn_enabled="$(toml_get vpn enabled false)"
     vpn_provider="$(toml_get vpn provider none)"
     [ "$vpn_enabled" = "true" ] || return 0
+
+    # Pick the transport so we restore the right routing. WireGuard (aeon0 +
+    # fwmark table) bounces wg-quick; the OpenVPN family (tun0, routes in the
+    # MAIN table) restarts openvpn-client@aeon. AirVPN is either, per its mode.
+    local transport=""
     case "$vpn_provider" in
-        wireguard|mullvad|ivpn) ;;
+        wireguard|mullvad|ivpn) transport="wg" ;;
+        openvpn)                transport="ovpn" ;;
+        airvpn)
+            case "$(airvpn_mode)" in
+                openvpn|openvpn_ssl|openvpn_ssh) transport="ovpn" ;;
+                *)                               transport="wg" ;;
+            esac
+            ;;
         *) return 0 ;;
     esac
+
+    # ── OpenVPN family: re-add the redirect route NM's reactivation flushed ──
+    # OpenVPN installs its redirect-gateway routes into the MAIN table; the
+    # DNSCrypt step's NM reactivation (earlier in main) wipes them, and unlike
+    # WireGuard there is no fwmark table to bounce. Proven on hardware: routing
+    # only sticks when openvpn is (re)started AFTER the last NM churn. So if the
+    # default-override is gone, restart the client here (reassert runs last).
+    if [ "$transport" = "ovpn" ]; then
+        systemctl is-active --quiet openvpn-client@aeon.service || return 0
+        local tun; tun="$(ip -o link show 2>/dev/null | awk -F': ' '/tun[0-9]+:/{print $2}' | head -1)"
+        if [ -z "$tun" ] || ! ip route show 2>/dev/null | grep -qE "^0\.0\.0\.0/1 .* dev ${tun}( |\$)"; then
+            log "vpn: OpenVPN redirect route missing (NM reactivation flushed it) — restarting openvpn-client@aeon to reinstate it"
+            systemctl restart openvpn-client@aeon.service 2>&1 | tee -a "$LOG" || true
+        fi
+        return 0
+    fi
+
+    # ── WireGuard path ──
     systemctl is-active --quiet wg-quick@aeon0.service || return 0
 
     # wg-quick numbers its table after the fwmark it set (0xca6c == 51820).

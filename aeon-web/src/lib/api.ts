@@ -369,6 +369,7 @@ export type VpnProvider =
   | 'mullvad'
   | 'ivpn'
   | 'azirevpn'
+  | 'airvpn'
   | 'tor'
   | 'i2p';
 
@@ -378,7 +379,7 @@ export type VpnProvider =
  * inline banner pointing users there.
  */
 export const WIZARD_PROVIDERS: ReadonlySet<VpnProvider> =
-  new Set(['mullvad', 'ivpn']);
+  new Set(['mullvad', 'ivpn', 'airvpn']);
 
 export interface VpnProviderInfo {
   id: VpnProvider;

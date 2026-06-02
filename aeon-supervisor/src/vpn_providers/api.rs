@@ -6,7 +6,7 @@
 //! has one client to build instead of three.
 
 use crate::api::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{provider_meta, PROVIDERS, mullvad, ivpn, azirevpn};
+use super::{provider_meta, PROVIDERS, mullvad, ivpn, azirevpn, airvpn, EyesTier};
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -45,11 +45,32 @@ pub async fn get_catalog(State(_state): State<AppState>) -> Json<Value> {
 #[derive(Deserialize)]
 pub struct SetupReq {
     /// 16-digit Mullvad account number / IVPN account ID / AzireVPN
-    /// API token, depending on provider.
+    /// API token, depending on provider. Unused for AirVPN (which
+    /// authenticates via `api_key` + a pasted config instead).
+    #[serde(default)]
     pub credential: String,
     /// Optional device label shown to the user. Defaults to "aeon-magick".
     #[serde(default = "default_device_name")]
     pub device_name: String,
+
+    // ── AirVPN-only fields ──────────────────────────────────────────
+    // AirVPN's API does NOT mint client credentials. The user pastes a
+    // config from AirVPN's Config Generator (once) and supplies an API
+    // key (which powers the server list / No-Eyes / pick-fastest).
+    /// AirVPN API key (member area → Client Area → API).
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// AirVPN connection mode: "wireguard" | "openvpn" | "openvpn_ssl"
+    /// | "openvpn_ssh". The last two are the stealth/obfuscation modes.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Pasted AirVPN WireGuard config (Config Generator → WireGuard).
+    #[serde(default)]
+    pub wg_config: Option<String>,
+    /// Pasted AirVPN OpenVPN bundle (.ovpn; certs inline). Used by the
+    /// openvpn / openvpn_ssl / openvpn_ssh modes.
+    #[serde(default)]
+    pub openvpn_config: Option<String>,
 }
 fn default_device_name() -> String { "aeon-magick".into() }
 
@@ -59,7 +80,9 @@ pub async fn setup(
     Json(req): Json<SetupReq>,
 ) -> impl IntoResponse {
     let cred = req.credential.trim();
-    if cred.is_empty() {
+    // AirVPN authenticates via api_key + a pasted config, not a single
+    // credential — so don't reject an empty `credential` for it.
+    if cred.is_empty() && provider != "airvpn" {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "err": "credential is empty"})),
@@ -77,6 +100,11 @@ pub async fn setup(
     let cred = cred.to_string();
     let device_name = req.device_name.clone();
     let trust = meta.trust_score;
+    // AirVPN setup inputs (moved into the closure below).
+    let av_api_key = req.api_key.clone();
+    let av_mode = req.mode.clone();
+    let av_wg_config = req.wg_config.clone();
+    let av_ovpn_config = req.openvpn_config.clone();
     let blocking = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         // Generate a fresh WG keypair for this device.
         let (priv_key, pub_key) = super::generate_wg_keypair()?;
@@ -228,6 +256,38 @@ pub async fn setup(
                 azirevpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
                 Ok(json!({"ok": true, "server_count": servers.len(), "peer_ipv4": s.peer_ipv4}))
             }
+            "airvpn" => {
+                // v77: AirVPN setup just stores the API key + fetches the
+                // server list (which also validates the key). Per-mode configs
+                // are pulled on demand from AirVPN's generator via the separate
+                // /generate endpoint (no manual paste) — see airvpn::generate_package.
+                let _ = (&av_wg_config, &av_ovpn_config); // legacy paste fields, unused now
+                let mut s = airvpn::read_state();
+                if let Some(k) = av_api_key.as_deref() {
+                    let k = k.trim();
+                    if !k.is_empty() { s.api_key = k.to_string(); }
+                }
+                if s.api_key.is_empty() {
+                    return Err("AirVPN needs an API key (member area → Client Area → API)".into());
+                }
+                if let Some(m) = av_mode.as_deref() {
+                    let m = m.trim();
+                    if !m.is_empty() { s.mode = m.to_string(); }
+                }
+                let servers = airvpn::fetch_servers(&s.api_key, &s.wg_public_key, s.wg_port, trust)?;
+                if !servers.iter().any(|sv| sv.id == s.selected_server) {
+                    s.selected_server = String::new();
+                }
+                s.servers = servers.clone();
+                s.servers_updated_ms = now_ms();
+                if s.selection_mode.is_empty() { s.selection_mode = "manual".into(); }
+                airvpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
+                Ok(json!({
+                    "ok": true,
+                    "server_count": servers.len(),
+                    "mode": s.mode,
+                }))
+            }
             _ => Err(format!("unknown provider '{provider_id}'")),
         }
     }).await;
@@ -298,6 +358,26 @@ pub async fn get_state(
                 "ok": true,
                 "configured": !s.api_token.is_empty(),
                 "peer_ipv4": s.peer_ipv4,
+                "selected_server": s.selected_server,
+                "selection_mode": s.selection_mode,
+                "servers": s.servers,
+                "servers_updated_ms": s.servers_updated_ms,
+                "meta": meta,
+            })
+        }
+        "airvpn" => {
+            let s = airvpn::read_state();
+            // v77: "configured" = key present AND the ACTIVE mode has a
+            // generated package. `generated` lists every mode that's been
+            // auto-pulled (so the UI can show per-mode readiness). Secrets are
+            // never echoed — only presence + the non-secret generated metadata.
+            let configured = !s.api_key.is_empty() && s.generated.contains_key(&s.mode);
+            json!({
+                "ok": true,
+                "configured": configured,
+                "mode": s.mode,
+                "has_api_key": !s.api_key.is_empty(),
+                "generated": s.generated,
                 "selected_server": s.selected_server,
                 "selection_mode": s.selection_mode,
                 "servers": s.servers,
@@ -378,6 +458,23 @@ pub async fn select(
             }
             Json(json!({"ok": true, "selected_server": s.selected_server})).into_response()
         }
+        "airvpn" => {
+            let mut s = airvpn::read_state();
+            if let Some(id) = req.server_id {
+                if !s.servers.iter().any(|sv| sv.id == id) {
+                    return (StatusCode::BAD_REQUEST,
+                        Json(json!({"ok": false, "err": format!("server '{id}' not in cache")}))
+                    ).into_response();
+                }
+                s.selected_server = id;
+            }
+            if let Some(m) = req.mode { s.selection_mode = m; }
+            if let Err(e) = airvpn::write_state(&s) {
+                return (StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"ok": false, "err": format!("persist: {e}")}))).into_response();
+            }
+            Json(json!({"ok": true, "selected_server": s.selected_server})).into_response()
+        }
         _ => unknown_provider(&provider),
     }
 }
@@ -388,22 +485,43 @@ pub async fn select(
 // the list sorted by RTT. The supervisor doesn't auto-apply the
 // result — the UI shows the ranking and lets the user pick.
 
+/// Query params for pick-fastest. `eyes=none` restricts the probe pool to
+/// servers OUTSIDE the 5/9/14-Eyes alliances ("No Eyes" / privacy-max).
+#[derive(Deserialize, Default)]
+pub struct PickFastestParams {
+    pub eyes: Option<String>,
+}
+
 pub async fn pick_fastest(
     State(_state): State<AppState>,
     Path(provider): Path<String>,
+    Query(params): Query<PickFastestParams>,
 ) -> impl IntoResponse {
     if provider_meta(&provider).is_none() {
         return unknown_provider(&provider);
     }
-    let servers: Vec<crate::vpn_providers::Server> = match provider.as_str() {
+    let mut servers: Vec<crate::vpn_providers::Server> = match provider.as_str() {
         "mullvad" => mullvad::read_state().servers,
         "ivpn"    => ivpn::read_state().servers,
         "azirevpn" => azirevpn::read_state().servers,
+        "airvpn"  => airvpn::read_state().servers,
         _ => return unknown_provider(&provider),
     };
     if servers.is_empty() {
         return (StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "err": "no servers in cache — finish setup first"}))).into_response();
+    }
+    // v76: "No Eyes" filter — restrict the latency probe to servers in
+    // countries OUTSIDE the 5/9/14-Eyes intelligence-sharing alliances.
+    let no_eyes = params.eyes.as_deref() == Some("none");
+    if no_eyes {
+        servers.retain(|s| s.eyes == EyesTier::None);
+        if servers.is_empty() {
+            return Json(json!({
+                "ok": true, "no_eyes": true, "ranking": [],
+                "note": "this provider has no servers outside the 14-Eyes alliances"
+            })).into_response();
+        }
     }
     // ICMP-ping each endpoint, concurrently. WireGuard endpoints are UDP-only,
     // so the previous TCP connect to endpoint_port (2049) ALWAYS failed and
@@ -421,6 +539,7 @@ pub async fn pick_fastest(
                 "city": s.city,
                 "rtt_ms": rtt_ms,
                 "server_score": s.server_score,
+                "eyes": s.eyes.as_str(),
             })
         });
     }
@@ -432,7 +551,7 @@ pub async fn pick_fastest(
     }
     // Sort: reachable first (lowest rtt_ms), unreachable (None → MAX) last.
     v.sort_by_key(|e| e.get("rtt_ms").and_then(|x| x.as_u64()).unwrap_or(u64::MAX));
-    Json(json!({"ok": true, "ranking": v})).into_response()
+    Json(json!({"ok": true, "no_eyes": no_eyes, "ranking": v})).into_response()
 }
 
 /// ICMP round-trip to `ip` (1 packet, 1s deadline) in ms, or None if the host
@@ -524,6 +643,21 @@ pub async fn refresh_servers(
                 azirevpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
                 Ok(n)
             }
+            "airvpn" => {
+                let mut s = airvpn::read_state();
+                if s.api_key.is_empty() {
+                    return Err("not configured — run setup first".into());
+                }
+                let servers = airvpn::fetch_servers(&s.api_key, &s.wg_public_key, s.wg_port, trust)?;
+                if !servers.iter().any(|sv| sv.id == s.selected_server) {
+                    s.selected_server = String::new();
+                }
+                let n = servers.len();
+                s.servers = servers;
+                s.servers_updated_ms = now_ms();
+                airvpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
+                Ok(n)
+            }
             _ => Err(format!("unknown provider '{pid}'")),
         }
     })
@@ -533,6 +667,82 @@ pub async fn refresh_servers(
             crate::audit::log("admin (session)", "vpn_provider_refresh",
                 &format!("provider={provider}"), "ok", None);
             Json(json!({"ok": true, "server_count": n})).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY,
+            Json(json!({"ok": false, "err": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "err": format!("join: {e}")}))).into_response(),
+    }
+}
+
+// ── POST /api/network/vpn/providers/airvpn/generate ─────────────────
+//
+// v77: AirVPN-only. Auto-pull the ready-to-run config package for a given
+// (server, mode) straight from AirVPN's generator (download=zip) and store it
+// under /etc/aeon/vpn-secrets/airvpn/<mode>/. Each mode is generated + stored
+// independently, so the user can have WireGuard + OpenVPN + SSL + SSH all set
+// up and switch freely. No manual paste; SSL/SSH ship with AirVPN's genuine
+// stunnel/ssh configs + keys, so net-services runs them verbatim.
+
+#[derive(Deserialize)]
+pub struct GenerateReq {
+    /// "wireguard" | "openvpn" | "openvpn_ssl" | "openvpn_ssh".
+    pub mode: String,
+    /// Server public_name. Defaults to the currently-selected server.
+    #[serde(default)]
+    pub server_id: Option<String>,
+}
+
+pub async fn generate(
+    State(_state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(req): Json<GenerateReq>,
+) -> impl IntoResponse {
+    if provider != "airvpn" {
+        return (StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "err": "config generation is AirVPN-only"}))).into_response();
+    }
+    let mode = req.mode.trim().to_string();
+    let mode_for_log = mode.clone();
+    let server_req = req.server_id.clone();
+    let blocking = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let mut s = airvpn::read_state();
+        if s.api_key.is_empty() {
+            return Err("not configured — add your AirVPN API key first".into());
+        }
+        // Use the requested server, else the currently-selected one.
+        let server_id = server_req
+            .as_deref()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .or_else(|| (!s.selected_server.is_empty()).then(|| s.selected_server.clone()))
+            .ok_or_else(|| "no server selected — pick one first".to_string())?;
+        let label = s.servers.iter()
+            .find(|sv| sv.id == server_id)
+            .map(|sv| sv.label.clone())
+            .ok_or_else(|| format!("server '{server_id}' not in cache — refresh the server list"))?;
+
+        let files = airvpn::generate_package(&s.api_key, &server_id, &mode)?;
+        let names = airvpn::store_package(&mode, &files).map_err(|e| format!("store package: {e}"))?;
+
+        s.generated.insert(mode.clone(), airvpn::GeneratedInfo {
+            server: server_id.clone(),
+            server_label: label,
+            generated_ms: now_ms(),
+            files: names.clone(),
+        });
+        // Make the just-generated mode + server active.
+        s.mode = mode.clone();
+        s.selected_server = server_id.clone();
+        airvpn::write_state(&s).map_err(|e| format!("persist: {e}"))?;
+        Ok(json!({"ok": true, "mode": mode, "server": server_id, "files": names}))
+    }).await;
+
+    match blocking {
+        Ok(Ok(v)) => {
+            crate::audit::log("admin (session)", "vpn_airvpn_generate",
+                &format!("mode={mode_for_log}"), "ok", None);
+            Json(v).into_response()
         }
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY,
             Json(json!({"ok": false, "err": e}))).into_response(),

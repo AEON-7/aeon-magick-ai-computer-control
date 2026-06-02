@@ -207,6 +207,10 @@ pub fn build_router(cfg: Config) -> Router {
             post(crate::vpn_providers::api::pick_fastest))
         .route("/network/vpn/providers/:id/refresh",
             post(crate::vpn_providers::api::refresh_servers))
+        // v77: AirVPN-only — auto-pull a mode's config package from AirVPN's
+        // generator (download=zip) and store it per-mode. No manual paste.
+        .route("/network/vpn/providers/:id/generate",
+            post(crate::vpn_providers::api::generate))
         // WiFi management — scan, connect, current state. Used by the
         // /setup-wifi captive-portal page during AP-fallback mode and
         // by the authenticated /wifi panel for ongoing management.

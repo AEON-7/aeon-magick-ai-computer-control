@@ -21,6 +21,7 @@
     mullvad: '#ffd524',
     ivpn: '#4a78e0',
     azirevpn: '#2f6fe0',
+    airvpn: '#16a085',
   };
   $: bg = BG[provider] ?? '#6b7280';
 </script>
@@ -61,6 +62,14 @@
       d="M16 7 L24 25 H20.3 L18.7 21 H13.3 L11.7 25 H8 Z M14.4 18 H17.6 L16 13.8 Z"
       fill="#ffffff"
     />
+  {:else if provider === 'airvpn'}
+    <!-- teal rounded tile + flat cloud over "air" wind lines -->
+    <rect x="1" y="1" width="30" height="30" rx="7" fill={bg} />
+    <circle cx="13" cy="15" r="4.6" fill="#ffffff" />
+    <circle cx="18.5" cy="15.5" r="3.6" fill="#ffffff" />
+    <rect x="11" y="15" width="10.5" height="4.6" rx="2.3" fill="#ffffff" />
+    <rect x="9.5" y="22" width="13" height="1.6" rx="0.8" fill="#ffffff" opacity="0.9" />
+    <rect x="12.5" y="25" width="8" height="1.4" rx="0.7" fill="#ffffff" opacity="0.65" />
   {:else}
     <!-- fallback generic VPN tile -->
     <rect x="1" y="1" width="30" height="30" rx="7" fill={bg} />

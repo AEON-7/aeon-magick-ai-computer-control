@@ -25,6 +25,8 @@ apt-get install -y --no-install-recommends \
     hostapd \
     wireguard-tools \
     openvpn \
+    stunnel4 \
+    autossh \
     tor \
     obfs4proxy \
     i2pd

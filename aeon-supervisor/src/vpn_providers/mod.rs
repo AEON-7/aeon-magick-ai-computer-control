@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 pub mod mullvad;
 pub mod ivpn;
 pub mod azirevpn;
+pub mod airvpn;
 pub mod api;
 
 /// Eyes-alliance tier for the country a server runs in. Reuses the
@@ -34,6 +35,20 @@ pub enum EyesTier {
     Nine,
     Fourteen,
     Unknown,
+}
+
+impl EyesTier {
+    /// Stable lowercase tag matching the serde representation — handy for
+    /// embedding in hand-built json! values (e.g. the pick-fastest ranking).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EyesTier::None => "none",
+            EyesTier::Five => "five",
+            EyesTier::Nine => "nine",
+            EyesTier::Fourteen => "fourteen",
+            EyesTier::Unknown => "unknown",
+        }
+    }
 }
 
 /// A single VPN endpoint as exposed by the provider's server-list API.
@@ -107,6 +122,21 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         trust_score: 5,
         website: "https://www.ivpn.net/",
         notes: "Gibraltar HQ keeps it outside major intelligence-sharing pacts. Audited code + infra. Smaller server fleet than Mullvad.",
+    },
+    ProviderMeta {
+        id: "airvpn",
+        label: "AirVPN",
+        headquarters_country: "IT",      // Italy
+        headquarters_eyes: EyesTier::Fourteen,
+        audited: false,
+        last_audit_year: None,
+        last_audit_firm: None,
+        anonymous_signup: false,         // email required at signup
+        accepts_cash: false,
+        accepts_crypto: true,            // BTC / Monero / vouchers
+        trust_score: 4,
+        website: "https://airvpn.org/",
+        notes: "Activist-run (Italy, 14-Eyes HQ); crypto/voucher payment, no formal third-party audit. Uniquely Tor-friendly: native OpenVPN-over-SSL (stunnel) and OpenVPN-over-SSH to defeat DPI/blocking. WireGuard shares one network-wide server key — switch servers by endpoint. Config comes from AirVPN's Config Generator (paste once); the API key drives the server list.",
     },
     // AzireVPN removed (v67.9): acquired, trust dropped, and crucially
     // it does NOT take crypto — a hard misfit for the at-risk-user /

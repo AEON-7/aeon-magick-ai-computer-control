@@ -15,7 +15,29 @@
   import * as api from '$lib/api';
   import VpnLogo from '$lib/components/VpnLogo.svelte';
 
-  const PROVIDER_IDS = ['mullvad', 'ivpn'];
+  const PROVIDER_IDS = ['mullvad', 'ivpn', 'airvpn'];
+
+  // AirVPN connection modes. The two "stealth" modes are the headline
+  // feature: they disguise the VPN so a network/ISP can't tell it's a VPN.
+  // The `note` text is shown verbatim under each toggle.
+  const AIRVPN_MODES = [
+    { id: 'wireguard',   label: 'WireGuard',          badge: 'recommended', badgeClass: 'bg-live-500/15 text-live-300',
+      note: 'Fastest, most modern. Best for everyday use. AirVPN shares one key network-wide, so you can hop servers instantly.' },
+    { id: 'openvpn',     label: 'OpenVPN',            badge: 'compatible',  badgeClass: 'bg-zinc-500/15 text-zinc-300',
+      note: 'Classic OpenVPN. More compatible with locked-down networks; on TCP port 443 it already loosely resembles HTTPS.' },
+    { id: 'openvpn_ssl', label: 'OpenVPN over SSL',   badge: 'stealth',     badgeClass: 'bg-cursed-500/20 text-cursed-200',
+      note: 'Stealth — wraps the tunnel in TLS so on the wire it looks like ordinary HTTPS web-browsing traffic. Defeats most VPN-blocking and deep-packet inspection.' },
+    { id: 'openvpn_ssh', label: 'OpenVPN over SSH',   badge: 'stealth',     badgeClass: 'bg-cursed-500/20 text-cursed-200',
+      note: 'Stealth — carries the tunnel inside an SSH connection so it looks like a normal remote-management shell session.' },
+  ];
+
+  // "Get <provider>" sign-up links. AirVPN uses our referral link (supports
+  // the project at no cost to you); Mullvad + IVPN have no referral program.
+  const SIGNUP_URLS: Record<string, string> = {
+    airvpn: 'https://airvpn.org/?referred_by=832389',
+    mullvad: 'https://mullvad.net/',
+    ivpn: 'https://www.ivpn.net',
+  };
 
   // v66: which provider tab is showing. Defaults to mullvad, but the
   // deep-link from /network ("open setup wizard →" on the IVPN/Azire
@@ -35,6 +57,7 @@
     error = '';
     msg = '';
     credentialInput = '';
+    airvpnApiKey = '';
     forceResetup = false;
     if (pushUrl && typeof window !== 'undefined') {
       const url = new URL(window.location.href);
@@ -45,6 +68,15 @@
   let catalog: any[] = [];
   let states: Record<string, any> = {};
   let credentialInput = '';
+  // AirVPN setup inputs (it uses an API key + a pasted config, not a
+  // single credential like the account-based providers).
+  let airvpnMode = 'wireguard';
+  let airvpnApiKey = '';
+  // v77: AirVPN is "ready" once the API key is saved (server list fetched);
+  // from there the user picks a server + mode and we auto-generate. Other
+  // providers gate on full `configured`.
+  $: airvpnReady = active === 'airvpn' ? !!state?.has_api_key : !!state?.configured;
+  $: airvpnGenerated = (state?.generated ?? {}) as Record<string, any>;
   // v74: when a provider is already configured, this reveals the setup form
   // again so the user can change the account ID / re-submit (switched to a new
   // account, or re-running setup to repair a broken session).
@@ -95,9 +127,26 @@
   );
 
   async function runSetup() {
-    if (!credentialInput.trim()) {
-      error = 'paste your account number / token first';
-      return;
+    // Build the per-provider setup body. AirVPN is the odd one out: it
+    // doesn't mint credentials. Setup just stores the API key + fetches the
+    // server list — the actual configs are auto-pulled per mode from AirVPN's
+    // generator (generateConfig below), so there's no manual paste anywhere.
+    let body: any;
+    if (active === 'airvpn') {
+      if (!airvpnApiKey.trim()) {
+        error = 'paste your AirVPN API key first (member area → Client Area → API)';
+        return;
+      }
+      body = { api_key: airvpnApiKey.trim() };
+    } else {
+      if (!credentialInput.trim()) {
+        error = 'paste your account number / token first';
+        return;
+      }
+      body = {
+        credential: credentialInput.trim(),
+        device_name: deviceName.trim() || 'aeon-magick',
+      };
     }
     busy = true;
     error = '';
@@ -106,13 +155,13 @@
       const r = await fetch(`/api/network/vpn/providers/${active}/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          credential: credentialInput.trim(),
-          device_name: deviceName.trim() || 'aeon-magick',
-        }),
+        body: JSON.stringify(body),
       }).then(r => r.json());
       if (r.ok) {
-        msg = `✓ setup complete — ${r.server_count} servers in catalog, peer IP ${r.peer_ipv4}`;
+        const ip = r.peer_ipv4 ? `, peer IP ${r.peer_ipv4}` : '';
+        msg = active === 'airvpn'
+          ? `✓ API key saved — ${r.server_count} servers. Now pick a server + mode below and generate.`
+          : `✓ setup complete — ${r.server_count} servers in catalog${ip}`;
         credentialInput = '';
         forceResetup = false;
         await refresh();
@@ -121,6 +170,36 @@
       }
     } catch (e: any) {
       error = e?.message ?? 'setup failed';
+    } finally {
+      busy = false;
+    }
+  }
+
+  // v77: auto-pull a mode's config package from AirVPN's generator for the
+  // selected server. Each mode is generated + stored independently, so you can
+  // set up WireGuard + OpenVPN + SSL + SSH and switch freely on /network.
+  async function generateConfig(mode: string) {
+    if (!state?.selected_server) { error = 'pick a server first'; return; }
+    busy = true;
+    error = '';
+    msg = `generating ${mode} config for ${state.selected_server}…`;
+    try {
+      const r = await fetch('/api/network/vpn/providers/airvpn/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, server_id: state.selected_server }),
+      }).then(r => r.json());
+      if (r.ok) {
+        airvpnMode = mode;
+        msg = `✓ ${mode} generated for ${r.server} (${r.files?.length ?? 0} files) — select AirVPN on /network to apply`;
+        await refresh();
+      } else {
+        error = `generate failed: ${r.err}`;
+        msg = '';
+      }
+    } catch (e: any) {
+      error = e?.message ?? 'generate failed';
+      msg = '';
     } finally {
       busy = false;
     }
@@ -173,18 +252,21 @@
     }
   }
 
-  async function pickFastest() {
+  async function pickFastest(noEyes = false) {
     busy = true;
     error = '';
-    msg = 'probing servers (may take ~10s)…';
+    msg = noEyes ? 'probing No-Eyes servers (may take ~10s)…' : 'probing servers (may take ~10s)…';
     try {
-      const r = await fetch(`/api/network/vpn/providers/${active}/pick-fastest`, {
-        method: 'POST',
-      }).then(r => r.json());
+      const url = `/api/network/vpn/providers/${active}/pick-fastest${noEyes ? '?eyes=none' : ''}`;
+      const r = await fetch(url, { method: 'POST' }).then(r => r.json());
       if (r.ok) {
         ranking = r.ranking;
         const reachable = ranking.filter((x: any) => x.rtt_ms !== null);
-        msg = `✓ probed ${ranking.length} servers, ${reachable.length} reachable`;
+        if (noEyes && ranking.length === 0) {
+          msg = '✗ this provider has no servers outside the 14-Eyes alliances';
+        } else {
+          msg = `✓ probed ${ranking.length}${noEyes ? ' No-Eyes' : ''} servers, ${reachable.length} reachable`;
+        }
       } else {
         error = `probe failed: ${r.err}`;
       }
@@ -271,6 +353,22 @@
             </div>
           </header>
           <p class="text-xs text-zinc-500 leading-relaxed">{meta.notes}</p>
+          <div class="flex items-center gap-2 flex-wrap">
+            <a class="inline-flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded
+                      border border-cursed-500/50 text-cursed-200
+                      hover:bg-cursed-500/10 transition-colors"
+               href={SIGNUP_URLS[active] ?? meta.website} target="_blank" rel="noreferrer">
+              Get {meta.label} →
+            </a>
+            <span class="text-[10px] text-zinc-600">
+              No account yet? Sign up, then run the setup below.
+              {#if active === 'airvpn'}
+                <span class="text-cursed-300/70">(referral link — supports this project)</span>
+              {:else}
+                <span class="text-zinc-700">(direct link — not a referral)</span>
+              {/if}
+            </span>
+          </div>
           <div class="flex gap-3 text-[10px] text-zinc-600 pt-1 border-t border-ink-800">
             {#if meta.anonymous_signup}<span>✓ anonymous signup</span>{:else}<span>email required</span>{/if}
             {#if meta.accepts_cash}<span>✓ cash payments</span>{/if}
@@ -282,7 +380,7 @@
           </div>
         </section>
 
-        {#if !state?.configured || forceResetup}
+        {#if !airvpnReady || forceResetup}
           <!-- Setup wizard. Also reachable when already configured via the
                "change account" button (forceResetup) — for switching to a new
                account or repairing a stuck session. -->
@@ -293,7 +391,12 @@
                   {state?.configured ? 'Change account / re-run setup' : 'Setup'}
                 </h2>
                 <p class="text-xs text-zinc-500">
-                  {#if state?.configured}
+                  {#if active === 'airvpn'}
+                    Paste your AirVPN API key (member area → Client Area → API). We
+                    fetch the server list — then you pick a server + mode below and the
+                    Pi <strong>auto-generates</strong> the config straight from AirVPN
+                    (WireGuard / OpenVPN / SSL / SSH). No manual download or paste.
+                  {:else if state?.configured}
                     Submitting an account ID (a new one, or the same) registers a
                     fresh WireGuard key + session and re-fetches the server list —
                     use this for a new {meta.label} account or to repair a stuck
@@ -312,24 +415,40 @@
               {/if}
             </header>
             <div class="space-y-2">
-              <input type="password" bind:value={credentialInput}
-                     placeholder={credentialPlaceholder(active)}
-                     class="w-full bg-ink-800 border border-ink-700 rounded
-                            px-3 py-2 text-sm text-zinc-200 font-mono" />
-              {#if active === 'azirevpn'}
-                <p class="text-[11px] text-amber-300/80 leading-relaxed">
-                  This is your <strong>API token</strong> — <em>not</em> your account ID.
-                  While signed in to AzireVPN, create one at
-                  <a class="underline hover:text-amber-200"
-                     href="https://manager.azirevpn.com/account/token"
-                     target="_blank" rel="noopener"
-                     >manager.azirevpn.com/account/token</a>.
+              {#if active === 'airvpn'}
+                <!-- AirVPN: just the API key. Server pick + per-mode auto-generate
+                     happen in the picker view once the key is saved. -->
+                <p class="text-[11px] uppercase tracking-wider text-zinc-400">AirVPN API key</p>
+                <input type="password" bind:value={airvpnApiKey}
+                       placeholder={state?.has_api_key ? '•••••••• (stored — paste again to change)' : 'AirVPN API key (64-char)'}
+                       class="w-full bg-ink-800 border border-ink-700 rounded
+                              px-3 py-2 text-sm text-zinc-200 font-mono" />
+                <p class="text-[10px] text-zinc-600 leading-relaxed">
+                  Get it at
+                  <a class="underline hover:text-cursed-200" href="https://airvpn.org/apisettings/"
+                     target="_blank" rel="noopener">airvpn.org → API settings</a>.
+                  After saving, pick a server + connection mode and we auto-generate the config.
                 </p>
+              {:else}
+                <input type="password" bind:value={credentialInput}
+                       placeholder={credentialPlaceholder(active)}
+                       class="w-full bg-ink-800 border border-ink-700 rounded
+                              px-3 py-2 text-sm text-zinc-200 font-mono" />
+                {#if active === 'azirevpn'}
+                  <p class="text-[11px] text-amber-300/80 leading-relaxed">
+                    This is your <strong>API token</strong> — <em>not</em> your account ID.
+                    While signed in to AzireVPN, create one at
+                    <a class="underline hover:text-amber-200"
+                       href="https://manager.azirevpn.com/account/token"
+                       target="_blank" rel="noopener"
+                       >manager.azirevpn.com/account/token</a>.
+                  </p>
+                {/if}
+                <input type="text" bind:value={deviceName}
+                       placeholder="device name (default: aeon-magick)"
+                       class="w-full bg-ink-800 border border-ink-700 rounded
+                              px-3 py-2 text-sm text-zinc-200 font-mono" />
               {/if}
-              <input type="text" bind:value={deviceName}
-                     placeholder="device name (default: aeon-magick)"
-                     class="w-full bg-ink-800 border border-ink-700 rounded
-                            px-3 py-2 text-sm text-zinc-200 font-mono" />
               <button class="btn-primary text-sm" disabled={busy}
                       on:click={runSetup}>
                 {busy ? 'setting up…' : 'Validate + fetch servers'}
@@ -345,7 +464,11 @@
               </h2>
               <div class="flex items-center gap-3">
                 <p class="text-[10px] text-zinc-500 font-mono">
-                  peer IP {state.peer_ipv4} · {servers.length} servers cached
+                  {#if active === 'airvpn' && state.mode && state.mode !== 'wireguard'}
+                    mode {state.mode} · {servers.length} servers cached
+                  {:else}
+                    {#if state.peer_ipv4}peer IP {state.peer_ipv4} · {/if}{servers.length} servers cached
+                  {/if}
                 </p>
                 <button class="btn text-xs"
                         on:click={() => { forceResetup = true; error = ''; msg = ''; }}
@@ -366,8 +489,13 @@
                 ⟳ refresh server list
               </button>
               <button class="btn-primary text-xs" disabled={busy}
-                      on:click={pickFastest}>
+                      on:click={() => pickFastest(false)}>
                 {busy ? 'probing…' : 'pick fastest now'}
+              </button>
+              <button class="btn text-xs" disabled={busy}
+                      on:click={() => pickFastest(true)}
+                      title="Probe + rank only servers in countries OUTSIDE the 5/9/14-Eyes intelligence-sharing alliances">
+                {busy ? 'probing…' : '🛡 fastest · No Eyes'}
               </button>
             </div>
 
@@ -420,13 +548,56 @@
             </div>
 
             <p class="text-[11px] text-zinc-500 leading-relaxed pt-2 border-t border-ink-800">
-              After picking a server, head to <a href="/network" class="text-cursed-300 hover:underline">/network</a>,
-              select <code class="text-cursed-300">{active}</code> as the
-              VPN provider, and save. The supervisor will render the
-              WireGuard config from the chosen server and bring up
-              wg-quick@aeon0.
+              {#if active === 'airvpn'}
+                Pick a server above, then generate a connection mode below. Each mode
+                is stored independently — switch any time on
+                <a href="/network" class="text-cursed-300 hover:underline">/network</a>.
+              {:else}
+                After picking a server, head to <a href="/network" class="text-cursed-300 hover:underline">/network</a>,
+                select <code class="text-cursed-300">{active}</code> as the VPN provider, and save.
+                The supervisor renders the WireGuard config from the chosen server and
+                brings up wg-quick@aeon0.
+              {/if}
             </p>
           </section>
+
+          {#if active === 'airvpn'}
+            <!-- v77: per-mode auto-generate. Each mode is pulled from AirVPN's
+                 generator + stored independently, so all four can be set up. -->
+            <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+              <header class="space-y-1">
+                <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Connection mode</h2>
+                <p class="text-xs text-zinc-500">
+                  Generate the config for any mode — it's auto-pulled from AirVPN for your
+                  selected server and stored on the Pi. The <strong>active</strong> mode
+                  is what applies when you select AirVPN on /network.
+                </p>
+              </header>
+              {#if !state.selected_server}
+                <p class="text-[11px] text-amber-300/80">⤴ Pick a server above first.</p>
+              {/if}
+              <div class="space-y-2">
+                {#each AIRVPN_MODES as m}
+                  {@const g = airvpnGenerated[m.id]}
+                  <div class="p-3 rounded border {state.mode === m.id
+                                ? 'border-cursed-500 bg-cursed-500/10'
+                                : 'border-ink-700 bg-ink-800'}">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="text-sm text-zinc-200 font-mono">{m.label}</span>
+                      <span class="text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wide {m.badgeClass}">{m.badge}</span>
+                      {#if g}<span class="text-[10px] text-live-300" title={g.server}>✓ generated · {g.server_label || g.server}</span>{/if}
+                      {#if state.mode === m.id && g}<span class="text-[10px] text-cursed-300 font-mono">active</span>{/if}
+                      <button class="btn text-xs ml-auto" disabled={busy || !state.selected_server}
+                              on:click={() => generateConfig(m.id)}>
+                        {busy ? '…' : (g ? '↻ re-generate' : '⚡ generate')}
+                      </button>
+                    </div>
+                    <p class="text-[11px] text-zinc-500 leading-snug mt-1">{m.note}</p>
+                  </div>
+                {/each}
+              </div>
+            </section>
+          {/if}
         {/if}
       {/if}
     </div>

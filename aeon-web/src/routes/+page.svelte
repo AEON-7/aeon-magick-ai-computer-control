@@ -157,6 +157,12 @@
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
+    // Wheel MUST be a non-passive window listener: window wheel listeners are
+    // passive-by-default (browser intervention), and only a non-passive one
+    // lets onWheel.preventDefault() stop the local page from scrolling while it
+    // forwards the scroll to the target. Window scope (not the canvas) means it
+    // also works in captured mode when the cursor isn't over the canvas.
+    window.addEventListener('wheel', onWheel, { passive: false });
     document.addEventListener('pointerlockchange', onPointerLockChange);
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('webkitfullscreenchange', onFullscreenChange);
@@ -173,6 +179,7 @@
     document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKey);
+    window.removeEventListener('wheel', onWheel);
     document.removeEventListener('pointerlockchange', onPointerLockChange);
     document.removeEventListener('fullscreenchange', onFullscreenChange);
     document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
@@ -339,14 +346,25 @@
   }
 
   function onWheel(ev: WheelEvent) {
-    // Forward wheel events from anywhere on the canvas. The target's
-    // cursor has already been synced to our position by onMouseMove
-    // (in casual mode) or pointer-lock movementX/Y (in captured mode),
-    // so scrolling scrolls under wherever you're hovering — no need to
-    // click-into-center first.
+    // Forward wheel / two-finger-scroll to the TARGET. This is a window-level
+    // listener registered {passive:false} in onMount — mirroring onKey — for
+    // two reasons:
+    //   1. In captured mode EVERY wheel event must reach the target no matter
+    //      where the OS cursor sits (Safari's pointer-lock is flaky and may
+    //      leave the cursor free), exactly like keystrokes do.
+    //   2. preventDefault() only stops the local page from scrolling /
+    //      rubber-banding when the listener is NON-passive. The previous
+    //      on:wheel binding was passive-by-default, so the scroll leaked to
+    //      the local browser (the reported "Aeon Magick UI bounces, target
+    //      doesn't scroll" bug).
+    // When NOT captured we only hijack the wheel while it's over the video
+    // canvas, so the rest of the Aeon Magick page scrolls normally.
+    const overCanvas = !!canvas &&
+      (ev.target === canvas || canvas.contains(ev.target as Node));
+    if (!captured && !overCanvas) return;
     ev.preventDefault();
     const dy = -Math.sign(ev.deltaY) * 3;
-    api.scroll(dy).catch(console.warn);
+    if (dy !== 0) api.scroll(dy).catch(console.warn);
   }
 
   // ── Touch input mapping (iPhone / iPad / Android) ─────────────────────
@@ -518,6 +536,19 @@
     // runs. The standards API event fires only for the real path.
     fullscreen = real || pseudoFullscreen;
     if (!real && !pseudoFullscreen) hideKeyboard();
+    // Desktop: tie input capture to fullscreen. Entering fullscreen on a
+    // pointer device auto-captures (pointer-lock + keyboard-lock) so the
+    // user's mouse + keystrokes drive the target immediately — no separate
+    // "Capture" click. Requesting pointer-lock HERE (after the fullscreen
+    // transition completes) rather than in enterFullscreen avoids the
+    // "pointer lock while transitioning" rejection, and the event still
+    // carries the user-gesture activation from the fullscreen click.
+    // Touch devices opt out — there's no pointer to lock; they use the
+    // touch-mapping + on-screen-keyboard flow instead.
+    if (!isTouchDevice) {
+      if (real && !captured) enterCapture();
+      else if (!real && captured) exitCapture();
+    }
   }
 
   // ── On-screen keyboard bridge (iOS / Android) ─────────────────────────
@@ -982,7 +1013,6 @@
       on:mouseup={onMouseUp}
       on:mouseenter={onMouseEnter}
       on:mouseleave={onMouseLeave}
-      on:wheel={onWheel}
       on:touchstart={onTouchStart}
       on:touchmove={onTouchMove}
       on:touchend={onTouchEnd}

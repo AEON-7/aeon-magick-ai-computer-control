@@ -156,11 +156,13 @@
     mullvad: false,
     ivpn: false,
     azirevpn: false,
+    airvpn: false,
   };
   let wizardProviderServer: Record<string, string> = {
     mullvad: '',
     ivpn: '',
     azirevpn: '',
+    airvpn: '',
   };
   // v74: cached server list per provider (from the /state endpoint) so the
   // VPN section can offer an INLINE server picker + "pick fastest" once a
@@ -169,6 +171,7 @@
     mullvad: [],
     ivpn: [],
     azirevpn: [],
+    airvpn: [],
   };
   let serverBusy = ''; // provider id currently selecting/probing
   let fastestMsg = '';
@@ -269,6 +272,7 @@
         case 'mullvad': return 'Mullvad VPN';
         case 'ivpn': return 'IVPN';
         case 'azirevpn': return 'AzireVPN';
+        case 'airvpn': return 'AirVPN';
         case 'tailscale': return 'Tailscale';
         case 'wireguard': return 'WireGuard';
         case 'openvpn': return 'OpenVPN';
@@ -281,6 +285,7 @@
       case 'mullvad': return 'Mullvad VPN';
       case 'ivpn': return 'IVPN';
       case 'azirevpn': return 'AzireVPN';
+      case 'airvpn': return 'AirVPN';
       case 'tailscale': return 'Tailscale';
       case 'wireguard': return 'WireGuard';
       case 'openvpn': return 'OpenVPN';
@@ -490,7 +495,7 @@
       // active — we hit all three so toggling the radio doesn't need
       // an extra round-trip. Cheap; the state files are tiny.
       await Promise.all(
-        ['mullvad', 'ivpn', 'azirevpn'].map(async (id) => {
+        ['mullvad', 'ivpn', 'azirevpn', 'airvpn'].map(async (id) => {
           try {
             const r = await fetch(
               `/api/network/vpn/providers/${id}/state`,
@@ -545,17 +550,21 @@
     }
   }
 
-  async function pickFastestVpnServer(id: string) {
+  async function pickFastestVpnServer(id: string, noEyes = false) {
     serverBusy = id;
-    fastestMsg = 'probing latency to each server…';
+    fastestMsg = noEyes
+      ? 'probing latency to No-Eyes servers…'
+      : 'probing latency to each server…';
     try {
-      const r = await fetch(`/api/network/vpn/providers/${id}/pick-fastest`, {
-        method: 'POST',
-      }).then((rr) => rr.json());
-      const top = (r?.ranking ?? []).find((e: any) => e.rtt_ms != null);
+      const url = `/api/network/vpn/providers/${id}/pick-fastest${noEyes ? '?eyes=none' : ''}`;
+      const r = await fetch(url, { method: 'POST' }).then((rr) => rr.json());
+      const ranking = r?.ranking ?? [];
+      const top = ranking.find((e: any) => e.rtt_ms != null);
       if (top?.id) {
         await selectVpnServer(id, top.id);
-        fastestMsg = `fastest: ${top.label} (${top.rtt_ms} ms) — Save & Apply to connect`;
+        fastestMsg = `fastest${noEyes ? ' No-Eyes' : ''}: ${top.label} (${top.rtt_ms} ms) — Save & Apply to connect`;
+      } else if (noEyes && ranking.length === 0) {
+        fastestMsg = '✗ this provider has no servers outside the 14-Eyes alliances';
       } else {
         fastestMsg = 'no servers responded to the probe — try "refresh" in the wizard';
       }
@@ -1873,6 +1882,28 @@
                   </div>
                 </label>
 
+                <!-- v77: Tor-over-VPN compatibility note. Hard-won across
+                     sessions: Tor only bootstraps through a STEALTH OpenVPN
+                     tunnel (AirVPN SSL/SSH). WireGuard can't reliably carry
+                     Tor, and commercial-VPN exit IPs are widely Tor-blacklisted.
+                     Amber when the active provider is a WireGuard/commercial one. -->
+                <div class="ml-7 p-2.5 rounded border text-[11px] leading-relaxed
+                            {['mullvad','ivpn','wireguard','azirevpn','tailscale'].includes(vpnProvider)
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-200/90'
+                              : 'border-cursed-500/30 bg-cursed-500/5 text-zinc-400'}">
+                  <span class="font-medium text-zinc-200">Tor-over-VPN works only over a stealth OpenVPN tunnel.</span>
+                  Use <strong>AirVPN's OpenVPN-over-SSL or -SSH</strong> (or a similar custom <code>.ovpn</code>).
+                  WireGuard fundamentally struggles to carry Tor traffic, and most commercial-VPN
+                  exit-IP ranges are blacklisted by the Tor network — so transparent Tor over
+                  WireGuard providers (Mullvad / IVPN / AirVPN-WireGuard) usually won't bootstrap
+                  (the watchdog auto-reverts it if it stalls).
+                  {#if ['mullvad','ivpn','wireguard','azirevpn','tailscale'].includes(vpnProvider)}
+                    <span class="block mt-1">⚠ Your active VPN (<code>{vpnProvider}</code>) is WireGuard / commercial-exit — Tor likely won't bootstrap. Switch to AirVPN SSL/SSH first.</span>
+                  {:else if vpnProvider === 'airvpn'}
+                    <span class="block mt-1">✓ AirVPN active — make sure it's an <strong>SSL</strong> or <strong>SSH</strong> stealth mode (not WireGuard) for Tor.</span>
+                  {/if}
+                </div>
+
                 <!-- v73: Tor bridge preset + custom bridges — moved here from
                      the legacy VPN "Tor" provider. Tor is no longer a VPN
                      provider, so this is the single place to configure it.
@@ -2015,9 +2046,24 @@
                         border border-cursed-500/40 text-cursed-300
                         hover:bg-cursed-500/10 transition-colors">
                 ⚙ VPN provider setup wizard
-                <span class="text-zinc-500 normal-case">— register / manage Mullvad · IVPN</span>
+                <span class="text-zinc-500 normal-case">— register / manage Mullvad · IVPN · AirVPN</span>
                 →
               </a>
+              <!-- v76: sign-up links for users without an account yet. AirVPN
+                   is our referral link (supports the project); Mullvad + IVPN
+                   have no referral program. -->
+              <div class="flex items-center gap-2 flex-wrap text-[11px] text-zinc-500">
+                <span>No account yet? Get one:</span>
+                <a class="text-cursed-300 hover:underline" href="https://mullvad.net/" target="_blank" rel="noreferrer">Mullvad ↗</a>
+                <span class="text-zinc-700">·</span>
+                <a class="text-cursed-300 hover:underline" href="https://www.ivpn.net" target="_blank" rel="noreferrer">IVPN ↗</a>
+                <span class="text-zinc-700">·</span>
+                <a class="text-cursed-300 hover:underline" href="https://airvpn.org/?referred_by=832389" target="_blank" rel="noreferrer">AirVPN ↗</a>
+              </div>
+              <p class="text-[10px] text-zinc-600 leading-relaxed">
+                AirVPN is a <span class="text-cursed-300/70">referral link</span> — it supports this project at no
+                extra cost to you. Mullvad and IVPN are plain direct links (those providers have no referral program).
+              </p>
             </header>
 
             <label class="flex items-center gap-3 cursor-pointer">
@@ -2186,7 +2232,7 @@ AllowedIPs = 0.0.0.0/0`}
               </div>
             {/if}
 
-            {#if vpnEnabled && (vpnProvider === 'mullvad' || vpnProvider === 'ivpn' || vpnProvider === 'azirevpn')}
+            {#if vpnEnabled && (vpnProvider === 'mullvad' || vpnProvider === 'ivpn' || vpnProvider === 'azirevpn' || vpnProvider === 'airvpn')}
               <!-- v61: inline banner pointing at the wizard. The
                    per-provider state endpoint tells us whether the
                    user has registered an account + selected a server
@@ -2214,13 +2260,19 @@ AllowedIPs = 0.0.0.0/0`}
                                 disabled={serverBusy === vpnProvider}>
                           <option value="">— none pinned (provider picks) —</option>
                           {#each (wizardProviderServers[vpnProvider] ?? []) as sv}
-                            <option value={sv.id}>{sv.label} · {sv.hostname}</option>
+                            <option value={sv.id}>{sv.label} · {sv.hostname}{sv.eyes === 'none' ? ' · 🛡 No Eyes' : ''}</option>
                           {/each}
                         </select>
                         <button class="btn text-xs whitespace-nowrap"
                                 on:click={() => pickFastestVpnServer(vpnProvider)}
                                 disabled={serverBusy === vpnProvider}>
                           {serverBusy === vpnProvider ? 'probing…' : '⚡ Pick fastest now'}
+                        </button>
+                        <button class="btn text-xs whitespace-nowrap"
+                                title="Fastest server in a country OUTSIDE the 5/9/14-Eyes intelligence-sharing alliances"
+                                on:click={() => pickFastestVpnServer(vpnProvider, true)}
+                                disabled={serverBusy === vpnProvider}>
+                          {serverBusy === vpnProvider ? 'probing…' : '🛡 Fastest · No Eyes'}
                         </button>
                       </div>
                       {#if fastestMsg}<p class="text-[11px] text-live-300 leading-snug">{fastestMsg}</p>{/if}
@@ -2254,6 +2306,13 @@ AllowedIPs = 0.0.0.0/0`}
                             on-device, pubkey registered with IVPN's API, server list
                             cached. IVPN's HQ is Gibraltar — outside 14-Eyes — and
                             their no-logs policy was Cure53-audited.
+                          {:else if vpnProvider === 'airvpn'}
+                            Open the wizard, pick a connection mode — WireGuard, plain
+                            OpenVPN, or a <strong>stealth</strong> mode
+                            (OpenVPN-over-SSL looks like HTTPS, OpenVPN-over-SSH looks
+                            like a remote shell) — paste your AirVPN API key, and paste
+                            the matching config from AirVPN's Config Generator. The key
+                            drives the server list + No-Eyes / fastest picks.
                           {:else}
                             Paste your AzireVPN <strong>API token</strong> into the
                             wizard — this is <em>not</em> your account ID. While logged

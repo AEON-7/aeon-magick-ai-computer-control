@@ -965,6 +965,7 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
             // setup lives under /network/vpn/providers/<id>.
             {"id": "mullvad", "label": "Mullvad VPN", "blurb": "Swedish HQ, multiple 3rd-party audits, anonymous account (16-digit number, no email), accepts cash + crypto. Setup wizard at /network/vpn-providers."},
             {"id": "ivpn", "label": "IVPN", "blurb": "Gibraltar HQ (outside 14-Eyes), audited by Cure53, accepts cash + crypto. Setup wizard at /network/vpn-providers."},
+            {"id": "airvpn", "label": "AirVPN", "blurb": "Activist-run (Italy); crypto/voucher payment. Uniquely Tor/DPI-friendly: WireGuard plus stealth OpenVPN-over-SSL (looks like HTTPS) and OpenVPN-over-SSH. Setup wizard at /network/vpn-providers."},
             {"id": "tor", "label": "Tor (legacy)", "blurb": "v58+: prefer the independent Tor toggle below — Tor can now run alongside any of the above. Selecting this option flips tor.enabled=true in transparent mode for backward compat."},
             {"id": "i2p", "label": "I2P (legacy)", "blurb": "v58+: prefer the independent I2P toggle below. Selecting this option flips i2p.enabled=true for backward compat."},
         ],
@@ -1149,12 +1150,13 @@ pub async fn put_vpn(
         nf.i2p.enabled = true;
         nf.vpn.provider = "none".into();
     }
-    // v59: mullvad/ivpn/azirevpn join the list — they all run as
-    // WireGuard tunnels but their config comes from the provider
-    // wizard rather than a user-pasted .conf.
+    // v59: mullvad/ivpn join the list — they run as WireGuard tunnels but
+    // their config comes from the provider wizard, not a pasted .conf.
+    // v76: airvpn too (WireGuard by default, plus OpenVPN/SSL/SSH stealth
+    // modes selected in its wizard; the mode lives in airvpn.toml).
     const VALID_VPN_PROVIDERS: &[&str] = &[
         "none", "tailscale", "wireguard", "openvpn",
-        "mullvad", "ivpn",
+        "mullvad", "ivpn", "airvpn",
     ];
     if !VALID_VPN_PROVIDERS.contains(&nf.vpn.provider.as_str()) {
         return (

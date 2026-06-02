@@ -293,9 +293,47 @@ def openvpn_status(cfg: dict) -> dict:
         active = result.stdout.decode().strip() == "active"
     except (subprocess.TimeoutExpired, OSError):
         active = False
-    out["state"] = "connected" if active else "failed"
-    out["bootstrap_percent"] = 100 if active else 0
-    out["summary"] = "OpenVPN tunnel up" if active else "OpenVPN tunnel down"
+    if not active:
+        out["state"] = "failed"
+        out["bootstrap_percent"] = 0
+        out["summary"] = "OpenVPN service not running"
+        return out
+
+    # "service active" only means the process is up — it stays active while
+    # still reconnecting. The REAL handshake signal: OpenVPN assigns the tun
+    # interface its IP only AFTER the TLS handshake + the server's PUSH_REPLY
+    # ifconfig. So confirm a tun* device actually has an inet address before
+    # calling it "connected" (green); otherwise it's still establishing (amber).
+    tun_iface = tun_ip = None
+    try:
+        r = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                           capture_output=True, timeout=3)
+        for ln in r.stdout.decode("ascii", "replace").splitlines():
+            p = ln.split()
+            if len(p) >= 4 and p[1].startswith("tun") and p[2] == "inet":
+                tun_iface, tun_ip = p[1], p[3].split("/")[0]
+                break
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    out["detail"] = {"iface": tun_iface, "tunnel_ip": tun_ip}
+    # rx/tx byte counters (parity with WireGuard's transfer stats).
+    if tun_iface:
+        for d in ("rx", "tx"):
+            try:
+                with open(f"/sys/class/net/{tun_iface}/statistics/{d}_bytes") as fh:
+                    out["detail"][f"{d}_bytes"] = int(fh.read().strip())
+            except OSError:
+                pass
+
+    if tun_ip:
+        out["state"] = "connected"
+        out["bootstrap_percent"] = 100
+        out["summary"] = f"OpenVPN tunnel up ({tun_iface} {tun_ip})"
+    else:
+        out["state"] = "establishing"
+        out["bootstrap_percent"] = 50
+        out["summary"] = "OpenVPN connecting — handshake not complete yet"
     return out
 
 
@@ -330,6 +368,26 @@ def i2p_status(cfg: dict) -> dict:
     return out
 
 
+# v77: AirVPN can ride EITHER wg-quick@aeon0 (WireGuard mode) OR
+# openvpn-client@aeon (the OpenVPN family: plain / SSL / SSH). Pick the right
+# introspection by reading the mode from airvpn.toml — otherwise the status
+# panel can't confirm "connected" and the chip stays amber ("enabled") even
+# though the tunnel is up.
+def airvpn_status(cfg: dict) -> dict:
+    mode = "wireguard"
+    try:
+        with open("/etc/aeon/vpn-secrets/airvpn.toml", "rb") as fh:
+            mode = tomllib.load(fh).get("mode", "wireguard")
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+    out = (openvpn_status(cfg)
+           if mode in ("openvpn", "openvpn_ssl", "openvpn_ssh")
+           else wireguard_status(cfg))
+    out["provider"] = "airvpn"
+    out["detail"] = {**out.get("detail", {}), "mode": mode}
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Dispatch
 # ─────────────────────────────────────────────────────────────────────────
@@ -346,6 +404,8 @@ PROVIDERS = {
     "mullvad": wireguard_status,
     "ivpn": wireguard_status,
     "azirevpn": wireguard_status,
+    # v77: AirVPN is mode-aware (WireGuard or OpenVPN family).
+    "airvpn": airvpn_status,
 }
 
 
