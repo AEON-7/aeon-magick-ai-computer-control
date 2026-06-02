@@ -608,6 +608,9 @@ pub async fn setup_password(
         )
             .into_response();
     }
+    // Mirror onto the Unix/SSH account so first-boot setup also replaces the
+    // shipped default SSH password (console + SSH share one credential).
+    sync_unix_password(&req.username, &req.password);
     crate::audit::log(
         &format!("{} (setup)", req.username),
         "password_set",
@@ -661,6 +664,8 @@ pub async fn change_password(
     if let Err(e) = state.auth.set_password(&id.user, &req.new_password) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
+    // Keep the Unix/SSH password in lockstep with the console password.
+    sync_unix_password(&id.user, &req.new_password);
     crate::audit::log(
         &crate::audit::actor_for(&id),
         "password_change",
@@ -669,6 +674,38 @@ pub async fn change_password(
         None,
     );
     Json(json!({"ok": true})).into_response()
+}
+
+/// Mirror the console password onto the same-named Unix login account so the
+/// web console and SSH share one credential — setting the password at first
+/// boot therefore also replaces the shipped default SSH password. Best-effort:
+/// a failure is logged, not fatal (the console password is still set). The
+/// supervisor runs as root, so `chpasswd` works directly. Gated to the shipped
+/// `admin` account so a stray console username can't touch a system user.
+fn sync_unix_password(user: &str, plaintext: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if user != "admin" {
+        return;
+    }
+    let res = (|| -> std::io::Result<std::process::ExitStatus> {
+        let mut child = Command::new("chpasswd")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(format!("{user}:{plaintext}\n").as_bytes())?;
+        }
+        child.wait()
+    })();
+    match res {
+        Ok(s) if s.success() => {
+            tracing::info!(user, "console password mirrored to the Unix/SSH account")
+        }
+        Ok(s) => tracing::warn!(user, code = ?s.code(), "chpasswd non-zero — SSH password not synced"),
+        Err(e) => tracing::warn!(user, %e, "chpasswd failed — SSH password not synced"),
+    }
 }
 
 // ── Token CRUD ──────────────────────────────────────────────────────────
