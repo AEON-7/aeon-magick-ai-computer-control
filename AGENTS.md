@@ -76,30 +76,14 @@ computer you want to control.
 
 ## First boot
 
-> **Recommended: enroll over WiFi (Path 2).** Beyond the obvious flexibility —
+> **Recommended: enroll over WiFi (Path 1).** Beyond the obvious flexibility —
 > no cable, so you can place the Pi anywhere near the target — in our testing
 > the Pi streamed with **lower end-to-end latency over WiFi than over wired
 > Ethernet**. So WiFi is the better default for both performance *and*
-> placement. Ethernet still works (Path 1) as a fallback when WiFi isn't
+> placement. Ethernet still works (Path 2) as a fallback when WiFi isn't
 > handy, but the **automated WiFi enrollment** below is the recommended way in.
 
-### Path 1 — Wired Ethernet (fallback)
-
-1. Plug ethernet into the Pi. Plug power.
-2. Wait ~60 seconds.
-3. On your laptop: open `https://aeon-magick.local/` in a browser.
-4. Your browser will warn about the self-signed TLS cert. Accept it. (We
-   regenerate the cert on first boot per-device, so it's unique to your
-   Pi.)
-5. **Setup wizard.** First visit shows a one-page form asking you to
-   choose an admin password. There are no shipped default credentials —
-   you set the password yourself. Once submitted, the device transitions
-   to "locked" state and your session cookie is set automatically; you
-   land on the main UI.
-6. SSH uses a separate credential: user `admin`, default password
-   `aeon-default-change-me`. Change it with `passwd` after first login.
-
-### Path 2 — WiFi via the device's own AP (recommended)
+### Path 1 — WiFi via the device's own AP (recommended)
 
 No cable needed — the Pi hosts a setup hotspot, you pick your network through a
 captive portal, and it enrolls itself onto your WiFi. Step by step:
@@ -127,6 +111,22 @@ To switch networks later (or if enrollment lands somewhere unintended), the web
 UI's **WiFi** page scans / joins / forgets networks; or force the setup AP back
 up by creating an empty `aeon-force-ap` file on the SD card's boot partition
 (`/boot/firmware/aeon-force-ap`) and rebooting.
+
+### Path 2 — Wired Ethernet (fallback)
+
+1. Plug ethernet into the Pi. Plug power.
+2. Wait ~60 seconds.
+3. On your laptop: open `https://aeon-magick.local/` in a browser.
+4. Your browser will warn about the self-signed TLS cert. Accept it. (We
+   regenerate the cert on first boot per-device, so it's unique to your
+   Pi.)
+5. **Setup wizard.** First visit shows a one-page form asking you to
+   choose an admin password. There are no shipped default credentials —
+   you set the password yourself. Once submitted, the device transitions
+   to "locked" state and your session cookie is set automatically; you
+   land on the main UI.
+6. SSH uses a separate credential: user `admin`, default password
+   `aeon-default-change-me`. Change it with `passwd` after first login.
 
 ### Path 3 — Pre-configured before first boot (best for fleets)
 
