@@ -207,6 +207,14 @@ Valid values:
 - `apple-magic` (experimental) — Apple VID, multi-touch; macOS gestures WIP and
   the pointer is currently unreliable — see `docs/design/apple-mt.md`.
 
+**Which to use:** `generic-absolute` for **deterministic clicking** (snapshot →
+`click_at` lands on exact coords, no acceleration drift) — the default for UI
+automation. A **relative** persona (`generic-composite`, `logitech-mx` off-Linux,
+`apple-magic-stable` on macOS) for **natural, human-like** interaction or apps
+that key off relative motion (games / 3D / drag-velocity). `logitech-mx` /
+`apple-magic-stable` also serve as vendor **disguise**. Switch freely mid-session.
+On `generic-absolute`, scroll via `move_abs`'s `wheel` field (not `/hid/scroll`).
+
 Switching triggers a USB re-enumeration on the target (about 1 s blip).
 
 ### Release-all — panic button
@@ -250,6 +258,57 @@ curl -sk -u "$AEON_USER:$AEON_PASSWD" \
 
 Shipped: `agent-quickstart`, `macos-shortcuts`. Useful to fetch at session
 start to remind yourself of device idioms.
+
+## Network & privacy (DNS / VPN / Tor)
+
+The device can layer DNSCrypt + a VPN + Tor/I2P over the target's outbound
+traffic, all under `GET|PUT /api/network` (+ `/api/network/vpn/...`). Read the
+current posture first:
+
+```bash
+curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/network"
+```
+
+**Set up a VPN (guide the user):** recommend **AirVPN** for stealth /
+Tor-over-VPN, else **Mullvad / IVPN**. Sign-up links (same as the web UI):
+AirVPN <https://airvpn.org/?referred_by=832389> (referral — supports the
+project), Mullvad <https://mullvad.net/>, IVPN <https://www.ivpn.net>; the
+AirVPN API key comes from <https://airvpn.org/apisettings/>. Have the user paste
+the credential / API key **into the device wizard — never into chat**.
+
+```bash
+# AirVPN: API key → generate a stealth config → select → enable
+B="https://$AEON_HOST/api/network/vpn/providers/airvpn"
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H 'Content-Type: application/json' \
+    -d '{"api_key":"<64-char key>"}' "$B/setup"
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H 'Content-Type: application/json' \
+    -d '{"server_id":"Ainalrami","mode":"openvpn_ssl"}' "$B/generate"   # SSL ≈ looks like HTTPS
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H 'Content-Type: application/json' \
+    -d '{"server_id":"Ainalrami"}' "$B/select"
+# Commercial WG: same shape — /providers/{mullvad,ivpn}/setup {"credential":"…"} → /pick-fastest
+# Then enable the VPN (kill_switch recommended):
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+    -d '{"vpn":{"provider":"airvpn","enabled":true,"kill_switch":true}}' \
+    "https://$AEON_HOST/api/network"
+```
+
+**Tor:** `split_tunnel` routes only `.onion` via Tor; `transparent` routes all
+TCP. `over_vpn:true` nests Tor inside the VPN — **only works through AirVPN
+`openvpn_ssl` / `openvpn_ssh`**, not commercial WireGuard exits.
+
+```bash
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+    -d '{"tor":{"enabled":true,"mode":"split_tunnel","over_vpn":true}}' \
+    "https://$AEON_HOST/api/network"
+# Change identity (new Tor circuit / SIGNAL NEWNYM):
+curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST "https://$AEON_HOST/api/network/vpn/rotate"
+```
+
+**`.onion` in a browser:** the Pi's Tor only serves apps that resolve `.onion`
+through the **OS resolver** — `curl`, or Firefox with
+`network.dns.blockDotOnion=false` + Secure DNS OFF. **Brave / Tor Browser bundle
+their own Tor** and bypass the Pi — keep the Pi in `split_tunnel` (not
+transparent) so their Tor isn't double-wrapped.
 
 ## MCP transport (alternative to curl)
 

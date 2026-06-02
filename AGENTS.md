@@ -32,6 +32,31 @@ look at [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
+## Feature index
+
+Every feature is reachable three ways: the **web UI**, the **REST API**
+(`https://<host>/api/…`, basic-auth `admin:<pw>` or a bearer token), and — for
+most actions — the **MCP** endpoint (`POST /api/mcp`). The full route + tool
+table is at the end ("API + MCP endpoint reference").
+
+| Feature set | What it does | API base | See section |
+|---|---|---|---|
+| **Live view + input** | Stream the screen; type / click / scroll / drag; snapshot a frame | `/streamer/*`, `/hid/*` | Talking to it as an AI agent |
+| **HID personas** | Swap USB identity: absolute pointer (precise) vs natural relative vs vendor disguise | `/hid/persona` | Switch HID persona |
+| **Target power** | Wake / power-tap / hard-hold / reboot the controlled machine (HID + WoL) | `/target/*` | Target machine power controls |
+| **Clipboard + files + ISOs** | Two-way clipboard; stage files; mount an ISO as a virtual CDROM | `/clipboard/*`, `/files/*`, `/storage/*` | Shared clipboard / File transfer |
+| **DNS (DNSCrypt)** | Encrypted DNS + anonymized relays, criteria-driven auto-pick | `/network` | DNSCrypt |
+| **Tor / I2P** | Onion + I2P routing (split / transparent), over-VPN nesting, change identity | `/network`, `/network/vpn/rotate` | Tor / I2P |
+| **VPN providers** | Mullvad / IVPN / Azire (WireGuard) + **AirVPN** (SSL/SSH stealth + auto-generator) | `/network/vpn/providers/*` | Provider wizards |
+| **Firewall / NAT / DNS blocklist** | User rules, port-forwards, system-rule visibility, blacklist subscriptions | `/firewall/*`, `/dns/*` | Firewall, NAT, port-forwards |
+| **Security console** | Blocked-packet log with cause attribution; audit log of every mutating op | `/security/*`, `/audit` | Security console |
+| **WiFi** | Scan / connect / forget / AP-fallback / radio toggle | `/wifi/*` | WiFi management |
+| **Macros + prompts** | Store + run named action sequences; stored agent playbooks | `/macros/*`, `/prompts/*` | Macros / Prompts |
+| **API tokens** | Issue / list / revoke scoped tokens — name them per-agent for audit attribution | `/auth/tokens/*` | API tokens |
+| **Pi system** | Pi health (temp, load, mem); reboot / power off the Pi itself | `/system/*` | Pi-side system controls |
+
+---
+
 ## Hardware you need
 
 | Piece | Notes |
@@ -314,6 +339,26 @@ target — about a one-second blip.
   a work-in-progress and the pointer is currently unreliable. See
   `docs/design/apple-mt.md`.
 
+**Which persona when — interaction style:**
+- **Deterministic clicking / UI automation → `generic-absolute`.** The
+  absolute pointer + `move_abs` / `click_at` lands exactly on coordinates you
+  read from a `snapshot`, with zero pointer-acceleration drift. Default choice
+  for precise, repeatable UI work — `snapshot` → compute fraction → `click_at`.
+- **Natural / human-like interaction → a relative persona** (`generic-composite`,
+  `logitech-mx` off-Linux, `apple-magic-stable` on macOS). Relative deltas move
+  the cursor incrementally like a real hand — better when input should *look*
+  human, when an app keys off relative motion (games / 3D viewports / drag-velocity
+  gestures), or when a teleporting cursor would confuse the target. Accumulate
+  small `move` deltas, or hover then act.
+- **Disguise →** `logitech-mx` / `apple-magic-stable` present real-vendor USB IDs
+  (target sees "Logitech MX" / "Apple"); `generic-*` are neutral. `logitech-mx`
+  can wedge on Linux (above) — use `generic-*` there.
+
+Switch freely mid-session (each switch is a ~1 s re-enumeration): flip to
+`generic-absolute` to click a precise element, then back to a natural persona
+for the rest. **Note:** on `generic-absolute`, scroll via `move_abs`'s `wheel`
+field — the relative `/hid/scroll` report doesn't match the absolute descriptor.
+
 **Persistence:** the selection is written to `/etc/aeon/persona.state`
 and survives reboots. To revert to the default, SSH in and `sudo rm
 /etc/aeon/persona.state` then `sudo systemctl restart aeon-hid`. The
@@ -571,6 +616,39 @@ curl -sk -u admin:$PW -X PUT \
     https://aeon-magick.local/api/network
 ```
 
+**`.onion` in a browser — which browser matters.** The Pi's Tor (split or
+transparent) only serves apps that resolve `.onion` through the **OS
+resolver**:
+- `curl` / `wget` — work out of the box.
+- **Firefox** — `about:config` → `network.dns.blockDotOnion = false`, and
+  turn OFF "Secure DNS" / DoH (DoH bypasses the Pi's resolver). Then `.onion`
+  flows to the Pi's Tor and loads.
+- **Brave and Tor Browser do NOT use the Pi's Tor for `.onion`** — they
+  bundle their *own* Tor and resolve `.onion` internally. They still work,
+  but over their own Tor, so keep the Pi in **`split_tunnel`, not
+  `transparent`** or their Tor gets wrapped again (Tor-over-Tor: slow,
+  fragile). The Pi's transparent Tor is for apps *without* their own Tor.
+- General rule: disable the browser's Secure DNS / DoH so DNS reaches the Pi.
+
+**Tor over a commercial VPN only works through obfuscated transport.**
+Transparent Tor will NOT bootstrap through a plain WireGuard provider
+(Mullvad/IVPN exit IPs are tar-pitted by the Tor network). Use **AirVPN's
+OpenVPN-over-SSL or -over-SSH stealth mode** as the VPN layer (see below) —
+that is the proven path for Tor-over-VPN.
+
+**Change Tor identity (new circuit / "new identity").** Rotate exit
+circuits — `SIGNAL NEWNYM` on Tor, plus a WG/OpenVPN reconnect and
+Tailscale/i2pd refresh if those are active:
+
+```bash
+curl -sk -u admin:$PW -X POST \
+    https://aeon-magick.local/api/network/vpn/rotate
+# → {"ok":true, "provider":"tor", "action":"NEWNYM"}
+```
+
+(The web UI exposes this as the "↻ change identity" button. Not yet an MCP
+tool — call the REST endpoint directly from an agent for now.)
+
 ### I2P
 
 I2P is always proxy-based — browsers must point at the daemon's HTTP
@@ -619,47 +697,93 @@ curl -sk -u admin:$PW -X PUT \
 ```
 
 Valid `provider` values: `none`, `tailscale`, `wireguard`, `openvpn`,
-`mullvad`, `ivpn`, `azirevpn`.
+`mullvad`, `ivpn`, `azirevpn`, `airvpn`. **AirVPN is the recommended
+provider for stealth obfuscation and Tor-over-VPN** (OpenVPN-over-SSL/SSH).
 
-### Provider wizards (Mullvad / IVPN / AzireVPN)
+### Provider wizards
 
-For Mullvad/IVPN/AzireVPN you run a one-shot wizard that
-registers your WireGuard pubkey with the provider's API, caches their
-server list, and lets you pick by country + Eyes-tier + privacy badges.
+Two flavors, both under `/api/network/vpn/providers/`. **Commercial WireGuard
+providers** (Mullvad / IVPN / AzireVPN) register a WG keypair with the
+provider's API. **AirVPN** instead auto-pulls finished configs (including
+stealth) from AirVPN's Config Generator with just an API key.
 
-Full-process from CLI:
+**Mullvad / IVPN / AzireVPN (WireGuard):**
 
 ```bash
-# 1. Cache the provider catalog (HQ country, Eyes tier, audit history)
-curl -sk -u admin:$PW \
-    https://aeon-magick.local/api/vpn/providers/catalog
-
-# 2. Register your account (creates WG keypair, posts to provider, saves
-#    secrets to /etc/aeon/vpn-providers/<name>.toml mode 0600)
+P=mullvad   # or ivpn / azirevpn
+# 1. Provider catalog (HQ country, Eyes tier, audit history)
+curl -sk -u admin:$PW https://aeon-magick.local/api/network/vpn/providers/catalog
+# 2. Set up the account — creates a WG keypair, registers it, saves secrets
+#    0600 on the device. `credential` = Mullvad account number / IVPN account
+#    ID / AzireVPN API token.
+curl -sk -u admin:$PW -X POST -H "Content-Type: application/json" \
+    -d '{"credential": "1234567890123456"}' \
+    https://aeon-magick.local/api/network/vpn/providers/$P/setup
+# 3. State — configured?, server list, selected server
+curl -sk -u admin:$PW https://aeon-magick.local/api/network/vpn/providers/$P/state
+# 4. TCP-probe + rank by RTT, auto-select the fastest. Add ?eyes=none to
+#    restrict to servers outside the 14-Eyes alliances ("No-Eyes" pick).
 curl -sk -u admin:$PW -X POST \
-    -H "Content-Type: application/json" \
-    -d '{"account_number": "1234567890123456"}' \
-    https://aeon-magick.local/api/vpn/providers/mullvad/register
-
-# 3. Fetch server list
-curl -sk -u admin:$PW \
-    https://aeon-magick.local/api/vpn/providers/mullvad
-
-# 4. TCP-probe all servers, ranked by RTT
-curl -sk -u admin:$PW -X POST \
-    https://aeon-magick.local/api/vpn/providers/mullvad/pick_fastest
-
-# 5. Select a specific server (writes /etc/wireguard/aeon0.conf,
-#    restarts wg-quick@aeon0)
-curl -sk -u admin:$PW -X PUT \
-    -H "Content-Type: application/json" \
-    -d '{"server_id": "se-sto-wg-001", "mode": "manual"}' \
-    https://aeon-magick.local/api/vpn/providers/mullvad/select
+    https://aeon-magick.local/api/network/vpn/providers/$P/pick-fastest
+# 5. Or pick a specific server (writes /etc/wireguard/aeon0.conf, restarts wg-quick)
+curl -sk -u admin:$PW -X POST -H "Content-Type: application/json" \
+    -d '{"server_id": "se-sto-wg-001"}' \
+    https://aeon-magick.local/api/network/vpn/providers/$P/select
 ```
 
-Trust ratings per HQ country are based on Eyes-tier membership
-(Five / Nine / Fourteen / outside) plus published audit history. The
-`/network/vpn-providers` page shows them as badges.
+**AirVPN (recommended — stealth + Tor-over-VPN):** AirVPN doesn't mint
+credentials. Sign up at **<https://airvpn.org/?referred_by=832389>** (a referral
+link that supports the project — the same one the web UI's "Get AirVPN →" button
+uses), then supply a **64-char API key** from
+[airvpn.org → API settings](https://airvpn.org/apisettings/); the device pulls
+finished configs from AirVPN's Config Generator. Modes:
+
+| `mode` | transport | on the wire |
+|--------|-----------|-------------|
+| `wireguard` | WireGuard UDP | a WG tunnel |
+| `openvpn` | OpenVPN TCP/UDP | a VPN |
+| `openvpn_ssl` | OpenVPN inside stunnel TLS | **plain HTTPS** |
+| `openvpn_ssh` | OpenVPN inside an SSH tunnel | **an SSH session** |
+
+```bash
+# 1. Set up with the API key (fetches your server list; no WG registration)
+curl -sk -u admin:$PW -X POST -H "Content-Type: application/json" \
+    -d '{"api_key": "<64-char key>"}' \
+    https://aeon-magick.local/api/network/vpn/providers/airvpn/setup
+# 2. State — servers + which modes are already generated
+curl -sk -u admin:$PW https://aeon-magick.local/api/network/vpn/providers/airvpn/state
+# 3. Generate the config for a server + mode (auto-pulls + stores it). Repeat
+#    per mode you want available; server_id is the server public_name.
+curl -sk -u admin:$PW -X POST -H "Content-Type: application/json" \
+    -d '{"server_id": "Ainalrami", "mode": "openvpn_ssl"}' \
+    https://aeon-magick.local/api/network/vpn/providers/airvpn/generate
+# 4. Select the server, then flip the top-level provider to airvpn (the active
+#    mode rides in /etc/aeon/vpn-secrets/airvpn.toml).
+curl -sk -u admin:$PW -X POST -H "Content-Type: application/json" \
+    -d '{"server_id": "Ainalrami"}' \
+    https://aeon-magick.local/api/network/vpn/providers/airvpn/select
+```
+
+**For Tor-over-VPN, use AirVPN `openvpn_ssl` or `openvpn_ssh`**, then enable
+Tor with `over_vpn: true`. Commercial WireGuard exits can't bootstrap Tor.
+
+Trust ratings per HQ country use Eyes-tier membership (Five / Nine /
+Fourteen / outside) plus published audit history; the `/network/vpn-providers`
+page shows them as badges and runs the same flow with sign-up links (AirVPN's
+is a referral that supports the project; Mullvad / IVPN are plain links).
+
+**Helping a user set up a VPN from scratch (agent guidance):** (1) Recommend
+**AirVPN** if they want stealth or Tor-over-VPN, else Mullvad / IVPN for simple
+privacy. (2) Send them to the provider's sign-up page — **AirVPN
+<https://airvpn.org/?referred_by=832389>** (referral, supports the project),
+Mullvad <https://mullvad.net/>, IVPN <https://www.ivpn.net> (plain links) — the
+same links the wizard's "Get &lt;provider&gt; →" button uses; have them create
+the account (AirVPN API key: <https://airvpn.org/apisettings/>) and **paste the
+credential / API key into the device's wizard — never into chat**. (3) Run
+`setup` → `pick-fastest` (AirVPN: `generate` per mode) → `select`. (4) Set
+`vpn.enabled=true` with `kill_switch=true`. (5) Confirm with
+`/api/network/vpn/status` that a tunnel is up and the public IP / country
+changed.
 
 ---
 
@@ -949,6 +1073,13 @@ cert). The server advertises 55 tools, grouped below.
 | `vpn_provider_select` | Pick a specific server |
 | `vpn_provider_pick_fastest` | TCP-probe ranking |
 
+The provider tools cover **AirVPN** too (`set_vpn_provider` → `airvpn`, then
+`vpn_provider_state` / `_select` / `_pick_fastest`). Two AirVPN/Tor actions are
+currently **REST-only — no MCP tool yet** (call the endpoint directly, or wire
+them up in P1): the AirVPN config **generator**
+(`POST /api/network/vpn/providers/airvpn/generate`) and Tor **change-identity**
+(`POST /api/network/vpn/rotate` — SIGNAL NEWNYM).
+
 ### System + security
 
 | Tool | What it does |
@@ -973,6 +1104,32 @@ cert). The server advertises 55 tools, grouped below.
 It also exposes stored macros + prompts as MCP **resources**
 (`aeon://macros/<name>`, `aeon://prompts/<name>`) and prompts as MCP
 **prompts** for the `prompts/list` + `prompts/get` methods.
+
+---
+
+## API + MCP endpoint reference
+
+**MCP:** one endpoint, `POST /api/mcp` (JSON-RPC 2.0) — ~55 tools, tabled
+above. **REST:** everything under `https://<host>/api/`, basic-auth
+`admin:<pw>` or `Authorization: Bearer <token>`. Full route map:
+
+| Area | Routes |
+|---|---|
+| **Auth / tokens** | `GET /auth/me` · `POST /login` `/logout` `/setup/password` `/auth/change-password` · `GET|POST /auth/tokens` · `DELETE /auth/tokens/:id` |
+| **State / stream** | `GET /state` `/streamer/state` `/streamer/snapshot` (JPEG) `/streamer/stream` (MJPEG) `/streamer/ws` (H.264) · `POST /streamer/relaunch` · `PUT /streamer/config` |
+| **HID input** | `GET /hid/status` · `POST /hid/{type,key,click,button,move,move_abs,scroll,persona,release_all}` |
+| **Target power** | `GET /target/info` · `PUT /target/config` · `POST /target/{power-tap,power-hold,wake,reboot}` |
+| **Clipboard / files / ISOs** | `GET|PUT /clipboard` · `POST /clipboard/type-on-target` · `GET /files` `/files/config` · `POST /files/upload` · `GET|DELETE /files/:name` · `GET /storage` · `PUT /storage/active` · `POST /storage/upload` · `DELETE /storage/:slug` |
+| **Network (DNS/Tor/I2P/VPN)** | `GET|PUT /network` · `GET /i2p/status` · `GET /network/vpn/status` · `POST /network/vpn/rotate` *(change identity)* · `GET /network/vpn/providers/catalog` · per-provider `POST /…/:id/setup`, `GET /…/:id/state`, `POST /…/:id/{select,pick-fastest,refresh}`, AirVPN-only `POST /…/airvpn/generate` |
+| **Firewall / DNS blocklist** | `GET|POST /firewall/rules` · `GET /firewall/system-rules` · `PUT|DELETE /firewall/rules/:id` · `POST /firewall/rules/:id/move` · `GET /dns/log` · `GET|POST /dns/blacklist` · `POST /dns/blacklist/import` · `GET|POST /dns/sources` · `DELETE /dns/sources/:id` · `POST /dns/sources/:id/refresh` |
+| **Security / audit** | `GET /security/metrics` `/security/blocked` `/audit` |
+| **WiFi** | `GET /wifi/{scan,state,known}` · `POST /wifi/{connect,disconnect,autoconnect,radio}` · `GET|POST /wifi/ap` |
+| **SSH keys** | `GET|POST /ssh/keys` · `DELETE /ssh/keys/:id` |
+| **Macros / prompts** | `GET|POST /macros` · `GET|PUT|DELETE /macros/:name` · `POST /macros/:name/run` · `GET|POST /prompts` · `GET|PUT|DELETE /prompts/:name` |
+| **Pi system** | `GET /system/info` · `POST /system/{pi-reboot,pi-poweroff}` |
+
+Anything an agent can do in the web UI it can do here — the UI is just a
+client of this same API. (Source of truth for routes: `aeon-supervisor/src/api.rs`.)
 
 ---
 
