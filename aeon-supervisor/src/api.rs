@@ -164,6 +164,9 @@ pub fn build_router(cfg: Config) -> Router {
         // (traversal-guarded under <workspace>/memory/<id>-corpus on the gateway).
         .route("/agent/systems/:id/agents/:aid/corpus", get(crate::agent_connect::agent_corpus_list))
         .route("/agent/systems/:id/agents/:aid/corpus/file", get(crate::agent_connect::agent_corpus_file))
+        // E1: per-agent effective TTS voice (override or gateway default) +
+        // clone-name vs designer-description classification.
+        .route("/agent/systems/:id/agents/:aid/voice", get(crate::agent_connect::agent_voice))
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.

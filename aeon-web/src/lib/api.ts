@@ -355,6 +355,20 @@ export const getAgentCorpusFile = (sysId: string, agentId: string, path: string)
     `/agent/systems/${sysId}/agents/${agentId}/corpus/file?path=${encodeURIComponent(path)}`,
   );
 
+// ── E1: per-agent voice ──
+export interface AgentVoice {
+  ok: boolean;
+  voice?: string | null;       // the effective voice value
+  source?: string | null;      // where it came from (agent override / gateway default)
+  kind?: 'clone' | 'designer' | 'none';
+  is_override?: boolean;       // true = per-agent override, false = inherits global
+  global?: string | null;      // the gateway-wide default voice
+  provider?: string | null;    // TTS provider (e.g. "openai")
+  err?: string;
+}
+export const getAgentVoice = (sysId: string, agentId: string) =>
+  req<AgentVoice>('GET', `/agent/systems/${sysId}/agents/${agentId}/voice`);
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

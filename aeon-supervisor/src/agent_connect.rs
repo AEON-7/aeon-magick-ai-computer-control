@@ -1329,6 +1329,84 @@ pub struct CorpusFileQuery {
     path: String,
 }
 
+// ── E1: per-agent voice ──────────────────────────────────────────────────
+//
+// The agent objects carry NO per-agent voice field — the effective TTS voice
+// is the gateway-global `messages.tts.providers.openai.voice` (currently the
+// named clone "azelma"). A per-agent override COULD live on the agent object
+// (voice / identity.voice / tts.*) so we check those first, then fall back to
+// the global. We also classify the value: a short single-token name → a named
+// clone; a long descriptive sentence → a voice-designer description.
+
+/// VOICE python: resolve the agent's effective voice + its source + the global
+/// default. argv[1] = agent id. base64'd over SSH.
+const VOICE_PY: &str = r#"import json,os,sys
+h=os.path.expanduser('~')
+aid=sys.argv[1]
+d=json.load(open(h+'/.openclaw/openclaw.json'))
+def dig(o,path):
+    cur=o
+    for k in path:
+        if isinstance(cur,dict) and k in cur: cur=cur[k]
+        else: return None
+    return cur
+glob=dig(d,['messages','tts','providers','openai','voice'])
+glob_provider=dig(d,['messages','tts','provider'])
+a={}
+for x in ((d.get('agents') or {}).get('list') or []):
+    if isinstance(x,dict) and x.get('id')==aid: a=x; break
+# per-agent override candidates (first non-null wins)
+ov=None; ov_src=None
+for name,path in [('voice',['voice']),('identity.voice',['identity','voice']),
+                  ('tts.voice',['tts','voice']),
+                  ('tts.providers.openai.voice',['tts','providers','openai','voice'])]:
+    v=dig(a,path)
+    if isinstance(v,str) and v.strip():
+        ov=v; ov_src=name; break
+eff = ov if ov is not None else glob
+src = ('agent.'+ov_src) if ov is not None else 'gateway-default (messages.tts.providers.openai.voice)'
+# classify: long sentence-ish => designer description; short token => named clone
+def kind(v):
+    if not isinstance(v,str) or not v.strip(): return 'none'
+    s=v.strip()
+    if len(s)>60 or s.count(' ')>=4 or '.' in s: return 'designer'
+    return 'clone'
+print(json.dumps({'voice':eff,'source':src,'kind':kind(eff),
+                  'is_override':ov is not None,'global':glob,'provider':glob_provider,
+                  'found':bool(a)}))
+"#;
+
+/// GET /agent/systems/:id/agents/:aid/voice — the agent's effective TTS voice
+/// (per-agent override if any, else the gateway default) + whether it looks
+/// like a named clone vs a voice-designer description.
+pub async fn agent_voice(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let aid = sanitize_id(&agent_id);
+    let res = tokio::task::spawn_blocking(move || {
+        let remote = format!("echo {} | base64 -d | python3 - {}", b64(VOICE_PY.as_bytes()), aid);
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(stdout) => {
+            let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({}));
+            Json(json!({
+                "ok": true,
+                "voice": p.get("voice").cloned().unwrap_or(serde_json::Value::Null),
+                "source": p.get("source").cloned().unwrap_or(serde_json::Value::Null),
+                "kind": p.get("kind").cloned().unwrap_or(json!("none")),
+                "is_override": p.get("is_override").cloned().unwrap_or(json!(false)),
+                "global": p.get("global").cloned().unwrap_or(serde_json::Value::Null),
+                "provider": p.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
 /// GET /agent/systems/:id/agents/:aid/corpus/file?path=… — read one corpus
 /// file's contents (read-only, traversal-guarded, 2 MB cap).
 pub async fn agent_corpus_file(

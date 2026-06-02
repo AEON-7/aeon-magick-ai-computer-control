@@ -39,6 +39,8 @@
   let corpusFilePath = '';
   let corpusFileLoading = false;
   let corpusFilter = '';
+  // E1: voice
+  let voice: api.AgentVoice | null = null;
   // per-system power controls
   let lastMac: Record<string, string> = {};
   let powerBusy = '';
@@ -467,6 +469,7 @@
     corpusFile = null;
     corpusFilePath = '';
     corpusFilter = '';
+    voice = null;
     detailLoading = true;
     try {
       detail = await api.getAgentDetail(sysId, a.id);
@@ -475,12 +478,16 @@
     } finally {
       detailLoading = false;
     }
-    // Matrix avatar loads independently — a missing creds file shouldn't
-    // block the rest of the detail panel.
+    // Matrix avatar + voice load independently — a missing creds file or a
+    // slow extra SSH shouldn't block the rest of the detail panel.
     api
       .getAgentAvatar(sysId, a.id)
       .then((r) => (avatar = r))
       .catch((e) => (avatar = { ok: false, err: (e as any)?.message ?? String(e) }));
+    api
+      .getAgentVoice(sysId, a.id)
+      .then((r) => (voice = r))
+      .catch((e) => (voice = { ok: false, err: (e as any)?.message ?? String(e) }));
   }
   function closeDetail() {
     detailAgent = null;
@@ -489,6 +496,7 @@
     avatar = null;
     corpus = null;
     corpusFile = null;
+    voice = null;
   }
   // ── E1: corpus browse/view ──────────────────────────────────────────
   async function loadCorpus() {
@@ -1043,9 +1051,27 @@
         </section>
 
         <div class="agd-grid2">
-          <section class="agd-sec"><h3 class="agd-h3">Voice</h3><p class="agd-mono agd-clip">{detail?.voice || '—'}</p></section>
+          <section class="agd-sec">
+            <h3 class="agd-h3">Voice
+              {#if voice?.ok && voice.kind && voice.kind !== 'none'}<span class="agd-chip">{voice.kind === 'clone' ? 'named clone' : 'designer'}</span>{/if}
+            </h3>
+            {#if voice == null}
+              <p class="agd-dim">resolving…</p>
+            {:else if !voice.ok}
+              <p class="agd-warn">{voice.err}</p>
+            {:else}
+              <p class="agd-mono agd-clip" title={voice.voice ?? ''}>{voice.voice || '—'}</p>
+              <p class="agd-dim agd-avail">
+                {voice.is_override ? 'per-agent override' : 'inherits gateway default'}
+                {#if voice.provider} · {voice.provider}{/if}
+              </p>
+            {/if}
+          </section>
           <section class="agd-sec"><h3 class="agd-h3">Corpus mode</h3><p class="agd-mono">{detail?.corpus || '—'}</p></section>
         </div>
+        {#if voice?.ok}
+          <p class="agd-dim agd-avail">Voice source: <span class="agd-mono">{voice.source}</span>. Edit designer-description / upload a clone sample: TODO.</p>
+        {/if}
 
         <section class="agd-sec">
           <h3 class="agd-h3">Corpus Files <span class="agd-adminonly">read-only</span></h3>
@@ -1108,7 +1134,7 @@
           <p class="agd-dim agd-avail">Upload / edit: TODO — read-only browse for v1.</p>
         </section>
 
-        <p class="agd-soon">Coming next: corpus upload/edit · voice clone · Add-Skill marketplace.</p>
+        <p class="agd-soon">Coming next: corpus upload/edit · voice clone upload · Add-Skill marketplace.</p>
       </div>
     </div>
   {/if}
