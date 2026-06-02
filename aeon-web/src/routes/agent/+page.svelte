@@ -1,14 +1,20 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
   let tab: 'overview' | 'systems' = 'overview';
   let pubkey = '';
   let systems: api.ConnectedSystem[] = [];
   let metrics: Record<string, api.SystemMetrics> = {};
+  let agents: Record<string, api.AgentRoster> = {};
+  let usage: Record<string, api.UsageHistory> = {};
+  let range: 'all' | '30d' | '90d' | '1y' | 'month' | 'year' = 'all';
+  let selMonth = '';
+  let selYear = '';
   let loading = true;
   let metricsLoading = false;
   let err = '';
+  let timer: ReturnType<typeof setInterval> | undefined;
 
   // add-system form
   let label = '';
@@ -21,6 +27,8 @@
   let adding = false;
   let busyId = '';
   let fallback: Record<string, string> = {};
+
+  $: openclawSystems = systems.filter((s) => s.roles?.includes('openclaw'));
 
   const inputCls =
     'bg-ink-900 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cursed-500';
@@ -39,8 +47,8 @@
   async function loadMetrics() {
     if (!systems.length) return;
     metricsLoading = true;
-    await Promise.all(
-      systems.map(async (s) => {
+    await Promise.all([
+      ...systems.map(async (s) => {
         try {
           const r = await api.getSystemMetrics(s.id);
           metrics[s.id] = r.metrics;
@@ -48,16 +56,299 @@
           metrics[s.id] = { reachable: false };
         }
       }),
-    );
+      ...openclawSystems.map(async (s) => {
+        try {
+          agents[s.id] = await api.getSystemAgents(s.id);
+        } catch {
+          agents[s.id] = { ok: false, reachable: false };
+        }
+      }),
+      ...openclawSystems.map(async (s) => {
+        try {
+          usage[s.id] = await api.getSystemUsage(s.id);
+        } catch {
+          /* keep prior history on a transient failure */
+        }
+      }),
+    ]);
     metrics = metrics;
+    agents = agents;
+    usage = usage;
     metricsLoading = false;
   }
   onMount(async () => {
     await refresh();
     await loadMetrics();
+    timer = setInterval(() => {
+      if (tab === 'overview' && !document.hidden) loadMetrics();
+    }, 15000);
   });
+  onDestroy(() => clearInterval(timer));
 
-  function roles(): string[] {
+  // ── formatting helpers ──────────────────────────────────────────────
+  function fmtTok(n?: number): string {
+    n = n ?? 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+    return String(n);
+  }
+  function fmtAgo(s?: number | null): string {
+    if (s == null) return '—';
+    if (s < 60) return Math.round(s) + 's';
+    if (s < 3600) return Math.round(s / 60) + 'm';
+    if (s < 86400) return Math.round(s / 3600) + 'h';
+    return Math.round(s / 86400) + 'd';
+  }
+  function num(x: unknown): number {
+    const v = typeof x === 'string' ? parseFloat(x) : (x as number);
+    return isNaN(v as number) ? NaN : (v as number);
+  }
+  function clampPct(x: unknown): number {
+    const v = num(x);
+    return isNaN(v) ? 0 : Math.min(100, Math.max(0, v));
+  }
+  function utilColor(u: unknown): string {
+    const v = num(u);
+    if (isNaN(v)) return '#3f3f46';
+    if (v >= 85) return '#f87171';
+    if (v >= 60) return '#fbbf24';
+    if (v >= 30) return '#34d399';
+    return '#22d3ee';
+  }
+  function parseMem(mem?: string): { used: number; total: number; pct: number } | null {
+    if (!mem) return null;
+    const [u, t] = mem.split('/').map((x) => parseInt(x.trim(), 10));
+    if (isNaN(u) || isNaN(t) || t === 0) return null;
+    return { used: u, total: t, pct: Math.round((u / t) * 100) };
+  }
+  const gb = (mb: number) => (mb / 1024).toFixed(1);
+  const isDgx = (s: api.ConnectedSystem) => s.roles?.includes('dgx');
+  /** For a DGX, system memory IS the GPU VRAM (unified GB10). */
+  function unifiedVram(s: api.ConnectedSystem, m?: api.SystemMetrics) {
+    return isDgx(s) ? parseMem(m?.mem) : null;
+  }
+  function vramPct(g: { mem_used: string; mem_total: string }): number {
+    const u = num(g.mem_used),
+      t = num(g.mem_total);
+    return isNaN(u) || isNaN(t) || t === 0 ? 0 : Math.min(100, (u / t) * 100);
+  }
+  const hasNvVram = (g: { mem_total: string }) => !isNaN(num(g.mem_total));
+  function memTile(s: api.ConnectedSystem, m?: api.SystemMetrics): string {
+    const pm = parseMem(m?.mem);
+    if (!pm) return '—';
+    return gb(pm.used) + '/' + gb(pm.total) + 'G';
+  }
+  function roleIcon(roles: string[]): string {
+    if (roles?.includes('dgx')) return '⚡';
+    if (roles?.includes('openclaw')) return '🧠';
+    if (roles?.includes('hermes')) return '📡';
+    return '🖥️';
+  }
+
+  // ── agent roster helpers ────────────────────────────────────────────
+  function agentRank(a: api.AgentInfo): number {
+    return (
+      (a.working ? 8 : 0) +
+      (a.on_call ? 4 : 0) +
+      (a.active || (a.active_sessions ?? 0) > 0 ? 2 : 0) +
+      (a.is_default ? 1 : 0)
+    );
+  }
+  function sortedAgents(r?: api.AgentRoster): api.AgentInfo[] {
+    return [...(r?.agents ?? [])].sort(
+      (a, b) =>
+        agentRank(b) - agentRank(a) ||
+        (b.total_tokens ?? 0) - (a.total_tokens ?? 0) ||
+        a.name.localeCompare(b.name),
+    );
+  }
+  function rosterSummary(r?: api.AgentRoster) {
+    const ags = r?.agents ?? [];
+    return {
+      count: ags.length,
+      active: ags.filter((a) => a.working || a.on_call || a.active || (a.active_sessions ?? 0) > 0)
+        .length,
+      tokens: ags.reduce((s, a) => s + (a.total_tokens ?? 0), 0),
+    };
+  }
+  function tokMax(r?: api.AgentRoster): number {
+    return Math.max(1, ...(r?.agents ?? []).map((a) => a.total_tokens ?? 0));
+  }
+  function agentStatus(a: api.AgentInfo): { label: string; color: string; pulse: boolean } {
+    if (a.working) return { label: 'working', color: '#34d399', pulse: true };
+    if (a.on_call) return { label: 'on call', color: '#fbbf24', pulse: true };
+    if (a.active || (a.active_sessions ?? 0) > 0)
+      return { label: 'active', color: '#22d3ee', pulse: false };
+    if (a.last_seen_s_ago != null && a.last_seen_s_ago < 3600)
+      return { label: 'idle', color: '#4ade80', pulse: false };
+    if (a.last_seen_s_ago != null)
+      return { label: 'seen ' + fmtAgo(a.last_seen_s_ago), color: '#71717a', pulse: false };
+    return { label: 'cold', color: '#3f3f46', pulse: false };
+  }
+
+  // ── token-usage history (banner) ────────────────────────────────────
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function fmtLocalDate(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  function daysBack(todayStr: string, n: number): string[] {
+    const [y, m, d] = (todayStr || '').split('-').map(Number);
+    if (!y) return [];
+    const base = new Date(y, m - 1, d);
+    const out: string[] = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const x = new Date(base);
+      x.setDate(base.getDate() - i);
+      out.push(fmtLocalDate(x));
+    }
+    return out;
+  }
+  function lastMonths(todayStr: string, n: number): string[] {
+    const [y, m] = (todayStr || '').split('-').map(Number);
+    if (!y) return [];
+    const out: string[] = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const d = new Date(y, m - 1 - i, 1);
+      out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    }
+    return out;
+  }
+  function monthDays(ym: string): string[] {
+    if (!ym) return [];
+    const [y, m] = ym.split('-').map(Number);
+    const dim = new Date(y, m, 0).getDate();
+    return Array.from({ length: dim }, (_, i) => `${ym}-${String(i + 1).padStart(2, '0')}`);
+  }
+  const monthLabel = (ym: string): string => {
+    if (!ym) return '';
+    const [y, m] = ym.split('-').map(Number);
+    return `${MONTHS[m - 1]} ${y}`;
+  };
+  function monthsBetween(first: string, today: string): string[] {
+    if (!first || !today) return [];
+    let [y, m] = first.split('-').map(Number);
+    const [ty, tm] = today.split('-').map(Number);
+    const out: string[] = [];
+    while (y < ty || (y === ty && m <= tm)) {
+      out.push(`${y}-${String(m).padStart(2, '0')}`);
+      m++;
+      if (m > 12) { m = 1; y++; }
+    }
+    return out.reverse();
+  }
+  function yearsBetween(first: string, today: string): string[] {
+    const fy = Number((first || '').slice(0, 4));
+    const ty = Number((today || '').slice(0, 4));
+    if (!fy || !ty) return [];
+    const out: string[] = [];
+    for (let y = ty; y >= fy; y--) out.push(String(y));
+    return out;
+  }
+  function trackedDays(u: api.UsageHistory): number {
+    if (!u?.first_day || !u?.today) return 0;
+    const [fy, fm, fd] = u.first_day.split('-').map(Number);
+    const [ty, tm, td] = u.today.split('-').map(Number);
+    return Math.max(1, Math.round((+new Date(ty, tm - 1, td) - +new Date(fy, fm - 1, fd)) / 86400000) + 1);
+  }
+  const tokAt = (u: api.UsageHistory, date: string): number => u?.daily?.[date]?.total ?? 0;
+  function sumDates(u: api.UsageHistory, dates: string[]): number {
+    return dates.reduce((s, d) => s + tokAt(u, d), 0);
+  }
+  function perAgentForDates(u: api.UsageHistory, dates: string[]): Record<string, number> {
+    const acc: Record<string, number> = {};
+    for (const d of dates) {
+      const ag = u?.daily?.[d]?.agents ?? {};
+      for (const id in ag) acc[id] = (acc[id] ?? 0) + ag[id];
+    }
+    return acc;
+  }
+  function rangeShort(): string {
+    if (range === 'all') return 'all-time';
+    if (range === '30d') return '30d';
+    if (range === '90d') return '90d';
+    if (range === '1y') return '1y';
+    if (range === 'month') return monthLabel(selMonth);
+    if (range === 'year') return selYear;
+    return '';
+  }
+  type Bucket = { label: string; tokens: number };
+  type RangeView = { label: string; total: number; perAgent: Record<string, number>; buckets: Bucket[] };
+  function view(u: api.UsageHistory, r?: api.AgentRoster): RangeView {
+    if (range === 'all') {
+      // All-time = the live gateway snapshot (always available): total is the
+      // gateway's running total, the chart is a per-agent breakdown.
+      const ags = [...(r?.agents ?? [])].sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0));
+      return {
+        label: 'all-time',
+        total: u?.gateway_total ?? ags.reduce((s, a) => s + (a.total_tokens ?? 0), 0),
+        perAgent: Object.fromEntries(ags.map((a) => [a.id, a.total_tokens ?? 0])),
+        buckets: ags.slice(0, 16).map((a) => ({ label: a.emoji || (a.name ?? a.id).slice(0, 4), tokens: a.total_tokens ?? 0 })),
+      };
+    }
+    const today = u?.today || '';
+    let dates: string[] = [];
+    let groups: { label: string; dates: string[] }[] = [];
+    let label = '';
+    if (range === '30d') {
+      dates = daysBack(today, 30);
+      groups = dates.map((d) => ({ label: d.slice(5), dates: [d] }));
+      label = 'last 30 days';
+    } else if (range === '90d') {
+      dates = daysBack(today, 90);
+      for (let i = 0; i < dates.length; i += 7) groups.push({ label: dates[i].slice(5), dates: dates.slice(i, i + 7) });
+      label = 'last 90 days';
+    } else if (range === '1y') {
+      for (const ym of lastMonths(today, 12)) {
+        const ds = monthDays(ym);
+        dates.push(...ds);
+        groups.push({ label: ym.slice(2), dates: ds });
+      }
+      label = 'last 12 months';
+    } else if (range === 'month') {
+      dates = monthDays(selMonth);
+      groups = dates.map((d) => ({ label: d.slice(8), dates: [d] }));
+      label = monthLabel(selMonth);
+    } else if (range === 'year') {
+      for (let m = 1; m <= 12; m++) {
+        const ym = `${selYear}-${String(m).padStart(2, '0')}`;
+        const ds = monthDays(ym);
+        dates.push(...ds);
+        groups.push({ label: MONTHS[m - 1], dates: ds });
+      }
+      label = selYear;
+    }
+    return {
+      label,
+      total: sumDates(u, dates),
+      perAgent: perAgentForDates(u, dates),
+      buckets: groups.map((g) => ({ label: g.label, tokens: sumDates(u, g.dates) })),
+    };
+  }
+  function showBucketLabel(n: number, i: number): boolean {
+    if (n <= 14) return true;
+    return i % Math.ceil(n / 8) === 0;
+  }
+  function agentPrimaryMax(r: api.AgentRoster | undefined, v: RangeView | null): number {
+    return Math.max(
+      1,
+      ...(r?.agents ?? []).map((a) => {
+        const ru = v?.perAgent?.[a.id] ?? 0;
+        return ru > 0 ? ru : a.total_tokens ?? 0;
+      }),
+    );
+  }
+  function pickMonth(e: Event) {
+    selMonth = (e.currentTarget as HTMLSelectElement).value;
+    range = 'month';
+  }
+  function pickYear(e: Event) {
+    selYear = (e.currentTarget as HTMLSelectElement).value;
+    range = 'year';
+  }
+
+  // ── connected-systems actions (unchanged) ───────────────────────────
+  function rolesArr(): string[] {
     const r: string[] = [];
     if (roleOpenclaw) r.push('openclaw');
     if (roleHermes) r.push('hermes');
@@ -68,13 +359,12 @@
     if (!address.trim()) return;
     adding = true;
     try {
-      const res = await api.addSystem({ label, address, ssh_user: sshUser, port, roles: roles() });
+      const res = await api.addSystem({ label, address, ssh_user: sshUser, port, roles: rolesArr() });
       if (!res.ok) {
         alert(res.err ?? 'add failed');
         return;
       }
-      label = '';
-      address = '';
+      label = address = '';
       sshUser = 'root';
       port = 22;
       roleOpenclaw = roleHermes = roleDgx = false;
@@ -116,9 +406,7 @@
     await api.removeSystem(s.id);
     await refresh();
   }
-  function copy(text: string) {
-    navigator.clipboard?.writeText(text);
-  }
+  const copy = (t: string) => navigator.clipboard?.writeText(t);
   function badgeCls(status: string): string {
     if (status === 'connected' || status === 'online')
       return 'bg-live-900/40 text-live-300 border border-live-500/40';
@@ -149,62 +437,188 @@
   </div>
 
   <main class="flex-1 overflow-auto">
-    <div class="p-6 max-w-3xl mx-auto w-full space-y-5">
-      {#if loading}<p class="text-zinc-500 text-sm">loading…</p>{/if}
-      {#if err}<p class="text-red-400 text-sm">{err}</p>{/if}
+    {#if tab === 'overview'}
+      <div class="p-5 max-w-5xl mx-auto w-full space-y-6">
+        {#if loading}<p class="text-zinc-500 text-sm">loading…</p>{/if}
+        {#if err}<p class="text-red-400 text-sm">{err}</p>{/if}
 
-      {#if tab === 'overview'}
+        <!-- ── SYSTEMS ───────────────────────────────────────────── -->
         <div class="flex items-center justify-between">
-          <h2 class="font-mono text-xs uppercase tracking-wider text-cursed-300">Systems</h2>
-          <button class="btn text-xs" on:click={loadMetrics} disabled={metricsLoading}>
-            {metricsLoading ? 'refreshing…' : '↻ refresh'}
+          <h2 class="section-title">Systems</h2>
+          <button class="refresh-btn" on:click={loadMetrics} disabled={metricsLoading}>
+            <span class:spin={metricsLoading}>↻</span> {metricsLoading ? 'refreshing' : 'refresh'}
           </button>
         </div>
         {#if !systems.length}
-          <p class="text-zinc-500 text-xs">No systems yet — add them in the <button class="underline text-cursed-300" on:click={() => (tab = 'systems')}>Connected Systems</button> tab.</p>
+          <p class="text-zinc-500 text-xs">No systems yet — add them in the
+            <button class="underline text-cursed-300" on:click={() => (tab = 'systems')}>Connected Systems</button> tab.</p>
         {/if}
-        {#each systems as s (s.id)}
-          {@const m = metrics[s.id]}
-          <div class="p-4 rounded-lg border border-ink-800 bg-ink-950/40 space-y-2">
-            <div class="flex items-center justify-between gap-2">
-              <div class="min-w-0">
-                <p class="text-sm text-zinc-200 truncate">{s.label}</p>
-                <p class="text-[10px] font-mono text-zinc-500">{s.roles.join(', ') || 'no role'} · {m?.host || s.address}</p>
+
+        <div class="sys-grid">
+          {#each systems as s (s.id)}
+            {@const m = metrics[s.id]}
+            <div class="sys-card">
+              <div class="sys-head">
+                <span class="sys-icon">{roleIcon(s.roles)}</span>
+                <div class="sys-id">
+                  <div class="sys-label">{s.label}</div>
+                  <div class="sys-host">{m?.host || s.address} · {s.roles.join(' / ') || 'system'}</div>
+                </div>
+                <span class="pill" class:on={m?.reachable} class:off={m && !m.reachable}>
+                  {m ? (m.reachable ? 'online' : 'offline') : '…'}
+                </span>
               </div>
-              <span class="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full {m?.reachable ? badgeCls('online') : badgeCls(m ? 'unreachable' : '')}">
-                {m ? (m.reachable ? 'online' : 'unreachable') : '…'}
-              </span>
-            </div>
-            {#if m?.reachable}
-              <div class="flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-mono text-zinc-400">
-                {#if m.load}<span><span class="text-zinc-600">load</span> {m.load}</span>{/if}
-                {#if m.mem}<span><span class="text-zinc-600">mem</span> {m.mem} MB</span>{/if}
-              </div>
-              {#if m.gpus?.length}
-                <div class="space-y-1.5 pt-1">
+
+              {#if m?.reachable}
+                {#if m.gpus?.length}
                   {#each m.gpus as g}
-                    <div class="text-[10px] font-mono text-zinc-300 space-y-0.5">
-                      <div class="flex justify-between"><span class="truncate">{g.name}</span><span class="text-cursed-300">{g.util}% · {g.temp}°C</span></div>
-                      <div class="h-1.5 rounded bg-ink-800 overflow-hidden"><div class="h-full bg-cursed-500 transition-all" style="width:{g.util}%"></div></div>
-                      <span class="text-zinc-600">{g.mem_used}/{g.mem_total} MB VRAM</span>
+                    {@const uv = unifiedVram(s, m)}
+                    <div class="gpu">
+                      <div class="gpu-top">
+                        <span class="gpu-name">{g.name}</span>
+                        <span class="gpu-meta" style="color:{utilColor(g.util)}">{g.util}% · {g.temp}°C</span>
+                      </div>
+                      <div class="gauge">
+                        <div class="gauge-fill" style="width:{clampPct(g.util)}%; background:{utilColor(g.util)}; box-shadow:0 0 10px {utilColor(g.util)}88"></div>
+                      </div>
+                      {#if uv}
+                        <div class="vram-row"><span>VRAM <span class="unified">unified</span></span><span>{gb(uv.used)} / {gb(uv.total)} GB</span></div>
+                        <div class="gauge sm"><div class="gauge-fill" style="width:{uv.pct}%; background:#a78bfa; box-shadow:0 0 8px #a78bfa66"></div></div>
+                      {:else if hasNvVram(g)}
+                        <div class="vram-row"><span>VRAM</span><span>{g.mem_used} / {g.mem_total} MB</span></div>
+                        <div class="gauge sm"><div class="gauge-fill" style="width:{vramPct(g)}%; background:#a78bfa; box-shadow:0 0 8px #a78bfa66"></div></div>
+                      {/if}
+                    </div>
+                  {/each}
+                {/if}
+
+                <div class="tiles">
+                  <div class="tile"><div class="tile-num">{m.load?.split(' ')[0] || '—'}</div><div class="tile-lbl">load</div></div>
+                  <div class="tile"><div class="tile-num">{memTile(s, m)}</div><div class="tile-lbl">{isDgx(s) ? 'unified' : 'mem'}</div></div>
+                  <div class="tile"><div class="tile-num">{m.containers?.length ?? 0}</div><div class="tile-lbl">containers</div></div>
+                </div>
+                {#if m.containers?.length}
+                  <div class="chips">{#each m.containers as c}<span class="chip">{c}</span>{/each}</div>
+                {/if}
+              {:else if m}
+                <div class="errline">{m.err || 'unreachable'}</div>
+              {:else}
+                <div class="errline dim">gathering…</div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+
+        <!-- ── USAGE BANNER + PANTHEON (per OpenClaw system) ──────── -->
+        {#if openclawSystems.length}
+          {#each openclawSystems as s (s.id)}
+            {@const u = usage[s.id]}
+            {@const r = agents[s.id]}
+            {@const v = u ? view(u, r) : null}
+            {@const sum = rosterSummary(r)}
+
+            {#if u}
+              <div class="usage-banner">
+                <div class="ub-head">
+                  <div class="min-w-0">
+                    <div class="ub-title">Token Usage <span class="ub-sub">· {s.label}</span></div>
+                    <div class="ub-meta">
+                      {#if u.first_day}tracked since {u.first_day} · {trackedDays(u)}d{:else}building history…{/if}
+                      <span class="dot-sep">·</span> gateway all-time <b>{fmtTok(u.gateway_total)}</b>
+                    </div>
+                  </div>
+                  <div class="ub-total">
+                    <div class="ub-total-num">{fmtTok(v?.total ?? 0)}</div>
+                    <div class="ub-total-lbl">{v?.label ?? ''}</div>
+                  </div>
+                </div>
+
+                <div class="ub-controls">
+                  <button class="ub-btn" class:active={range === 'all'} on:click={() => (range = 'all')}>All-time</button>
+                  <button class="ub-btn" class:active={range === '30d'} on:click={() => (range = '30d')}>30 days</button>
+                  <button class="ub-btn" class:active={range === '90d'} on:click={() => (range = '90d')}>90 days</button>
+                  <button class="ub-btn" class:active={range === '1y'} on:click={() => (range = '1y')}>1 year</button>
+                  <select class="ub-sel" class:active={range === 'month'} value={range === 'month' ? selMonth : ''}
+                          on:change={pickMonth}>
+                    <option value="" disabled>Month…</option>
+                    {#each monthsBetween(u.first_day, u.today) as ym}<option value={ym}>{monthLabel(ym)}</option>{/each}
+                  </select>
+                  <select class="ub-sel" class:active={range === 'year'} value={range === 'year' ? selYear : ''}
+                          on:change={pickYear}>
+                    <option value="" disabled>Year…</option>
+                    {#each yearsBetween(u.first_day, u.today) as y}<option value={y}>{y}</option>{/each}
+                  </select>
+                </div>
+
+                <div class="ub-chart">
+                  {#if v && v.buckets.some((b) => b.tokens > 0)}
+                    {@const mx = Math.max(1, ...v.buckets.map((x) => x.tokens))}
+                    {#each v.buckets as b, i}
+                      <div class="ub-bar-wrap" title="{b.label}: {fmtTok(b.tokens)} tokens">
+                        <div class="ub-bar" style="height:{Math.max(2, (b.tokens / mx) * 100)}%; opacity:{b.tokens > 0 ? 1 : 0.3}"></div>
+                        <div class="ub-bar-lbl">{showBucketLabel(v.buckets.length, i) ? b.label : ''}</div>
+                      </div>
+                    {/each}
+                  {:else if range === 'all'}
+                    <div class="ub-empty">{r ? 'No per-agent usage to chart yet.' : 'loading roster…'}</div>
+                  {:else}
+                    <div class="ub-empty">No tracked daily history in this range yet — switch to <button class="ub-link" on:click={() => (range = 'all')}>All-time</button> for current totals. The Pi samples every 10&nbsp;min, so 30d / 90d / 1y fill in as days pass.</div>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            <div class="space-y-3">
+              <div class="flex items-baseline justify-between flex-wrap gap-2">
+                <h2 class="section-title">Pantheon <span class="text-zinc-600 font-normal">· {s.label}</span></h2>
+                {#if r?.reachable}
+                  <div class="roster-stats">
+                    <span><b>{sum.count}</b> agents</span>
+                    <span class="dot-sep">·</span>
+                    <span class="text-live-300"><b>{sum.active}</b> active</span>
+                  </div>
+                {:else if r}
+                  <span class="text-amber-300 text-[11px] font-mono">{r.err || 'roster unavailable'}</span>
+                {:else}
+                  <span class="text-zinc-600 text-[11px] font-mono">loading roster…</span>
+                {/if}
+              </div>
+
+              {#if r?.reachable}
+                <div class="agent-grid">
+                  {#each sortedAgents(r) as a (a.id)}
+                    {@const st = agentStatus(a)}
+                    {@const ru = v?.perAgent?.[a.id] ?? 0}
+                    {@const pv = ru > 0 ? ru : a.total_tokens ?? 0}
+                    <div class="agent" class:is-default={a.is_default} class:is-working={a.working || a.on_call}>
+                      <div class="agent-top">
+                        <span class="agent-emoji">{a.emoji || '🤖'}</span>
+                        <div class="agent-id">
+                          <div class="agent-name">{a.name}{#if a.is_default}<span class="def-star" title="default agent">★</span>{/if}</div>
+                          <div class="agent-model">{a.model || '—'}</div>
+                        </div>
+                        <span class="dot" class:pulse={st.pulse} style="background:{st.color}; box-shadow:0 0 7px {st.color}"></span>
+                      </div>
+                      <div class="agent-status" style="color:{st.color}">{st.label}</div>
+                      <div class="agent-stats">
+                        <div><span class="as-num">{fmtTok(pv)}</span><span class="as-lbl" title={ru > 0 ? 'locally-tracked usage in the selected range' : 'gateway running total'}>{ru > 0 ? rangeShort() : 'gateway'}</span></div>
+                        <div><span class="as-num">{a.sessions ?? 0}</span><span class="as-lbl">sessions</span></div>
+                        <div><span class="as-num">{a.working ? (a.tok_s ?? 0).toFixed(0) : fmtAgo(a.last_seen_s_ago)}</span><span class="as-lbl">{a.working ? 'tok/s' : 'seen'}</span></div>
+                      </div>
+                      <div class="tok-bar"><div style="width:{(pv / agentPrimaryMax(r, v)) * 100}%; background:{st.color}"></div></div>
                     </div>
                   {/each}
                 </div>
               {/if}
-              {#if m.containers?.length}
-                <p class="text-[10px] font-mono text-zinc-400"><span class="text-zinc-600">containers ({m.containers.length}):</span> {m.containers.join(', ')}</p>
-              {/if}
-            {:else if m}
-              <p class="text-[10px] text-red-400">{m.err || 'unreachable'}</p>
-            {/if}
-          </div>
-        {/each}
-        {#if systems.length}
-          <p class="text-[10px] text-zinc-600">Per-agent roster + token usage (your OpenClaw pantheon) is the next layer — needs the way you query OpenClaw's agents (`openclaw` isn't in albert's PATH on .155).</p>
+            </div>
+          {/each}
         {/if}
-      {/if}
+      </div>
+    {/if}
 
-      {#if tab === 'systems'}
+    {#if tab === 'systems'}
+      <div class="p-6 max-w-3xl mx-auto w-full space-y-5">
+        {#if err}<p class="text-red-400 text-sm">{err}</p>{/if}
         <section class="space-y-2 p-4 rounded-lg border border-ink-800 bg-ink-950/40">
           <h2 class="font-mono text-xs uppercase tracking-wider text-cursed-300">This device's agent-connect key</h2>
           <p class="text-xs text-zinc-400">The Pi installs <em>this</em> public key on each system so it has SSH key-auth for metrics + provisioning.</p>
@@ -256,7 +670,273 @@
             </div>
           {/each}
         </section>
-      {/if}
-    </div>
+      </div>
+    {/if}
   </main>
 </div>
+
+<style>
+  .section-title {
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #c4b5fd;
+  }
+  .refresh-btn {
+    font-family: ui-monospace, monospace;
+    font-size: 0.65rem;
+    color: #a1a1aa;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid #2a2a38;
+    border-radius: 0.35rem;
+    background: #12121a;
+  }
+  .refresh-btn:hover { color: #e4e4e7; border-color: #3f3f5a; }
+  .spin { display: inline-block; animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── system cards ── */
+  .sys-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.85rem;
+  }
+  .sys-card {
+    border: 1px solid #23232f;
+    border-radius: 0.75rem;
+    padding: 0.9rem 1rem;
+    background: linear-gradient(160deg, rgba(30, 27, 50, 0.5), rgba(12, 12, 20, 0.6));
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+  .sys-head { display: flex; align-items: center; gap: 0.6rem; }
+  .sys-icon { font-size: 1.35rem; line-height: 1; filter: drop-shadow(0 0 6px rgba(167, 139, 250, 0.4)); }
+  .sys-id { min-width: 0; flex: 1; }
+  .sys-label { font-size: 0.9rem; color: #f4f4f5; font-weight: 600; line-height: 1.1; }
+  .sys-host {
+    font-family: ui-monospace, monospace;
+    font-size: 0.62rem;
+    color: #71717a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pill {
+    font-family: ui-monospace, monospace;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.12rem 0.5rem;
+    border-radius: 999px;
+    background: #1c1c26;
+    color: #71717a;
+    border: 1px solid #2a2a38;
+  }
+  .pill.on { background: rgba(52, 211, 153, 0.12); color: #6ee7b7; border-color: rgba(52, 211, 153, 0.35); }
+  .pill.off { background: rgba(248, 113, 113, 0.1); color: #fca5a5; border-color: rgba(248, 113, 113, 0.3); }
+
+  .gpu { display: flex; flex-direction: column; gap: 0.3rem; }
+  .gpu-top { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+  .gpu-name {
+    font-family: ui-monospace, monospace;
+    font-size: 0.66rem;
+    color: #d4d4d8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .gpu-meta { font-family: ui-monospace, monospace; font-size: 0.66rem; font-weight: 600; white-space: nowrap; }
+  .gauge { height: 0.5rem; border-radius: 999px; background: #18181f; overflow: hidden; }
+  .gauge.sm { height: 0.3rem; }
+  .gauge-fill { height: 100%; border-radius: 999px; transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .vram-row {
+    display: flex;
+    justify-content: space-between;
+    font-family: ui-monospace, monospace;
+    font-size: 0.6rem;
+    color: #8b8b96;
+  }
+  .unified {
+    font-size: 0.52rem;
+    color: #a78bfa;
+    border: 1px solid rgba(167, 139, 250, 0.4);
+    border-radius: 3px;
+    padding: 0 0.2rem;
+    margin-left: 0.15rem;
+  }
+
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; }
+  .tile { background: rgba(12, 12, 20, 0.5); border: 1px solid #20202b; border-radius: 0.5rem; padding: 0.4rem; text-align: center; }
+  .tile-num { font-family: ui-monospace, monospace; font-size: 0.82rem; color: #e4e4e7; font-weight: 600; }
+  .tile-lbl { font-family: ui-monospace, monospace; font-size: 0.55rem; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .chip {
+    font-family: ui-monospace, monospace;
+    font-size: 0.58rem;
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+  }
+  .errline { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #fca5a5; }
+  .errline.dim { color: #52525b; }
+
+  /* ── agent roster ── */
+  .roster-stats { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #a1a1aa; display: flex; gap: 0.4rem; align-items: center; }
+  .roster-stats b { color: #e4e4e7; }
+  .dot-sep { color: #3f3f46; }
+  .agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 0.6rem;
+  }
+  .agent {
+    border: 1px solid #23232f;
+    border-radius: 0.6rem;
+    padding: 0.6rem 0.65rem;
+    background: linear-gradient(160deg, rgba(24, 24, 34, 0.6), rgba(12, 12, 20, 0.6));
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .agent:hover { border-color: #3f3f5a; transform: translateY(-1px); }
+  .agent.is-working { border-color: rgba(52, 211, 153, 0.4); background: linear-gradient(160deg, rgba(16, 40, 32, 0.5), rgba(12, 16, 20, 0.6)); }
+  .agent.is-default { box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.35); }
+  .agent-top { display: flex; align-items: center; gap: 0.45rem; }
+  .agent-emoji { font-size: 1.15rem; line-height: 1; }
+  .agent-id { min-width: 0; flex: 1; }
+  .agent-name {
+    font-size: 0.78rem;
+    color: #f4f4f5;
+    font-weight: 600;
+    line-height: 1.15;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .def-star { color: #fbbf24; margin-left: 0.2rem; font-size: 0.7rem; }
+  .agent-model {
+    font-family: ui-monospace, monospace;
+    font-size: 0.55rem;
+    color: #71717a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; flex-shrink: 0; }
+  .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.35); }
+  }
+  .agent-status {
+    font-family: ui-monospace, monospace;
+    font-size: 0.55rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .agent-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.2rem; }
+  .agent-stats > div { display: flex; flex-direction: column; align-items: center; }
+  .as-num { font-family: ui-monospace, monospace; font-size: 0.72rem; color: #e4e4e7; font-weight: 600; }
+  .as-lbl { font-family: ui-monospace, monospace; font-size: 0.5rem; color: #71717a; text-transform: uppercase; }
+  .tok-bar { height: 0.2rem; border-radius: 999px; background: #18181f; overflow: hidden; }
+  .tok-bar > div { height: 100%; border-radius: 999px; opacity: 0.8; transition: width 0.6s ease; }
+
+  /* ── usage banner ── */
+  .usage-banner {
+    border: 1px solid #2a2740;
+    border-radius: 0.75rem;
+    padding: 0.9rem 1rem;
+    background: linear-gradient(160deg, rgba(40, 32, 66, 0.45), rgba(12, 12, 20, 0.55));
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .ub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .ub-title { font-family: ui-monospace, monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em; color: #c4b5fd; }
+  .ub-sub { color: #52525b; }
+  .ub-meta { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #71717a; margin-top: 0.25rem; }
+  .ub-meta b { color: #a1a1aa; }
+  .ub-total { text-align: right; flex-shrink: 0; }
+  .ub-total-num { font-family: ui-monospace, monospace; font-size: 1.6rem; font-weight: 700; color: #f4f4f5; line-height: 1; }
+  .ub-total-lbl { font-family: ui-monospace, monospace; font-size: 0.55rem; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 0.2rem; }
+  .ub-controls { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .ub-btn,
+  .ub-sel {
+    font-family: ui-monospace, monospace;
+    font-size: 0.62rem;
+    color: #a1a1aa;
+    background: #14141d;
+    border: 1px solid #2a2a38;
+    border-radius: 0.35rem;
+    padding: 0.24rem 0.6rem;
+    cursor: pointer;
+  }
+  .ub-btn:hover,
+  .ub-sel:hover { border-color: #3f3f5a; color: #e4e4e7; }
+  .ub-btn.active,
+  .ub-sel.active { background: rgba(167, 139, 250, 0.18); border-color: #a78bfa; color: #ddd6fe; }
+  .ub-sel { appearance: none; -webkit-appearance: none; }
+  .ub-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 100px;
+    background: rgba(10, 10, 16, 0.5);
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.45rem 0.2rem;
+  }
+  .ub-bar-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    height: 100%;
+    min-width: 0;
+  }
+  .ub-bar {
+    width: 100%;
+    max-width: 24px;
+    border-radius: 3px 3px 0 0;
+    background: linear-gradient(to top, #7c3aed, #a78bfa);
+    transition: height 0.5s ease;
+    min-height: 2px;
+  }
+  .ub-bar-wrap:hover .ub-bar { background: linear-gradient(to top, #8b5cf6, #c4b5fd); box-shadow: 0 0 10px rgba(167, 139, 250, 0.5); }
+  .ub-bar-lbl {
+    font-family: ui-monospace, monospace;
+    font-size: 0.48rem;
+    color: #52525b;
+    margin-top: 0.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+  .ub-link {
+    color: #a78bfa;
+    text-decoration: underline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    font: inherit;
+    padding: 0;
+  }
+  .ub-empty {
+    font-family: ui-monospace, monospace;
+    font-size: 0.62rem;
+    color: #52525b;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    width: 100%;
+    padding: 0 1.5rem;
+    line-height: 1.5;
+  }
+</style>

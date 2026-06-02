@@ -348,3 +348,216 @@ fn parse_metrics(s: &str) -> serde_json::Value {
     }
     json!({"reachable": true, "host": host, "load": load, "mem": mem, "gpus": gpus, "containers": containers})
 }
+
+// ── per-agent roster (the OpenClaw pantheon) ─────────────────────────────
+
+/// OpenClaw's agents HTTP API port. `GET http://<addr>:9787/agents` returns the
+/// live roster — every agent with its emoji/name/model plus token, session and
+/// activity stats. (Same endpoint the presto-cockpit dashboard consumes.)
+const OPENCLAW_AGENTS_PORT: u16 = 9787;
+
+/// GET /agent/systems/:id/agents — the gateway's pantheon roster for a system.
+pub async fn system_agents(Path(id): Path<String>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let v = tokio::task::spawn_blocking(move || fetch_agents(&sys))
+        .await
+        .unwrap_or_else(|_| json!({"ok": false, "reachable": false, "err": "join error"}));
+    Json(v)
+}
+
+fn fetch_agents(sys: &System) -> serde_json::Value {
+    let url = format!("http://{}:{}/agents", sys.address, OPENCLAW_AGENTS_PORT);
+    let out = Command::new("curl")
+        .args(["-s", "--max-time", "6", "-H", "Accept: application/json", &url])
+        .output();
+    match out {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+            match serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                Ok(j) => json!({
+                    "ok": true,
+                    "reachable": true,
+                    "ts": j.get("ts").cloned().unwrap_or(json!(null)),
+                    "warming": j.get("warming").cloned().unwrap_or(json!(false)),
+                    "agents": j.get("agents").cloned().unwrap_or_else(|| json!([])),
+                }),
+                Err(e) => json!({"ok": false, "reachable": false, "err": format!("parse: {e}")}),
+            }
+        }
+        Ok(_) => json!({"ok": false, "reachable": false,
+            "err": format!("no agents API at {url} — is the OpenClaw agents endpoint up on :{OPENCLAW_AGENTS_PORT}?")}),
+        Err(e) => json!({"ok": false, "reachable": false, "err": format!("curl: {e}")}),
+    }
+}
+
+// ── local token-usage history (long-timeframe tracking) ──────────────────
+//
+// The gateway only reports a short rolling window of token usage, so to show
+// 30-day / 90-day / 1-year / month / year breakdowns we sample /agents on a
+// timer and accumulate per-agent, per-DAY usage locally — taking deltas of the
+// gateway's cumulative counters (with reset detection, and a baseline-skip on
+// first sight so pre-existing history isn't dumped onto day one). The frontend
+// slices the daily series into any timeframe.
+
+const TOKENS_DIR: &str = "/var/lib/aeon/agent-tokens";
+const SAMPLE_INTERVAL_S: u64 = 600; // 10 min
+const MAX_DAYS: usize = 800; // ~2 years of daily rollups
+
+fn sanitize_id(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+fn tokens_path(system_id: &str) -> PathBuf {
+    PathBuf::from(TOKENS_DIR).join(format!("{}.json", sanitize_id(system_id)))
+}
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct AgentName {
+    name: String,
+    emoji: String,
+}
+#[derive(Serialize, Deserialize, Default)]
+struct TokenStore {
+    #[serde(default)]
+    first_day: String,
+    /// last cumulative counters seen per agent → [total, in, out] (for deltas)
+    #[serde(default)]
+    last: std::collections::HashMap<String, [i64; 3]>,
+    /// daily usage deltas: date → agent_id → [total, in, out] used that day
+    #[serde(default)]
+    daily: std::collections::BTreeMap<String, std::collections::HashMap<String, [i64; 3]>>,
+    #[serde(default)]
+    names: std::collections::HashMap<String, AgentName>,
+}
+
+/// Local date (system timezone) as YYYY-MM-DD, via `date +%F`.
+fn today_str() -> String {
+    Command::new("date")
+        .arg("+%F")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() == 10)
+        .unwrap_or_default()
+}
+fn load_token_store(system_id: &str) -> TokenStore {
+    std::fs::read(tokens_path(system_id))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+fn save_token_store(system_id: &str, store: &TokenStore) {
+    let _ = std::fs::create_dir_all(TOKENS_DIR);
+    if let Ok(text) = serde_json::to_vec(store) {
+        let tmp = tokens_path(system_id).with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, tokens_path(system_id));
+        }
+    }
+}
+
+/// Fold one /agents snapshot into the daily store (delta accumulation).
+fn record_token_sample(system_id: &str, agents: &[serde_json::Value]) {
+    let day = today_str();
+    if day.is_empty() {
+        return;
+    }
+    let mut store = load_token_store(system_id);
+    if store.first_day.is_empty() {
+        store.first_day = day.clone();
+    }
+    let getn = |a: &serde_json::Value, k: &str| a.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    let mut deltas: Vec<(String, [i64; 3])> = Vec::new();
+    for a in agents {
+        let Some(id) = a.get("id").and_then(|x| x.as_str()) else { continue };
+        let cur = [getn(a, "total_tokens"), getn(a, "in_tokens"), getn(a, "out_tokens")];
+        let d = match store.last.get(id) {
+            None => [0, 0, 0], // baseline: don't attribute pre-existing history to a day
+            Some(p) => [
+                if cur[0] >= p[0] { cur[0] - p[0] } else { cur[0] }, // reset → count current
+                if cur[1] >= p[1] { cur[1] - p[1] } else { cur[1] },
+                if cur[2] >= p[2] { cur[2] - p[2] } else { cur[2] },
+            ],
+        };
+        store.last.insert(id.to_string(), cur);
+        store.names.insert(
+            id.to_string(),
+            AgentName {
+                name: a.get("name").and_then(|x| x.as_str()).unwrap_or(id).to_string(),
+                emoji: a.get("emoji").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            },
+        );
+        if d != [0, 0, 0] {
+            deltas.push((id.to_string(), d));
+        }
+    }
+    if !deltas.is_empty() {
+        let bucket = store.daily.entry(day).or_default();
+        for (id, d) in deltas {
+            let e = bucket.entry(id).or_insert([0, 0, 0]);
+            e[0] += d[0];
+            e[1] += d[1];
+            e[2] += d[2];
+        }
+    }
+    while store.daily.len() > MAX_DAYS {
+        let Some(oldest) = store.daily.keys().next().cloned() else { break };
+        store.daily.remove(&oldest);
+    }
+    save_token_store(system_id, &store);
+}
+
+/// GET /agent/systems/:id/usage — locally-tracked token-usage history (daily
+/// per-agent deltas) + the gateway's current cumulative totals. The frontend
+/// slices `daily` into 30d / 90d / 1y / month / year views.
+pub async fn system_usage(Path(id): Path<String>) -> impl IntoResponse {
+    let store = load_token_store(&id);
+    let gateway_total: i64 = store.last.values().map(|v| v[0]).sum();
+    let mut daily = serde_json::Map::new();
+    for (date, agents) in &store.daily {
+        let mut total = 0i64;
+        let mut amap = serde_json::Map::new();
+        for (aid, v) in agents {
+            total += v[0];
+            amap.insert(aid.clone(), json!(v[0]));
+        }
+        daily.insert(date.clone(), json!({"total": total, "agents": amap}));
+    }
+    let names: serde_json::Map<String, serde_json::Value> = store
+        .names
+        .iter()
+        .map(|(k, v)| (k.clone(), json!({"name": v.name, "emoji": v.emoji})))
+        .collect();
+    Json(json!({
+        "ok": true,
+        "first_day": store.first_day,
+        "today": today_str(),
+        "gateway_total": gateway_total,
+        "daily": daily,
+        "names": names,
+    }))
+}
+
+/// Background task: every SAMPLE_INTERVAL_S, sample each OpenClaw system's
+/// /agents roster and fold it into the local token-usage history. Runs for the
+/// life of the process; samples once immediately on startup.
+pub async fn token_sampler_loop() {
+    loop {
+        for sys in load_systems().into_iter().filter(|s| s.roles.iter().any(|r| r == "openclaw")) {
+            let id = sys.id.clone();
+            let v = tokio::task::spawn_blocking(move || fetch_agents(&sys))
+                .await
+                .unwrap_or_else(|_| json!({"reachable": false}));
+            if let Some(agents) = v.get("agents").and_then(|x| x.as_array()) {
+                if !agents.is_empty() {
+                    let agents = agents.clone();
+                    let _ = tokio::task::spawn_blocking(move || record_token_sample(&id, &agents)).await;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(SAMPLE_INTERVAL_S)).await;
+    }
+}

@@ -200,6 +200,54 @@ export interface SystemMetrics {
 export const getSystemMetrics = (id: string) =>
   req<{ ok: boolean; metrics: SystemMetrics }>('GET', `/agent/systems/${id}/metrics`);
 
+/** One agent in an OpenClaw gateway's pantheon (from its /agents API). */
+export interface AgentInfo {
+  id: string;
+  name: string;
+  emoji?: string;
+  model?: string;
+  provider?: string | null;
+  active?: boolean;
+  on_call?: boolean;
+  working?: boolean;
+  last_seen_s_ago?: number | null;
+  tok_s?: number;
+  pp_tok_s?: number;
+  active_sessions?: number;
+  runs_active?: number;
+  subagents_active?: number;
+  proc_rss_mb?: number;
+  total_tokens?: number;
+  in_tokens?: number;
+  out_tokens?: number;
+  context_tokens?: number | null;
+  sessions?: number;
+  current?: string | null;
+  is_default?: boolean;
+}
+export interface AgentRoster {
+  ok: boolean;
+  reachable: boolean;
+  ts?: number | null;
+  warming?: boolean;
+  agents?: AgentInfo[];
+  err?: string;
+}
+export const getSystemAgents = (id: string) =>
+  req<AgentRoster>('GET', `/agent/systems/${id}/agents`);
+
+/** Locally-tracked token-usage history for a system (daily per-agent deltas). */
+export interface UsageHistory {
+  ok: boolean;
+  first_day: string;
+  today: string;
+  gateway_total: number;
+  daily: Record<string, { total: number; agents: Record<string, number> }>;
+  names: Record<string, { name: string; emoji: string }>;
+}
+export const getSystemUsage = (id: string) =>
+  req<UsageHistory>('GET', `/agent/systems/${id}/usage`);
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

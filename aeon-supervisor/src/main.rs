@@ -98,6 +98,10 @@ async fn main() -> Result<()> {
     // Background refresh loop for DNS blacklist subscription sources.
     // Runs forever; checks every 5 min for stale lists and re-fetches.
     tokio::spawn(dns_log::run_refresh_loop());
+    // Agent Dash: sample each OpenClaw gateway's /agents roster on a timer and
+    // accumulate per-agent token usage locally, so the dashboard can show
+    // 30-day / 90-day / 1-year history beyond the gateway's short window.
+    tokio::spawn(agent_connect::token_sampler_loop());
     // Ensure the AEON_DROP iptables chain exists at startup so every
     // DROP rule we apply (user or system) gets logged on the way down.
     // This is what populates the "Blocked traffic" panel.
