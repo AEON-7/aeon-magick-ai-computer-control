@@ -10,7 +10,7 @@
 //! Metrics, the per-agent roster, and per-agent provisioning hang off this
 //! registry (built incrementally on top).
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,8 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::api::AppState;
 
 const DIR: &str = "/var/lib/aeon/agent-connect";
 
@@ -560,4 +562,208 @@ pub async fn token_sampler_loop() {
         }
         tokio::time::sleep(std::time::Duration::from_secs(SAMPLE_INTERVAL_S)).await;
     }
+}
+
+// ── E1: per-agent detail + provisioning ──────────────────────────────────
+//
+// "Provision access" is deliberately NON-INVASIVE: it issues a real Aeon Magick
+// API token (scoped Full) through the running AuthStore, drops a per-agent
+// access file into that agent's gateway dir, and *returns* the exact one-line
+// `skills` change to apply — it does NOT blind-edit the live 70KB openclaw.json.
+
+fn b64(d: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(d)
+}
+
+/// Run a remote command (shell pipeline) over the agent-connect key, capture stdout.
+fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
+    let target = format!("{}@{}", sys.ssh_user, sys.address);
+    let out = Command::new("ssh")
+        .arg("-i")
+        .arg(key_path())
+        .args([
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=8",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "ServerAliveInterval=3",
+            "-o", "ServerAliveCountMax=3",
+            "-p", &sys.port.to_string(),
+            &target, "timeout", "12", "bash", "-lc", remote,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("ssh failed").to_string())
+    }
+}
+
+type ProvMap = std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>;
+fn provisioned_path() -> PathBuf {
+    PathBuf::from(DIR).join("provisioned.json")
+}
+fn load_provisioned() -> ProvMap {
+    std::fs::read(provisioned_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+fn save_provisioned(m: &ProvMap) {
+    let _ = std::fs::create_dir_all(DIR);
+    if let Ok(t) = serde_json::to_vec_pretty(m) {
+        let tmp = provisioned_path().with_extension("json.tmp");
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, provisioned_path());
+        }
+    }
+}
+
+/// Read-from-stdin python that extracts one agent's config (skills/voice/corpus/
+/// model) from openclaw.json + lists available shared skills. base64'd over SSH
+/// so there are zero quoting concerns. argv[1] = agent id.
+const DETAIL_PY: &str = r#"import json,os,sys
+h=os.path.expanduser('~')
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+except Exception as e:
+    print(json.dumps({'err':'config: '+str(e)}))
+    sys.exit(0)
+aid=sys.argv[1]
+lst=(d.get('agents') or {}).get('list') or []
+a={}
+for x in lst:
+    if isinstance(x,dict) and x.get('id')==aid:
+        a=x
+        break
+sd=h+'/.openclaw/workspace/skills'
+av=sorted([n for n in os.listdir(sd) if os.path.isdir(os.path.join(sd,n))]) if os.path.isdir(sd) else []
+print(json.dumps({'skills':a.get('skills',[]),'voice':a.get('voice'),'corpus':a.get('corpus'),'model':a.get('model') or a.get('thinkingDefault'),'name':a.get('name'),'is_default':a.get('default',False),'available_skills':av,'found':bool(a)}))
+"#;
+
+/// GET /agent/systems/:id/agents/:aid/detail — per-agent skills/voice/corpus/
+/// model (from the gateway config) + local provisioned state.
+pub async fn agent_detail(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let safe_aid = sanitize_id(&agent_id);
+    let prov = load_provisioned().get(&id).and_then(|m| m.get(&safe_aid)).cloned();
+    let aid2 = safe_aid.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let remote = format!("echo {} | base64 -d | python3 - {}", b64(DETAIL_PY.as_bytes()), aid2);
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(stdout) => {
+            let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({}));
+            Json(json!({
+                "ok": true,
+                "skills": p.get("skills").cloned().unwrap_or_else(|| json!([])),
+                "voice": p.get("voice").cloned().unwrap_or(serde_json::Value::Null),
+                "corpus": p.get("corpus").cloned().unwrap_or(serde_json::Value::Null),
+                "model": p.get("model").cloned().unwrap_or(serde_json::Value::Null),
+                "available_skills": p.get("available_skills").cloned().unwrap_or_else(|| json!([])),
+                "provisioned": prov,
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e, "provisioned": prov})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProvisionReq {
+    /// The Pi's API base URL the agent should call (the browser passes its origin).
+    #[serde(default)]
+    api_base: String,
+}
+
+/// POST /agent/systems/:id/agents/:aid/provision — issue a per-agent Aeon Magick
+/// token, drop an access file into the agent's gateway dir, return the token ONCE
+/// plus the exact (non-invasive) skills-array change to apply.
+pub async fn provision_agent(
+    State(state): State<AppState>,
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<ProvisionReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let safe_aid = sanitize_id(&agent_id);
+    let (token_id, token_plain) =
+        match state.auth.create_token(&format!("agent:{safe_aid}"), crate::auth::TokenScope::Full) {
+            Ok(t) => t,
+            Err(e) => return Json(json!({"ok": false, "err": format!("token: {e}")})),
+        };
+    let api_base = if req.api_base.trim().is_empty() {
+        format!("https://{}/api", "<this-pi>")
+    } else {
+        req.api_base.trim().trim_end_matches('/').to_string()
+    };
+    let drop_res = {
+        let (sys, aid, tok, ab) = (sys.clone(), safe_aid.clone(), token_plain.clone(), api_base.clone());
+        tokio::task::spawn_blocking(move || drop_agent_access(&sys, &aid, &tok, &ab))
+            .await
+            .unwrap_or_else(|_| Err("join error".into()))
+    };
+    let mut prov = load_provisioned();
+    prov.entry(id.clone()).or_default().insert(
+        safe_aid.clone(),
+        json!({"token_id": token_id, "at_ms": now_ms(), "skill": "aeon-magick", "dropped": drop_res.as_ref().ok()}),
+    );
+    save_provisioned(&prov);
+    Json(json!({
+        "ok": true,
+        "token_id": token_id,
+        "token": token_plain,
+        "skill": "aeon-magick",
+        "dropped": drop_res.as_ref().ok(),
+        "drop_err": drop_res.as_ref().err(),
+        "config_change": format!(
+            "Add \"aeon-magick\" to the skills array of the agents.list entry with id==\"{safe_aid}\" in ~/.openclaw/openclaw.json (create a \"skills\":[] array on that entry if absent), then reload OpenClaw.",
+        ),
+    }))
+}
+
+fn drop_agent_access(sys: &System, agent_id: &str, token: &str, api_base: &str) -> Result<String, String> {
+    let content = json!({"api_base": api_base, "token": token, "skill": "aeon-magick"}).to_string();
+    let dir = format!("$HOME/.openclaw/agents/{agent_id}/agent");
+    let file = format!("{dir}/aeon-magick-access.json");
+    let remote = format!(
+        "mkdir -p {dir} && echo {} | base64 -d > {file} && chmod 600 {file} && echo {file}",
+        b64(content.as_bytes())
+    );
+    ssh_capture(sys, &remote).map(|s| s.trim().to_string())
+}
+
+/// DELETE /agent/systems/:id/agents/:aid/provision — revoke the agent's token +
+/// remove its access file.
+pub async fn deprovision_agent(
+    State(state): State<AppState>,
+    Path((id, agent_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let safe_aid = sanitize_id(&agent_id);
+    let mut prov = load_provisioned();
+    let token_id = prov
+        .get(&id)
+        .and_then(|m| m.get(&safe_aid))
+        .and_then(|v| v.get("token_id"))
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    if let Some(tid) = &token_id {
+        let _ = state.auth.revoke_token(tid);
+    }
+    if let Some(sys) = load_systems().into_iter().find(|s| s.id == id) {
+        let aid = safe_aid.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            ssh_capture(&sys, &format!("rm -f $HOME/.openclaw/agents/{aid}/agent/aeon-magick-access.json && echo removed"))
+        })
+        .await;
+    }
+    if let Some(m) = prov.get_mut(&id) {
+        m.remove(&safe_aid);
+    }
+    save_provisioned(&prov);
+    Json(json!({"ok": true, "revoked_token": token_id}))
 }

@@ -12,6 +12,16 @@
   let selMonth = '';
   let selYear = '';
   let loading = true;
+
+  // agent detail modal
+  let detailSys = '';
+  let detailAgent: api.AgentInfo | null = null;
+  let detail: api.AgentDetail | null = null;
+  let detailLoading = false;
+  let provisioning = false;
+  let newToken = '';
+  let configChange = '';
+  let dropMsg = '';
   let metricsLoading = false;
   let err = '';
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -407,6 +417,59 @@
     await refresh();
   }
   const copy = (t: string) => navigator.clipboard?.writeText(t);
+
+  // ── agent detail + provisioning ─────────────────────────────────────
+  async function openDetail(sysId: string, a: api.AgentInfo) {
+    detailSys = sysId;
+    detailAgent = a;
+    detail = null;
+    newToken = configChange = dropMsg = '';
+    detailLoading = true;
+    try {
+      detail = await api.getAgentDetail(sysId, a.id);
+    } catch (e) {
+      detail = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      detailLoading = false;
+    }
+  }
+  function closeDetail() {
+    detailAgent = null;
+    detail = null;
+    newToken = '';
+  }
+  async function doProvision() {
+    if (!detailAgent) return;
+    provisioning = true;
+    try {
+      const r = await api.provisionAgent(detailSys, detailAgent.id, window.location.origin + '/api');
+      if (r.ok) {
+        newToken = r.token ?? '';
+        configChange = r.config_change ?? '';
+        dropMsg = r.dropped
+          ? `access file dropped → ${r.dropped}`
+          : r.drop_err
+            ? `skill-drop failed: ${r.drop_err}`
+            : '';
+        detail = await api.getAgentDetail(detailSys, detailAgent.id);
+      } else {
+        alert(r.err ?? 'provision failed');
+      }
+    } finally {
+      provisioning = false;
+    }
+  }
+  async function doRevoke() {
+    if (!detailAgent || !confirm("Revoke this agent's API key + remove its access file?")) return;
+    provisioning = true;
+    try {
+      await api.deprovisionAgent(detailSys, detailAgent.id);
+      newToken = '';
+      detail = await api.getAgentDetail(detailSys, detailAgent.id);
+    } finally {
+      provisioning = false;
+    }
+  }
   function badgeCls(status: string): string {
     if (status === 'connected' || status === 'online')
       return 'bg-live-900/40 text-live-300 border border-live-500/40';
@@ -590,7 +653,10 @@
                     {@const st = agentStatus(a)}
                     {@const ru = v?.perAgent?.[a.id] ?? 0}
                     {@const pv = ru > 0 ? ru : a.total_tokens ?? 0}
-                    <div class="agent" class:is-default={a.is_default} class:is-working={a.working || a.on_call}>
+                    <div class="agent agent-click" class:is-default={a.is_default} class:is-working={a.working || a.on_call}
+                         role="button" tabindex="0" title="Open agent detail"
+                         on:click={() => openDetail(s.id, a)}
+                         on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && openDetail(s.id, a)}>
                       <div class="agent-top">
                         <span class="agent-emoji">{a.emoji || '🤖'}</span>
                         <div class="agent-id">
@@ -673,6 +739,67 @@
       </div>
     {/if}
   </main>
+
+  {#if detailAgent}
+    <div class="agd-overlay" role="button" tabindex="-1"
+         on:click={closeDetail} on:keydown={(e) => e.key === 'Escape' && closeDetail()}>
+      <div class="agd" role="dialog" tabindex="-1"
+           on:click|stopPropagation on:keydown|stopPropagation>
+        <header class="agd-head">
+          <span class="agd-emoji">{detailAgent.emoji || '🤖'}</span>
+          <div class="min-w-0 flex-1">
+            <div class="agd-name">{detailAgent.name}{#if detailAgent.is_default}<span class="def-star">★</span>{/if}</div>
+            <div class="agd-model">{detail?.model || detailAgent.model || '—'}</div>
+          </div>
+          <button class="agd-close" on:click={closeDetail} title="close">✕</button>
+        </header>
+
+        {#if detailLoading}<p class="agd-dim">loading agent…</p>{/if}
+        {#if detail?.err}<p class="text-amber-300 text-xs font-mono">{detail.err}</p>{/if}
+
+        <section class="agd-sec">
+          <h3 class="agd-h3">Aeon Magick Access</h3>
+          {#if detail?.provisioned}
+            <div class="agd-prov">
+              <span class="agd-badge on">provisioned</span>
+              <span class="agd-mono agd-dim">token {detail.provisioned.token_id}</span>
+              <button class="btn text-xs ml-auto text-red-300" on:click={doRevoke} disabled={provisioning}>revoke API key</button>
+            </div>
+          {:else}
+            <p class="agd-dim">No token yet. Provisioning mints a scoped Aeon Magick API key and drops an access file into this agent's gateway workspace.</p>
+            <button class="btn-primary text-xs" on:click={doProvision} disabled={provisioning}>
+              {provisioning ? 'provisioning…' : 'Provision API Key'}
+            </button>
+          {/if}
+          {#if newToken}
+            <div class="agd-token">
+              <div class="agd-token-row"><span class="agd-dim">API token — shown once</span><button class="agd-copy" on:click={() => copy(newToken)}>copy</button></div>
+              <code class="agd-code">{newToken}</code>
+              {#if dropMsg}<div class="agd-mono agd-dim">{dropMsg}</div>{/if}
+              {#if configChange}<div class="agd-note">Enable: {configChange}</div>{/if}
+            </div>
+          {/if}
+        </section>
+
+        <section class="agd-sec">
+          <h3 class="agd-h3">Skills</h3>
+          {#if detail?.skills?.length}
+            <div class="agd-chips">{#each detail.skills as sk}<span class="agd-chip" class:am={sk === 'aeon-magick'}>{sk}</span>{/each}</div>
+          {:else if detail}<p class="agd-dim">none assigned</p>{/if}
+          {#if detail?.available_skills?.length}
+            <p class="agd-dim agd-avail">available on gateway: {detail.available_skills.join(' · ')}</p>
+          {/if}
+        </section>
+
+        <div class="agd-grid2">
+          <section class="agd-sec"><h3 class="agd-h3">Voice</h3><p class="agd-mono agd-clip">{detail?.voice || '—'}</p></section>
+          <section class="agd-sec"><h3 class="agd-h3">Corpus</h3><p class="agd-mono">{detail?.corpus || '—'}</p></section>
+        </div>
+
+        <p class="agd-soon">Coming next: profile photo → Matrix avatar · SSH key · corpus upload/browse · voice clone · Add-Skill marketplace.</p>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -939,4 +1066,67 @@
     padding: 0 1.5rem;
     line-height: 1.5;
   }
+
+  /* ── agent detail modal ── */
+  .agent-click { cursor: pointer; }
+  .agent-click:focus-visible { outline: 1px solid #a78bfa; outline-offset: 1px; }
+  .agd-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(5, 5, 10, 0.72);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+  }
+  .agd {
+    width: 100%;
+    max-width: 30rem;
+    max-height: 88vh;
+    overflow-y: auto;
+    background: linear-gradient(160deg, #16131f, #0c0c14);
+    border: 1px solid #2e2a44;
+    border-radius: 0.9rem;
+    padding: 1.1rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  }
+  .agd-head { display: flex; align-items: center; gap: 0.6rem; }
+  .agd-emoji { font-size: 1.7rem; line-height: 1; }
+  .agd-name { font-size: 1.05rem; color: #f4f4f5; font-weight: 700; }
+  .agd-model { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #71717a; }
+  .agd-close { color: #71717a; font-size: 0.9rem; padding: 0.2rem 0.5rem; border-radius: 0.35rem; }
+  .agd-close:hover { color: #e4e4e7; background: #20202b; }
+  .agd-sec {
+    border: 1px solid #23232f;
+    border-radius: 0.6rem;
+    padding: 0.7rem 0.8rem;
+    background: rgba(10, 10, 16, 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .agd-h3 { font-family: ui-monospace, monospace; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.1em; color: #c4b5fd; }
+  .agd-dim { font-size: 0.72rem; color: #71717a; line-height: 1.45; }
+  .agd-mono { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #a1a1aa; }
+  .agd-clip { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .agd-prov { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .agd-badge { font-family: ui-monospace, monospace; font-size: 0.58rem; text-transform: uppercase; padding: 0.1rem 0.45rem; border-radius: 999px; }
+  .agd-badge.on { background: rgba(52, 211, 153, 0.14); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.4); }
+  .agd-token { border: 1px dashed #3f3f5a; border-radius: 0.5rem; padding: 0.6rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .agd-token-row { display: flex; justify-content: space-between; align-items: center; }
+  .agd-copy { font-family: ui-monospace, monospace; font-size: 0.58rem; color: #a78bfa; }
+  .agd-copy:hover { text-decoration: underline; }
+  .agd-code { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #6ee7b7; background: #0a0a10; border-radius: 0.35rem; padding: 0.45rem 0.55rem; word-break: break-all; }
+  .agd-note { font-family: ui-monospace, monospace; font-size: 0.58rem; color: #fbbf24; line-height: 1.45; }
+  .agd-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .agd-chip { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #a5b4fc; background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.25); border-radius: 4px; padding: 0.08rem 0.4rem; }
+  .agd-chip.am { color: #6ee7b7; background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.4); }
+  .agd-avail { margin-top: 0.1rem; }
+  .agd-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+  .agd-soon { font-family: ui-monospace, monospace; font-size: 0.56rem; color: #52525b; text-align: center; line-height: 1.5; }
 </style>

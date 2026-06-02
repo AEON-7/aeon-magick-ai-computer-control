@@ -248,6 +248,36 @@ export interface UsageHistory {
 export const getSystemUsage = (id: string) =>
   req<UsageHistory>('GET', `/agent/systems/${id}/usage`);
 
+/** Per-agent detail (gateway config + provisioned state) for the detail panel. */
+export interface AgentDetail {
+  ok: boolean;
+  skills?: string[];
+  voice?: string | null;
+  corpus?: string | null;
+  model?: string | null;
+  available_skills?: string[];
+  provisioned?: { token_id: string; at_ms: number; skill: string; dropped?: string | null } | null;
+  err?: string;
+}
+export const getAgentDetail = (sysId: string, agentId: string) =>
+  req<AgentDetail>('GET', `/agent/systems/${sysId}/agents/${agentId}/detail`);
+export const provisionAgent = (sysId: string, agentId: string, apiBase: string) =>
+  req<{
+    ok: boolean;
+    token_id?: string;
+    token?: string;
+    skill?: string;
+    config_change?: string;
+    dropped?: string | null;
+    drop_err?: string | null;
+    err?: string;
+  }>('POST', `/agent/systems/${sysId}/agents/${agentId}/provision`, { api_base: apiBase });
+export const deprovisionAgent = (sysId: string, agentId: string) =>
+  req<{ ok: boolean; revoked_token?: string | null }>(
+    'DELETE',
+    `/agent/systems/${sysId}/agents/${agentId}/provision`,
+  );
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 
