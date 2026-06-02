@@ -648,6 +648,7 @@ pub async fn agent_detail(Path((id, agent_id)): Path<(String, String)>) -> impl 
     };
     let safe_aid = sanitize_id(&agent_id);
     let prov = load_provisioned().get(&id).and_then(|m| m.get(&safe_aid)).cloned();
+    let ssh = load_ssh_prov().get(&id).and_then(|m| m.get(&safe_aid)).cloned();
     let aid2 = safe_aid.clone();
     let res = tokio::task::spawn_blocking(move || {
         let remote = format!("echo {} | base64 -d | python3 - {}", b64(DETAIL_PY.as_bytes()), aid2);
@@ -666,9 +667,10 @@ pub async fn agent_detail(Path((id, agent_id)): Path<(String, String)>) -> impl 
                 "model": p.get("model").cloned().unwrap_or(serde_json::Value::Null),
                 "available_skills": p.get("available_skills").cloned().unwrap_or_else(|| json!([])),
                 "provisioned": prov,
+                "ssh": ssh.clone(),
             }))
         }
-        Err(e) => Json(json!({"ok": false, "err": e, "provisioned": prov})),
+        Err(e) => Json(json!({"ok": false, "err": e, "provisioned": prov, "ssh": ssh})),
     }
 }
 
@@ -766,4 +768,175 @@ pub async fn deprovision_agent(
     }
     save_provisioned(&prov);
     Json(json!({"ok": true, "revoked_token": token_id}))
+}
+
+// ── E1 sub-step 3: per-agent SSH access to the Pi (HUMAN-ADMIN ONLY) ──────
+//
+// Gated to Admin scope by the /api/agent/ deny-list in auth.rs — no agent API
+// or MCP path reaches this. Creates an `aeon-agent-<id>` Unix user on the Pi
+// (the supervisor runs as root), installs a generated keypair, optionally
+// grants passwordless sudo (FULL ADMIN — the UI warns), and pushes the private
+// key to the agent's gateway workspace. Revoke deletes the user + sudoers.
+
+fn ssh_prov_path() -> PathBuf {
+    PathBuf::from(DIR).join("ssh_provisioned.json")
+}
+fn load_ssh_prov() -> ProvMap {
+    std::fs::read(ssh_prov_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+fn save_ssh_prov(m: &ProvMap) {
+    let _ = std::fs::create_dir_all(DIR);
+    if let Ok(t) = serde_json::to_vec_pretty(m) {
+        let tmp = ssh_prov_path().with_extension("json.tmp");
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, ssh_prov_path());
+        }
+    }
+}
+fn agent_unix_user(agent_id: &str) -> String {
+    format!("aeon-agent-{}", sanitize_id(agent_id))
+}
+/// Run a root bash script locally (the supervisor process runs as root).
+fn root_bash(script: &str) -> Result<String, String> {
+    let out = Command::new("bash").arg("-c").arg(script).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("script failed").to_string())
+    }
+}
+fn local_ip() -> String {
+    root_bash("hostname -I 2>/dev/null | awk '{print $1}'").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+pub struct SshGrantReq {
+    #[serde(default)]
+    admin: bool,
+}
+
+/// POST /agent/systems/:id/agents/:aid/ssh — create the agent's Pi SSH user.
+pub async fn grant_ssh(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<SshGrantReq>,
+) -> impl IntoResponse {
+    let safe_aid = sanitize_id(&agent_id);
+    if load_ssh_prov().get(&id).and_then(|m| m.get(&safe_aid)).is_some() {
+        return Json(json!({"ok": false, "err": "SSH already provisioned for this agent — revoke first"}));
+    }
+    let user = agent_unix_user(&safe_aid);
+    let admin = req.admin;
+    let (u, af) = (user.clone(), if admin { "1" } else { "0" });
+    let privkey = match tokio::task::spawn_blocking(move || {
+        let script = format!(
+            "set -e\nU={u}\nid \"$U\" >/dev/null 2>&1 || useradd -m -s /bin/bash \"$U\"\n\
+             KD=$(mktemp -d)\nssh-keygen -t ed25519 -N '' -C \"$U@aeon-magick\" -f \"$KD/k\" >/dev/null\n\
+             install -d -m700 -o \"$U\" -g \"$U\" \"/home/$U/.ssh\"\n\
+             cat \"$KD/k.pub\" > \"/home/$U/.ssh/authorized_keys\"\n\
+             chmod 600 \"/home/$U/.ssh/authorized_keys\"; chown \"$U:$U\" \"/home/$U/.ssh/authorized_keys\"\n\
+             if [ \"{af}\" = \"1\" ]; then printf '%s ALL=(ALL) NOPASSWD:ALL\\n' \"$U\" > \"/etc/sudoers.d/$U\"; chmod 440 \"/etc/sudoers.d/$U\"; else rm -f \"/etc/sudoers.d/$U\"; fi\n\
+             cat \"$KD/k\"\nrm -rf \"$KD\""
+        );
+        root_bash(&script)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join".into()))
+    {
+        Ok(k) => k,
+        Err(e) => return Json(json!({"ok": false, "err": format!("user setup: {e}")})),
+    };
+    let pi_addr = tokio::task::spawn_blocking(local_ip).await.unwrap_or_default();
+    let drop = if let Some(sys) = load_systems().into_iter().find(|s| s.id == id) {
+        let (sys, aid, pk) = (sys, safe_aid.clone(), privkey.clone());
+        tokio::task::spawn_blocking(move || drop_ssh_key(&sys, &aid, &pk)).await.unwrap_or_else(|_| Err("join".into()))
+    } else {
+        Err("system not registered".into())
+    };
+    let mut sp = load_ssh_prov();
+    sp.entry(id.clone()).or_default().insert(
+        safe_aid.clone(),
+        json!({"user": user, "admin": admin, "at_ms": now_ms(), "pi_address": pi_addr, "dropped": drop.as_ref().ok()}),
+    );
+    save_ssh_prov(&sp);
+    Json(json!({
+        "ok": true,
+        "user": user,
+        "admin": admin,
+        "pi_address": pi_addr,
+        "private_key": privkey,
+        "dropped": drop.as_ref().ok(),
+        "drop_err": drop.as_ref().err(),
+        "ssh_command": format!("ssh -i ~/.ssh/aeon-magick-pi {user}@{pi_addr}"),
+    }))
+}
+
+fn drop_ssh_key(sys: &System, agent_id: &str, privkey: &str) -> Result<String, String> {
+    let dir = format!("$HOME/.openclaw/agents/{agent_id}/agent");
+    let file = format!("{dir}/aeon-magick-pi-ssh-key");
+    let remote = format!(
+        "mkdir -p {dir} && echo {} | base64 -d > {file} && chmod 600 {file} && echo {file}",
+        b64(privkey.as_bytes())
+    );
+    ssh_capture(sys, &remote).map(|s| s.trim().to_string())
+}
+
+#[derive(Deserialize)]
+pub struct SshAdminReq {
+    admin: bool,
+}
+
+/// PATCH /agent/systems/:id/agents/:aid/ssh — toggle sudo without re-keying.
+pub async fn toggle_ssh_admin(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<SshAdminReq>,
+) -> impl IntoResponse {
+    let safe_aid = sanitize_id(&agent_id);
+    let mut sp = load_ssh_prov();
+    if sp.get(&id).and_then(|m| m.get(&safe_aid)).is_none() {
+        return Json(json!({"ok": false, "err": "no SSH provision for this agent"}));
+    }
+    let user = agent_unix_user(&safe_aid);
+    let (u, on) = (user.clone(), req.admin);
+    let res = tokio::task::spawn_blocking(move || {
+        let script = if on {
+            format!("printf '%s ALL=(ALL) NOPASSWD:ALL\\n' {u} > /etc/sudoers.d/{u} && chmod 440 /etc/sudoers.d/{u} && echo ok")
+        } else {
+            format!("rm -f /etc/sudoers.d/{u} && echo ok")
+        };
+        root_bash(&script)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join".into()));
+    if let Err(e) = res {
+        return Json(json!({"ok": false, "err": e}));
+    }
+    if let Some(o) = sp.get_mut(&id).and_then(|m| m.get_mut(&safe_aid)).and_then(|v| v.as_object_mut()) {
+        o.insert("admin".into(), json!(req.admin));
+    }
+    save_ssh_prov(&sp);
+    Json(json!({"ok": true, "admin": req.admin}))
+}
+
+/// DELETE /agent/systems/:id/agents/:aid/ssh — delete the agent's Pi SSH user.
+pub async fn revoke_ssh(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
+    let safe_aid = sanitize_id(&agent_id);
+    let user = agent_unix_user(&safe_aid);
+    let u = user.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        root_bash(&format!("rm -f /etc/sudoers.d/{u}; pkill -u {u} 2>/dev/null; userdel -r {u} 2>/dev/null; echo done"))
+    })
+    .await;
+    if let Some(sys) = load_systems().into_iter().find(|s| s.id == id) {
+        let aid = safe_aid.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            ssh_capture(&sys, &format!("rm -f $HOME/.openclaw/agents/{aid}/agent/aeon-magick-pi-ssh-key && echo ok"))
+        })
+        .await;
+    }
+    let mut sp = load_ssh_prov();
+    if let Some(m) = sp.get_mut(&id) {
+        m.remove(&safe_aid);
+    }
+    save_ssh_prov(&sp);
+    Json(json!({"ok": true, "user": user}))
 }

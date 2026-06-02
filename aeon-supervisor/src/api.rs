@@ -144,6 +144,12 @@ pub fn build_router(cfg: Config) -> Router {
             "/agent/systems/:id/agents/:aid/provision",
             post(crate::agent_connect::provision_agent).delete(crate::agent_connect::deprovision_agent),
         )
+        .route(
+            "/agent/systems/:id/agents/:aid/ssh",
+            post(crate::agent_connect::grant_ssh)
+                .patch(crate::agent_connect::toggle_ssh_admin)
+                .delete(crate::agent_connect::revoke_ssh),
+        )
         // v63: live streamer tuning. fps + jpeg_quality are tunable
         // from the /system page so operators can dial in latency vs
         // smoothness without ssh'ing.

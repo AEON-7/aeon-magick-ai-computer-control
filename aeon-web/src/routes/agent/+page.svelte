@@ -22,6 +22,12 @@
   let newToken = '';
   let configChange = '';
   let dropMsg = '';
+  // ssh provisioning (admin only)
+  let sshBusy = false;
+  let newPrivKey = '';
+  let sshCmd = '';
+  let sshDropMsg = '';
+  let grantSudo = false;
   let metricsLoading = false;
   let err = '';
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -423,7 +429,8 @@
     detailSys = sysId;
     detailAgent = a;
     detail = null;
-    newToken = configChange = dropMsg = '';
+    newToken = configChange = dropMsg = newPrivKey = sshCmd = sshDropMsg = '';
+    grantSudo = false;
     detailLoading = true;
     try {
       detail = await api.getAgentDetail(sysId, a.id);
@@ -468,6 +475,59 @@
       detail = await api.getAgentDetail(detailSys, detailAgent.id);
     } finally {
       provisioning = false;
+    }
+  }
+  const SUDO_WARN =
+    'Enabling sudo grants this agent FULL ADMIN (passwordless root) on the Pi. Only do this if absolutely necessary. Continue?';
+  async function doGrantSsh() {
+    if (!detailAgent) return;
+    if (grantSudo && !confirm(SUDO_WARN)) return;
+    sshBusy = true;
+    try {
+      const r = await api.grantSsh(detailSys, detailAgent.id, grantSudo);
+      if (r.ok) {
+        newPrivKey = r.private_key ?? '';
+        sshCmd = r.ssh_command ?? '';
+        sshDropMsg = r.dropped
+          ? `key dropped → ${r.dropped}`
+          : r.drop_err
+            ? `key-drop failed: ${r.drop_err}`
+            : '';
+        detail = await api.getAgentDetail(detailSys, detailAgent.id);
+      } else {
+        alert(r.err ?? 'grant failed');
+      }
+    } finally {
+      sshBusy = false;
+    }
+  }
+  function onSudoToggle(e: Event) {
+    const on = (e.currentTarget as HTMLInputElement).checked;
+    doToggleSudo(on);
+  }
+  async function doToggleSudo(on: boolean) {
+    if (!detailAgent) return;
+    if (on && !confirm(SUDO_WARN)) {
+      detail = await api.getAgentDetail(detailSys, detailAgent.id); // revert the checkbox
+      return;
+    }
+    sshBusy = true;
+    try {
+      await api.toggleSshAdmin(detailSys, detailAgent.id, on);
+      detail = await api.getAgentDetail(detailSys, detailAgent.id);
+    } finally {
+      sshBusy = false;
+    }
+  }
+  async function doRevokeSsh() {
+    if (!detailAgent || !confirm("Revoke this agent's SSH access (delete the aeon-agent user + key)?")) return;
+    sshBusy = true;
+    try {
+      await api.revokeSsh(detailSys, detailAgent.id);
+      newPrivKey = '';
+      detail = await api.getAgentDetail(detailSys, detailAgent.id);
+    } finally {
+      sshBusy = false;
     }
   }
   function badgeCls(status: string): string {
@@ -777,6 +837,38 @@
               <code class="agd-code">{newToken}</code>
               {#if dropMsg}<div class="agd-mono agd-dim">{dropMsg}</div>{/if}
               {#if configChange}<div class="agd-note">Enable: {configChange}</div>{/if}
+            </div>
+          {/if}
+        </section>
+
+        <section class="agd-sec">
+          <h3 class="agd-h3">SSH Access to the Pi <span class="agd-adminonly">human-admin only</span></h3>
+          {#if detail?.ssh}
+            <div class="agd-prov">
+              <span class="agd-badge on">SSH provisioned</span>
+              <span class="agd-mono agd-dim">{detail.ssh.user}@{detail.ssh.pi_address || 'pi'}</span>
+              <button class="btn text-xs ml-auto text-red-300" on:click={doRevokeSsh} disabled={sshBusy}>revoke SSH</button>
+            </div>
+            <label class="agd-sudo">
+              <input type="checkbox" checked={detail.ssh.admin} on:change={onSudoToggle} disabled={sshBusy} />
+              <span>sudo (admin)</span>
+              {#if detail.ssh.admin}<span class="agd-warn">⚠ FULL ADMIN granted</span>{/if}
+            </label>
+          {:else}
+            <p class="agd-dim">Create an <code class="agd-inline">aeon-agent-{detailAgent?.id}</code> login on the Pi so this agent can SSH in for system config. Human-admin action — never exposed to agents via API or MCP.</p>
+            <label class="agd-sudo">
+              <input type="checkbox" bind:checked={grantSudo} disabled={sshBusy} />
+              <span>grant sudo (admin)</span>
+            </label>
+            {#if grantSudo}<p class="agd-warn">⚠ Enabling sudo grants this agent FULL passwordless root on the Pi. Only do this if absolutely necessary.</p>{/if}
+            <button class="btn-primary text-xs" on:click={doGrantSsh} disabled={sshBusy}>{sshBusy ? 'granting…' : 'Grant SSH key'}</button>
+          {/if}
+          {#if newPrivKey}
+            <div class="agd-token">
+              <div class="agd-token-row"><span class="agd-dim">Private key — shown once</span><button class="agd-copy" on:click={() => copy(newPrivKey)}>copy</button></div>
+              <code class="agd-code agd-key">{newPrivKey}</code>
+              {#if sshCmd}<div class="agd-mono agd-dim">{sshCmd}</div>{/if}
+              {#if sshDropMsg}<div class="agd-mono agd-dim">{sshDropMsg}</div>{/if}
             </div>
           {/if}
         </section>
@@ -1129,4 +1221,9 @@
   .agd-avail { margin-top: 0.1rem; }
   .agd-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
   .agd-soon { font-family: ui-monospace, monospace; font-size: 0.56rem; color: #52525b; text-align: center; line-height: 1.5; }
+  .agd-adminonly { font-size: 0.5rem; color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 3px; padding: 0 0.25rem; margin-left: 0.3rem; vertical-align: middle; text-transform: uppercase; letter-spacing: 0.04em; }
+  .agd-sudo { display: flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; color: #d4d4d8; cursor: pointer; flex-wrap: wrap; }
+  .agd-warn { font-size: 0.62rem; color: #fbbf24; line-height: 1.45; }
+  .agd-key { white-space: pre-wrap; word-break: break-all; max-height: 7rem; overflow-y: auto; color: #fca5a5; }
+  .agd-inline { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #a5b4fc; background: #0a0a10; border-radius: 3px; padding: 0 0.25rem; }
 </style>

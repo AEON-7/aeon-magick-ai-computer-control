@@ -257,10 +257,31 @@ export interface AgentDetail {
   model?: string | null;
   available_skills?: string[];
   provisioned?: { token_id: string; at_ms: number; skill: string; dropped?: string | null } | null;
+  ssh?: { user: string; admin: boolean; at_ms: number; pi_address?: string } | null;
   err?: string;
 }
 export const getAgentDetail = (sysId: string, agentId: string) =>
   req<AgentDetail>('GET', `/agent/systems/${sysId}/agents/${agentId}/detail`);
+export const grantSsh = (sysId: string, agentId: string, admin: boolean) =>
+  req<{
+    ok: boolean;
+    user?: string;
+    admin?: boolean;
+    pi_address?: string;
+    private_key?: string;
+    ssh_command?: string;
+    dropped?: string | null;
+    drop_err?: string | null;
+    err?: string;
+  }>('POST', `/agent/systems/${sysId}/agents/${agentId}/ssh`, { admin });
+export const toggleSshAdmin = (sysId: string, agentId: string, admin: boolean) =>
+  req<{ ok: boolean; admin?: boolean; err?: string }>(
+    'PATCH',
+    `/agent/systems/${sysId}/agents/${agentId}/ssh`,
+    { admin },
+  );
+export const revokeSsh = (sysId: string, agentId: string) =>
+  req<{ ok: boolean; user?: string }>('DELETE', `/agent/systems/${sysId}/agents/${agentId}/ssh`);
 export const provisionAgent = (sysId: string, agentId: string, apiBase: string) =>
   req<{
     ok: boolean;

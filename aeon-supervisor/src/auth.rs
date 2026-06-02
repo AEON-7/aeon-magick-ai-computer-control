@@ -447,6 +447,11 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         // this fn); an agent's API token (Full/Macros/Read) is denied here, and
         // there is no MCP tool for it. Agents never manage SSH.
         || path.starts_with("/api/ssh/")
+        // The whole Agent Dash (connected systems, agent provisioning incl.
+        // per-agent SSH users + sudo, metrics) is a human-admin console. Agents
+        // operate via the main HID/vision/etc. API with their issued token; they
+        // never reach /api/agent/* — gate it all to the admin session.
+        || path.starts_with("/api/agent/")
     {
         return false;
     }
