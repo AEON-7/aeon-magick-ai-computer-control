@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { browser } from '$app/environment';
   import * as api from '$lib/api';
+  import TipJar from '$lib/components/TipJar.svelte';
 
   let tab: 'overview' | 'systems' | 'containers' | 'terminal' = 'overview';
   let pubkey = '';
@@ -1629,6 +1630,7 @@
             </div>
           {/each}
         {/if}
+        <TipJar />
       </div>
     {/if}
 
@@ -1909,6 +1911,7 @@
             </section>
           {/if}
         {/if}
+        <TipJar />
       </div>
     {/if}
 
