@@ -2269,12 +2269,13 @@ pub async fn compose_action(
 // The "easy button" for standing up a model server (or ComfyUI) on a GPU box.
 // Redesigned from the raw flag-form v1 into a curated picker:
 //
-//   • A CURATED CATALOG (`deploy_catalog`) pairs each model with the serving
-//     container image that runs it (+ a version tag) and SENSIBLE TEMPLATE FLAGS
-//     (max model length, GPU allocation, max batched tokens, max seqs/sessions).
-//     vLLM-served LLMs → a vLLM image; image-gen → a ComfyUI image. The list is
-//     editable in code below — a live GHCR/registry catalog fetch is a future
-//     enhancement (needs `gh`/a registry token, not installed here).
+//   • A LIVE CATALOG (`deploy_catalog`) is fetched TOKENLESS from AEON-7's public
+//     sources: HuggingFace models (paired with the serving container that runs
+//     them) + GHCR containers (their own deployable entries), each with SENSIBLE
+//     TEMPLATE FLAGS (max model length, GPU allocation, max batched tokens, max
+//     seqs/sessions). vLLM-served LLMs → a vLLM image; image-gen → ComfyUI. Both
+//     sources auto-update as AEON-7 publishes new models/containers; see the
+//     "Live AEON-7 catalog" section below for the (tokenless) fetch mechanics.
 //   • The same catalog response reports WHAT'S ALREADY ON THE BOX: `docker ps -a`
 //     plus any models we can detect (HF cache dirs, common model roots, and the
 //     `--served-model-name` of any running vLLM) so the UI can flag "already
@@ -2342,72 +2343,214 @@ const VLLM_IMAGE: &str = "vllm/vllm-openai:v0.6.6";
 // ── Live AEON-7 catalog (HuggingFace models + GHCR containers) ────────────────
 //
 // "AEON-7 easy model deployment" pulls LIVE from AEON-7's PUBLIC HuggingFace repos
-// (no auth) so newly-published models show up automatically, paired with the
-// matching AEON-7 GHCR serving container. GHCR's packages API requires a token
-// (it 401s unauthenticated), so the container side is a SEEDED list of the known
-// images (admin-editable in code) until a GHCR token is wired in.
+// AND AEON-7's PUBLIC GHCR container packages — both TOKENLESS — so newly-published
+// models and containers show up automatically.
 //
-// EXCLUDED per spec: any model tagged/named step3.7 (marked broken) and any
-// Nemotron model (marked experimental).
+// AEON-7's GitHub packages are PUBLIC, so no token is needed:
+//   • DISCOVER image names by scraping AEON-7's packages page (AEON-7 is a USER,
+//     not an org). GitHub returns ~empty without a browser User-Agent, so we send
+//     one. We scrape hrefs like `/users/AEON-7/packages/container/package/<name>`.
+//   • LIST TAGS per image via the anonymous GHCR registry v2 API: grab a pull
+//     token from `ghcr.io/token?scope=repository:aeon-7/<name>:pull`, then GET
+//     `ghcr.io/v2/aeon-7/<name>/tags/list`. We pick the newest deployable tag for
+//     the default and keep the full list so the UI can offer a picker.
 //
-// The fetch is cached briefly (CATALOG_TTL) so the catalog endpoint stays fast;
-// on a fetch failure we fall back to the curated list + a note.
+// (The old `api.github.com/orgs/AEON-7/packages` org-listing API 401s without a
+// token — that auth gate is why a previous pass thought GHCR needed one. We don't
+// use that API; the page-scrape + anonymous registry path above is fully public.)
+//
+// EXCLUDED per spec (same as the HF side): anything named/tagged Nemotron
+// (experimental), step3.7 (broken). We also skip `experimental`-only containers.
+//
+// Both fetches are cached briefly (CATALOG_TTL) so the catalog endpoint stays
+// fast; every HTTP call is bounded by a timeout, and on a fetch failure we fall
+// back to the last good cache (or a small note) — never blank, never hang.
 
 const HF_MODELS_URL: &str = "https://huggingface.co/api/models?author=AEON-7&limit=100";
-/// GHCR org packages API — surfaced for documentation; it 401s without a token.
-const GHCR_PACKAGES_URL: &str = "https://api.github.com/orgs/AEON-7/packages?package_type=container";
-/// How long a live HF fetch is cached before we re-fetch.
+/// AEON-7's PUBLIC GHCR container packages page. AEON-7 is a USER (not an org).
+/// GitHub returns ~empty HTML without a browser User-Agent, so `http_get_text`
+/// sends one when fetching this. We scrape package names out of the returned HTML.
+const GHCR_PACKAGES_PAGE: &str =
+    "https://github.com/AEON-7?tab=packages&package_type=container";
+/// Browser-ish User-Agent for the GitHub packages page (it returns ~empty without
+/// one). Plain enough to be honest about what we are while still getting HTML back.
+const GH_PAGE_UA: &str = "Mozilla/5.0 (Macintosh) AEON-Magick-AgentDash/1.0";
+/// How long a live fetch (HF models or GHCR containers) is cached before re-fetch.
 const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(420); // 7 min
 
-/// SEEDED AEON-7 GHCR serving containers (GHCR needs a token → can't list live).
-/// `(image_ref, [model-name substrings it serves], short quickstart description)`.
-/// Image refs confirmed from the models' HuggingFace cards; admin can edit here.
-fn aeon7_ghcr_seed() -> Vec<(&'static str, &'static [&'static str], &'static str)> {
-    vec![
-        ("ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3",
-         &["Qwen3.6-27B-AEON-Ultimate"][..],
-         "vLLM DFlash serving container for Qwen3.6-27B AEON-Ultimate (DGX Spark / GB10, NVFP4, speculative decoding). 32 tok/s median, ~350ms TTFT."),
-        ("ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2",
-         &["Gemma-4-26B-A4B"][..],
-         "vLLM DFlash serving container for Gemma-4 26B-A4B (DGX Spark, NVFP4 + speculative decoding)."),
-        ("ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest",
-         &["Gemma-4-31B", "Gemma-4-E4B", "supergemma4"][..],
-         "vLLM DGX-Spark serving container for the Gemma-4 NVFP4 family (31B / E4B / SuperGemma4)."),
-        ("ghcr.io/aeon-7/vllm-dflash:latest",
-         &["DFlash-Qwen3.5"][..],
-         "Generic vLLM DFlash serving container for the Qwen3.5 DFlash drafters."),
-        ("ghcr.io/aeon-7/vllm-spark-omni-q36:latest",
-         &["Qwen3.6-35B-A3B", "Multimodal"][..],
-         "vLLM DGX-Spark omni container for the Qwen3.6-35B-A3B / multimodal NVFP4 builds."),
-    ]
+/// One LIVE AEON-7 GHCR container discovered from the public packages page.
+/// `name` is the bare package name (e.g. "vllm-aeon-ultimate-dflash"),
+/// `image` is the full `ghcr.io/aeon-7/<name>:<newest-tag>` ref, `tags` is the
+/// full tag list (so the UI could offer a picker), `kind`/`desc` are derived.
+#[derive(Clone)]
+struct GhcrContainer {
+    name: String,
+    image: String,
+    tags: Vec<String>,
+    kind: &'static str,
+    desc: String,
 }
 
-/// Standalone GHCR images that aren't tied to one HF model but the admin wants
-/// surfaced. `(id, image_ref, kind, description)`.
-fn aeon7_ghcr_standalone() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
-    vec![
-        // ComfyUI optimized for DGX Spark. (No image ref was published on the HF
-        // cards; this is a sensible seeded ghcr.io/aeon-7 ref the admin can edit.)
-        ("aeon7-comfyui-dgx-spark", "ghcr.io/aeon-7/comfyui-dgx-spark:latest", "imagegen",
-         "ComfyUI container optimized for DGX Spark (Blackwell / GB10) — image generation (SD/SDXL/Flux). Mount or download checkpoints into the container. Seeded GHCR ref (edit if the tag differs)."),
-    ]
+/// True if a GHCR container must be EXCLUDED (same spirit as `excluded_model`):
+/// Nemotron (experimental) or step3.7 (broken), checked on the name and tags; we
+/// also drop containers whose ONLY tags are `experimental`-flavored (nothing
+/// deployable). Mirrors the HF-side exclusions so the two stay consistent.
+fn excluded_container(name: &str, tags: &[String]) -> bool {
+    let bad = |s: &str| {
+        let l = s.to_lowercase();
+        l.contains("nemotron")
+            || l.contains("step-3.7") || l.contains("step3.7") || l.contains("step3p7")
+    };
+    if bad(name) || tags.iter().any(|t| bad(t)) {
+        return true;
+    }
+    // Nothing deployable: every tag is some flavor of "experimental".
+    !tags.is_empty() && tags.iter().all(|t| t.to_lowercase().contains("experimental"))
 }
 
-/// ComfyUI catalog entry (DGX-Spark-optimized) — always offered for image-gen.
-fn comfyui_entry() -> serde_json::Value {
-    let (id, image, kind, desc) = aeon7_ghcr_standalone()[0];
-    cat(id, "ComfyUI (bring your own checkpoints)", image, kind, desc,
-        0, "1", DEFAULT_GPU_UTIL, 0, 0, "")
+/// Infer a catalog `kind` from a GHCR image name.
+///   comfyui* → imagegen   |   *tts* → tts   |   *asr* → asr
+///   vllm*/*gemma*/*qwen*/*llm* → llm   |   else → service
+fn infer_container_kind(name: &str) -> &'static str {
+    let l = name.to_lowercase();
+    if l.contains("comfyui") { "imagegen" }
+    else if l.contains("tts") { "tts" }
+    else if l.contains("asr") { "asr" }
+    else if l.contains("vllm") || l.contains("gemma") || l.contains("qwen") || l.contains("llm") { "llm" }
+    else { "service" }
 }
 
-/// Pick the best-matching seeded GHCR serving container for an HF model name.
-/// Returns (image_ref, short_container_desc) or falls back to the stock vLLM image.
-fn pair_container(model_name: &str) -> (String, Option<String>) {
-    let lower = model_name.to_lowercase();
-    for (image, needles, desc) in aeon7_ghcr_seed() {
-        if needles.iter().any(|n| lower.contains(&n.to_lowercase())) {
-            return (image.to_string(), Some(desc.to_string()));
+/// Pick the newest DEPLOYABLE tag for a GHCR image. Heuristic, validated against
+/// the live AEON-7 registry:
+///   • Prefer a RELEASE-versioned tag — one carrying a `vN(.N…)` token (e.g.
+///     `v2`, `v1.0.1`, `qwen36-v5-…`) or a pure dotted-numeric (`1.0.0`) — ranked
+///     by its numeric components (then shorter/lexically-lower as a tiebreak).
+///     This ignores build/arch tags like `cu130-sm121a` / `bf16-flux2-ltx2.3`,
+///     which carry digits but aren't releases, so they never outrank `latest`.
+///   • Else fall back to `latest`.
+///   • Else the first tag. (Empty list → `latest`.)
+fn pick_newest_tag(tags: &[String]) -> String {
+    /// Extract a release-version key from a tag, or None if it isn't versioned.
+    fn version_key(t: &str) -> Option<Vec<u64>> {
+        let b: Vec<char> = t.to_lowercase().chars().collect();
+        // Read a `v<digits>(.<digits>)*` run starting at index `i` (b[i]=='v').
+        let read_v = |i: usize| -> Option<Vec<u64>> {
+            if i + 1 < b.len() && b[i] == 'v' && b[i + 1].is_ascii_digit() {
+                let (mut j, mut comps, mut cur) = (i + 1, Vec::new(), String::new());
+                while j < b.len() && (b[j].is_ascii_digit() || b[j] == '.') {
+                    if b[j] == '.' {
+                        if !cur.is_empty() { comps.push(cur.parse().unwrap_or(0)); cur.clear(); }
+                    } else { cur.push(b[j]); }
+                    j += 1;
+                }
+                if !cur.is_empty() { comps.push(cur.parse().unwrap_or(0)); }
+                if !comps.is_empty() { return Some(comps); }
+            }
+            None
+        };
+        // `vN…` at the start or right after a separator (-, _, .).
+        for i in 0..b.len() {
+            if b[i] == 'v' && (i == 0 || b[i - 1] == '-' || b[i - 1] == '_' || b[i - 1] == '.') {
+                if let Some(c) = read_v(i) { return Some(c); }
+            }
         }
+        // Pure dotted-numeric like `1.0.0`.
+        if b.iter().all(|&c| c.is_ascii_digit() || c == '.') && b.iter().any(|c| c.is_ascii_digit()) {
+            let comps: Vec<u64> = t.split('.').filter(|s| !s.is_empty())
+                .map(|s| s.parse().unwrap_or(0)).collect();
+            if !comps.is_empty() { return Some(comps); }
+        }
+        None
+    }
+    if tags.is_empty() { return "latest".to_string(); }
+    let mut versioned: Vec<(&String, Vec<u64>)> =
+        tags.iter().filter_map(|t| version_key(t).map(|k| (t, k))).collect();
+    if !versioned.is_empty() {
+        versioned.sort_by(|a, b| a.1.cmp(&b.1)
+            .then_with(|| a.0.len().cmp(&b.0.len()))
+            .then_with(|| a.0.as_str().cmp(b.0.as_str())));
+        return versioned.last().unwrap().0.clone();
+    }
+    if let Some(l) = tags.iter().find(|t| t.eq_ignore_ascii_case("latest")) { return l.clone(); }
+    tags[0].clone()
+}
+
+/// Build a short human description for a GHCR container from its name + kind.
+fn describe_container(name: &str, kind: &str, tag: &str) -> String {
+    let l = name.to_lowercase();
+    let mut bits: Vec<&str> = Vec::new();
+    if l.contains("nvfp4") || l.contains("fp4") { bits.push("NVFP4"); }
+    if l.contains("awq") { bits.push("AWQ"); }
+    if l.contains("dflash") || l.contains("dtree") || l.contains("ddtree") { bits.push("DFlash spec-decode"); }
+    if l.contains("uncensored") || l.contains("abliterated") { bits.push("uncensored"); }
+    if l.contains("omni") || l.contains("multimodal") { bits.push("multimodal/omni"); }
+    if l.contains("spark") || l.contains("gb10") { bits.push("DGX Spark"); }
+    let what = match kind {
+        "imagegen" => "ComfyUI image-generation container",
+        "tts" => "text-to-speech server container",
+        "asr" => "speech-recognition (ASR) server container",
+        "llm" => "vLLM serving container",
+        _ => "AEON-7 service container",
+    };
+    let suffix = if bits.is_empty() { String::new() } else { format!(" — {}", bits.join(", ")) };
+    format!("AEON-7 {name}: {what}{suffix}. Image ghcr.io/aeon-7/{name}:{tag} (live from GHCR).")
+}
+
+/// Sensible default template flags for a GHCR container of the given `kind`.
+/// Returns `(model_placeholder, max_model_len, gpu, max_batched_tokens, max_seqs, extra)`.
+/// LLM containers get the same tunables as the HF entries (128k ctx, 70% VRAM,
+/// 8192 batched tokens, 8 seqs); non-LLM (imagegen/tts/asr/service) zero out the
+/// vLLM-specific knobs since they don't take a `--model`.
+fn container_template(kind: &str) -> (&'static str, i64, &'static str, i64, i64, &'static str) {
+    match kind {
+        "llm" => ("", DEFAULT_MODEL_LEN, "1", 8192, 8, ""),
+        // bring-your-own (ComfyUI) / self-contained servers (tts/asr): no --model.
+        _ => ("", 0, "1", 0, 0, ""),
+    }
+}
+
+/// Pick the best-matching LIVE AEON-7 GHCR serving container image for an HF model
+/// name (pair models↔containers by name where it's OBVIOUS). Returns the full
+/// `ghcr.io/aeon-7/<name>:<tag>` ref + a short desc, or the stock vLLM image when
+/// there's no confident family match.
+///
+/// A match REQUIRES a shared model-FAMILY token (gemma-4 / qwen3.6 / omni / …) on
+/// both the model name and the container name — generic quant/method tokens
+/// (nvfp4, dflash, ddtree) are NOT sufficient on their own (they appear across
+/// families, so e.g. a Qwen NVFP4 model must never pair to a Gemma container).
+/// Among containers that share a family, the most family-specific one wins, with
+/// the generic tokens used only as a tiebreak.
+fn pair_container_live(model_name: &str, live: &[GhcrContainer]) -> (String, Option<String>) {
+    // Collapse ALL separators (`. _ -`) so spelling variants of a family unify:
+    // `Qwen3.6-27B` and the container tag `qwen36-v5` both → contain `qwen3627b`
+    // / `qwen36`; `Gemma-4-31B` → `gemma431b`. Distinctive multi-char tokens make
+    // false positives unlikely even without word boundaries.
+    let norm = |s: &str| s.to_lowercase().chars().filter(|c| *c != '.' && *c != '_' && *c != '-').collect::<String>();
+    let m = norm(model_name);
+    // FAMILY tokens, most-specific first — at least one must match on both sides.
+    const FAMILY: &[&str] = &[
+        "gemma426b", "gemma431b", "gemma4e4b", "supergemma4", "gemma4",
+        "qwen3627b", "qwen3635b", "qwen36", "qwen35", "omni",
+    ];
+    // REFINING tokens (quant/serving method) — tiebreak only, never a sole match.
+    const REFINE: &[&str] = &["nvfp4", "awq", "dflash", "ddtree", "multimodal", "mtp", "spark"];
+    let mut best: Option<(&GhcrContainer, usize, usize)> = None; // (c, family_hits, refine_hits)
+    for c in live.iter().filter(|c| c.kind == "llm") {
+        // Match family/refine tokens against the container NAME *and* its TAGS —
+        // some containers carry the family only in a tag (e.g.
+        // `vllm-aeon-ultimate-dflash` tagged `qwen36-v5-…` serves Qwen3.6).
+        let cn = norm(&format!("{} {}", c.name, c.tags.join(" ")));
+        let fam = FAMILY.iter().filter(|t| m.contains(*t) && cn.contains(*t)).count();
+        if fam == 0 { continue; } // require a real family match
+        let refine = REFINE.iter().filter(|t| m.contains(*t) && cn.contains(*t)).count();
+        let better = match best {
+            None => true,
+            Some((_, bf, br)) => (fam, refine) > (bf, br),
+        };
+        if better { best = Some((c, fam, refine)); }
+    }
+    if let Some((c, _, _)) = best {
+        return (c.image.clone(), Some(c.desc.clone()));
     }
     (VLLM_IMAGE.to_string(), None)
 }
@@ -2449,9 +2592,9 @@ fn describe_model(short: &str, tags: &[String], pipeline: &str, downloads: i64) 
 }
 
 /// Fetch AEON-7's public HuggingFace models and turn them into catalog entries
-/// (filtered + paired with a GHCR serving container). Returns (entries, note).
-/// Note is set on fetch failure (UI shows "live fetch unavailable").
-fn fetch_aeon7_from_hf() -> (Vec<serde_json::Value>, Option<String>) {
+/// (filtered + paired with a LIVE GHCR serving container where the name makes the
+/// match obvious). Returns (entries, note). Note is set on fetch failure.
+fn fetch_aeon7_from_hf(ghcr: &[GhcrContainer]) -> (Vec<serde_json::Value>, Option<String>) {
     let v = match http_get_json_simple(HF_MODELS_URL) {
         Ok(v) => v,
         Err(e) => return (Vec::new(), Some(format!("AEON-7 HuggingFace fetch unavailable ({e}) — showing curated models only."))),
@@ -2481,7 +2624,7 @@ fn fetch_aeon7_from_hf() -> (Vec<serde_json::Value>, Option<String>) {
         } else {
             "llm"
         };
-        let (image, cdesc) = pair_container(short);
+        let (image, cdesc) = pair_container_live(short, ghcr);
         let mut desc = describe_model(short, &tags, pipeline, downloads);
         if let Some(cd) = cdesc { desc = format!("{desc}  Serving container: {cd}"); }
         // id: a docker-safe slug from the model name.
@@ -2498,9 +2641,11 @@ fn fetch_aeon7_from_hf() -> (Vec<serde_json::Value>, Option<String>) {
     (scored.into_iter().map(|(_, e)| e).collect(), None)
 }
 
-/// Cached live AEON-7 catalog. Returns (entries, note). Re-fetches at most every
-/// CATALOG_TTL; serves the cached copy in between. Thread-safe via a Mutex.
-fn aeon7_live_catalog() -> (Vec<serde_json::Value>, Option<String>) {
+/// Cached live AEON-7 HuggingFace catalog. Returns (entries, note). Re-fetches at
+/// most every CATALOG_TTL; serves the cached copy in between. `ghcr` is the live
+/// container list (already cached) used to pair each model with its serving image.
+/// Thread-safe via a Mutex.
+fn aeon7_live_catalog(ghcr: &[GhcrContainer]) -> (Vec<serde_json::Value>, Option<String>) {
     use std::sync::{Mutex, OnceLock};
     struct Cache {
         at: std::time::Instant,
@@ -2517,7 +2662,7 @@ fn aeon7_live_catalog() -> (Vec<serde_json::Value>, Option<String>) {
             }
         }
     }
-    let (entries, note) = fetch_aeon7_from_hf();
+    let (entries, note) = fetch_aeon7_from_hf(ghcr);
     // On a fetch failure (empty + note), keep any prior good cache rather than
     // blanking the live section — only overwrite the cache on a non-empty result.
     let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -2547,6 +2692,183 @@ fn http_get_json_simple(url: &str) -> Result<serde_json::Value, String> {
         Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
         Err(ureq::Error::Transport(t)) => Err(format!("network: {t}")),
     }
+}
+
+/// Minimal blocking GET → text (public, no auth) with a caller-supplied User-Agent
+/// and timeout. Used to scrape the GitHub packages page (which returns ~empty HTML
+/// without a browser-ish UA). Bounded so a stall can never hang the catalog.
+fn http_get_text(url: &str, user_agent: &str, timeout_secs: u64) -> Result<String, String> {
+    match ureq::get(url)
+        .set("User-Agent", user_agent)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .call()
+    {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
+        Err(ureq::Error::Transport(t)) => Err(format!("network: {t}")),
+    }
+}
+
+/// Scrape AEON-7's container package NAMES from the public packages page HTML.
+/// Looks for `/users/AEON-7/packages/container/package/<name>` hrefs (AEON-7 is a
+/// USER, not an org). Deduped + sorted. Case-insensitive on the `AEON-7` segment.
+fn scrape_ghcr_names(html: &str) -> Vec<String> {
+    const PAT: &str = "/packages/container/package/";
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Walk each occurrence of the package-path marker; the name is the path
+    // segment after it (terminated by a non [A-Za-z0-9._-] char).
+    let mut hay = html;
+    while let Some(pos) = hay.find(PAT) {
+        // Require the owner segment just before PAT to be AEON-7 (any case).
+        let before = &hay[..pos];
+        let owner_ok = before.to_ascii_lowercase().ends_with("/users/aeon-7")
+            || before.to_ascii_lowercase().ends_with("/orgs/aeon-7");
+        let rest = &hay[pos + PAT.len()..];
+        let name: String = rest.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-')
+            .collect();
+        if owner_ok && !name.is_empty() {
+            names.insert(name);
+        }
+        // Advance past this marker to find the next.
+        hay = &hay[pos + PAT.len()..];
+    }
+    names.into_iter().collect()
+}
+
+/// Anonymous GHCR registry: fetch the tag list for `aeon-7/<name>`. Grabs a pull
+/// token (public images need no creds) then GETs the v2 tags/list. Bounded; on any
+/// failure returns Err so the caller can skip the image gracefully.
+fn ghcr_image_tags(name: &str) -> Result<Vec<String>, String> {
+    let token_url = format!("https://ghcr.io/token?scope=repository:aeon-7/{name}:pull");
+    let tok_json = http_get_json_simple(&token_url)?;
+    let token = tok_json.get("token").and_then(|t| t.as_str())
+        .ok_or_else(|| "no token in GHCR token response".to_string())?;
+    let list_url = format!("https://ghcr.io/v2/aeon-7/{name}/tags/list");
+    let body = match ureq::get(&list_url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(8))
+        .call()
+    {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}"))?,
+        Err(ureq::Error::Status(code, _)) => return Err(format!("tags HTTP {code}")),
+        Err(ureq::Error::Transport(t)) => return Err(format!("tags network: {t}")),
+    };
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))?;
+    let tags = v.get("tags").and_then(|t| t.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Ok(tags)
+}
+
+/// LIVE, TOKENLESS fetch of AEON-7's public GHCR containers: scrape the package
+/// names off the GitHub packages page, then fetch each image's tags from the
+/// anonymous registry and build a `GhcrContainer` (newest deployable tag as the
+/// default `image`, excluding Nemotron/step3.7/experimental). Returns
+/// (containers, note); `note` is set on the page-scrape failure.
+fn fetch_aeon7_ghcr_live() -> (Vec<GhcrContainer>, Option<String>) {
+    let html = match http_get_text(GHCR_PACKAGES_PAGE, GH_PAGE_UA, 8) {
+        Ok(h) => h,
+        Err(e) => return (
+            Vec::new(),
+            Some(format!("AEON-7 GHCR container fetch unavailable ({e}).")),
+        ),
+    };
+    let names = scrape_ghcr_names(&html);
+    if names.is_empty() {
+        return (
+            Vec::new(),
+            Some("AEON-7 GHCR packages page returned no container names (scrape miss).".into()),
+        );
+    }
+    let mut out: Vec<GhcrContainer> = Vec::new();
+    for name in names {
+        // Tags drive both the default ref AND the experimental-only exclusion, so
+        // skip an image whose tags we can't read (rather than guessing `latest`).
+        let tags = match ghcr_image_tags(&name) {
+            Ok(t) if !t.is_empty() => t,
+            _ => continue,
+        };
+        if excluded_container(&name, &tags) { continue; }
+        let tag = pick_newest_tag(&tags);
+        let kind = infer_container_kind(&name);
+        let desc = describe_container(&name, kind, &tag);
+        out.push(GhcrContainer {
+            image: format!("ghcr.io/aeon-7/{name}:{tag}"),
+            tags,
+            kind,
+            desc,
+            name,
+        });
+    }
+    // Stable, friendly order: LLM containers first, then by name.
+    out.sort_by(|a, b| {
+        let rank = |k: &str| match k { "llm" => 0, "imagegen" => 1, "tts" => 2, "asr" => 3, _ => 4 };
+        rank(a.kind).cmp(&rank(b.kind)).then_with(|| a.name.cmp(&b.name))
+    });
+    (out, None)
+}
+
+/// Cached live AEON-7 GHCR containers. Re-fetches at most every CATALOG_TTL; serves
+/// the cached copy in between. On a fetch failure, returns the last good cache (so
+/// the container side never blanks) with the new note. Thread-safe via a Mutex.
+fn aeon7_ghcr_live_catalog() -> (Vec<GhcrContainer>, Option<String>) {
+    use std::sync::{Mutex, OnceLock};
+    struct Cache {
+        at: std::time::Instant,
+        containers: Vec<GhcrContainer>,
+        note: Option<String>,
+    }
+    static CACHE: OnceLock<Mutex<Option<Cache>>> = OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = guard.as_ref() {
+            if c.at.elapsed() < CATALOG_TTL {
+                return (c.containers.clone(), c.note.clone());
+            }
+        }
+    }
+    let (containers, note) = fetch_aeon7_ghcr_live();
+    let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if containers.is_empty() {
+        if let Some(c) = guard.as_ref() {
+            // Stale-but-usable: keep the previous good containers, surface new note.
+            return (c.containers.clone(), note.or_else(|| c.note.clone()));
+        }
+    }
+    *guard = Some(Cache { at: std::time::Instant::now(), containers: containers.clone(), note: note.clone() });
+    (containers, note)
+}
+
+/// Turn the live GHCR containers into standalone deployable catalog entries (each
+/// container is its own entry, per spec — pairing with HF models is additive). The
+/// `id` is a docker-safe `aeon7-ghcr-<name>` slug used by the deploy id-resolver.
+fn ghcr_container_entries(containers: &[GhcrContainer]) -> Vec<serde_json::Value> {
+    containers.iter().map(|c| {
+        let slug: String = c.name.to_lowercase().chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' }).collect();
+        let slug = slug.trim_matches('-').to_string();
+        let (model, ml, gpu, batched, seqs, extra) = container_template(c.kind);
+        // A human label for the "model" slot. LLM containers expect a HF model id at
+        // deploy time (left blank → user/UI supplies it); others are self-contained.
+        let model_label = if c.kind == "llm" { model } else { "(self-contained container)" };
+        let mut entry = cat(
+            &format!("aeon7-ghcr-{slug}"),
+            model_label,
+            &c.image,
+            c.kind,
+            &c.desc,
+            ml, gpu, DEFAULT_GPU_UTIL, batched, seqs, extra,
+        );
+        // Surface the FULL tag list so the UI can offer a tag picker (the default
+        // `container_image` already points at the newest deployable tag).
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("available_tags".into(), json!(c.tags));
+        }
+        entry
+    }).collect()
 }
 
 /// CURATED upstream vLLM models — NO LONGER merged into the catalog (AEON-7 wants
@@ -2587,20 +2909,38 @@ fn curated_commonly_used() -> Vec<serde_json::Value> {
     ]
 }
 
-/// The full Easy-Deploy catalog = live AEON-7 (HF models + GHCR containers,
-/// cached) merged with the curated commonly-used vLLM list (deduped by model id).
-/// `live` carries (entries, note) where note flags fallback/auth issues for the UI.
+/// The full Easy-Deploy catalog = LIVE AEON-7 HuggingFace models (each paired with
+/// its serving container where obvious) + LIVE AEON-7 GHCR containers as their own
+/// deployable entries. Both sources are TOKENLESS and cached ~7m, and both
+/// auto-update as AEON-7 publishes new models/containers. Returns (entries, note)
+/// where note flags any live-fetch fallback for the UI.
 fn deploy_catalog_merged() -> (Vec<serde_json::Value>, Option<String>) {
-    // AEON-7 ONLY: the catalog is a live pull of AEON-7's whole HuggingFace
-    // collection — no generic/upstream models. The DGX-Spark-optimized ComfyUI
-    // image is the one always-offered AEON-7 container.
-    let (mut live, note) = aeon7_live_catalog();
-    live.push(comfyui_entry());
-    (live, note)
+    // AEON-7 ONLY. Fetch the live GHCR container list first (cached): it both
+    // becomes standalone deployable entries AND drives model↔container pairing.
+    let (containers, ghcr_note) = aeon7_ghcr_live_catalog();
+    let (mut entries, hf_note) = aeon7_live_catalog(&containers);
+    // Append the containers as their own entries (deduped against any id already
+    // present — model entries use `aeon7-…`, containers use `aeon7-ghcr-…`, so no
+    // real collision, but keep it robust).
+    let mut seen: std::collections::HashSet<String> = entries.iter()
+        .filter_map(|e| e.get("id").and_then(|x| x.as_str()).map(String::from)).collect();
+    for c in ghcr_container_entries(&containers) {
+        let id = c.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if seen.insert(id) { entries.push(c); }
+    }
+    // Combine notes (either side may flag a fallback).
+    let note = match (hf_note, ghcr_note) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    (entries, note)
 }
 
 /// Back-compat shim used by `deploy_image`'s catalog-id resolution. Returns the
-/// merged catalog as a JSON array (live + curated + comfyui).
+/// merged catalog as a JSON array (live AEON-7 HF models + live AEON-7 GHCR
+/// containers).
 fn curated_deploy_catalog() -> serde_json::Value {
     serde_json::Value::Array(deploy_catalog_merged().0)
 }
@@ -2703,7 +3043,7 @@ pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
         }
         let (containers, models) = gather_installed(&sys);
         // Build the merged catalog inside the blocking task (it makes the cached
-        // HF fetch). `note` flags live-fetch fallback for the UI.
+        // live HF + GHCR fetches). `note` flags any live-fetch fallback for the UI.
         let (catalog, note) = deploy_catalog_merged();
         Ok((why, containers, models, catalog, note))
     })
@@ -2711,14 +3051,12 @@ pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
     .unwrap_or_else(|_| Err("join error".into()));
     match res {
         Ok((why, containers, models, catalog, note)) => {
-            // GHCR's packages API needs a token (it 401s unauthenticated), so the
-            // AEON-7 container side is a seeded list until a token is wired in.
-            let ghcr_note = format!(
-                "AEON-7 GHCR containers are seeded (the GitHub packages API {GHCR_PACKAGES_URL} \
-                 returns 401 without a token). Edit aeon7_ghcr_seed()/aeon7_ghcr_standalone() to adjust."
-            );
+            // Both halves of the catalog are now LIVE and TOKENLESS: AEON-7's public
+            // HuggingFace models and AEON-7's public GHCR containers (scraped names +
+            // anonymous registry tags). `note` (if any) flags a transient fallback.
             let live_note = note.unwrap_or_else(|| {
-                "Live AEON-7 HuggingFace catalog (cached ~7m), step3.7 + Nemotron filtered out, merged with curated vLLM models.".into()
+                "Live AEON-7 catalog (cached ~7m): public HuggingFace models + public GHCR containers, \
+                 both tokenless and auto-updating. Nemotron + step3.7 filtered out.".into()
             });
             Json(json!({
                 "ok": true,
@@ -2727,8 +3065,8 @@ pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
                 "allowed_via": why,                 // "dgx" | "docker+gpu"
                 "installed_containers": containers, // docker ps -a (slim shape)
                 "installed_models": models,         // detected model ids / dir names
-                "live_catalog_todo": format!("{live_note} {ghcr_note}"),
-                "ghcr_needs_token": true,
+                "live_catalog_todo": live_note,
+                "ghcr_needs_token": false,          // GHCR is public → tokenless live fetch
             }))
         }
         Err(e) => Json(json!({"ok": false, "err": e})),
