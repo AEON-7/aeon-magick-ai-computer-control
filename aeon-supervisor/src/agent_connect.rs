@@ -326,7 +326,8 @@ pub async fn system_metrics(Path(id): Path<String>) -> impl IntoResponse {
 /// SSH in (one round-trip) and emit key:value lines we parse into metrics.
 fn gather_metrics(sys: &System) -> serde_json::Value {
     let target = format!("{}@{}", sys.ssh_user, sys.address);
-    let remote = "echo HOST:$(hostname); \
+    let remote = "echo __pad__; \
+        echo HOST:$(hostname); \
         echo LOAD:$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null); \
         echo CPU:$(A=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5}' /proc/stat); sleep 0.25; B=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5}' /proc/stat); echo \"$A $B\" | awk '{dt=$3-$1; di=$4-$2; if(dt>0) printf \"%.0f\", 100*(dt-di)/dt}'); \
         echo MEM:$(free -m 2>/dev/null | awk '/Mem:/{print $3\"/\"$2}'); \
@@ -614,6 +615,12 @@ fn b64(d: &[u8]) -> String {
 /// Run a remote command (shell pipeline) over the agent-connect key, capture stdout.
 fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
     let target = format!("{}@{}", sys.ssh_user, sys.address);
+    // The Pi→gateway agent-connect SSH eats the FIRST line of the remote
+    // command's stdout (observed: a leading `echo X` comes back blank), which
+    // silently corrupted every JSON/clean-output handler (detail/avatar/corpus/
+    // soul/persona/containers). Prepend a throwaway marker line to absorb that
+    // loss, then strip it back off so downstream output is intact.
+    let wrapped = format!("echo __AEONHDR__; {remote}");
     let out = Command::new("ssh")
         .arg("-i")
         .arg(key_path())
@@ -625,12 +632,21 @@ fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
             "-o", "ServerAliveInterval=3",
             "-o", "ServerAliveCountMax=3",
             "-p", &sys.port.to_string(),
-            &target, "timeout", "12", "bash", "-lc", remote,
+            &target, "timeout", "12", "bash", "-lc", &wrapped,
         ])
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        let s = String::from_utf8_lossy(&out.stdout);
+        // Marker survived → take everything after its line; marker eaten (the
+        // usual case) → drop the now-blank first line.
+        let cleaned = if let Some(pos) = s.find("__AEONHDR__") {
+            let after = &s[pos..];
+            after.find('\n').map(|i| &after[i + 1..]).unwrap_or("")
+        } else {
+            s.find('\n').map(|i| &s[i + 1..]).unwrap_or(&s)
+        };
+        Ok(cleaned.to_string())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("ssh failed").to_string())
     }
