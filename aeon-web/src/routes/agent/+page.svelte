@@ -95,19 +95,26 @@
   let composeBusy = '';                            // compose path being acted on
   let composeSaving = false;
   let composeMsg = '';
-  // ── E5: Easy Deploy (dgx-only) ──
+  // ── E5: Easy Deploy — model+container picker, template flags, progress ──
   let deployCat: api.DeployCatalog | null = null;
-  let deployImages: api.DeployCatalogEntry[] = []; // editable working copy
-  let deploySel = 0;                               // index into deployImages
+  let deployEntries: api.DeployCatalogEntry[] = [];
+  let deploySel = -1;                               // index into deployEntries (-1 = none)
   let deployName = '';
-  let dfModelLen: number | null = 4096;
-  let dfMaxBatch: number | null = 256;
-  let dfGpu = 'all';
-  let dfMaxSessions: number | null = 8;
-  let deployNow = false;
+  // the 4 highlighted flags (pre-filled from the picked entry's template)
+  let dfModelLen: number | null = 16384;
+  let dfGpu = '1';
+  let dfMaxBatchTok: number | null = 8192;
+  let dfMaxSeqs: number | null = 16;
+  let dfExtra = '';                                 // advanced: raw extra args
+  let depAdvOpen = false;                           // advanced flags collapsed
   let deployBusy = false;
   let deployResult: api.DeployResult | null = null;
   let deployErr = '';
+  let deployCatLoading = false;
+  // install progress (polled after a deploy kicks off)
+  let depStatus: api.DeployStatus | null = null;
+  let depPolling = false;
+  let depPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── E2: multi-pane web SSH terminal ──
   // xterm.js + addon-fit are loaded lazily in the browser (they touch the DOM
@@ -352,7 +359,6 @@
 
   $: openclawSystems = systems.filter((s) => s.roles?.includes('openclaw'));
   $: cSysObj = systems.find((s) => s.id === cSys) ?? null;
-  $: cIsDgx = cSysObj?.roles?.includes('dgx') ?? false;
 
   const inputCls =
     'bg-ink-900 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cursed-500';
@@ -416,6 +422,7 @@
   onDestroy(() => {
     clearInterval(timer);
     clearInterval(cTimer);
+    stopDeployPoll();
     closeAllPanes();
   });
 
@@ -778,10 +785,18 @@
     cErr = '';
     composeEdit = null;
     composeMsg = '';
+    // reset Easy Deploy picker + stop any in-flight progress poll
+    stopDeployPoll();
     deployResult = null;
     deployErr = '';
+    deployCat = null;
+    deployEntries = [];
+    deploySel = -1;
+    depStatus = null;
     loadContainers();
-    if (systems.find((s) => s.id === sysId)?.roles?.includes('dgx')) loadDeployCatalog();
+    // Catalog handler decides eligibility (dgx OR docker+GPU) and returns a
+    // friendly message otherwise — so probe every system.
+    loadDeployCatalog();
   }
   async function loadContainers(silent = false) {
     if (!cSys) return;
@@ -863,61 +878,155 @@
   }
 
   // ── E5: Easy Deploy ─────────────────────────────────────────────────────
+  /** Short error-message coercion (kept here, not in the template — no casts). */
+  function errMsg(e: unknown): string {
+    return (e as { message?: string })?.message ?? String(e);
+  }
   async function loadDeployCatalog() {
     deployErr = '';
+    deployCatLoading = true;
     try {
       const r = await api.getDeployCatalog(cSys);
+      deployCat = r; // carries err (e.g. no GPU) when !ok
       if (r.ok) {
-        deployCat = r;
-        deployImages = (r.catalog ?? []).map((c) => ({ ...c }));
-        deploySel = 0;
-        if (deployImages.length && !deployName) deployName = suggestName(deployImages[0]);
-      } else {
-        deployCat = r; // carries err (e.g. not a dgx)
+        deployEntries = r.catalog ?? [];
+        if (deploySel < 0 && deployEntries.length) pickEntry(0);
       }
     } catch (e) {
-      deployErr = (e as any)?.message ?? String(e);
+      deployErr = errMsg(e);
+    } finally {
+      deployCatLoading = false;
     }
   }
+  /** Suggest a docker-safe deploy name from a catalog entry's id. */
   function suggestName(c: api.DeployCatalogEntry): string {
-    // ghcr.io/aeon-7/vllm-model-server:latest → "vllm-model-server"
-    const base = (c?.image ?? '').split('/').pop() ?? '';
-    return base.split(':')[0] || 'aeon-deploy';
+    const base = (c?.id || 'aeon-deploy').toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+    return base.replace(/^-+|-+$/g, '') || 'aeon-deploy';
   }
-  function onPickImage(i: number) {
+  /** Pick a catalog entry → pre-fill the name + the 4 highlighted flags. */
+  function pickEntry(i: number) {
     deploySel = i;
-    deployName = suggestName(deployImages[i]);
+    const e = deployEntries[i];
+    if (!e) return;
+    deployName = suggestName(e);
+    const t = e.template_flags;
+    dfModelLen = t.max_model_len || null;
+    dfGpu = t.gpu || 'all';
+    dfMaxBatchTok = t.max_num_batched_tokens || null;
+    dfMaxSeqs = t.max_num_seqs || null;
+    dfExtra = t.extra || '';
+    deployResult = null;
+    depStatus = null;
+    deployErr = '';
+  }
+  /** Is this catalog entry already deployed/available on the box? */
+  function entryInstalled(e: api.DeployCatalogEntry): boolean {
+    const models = deployCat?.installed_models ?? [];
+    if (e.kind === 'imagegen') {
+      // ComfyUI: match by the image name appearing among installed containers.
+      return (deployCat?.installed_containers ?? []).some((c) =>
+        (c.image || '').includes('comfyui'),
+      );
+    }
+    return models.some((m) => m === e.model || m.toLowerCase() === e.model.toLowerCase());
+  }
+  function kindLabel(k: string): string {
+    return (
+      { llm: 'LLM', imagegen: 'image-gen', tts: 'TTS', embedding: 'embedding' }[k] ?? k
+    );
+  }
+  /** Container image → short "name:tag" chip text. */
+  function imageChip(img: string): string {
+    const parts = img.split('/');
+    return parts[parts.length - 1] || img;
+  }
+  function stopDeployPoll() {
+    depPolling = false;
+    if (depPollTimer) {
+      clearTimeout(depPollTimer);
+      depPollTimer = null;
+    }
+  }
+  /** Poll /deploy/status every ~1.5s until running/failed (bounded by ~5min). */
+  async function pollDeployStatus(name: string, startedMs = Date.now()) {
+    if (!depPolling) return;
+    try {
+      const s = await api.getDeployStatus(cSys, name);
+      if (s.ok) depStatus = s;
+      if (s.ok && s.done) {
+        stopDeployPoll();
+        await loadContainers(true);
+        return;
+      }
+    } catch {
+      /* transient — keep polling */
+    }
+    // Safety bound: give up after 5 minutes of polling.
+    if (Date.now() - startedMs > 5 * 60_000) {
+      stopDeployPoll();
+      return;
+    }
+    depPollTimer = setTimeout(() => pollDeployStatus(name, startedMs), 1500);
   }
   async function doDeploy() {
-    const entry = deployImages[deploySel];
-    if (!entry) return;
-    if (deployNow && !confirm(
-      `Deploy now will PULL ${entry.image} (can be multi-GB) and run docker compose up -d on ${cSysObj?.label}.\n\nContinue?`,
-    )) return;
+    const entry = deployEntries[deploySel];
+    if (!entry || !deployName.trim()) return;
+    if (
+      !confirm(
+        `Deploy "${entry.model}"?\n\nThis writes a compose to ~/aeon-deploy/${deployName}/ on ` +
+          `${cSysObj?.label} and PULLS ${entry.container_image} (can be multi-GB), then starts it.\n\nContinue?`,
+      )
+    )
+      return;
     deployBusy = true;
     deployErr = '';
     deployResult = null;
+    depStatus = null;
+    stopDeployPoll();
     try {
       const r = await api.deployImage(cSys, {
-        image: entry.image,
+        model_id: entry.id,
         name: deployName,
         kind: entry.kind,
         flags: {
-          model_len: dfModelLen,
-          max_batch: dfMaxBatch,
+          max_model_len: dfModelLen,
           gpu: dfGpu,
-          max_sessions: dfMaxSessions,
+          max_num_batched_tokens: dfMaxBatchTok,
+          max_num_seqs: dfMaxSeqs,
+          extra: dfExtra,
         },
-        deploy_now: deployNow,
       });
       deployResult = r;
-      if (!r.ok) deployErr = r.err ?? 'deploy failed';
-      if (r.ok && deployNow) await loadContainers(true);
+      if (!r.ok) {
+        deployErr = r.err ?? 'deploy failed';
+      } else {
+        // Deploy kicked off in the background — start the progress poll.
+        depStatus = { ok: true, name: r.name, phase: r.phase ?? 'writing', percent: 10, done: false };
+        depPolling = true;
+        pollDeployStatus(r.name ?? deployName);
+      }
     } catch (e) {
-      deployErr = (e as any)?.message ?? String(e);
+      deployErr = errMsg(e);
     } finally {
       deployBusy = false;
     }
+  }
+  /** Label + accent colour for a progress phase. */
+  function phaseLabel(p?: string): string {
+    return (
+      {
+        writing: 'writing compose…',
+        pulling: 'pulling image…',
+        starting: 'starting container…',
+        running: 'running ✓',
+        failed: 'failed ✗',
+      }[p ?? ''] ?? p ?? ''
+    );
+  }
+  function phaseColor(p?: string): string {
+    if (p === 'failed') return '#f87171';
+    if (p === 'running') return '#34d399';
+    return '#a78bfa';
   }
 
   // ── agent detail + provisioning ─────────────────────────────────────
@@ -1632,87 +1741,150 @@
             <p class="text-zinc-500 text-sm">loading containers…</p>
           {/if}
 
-          <!-- ── E5: Easy Deploy (dgx-only) ── -->
-          {#if cIsDgx}
+          <!-- ── E5: Easy Deploy — model + container picker ── -->
+          {#if cSys}
             <section class="deploy">
               <div class="flex items-baseline justify-between flex-wrap gap-2">
-                <h2 class="section-title">Easy Deploy <span class="text-zinc-600 font-normal">· AEON-7 GHCR → {cSysObj?.label}</span></h2>
-                <span class="text-[10px] font-mono text-amber-300/80">dgx-only</span>
+                <h2 class="section-title">Easy Deploy
+                  <span class="text-zinc-600 font-normal">· model + container → {cSysObj?.label}</span>
+                </h2>
+                {#if deployCat?.ok}
+                  <span class="dep-via">{deployCat.allowed_via === 'dgx' ? 'dgx' : 'docker + gpu'}</span>
+                {/if}
               </div>
-              <p class="agd-dim">
-                Pick a GHCR image, tune the flags, and generate a compose file on the box.
-                Default is <b>generate &amp; save only</b> (no multi-GB pull). Tick “deploy now” to also run
-                <code>docker compose up -d</code>.
-              </p>
 
-              {#if deployCat && !deployCat.ok}
-                <p class="text-amber-300 text-xs font-mono">{deployCat.err}</p>
-              {/if}
-              {#if deployErr}<p class="text-red-400 text-xs font-mono">{deployErr}</p>{/if}
+              {#if deployCatLoading && !deployCat}
+                <p class="text-zinc-500 text-xs">probing system for docker + GPU…</p>
+              {:else if deployCat && !deployCat.ok}
+                <!-- not eligible (no GPU / no docker) -->
+                <p class="dep-noteligible">{deployCat.err}</p>
+              {:else if deployCat?.ok}
+                <p class="agd-dim">
+                  The easy button: pick a model (paired with its serving container), tune the highlighted
+                  flags, and hit <b>Deploy</b>. The image pull + start runs in the background with a progress bar.
+                </p>
+                {#if deployErr}<p class="text-red-400 text-xs font-mono">{deployErr}</p>{/if}
 
-              <!-- editable image list (seeded placeholders) -->
-              <div class="dep-images">
-                {#each deployImages as img, i (i)}
-                  <div class="dep-img" class:active={deploySel === i}>
-                    <button class="dep-pick" on:click={() => onPickImage(i)} title="Select this image">
-                      <span class="dep-radio" class:on={deploySel === i}></span>
-                    </button>
-                    <div class="dep-img-body">
-                      <input class="dep-in dep-img-ref" bind:value={img.image} placeholder="ghcr.io/aeon-7/…" />
-                      <div class="dep-img-meta">
-                        <input class="dep-in dep-img-label" bind:value={img.label} placeholder="label" />
-                        <select class="dep-in dep-kind" bind:value={img.kind}>
-                          <option value="model-server">model-server</option>
-                          <option value="comfyui">comfyui</option>
-                          <option value="generic">generic</option>
-                        </select>
-                      </div>
-                      {#if img.note}<div class="dep-note">{img.note}</div>{/if}
+                <!-- already deployed / available on the box -->
+                {#if (deployCat.installed_models?.length ?? 0) > 0 || (deployCat.installed_containers?.length ?? 0) > 0}
+                  <div class="dep-installed">
+                    <div class="dep-sub">Already on this box</div>
+                    <div class="dep-inst-chips">
+                      {#each (deployCat.installed_models ?? []).slice(0, 24) as m (m)}
+                        <span class="dep-chip model" title="detected model">{m}</span>
+                      {/each}
+                      {#each (deployCat.installed_containers ?? []) as c (c.name)}
+                        <span class="dep-chip ctr" class:run={c.running} title={c.image}>
+                          <span class="dep-cdot" class:run={c.running}></span>{c.name}
+                        </span>
+                      {/each}
                     </div>
                   </div>
-                {/each}
-                <div class="dep-todo">
-                  TODO: live AEON-7 GHCR catalog fetch needs <code>gh</code> / a registry token (not available here).
-                  Edit the entries above by hand for now.
+                {/if}
+
+                <!-- catalog cards: model + paired container + kind -->
+                <div class="dep-sub">Deploy a model</div>
+                <div class="dep-cards">
+                  {#each deployEntries as e, i (e.id)}
+                    <button
+                      class="dep-card"
+                      class:active={deploySel === i}
+                      on:click={() => pickEntry(i)}
+                    >
+                      <div class="dep-card-top">
+                        <span class="dep-kind-badge {e.kind}">{kindLabel(e.kind)}</span>
+                        {#if entryInstalled(e)}<span class="dep-inst-tag">on box</span>{/if}
+                      </div>
+                      <div class="dep-card-model">{e.model}</div>
+                      <div class="dep-card-img" title={e.container_image}>
+                        <span class="dep-img-chip">{imageChip(e.container_image)}</span>
+                      </div>
+                      <div class="dep-card-desc">{e.description}</div>
+                    </button>
+                  {/each}
                 </div>
-              </div>
 
-              <!-- flags -->
-              <div class="dep-flags">
-                <label class="dep-f"><span>name</span>
-                  <input class="dep-in" bind:value={deployName} placeholder="container name" /></label>
-                <label class="dep-f"><span>max model length</span>
-                  <input class="dep-in" type="number" min="0" bind:value={dfModelLen} /></label>
-                <label class="dep-f"><span>max batch size</span>
-                  <input class="dep-in" type="number" min="0" bind:value={dfMaxBatch} /></label>
-                <label class="dep-f"><span>GPU (all / N / 0,1)</span>
-                  <input class="dep-in" bind:value={dfGpu} placeholder="all" /></label>
-                <label class="dep-f"><span>max concurrent sessions</span>
-                  <input class="dep-in" type="number" min="0" bind:value={dfMaxSessions} /></label>
-              </div>
+                <!-- selected-entry editor: name + 4 highlighted flags + advanced -->
+                {#if deploySel >= 0 && deployEntries[deploySel]}
+                  <div class="dep-editor">
+                    <div class="dep-ed-head">
+                      <span class="dep-ed-title">{deployEntries[deploySel].model}</span>
+                      <span class="dep-ed-img">→ {deployEntries[deploySel].container_image}</span>
+                    </div>
 
-              <div class="dep-go">
-                <label class="dep-now"><input type="checkbox" bind:checked={deployNow} /> deploy now (pull + up -d)</label>
-                <button class="btn-primary text-xs" on:click={doDeploy} disabled={deployBusy || !deployName.trim()}>
-                  {deployBusy ? 'working…' : deployNow ? 'generate + deploy' : 'generate + save compose'}
-                </button>
-              </div>
+                    <label class="dep-f wide"><span>deploy name</span>
+                      <input class="dep-in" bind:value={deployName} placeholder="deploy name" /></label>
 
-              {#if deployResult?.ok}
-                <div class="dep-result">
-                  <div class="text-[11px] font-mono text-live-300">
-                    {deployResult.deployed ? 'deployed' : 'compose written'} → {deployResult.path}
+                    <!-- the four flags people tune, big + labeled -->
+                    <div class="dep-hl-grid">
+                      <label class="dep-hl"><span class="dep-hl-lbl">max model length</span>
+                        <span class="dep-hl-flag">--max-model-len</span>
+                        <input class="dep-in" type="number" min="0" bind:value={dfModelLen} /></label>
+                      <label class="dep-hl"><span class="dep-hl-lbl">GPU allocation</span>
+                        <span class="dep-hl-flag">device / -tp / -util</span>
+                        <input class="dep-in" bind:value={dfGpu} placeholder="all / 1 / 0,1" /></label>
+                      <label class="dep-hl"><span class="dep-hl-lbl">max batch</span>
+                        <span class="dep-hl-flag">--max-num-batched-tokens</span>
+                        <input class="dep-in" type="number" min="0" bind:value={dfMaxBatchTok} /></label>
+                      <label class="dep-hl"><span class="dep-hl-lbl">max concurrent sessions</span>
+                        <span class="dep-hl-flag">--max-num-seqs</span>
+                        <input class="dep-in" type="number" min="0" bind:value={dfMaxSeqs} /></label>
+                    </div>
+
+                    <!-- advanced: raw extra args -->
+                    <button class="dep-adv-toggle" on:click={() => (depAdvOpen = !depAdvOpen)}>
+                      {depAdvOpen ? '▾' : '▸'} advanced
+                    </button>
+                    {#if depAdvOpen}
+                      <label class="dep-f wide"><span>extra server args</span>
+                        <input class="dep-in" bind:value={dfExtra} placeholder="--dtype auto --gpu-memory-utilization 0.9 …" /></label>
+                      <p class="dep-adv-note">
+                        Appended verbatim to the server command (vLLM kinds) or surfaced as
+                        <code>EXTRA_ARGS</code> env (others). Filtered to flag-like tokens.
+                      </p>
+                    {/if}
+
+                    <div class="dep-go">
+                      <button class="btn-primary text-xs" on:click={doDeploy}
+                              disabled={deployBusy || depPolling || !deployName.trim()}>
+                        {deployBusy ? 'starting…' : '🚀 Deploy'}
+                      </button>
+                      <span class="dep-go-hint">writes ~/aeon-deploy/{deployName || '<name>'}/ then pulls + starts</span>
+                    </div>
                   </div>
-                  {#if deployResult.compose}<pre class="cmp-ta-pre">{deployResult.compose}</pre>{/if}
-                  {#if deployResult.out}<pre class="cmp-out">{deployResult.out}</pre>{/if}
-                </div>
-              {/if}
+                {/if}
 
-              <div class="dep-agenttodo">
-                <b>TODO (agent hand-off):</b> dispatch the repo’s <code>agents.md</code> + this generated compose to an
-                OpenClaw agent with SSH access to the DGX to pull / tune / launch it. Needs the agent-task dispatch
-                channel (not wired yet).
-              </div>
+                <!-- install progress bar -->
+                {#if depStatus}
+                  <div class="dep-progress">
+                    <div class="dep-prog-top">
+                      <span class="dep-prog-phase" style="color:{phaseColor(depStatus.phase)}">
+                        {phaseLabel(depStatus.phase)}
+                      </span>
+                      <span class="dep-prog-pct">{depStatus.percent ?? 0}%</span>
+                    </div>
+                    <div class="gauge">
+                      <div class="gauge-fill"
+                           style="width:{depStatus.percent ?? 0}%; background:{phaseColor(depStatus.phase)}; box-shadow:0 0 8px {phaseColor(depStatus.phase)}66"></div>
+                    </div>
+                    {#if depStatus.log}<pre class="dep-prog-log">{depStatus.log}</pre>{/if}
+                    {#if depStatus.phase === 'running'}
+                      <div class="text-[11px] font-mono text-live-300">
+                        deployed → {deployResult?.path}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+
+                {#if deployResult?.ok && deployResult.compose}
+                  <details class="dep-compose-d">
+                    <summary>generated docker-compose.yml</summary>
+                    <pre class="cmp-ta-pre">{deployResult.compose}</pre>
+                  </details>
+                {/if}
+
+                <p class="dep-catnote">{deployCat.live_catalog_todo}</p>
+              {/if}
             </section>
           {/if}
         {/if}
@@ -2435,39 +2607,115 @@
     white-space: pre-wrap; word-break: break-word; line-height: 1.5;
   }
 
-  /* ── E5: Easy Deploy ── */
+  /* ── E5: Easy Deploy — model + container picker ── */
   .deploy {
-    border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 0.75rem; padding: 0.9rem 1rem;
-    background: linear-gradient(160deg, rgba(50, 40, 20, 0.25), rgba(12, 12, 20, 0.5)); display: flex; flex-direction: column; gap: 0.65rem;
+    border: 1px solid rgba(167, 139, 250, 0.25); border-radius: 0.75rem; padding: 0.9rem 1rem;
+    background: linear-gradient(160deg, rgba(40, 30, 60, 0.35), rgba(12, 12, 20, 0.6)); display: flex; flex-direction: column; gap: 0.7rem;
   }
-  .dep-images { display: flex; flex-direction: column; gap: 0.45rem; }
-  .dep-img { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.5rem; border: 1px solid #23232f; border-radius: 0.5rem; background: rgba(12, 12, 20, 0.5); }
-  .dep-img.active { border-color: rgba(167, 139, 250, 0.5); background: rgba(167, 139, 250, 0.08); }
-  .dep-pick { background: none; border: none; cursor: pointer; padding: 0.2rem 0; }
-  .dep-radio { display: inline-block; width: 0.85rem; height: 0.85rem; border-radius: 999px; border: 2px solid #52525b; }
-  .dep-radio.on { border-color: #a78bfa; background: #a78bfa; box-shadow: 0 0 8px #a78bfa88; }
-  .dep-img-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
-  .dep-img-meta { display: flex; gap: 0.4rem; }
+  .dep-via {
+    font-family: ui-monospace, monospace; font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: #6ee7b7; background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.35); border-radius: 999px; padding: 0.08rem 0.5rem;
+  }
+  .dep-noteligible {
+    font-family: ui-monospace, monospace; font-size: 0.62rem; color: #d4b483;
+    background: rgba(245, 158, 11, 0.08); border: 1px dashed rgba(245, 158, 11, 0.3); border-radius: 0.4rem; padding: 0.5rem 0.6rem; line-height: 1.45;
+  }
+  .dep-sub { font-family: ui-monospace, monospace; font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.08em; color: #8b8b96; margin-top: 0.1rem; }
+
+  /* already-on-box chips */
+  .dep-installed { display: flex; flex-direction: column; gap: 0.35rem; }
+  .dep-inst-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .dep-chip {
+    font-family: ui-monospace, monospace; font-size: 0.58rem; border-radius: 999px; padding: 0.1rem 0.5rem;
+    display: inline-flex; align-items: center; gap: 0.3rem; max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .dep-chip.model { color: #a5b4fc; background: rgba(99, 102, 241, 0.12); border: 1px solid rgba(99, 102, 241, 0.3); }
+  .dep-chip.ctr { color: #9ca3af; background: rgba(63, 63, 70, 0.4); border: 1px solid #3f3f5a; }
+  .dep-cdot { width: 0.4rem; height: 0.4rem; border-radius: 999px; background: #52525b; flex: none; }
+  .dep-cdot.run { background: #34d399; box-shadow: 0 0 6px #34d399; }
+
+  /* catalog cards */
+  .dep-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.55rem; }
+  .dep-card {
+    text-align: left; display: flex; flex-direction: column; gap: 0.3rem; padding: 0.6rem 0.7rem;
+    border: 1px solid #23232f; border-radius: 0.6rem; background: rgba(12, 12, 20, 0.5); cursor: pointer; transition: border-color 0.15s, background 0.15s;
+  }
+  .dep-card:hover { border-color: #3f3f5a; }
+  .dep-card.active { border-color: rgba(167, 139, 250, 0.6); background: rgba(167, 139, 250, 0.1); box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.3) inset; }
+  .dep-card-top { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; }
+  .dep-kind-badge {
+    font-family: ui-monospace, monospace; font-size: 0.52rem; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 0.08rem 0.4rem; border-radius: 4px; color: #c4b5fd; background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.3);
+  }
+  .dep-kind-badge.imagegen { color: #f0abfc; background: rgba(217, 70, 239, 0.12); border-color: rgba(217, 70, 239, 0.3); }
+  .dep-kind-badge.embedding { color: #67e8f9; background: rgba(34, 211, 238, 0.1); border-color: rgba(34, 211, 238, 0.3); }
+  .dep-kind-badge.tts { color: #fcd34d; background: rgba(251, 191, 36, 0.1); border-color: rgba(251, 191, 36, 0.3); }
+  .dep-inst-tag {
+    font-family: ui-monospace, monospace; font-size: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #6ee7b7; background: rgba(52, 211, 153, 0.14); border: 1px solid rgba(52, 211, 153, 0.4); border-radius: 4px; padding: 0.04rem 0.3rem;
+  }
+  .dep-card-model { font-size: 0.78rem; color: #f4f4f5; font-weight: 600; line-height: 1.2; word-break: break-word; }
+  .dep-card-img { display: flex; }
+  .dep-img-chip {
+    font-family: ui-monospace, monospace; font-size: 0.56rem; color: #93c5fd; background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 4px; padding: 0.05rem 0.4rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .dep-card-desc { font-size: 0.6rem; color: #71717a; line-height: 1.4; }
+
+  /* selected-entry editor */
+  .dep-editor {
+    border: 1px solid rgba(167, 139, 250, 0.3); border-radius: 0.6rem; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.6rem;
+    background: rgba(167, 139, 250, 0.05);
+  }
+  .dep-ed-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+  .dep-ed-title { font-size: 0.82rem; color: #f4f4f5; font-weight: 700; }
+  .dep-ed-img { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #93c5fd; }
+
   .dep-in {
-    background: #0a0a10; border: 1px solid #2a2a38; border-radius: 0.35rem; padding: 0.25rem 0.45rem;
-    font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc;
+    background: #0a0a10; border: 1px solid #2a2a38; border-radius: 0.35rem; padding: 0.3rem 0.5rem;
+    font-family: ui-monospace, monospace; font-size: 0.7rem; color: #d4d4dc;
   }
   .dep-in:focus { outline: none; border-color: #6d5fd0; }
-  .dep-img-ref { width: 100%; }
-  .dep-img-label { flex: 1; }
-  .dep-kind { flex: none; }
-  .dep-note { font-size: 0.58rem; color: #71717a; font-style: italic; }
-  .dep-todo, .dep-agenttodo {
-    font-size: 0.6rem; color: #d4b483; background: rgba(245, 158, 11, 0.08);
-    border: 1px dashed rgba(245, 158, 11, 0.3); border-radius: 0.4rem; padding: 0.45rem 0.55rem; line-height: 1.45;
-  }
-  .dep-flags { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.5rem; }
-  .dep-f { display: flex; flex-direction: column; gap: 0.2rem; }
+  .dep-f { display: flex; flex-direction: column; gap: 0.25rem; }
   .dep-f > span { font-family: ui-monospace, monospace; font-size: 0.56rem; color: #8b8b96; text-transform: uppercase; letter-spacing: 0.04em; }
   .dep-f .dep-in { width: 100%; }
+  .dep-f.wide { width: 100%; }
+
+  /* the four highlighted (tunable) flags */
+  .dep-hl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.6rem; }
+  .dep-hl {
+    display: flex; flex-direction: column; gap: 0.2rem; padding: 0.55rem 0.6rem;
+    border: 1px solid rgba(167, 139, 250, 0.35); border-radius: 0.5rem; background: rgba(167, 139, 250, 0.07);
+  }
+  .dep-hl-lbl { font-size: 0.68rem; color: #ede9fe; font-weight: 600; }
+  .dep-hl-flag { font-family: ui-monospace, monospace; font-size: 0.54rem; color: #a78bfa; }
+  .dep-hl .dep-in { width: 100%; margin-top: 0.15rem; font-size: 0.78rem; }
+
+  .dep-adv-toggle {
+    align-self: flex-start; font-family: ui-monospace, monospace; font-size: 0.62rem; color: #a1a1aa;
+    background: none; border: none; cursor: pointer; padding: 0.1rem 0;
+  }
+  .dep-adv-toggle:hover { color: #d4d4dc; }
+  .dep-adv-note { font-size: 0.58rem; color: #71717a; line-height: 1.4; }
+
   .dep-go { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
-  .dep-now { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc; display: inline-flex; align-items: center; gap: 0.35rem; }
-  .dep-result { display: flex; flex-direction: column; gap: 0.4rem; }
+  .dep-go-hint { font-family: ui-monospace, monospace; font-size: 0.58rem; color: #71717a; }
+
+  /* install progress bar */
+  .dep-progress {
+    display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 0.7rem;
+    border: 1px solid #23232f; border-radius: 0.6rem; background: rgba(12, 12, 20, 0.6);
+  }
+  .dep-prog-top { display: flex; align-items: baseline; justify-content: space-between; }
+  .dep-prog-phase { font-family: ui-monospace, monospace; font-size: 0.66rem; font-weight: 600; }
+  .dep-prog-pct { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc; }
+  .dep-prog-log {
+    font-family: ui-monospace, monospace; font-size: 0.56rem; color: #8b8b96; background: #0a0a10;
+    border-radius: 0.35rem; padding: 0.45rem; max-height: 8rem; overflow: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.4;
+  }
+  .dep-compose-d { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #a1a1aa; }
+  .dep-compose-d summary { cursor: pointer; color: #c4b5fd; }
+  .dep-catnote { font-size: 0.56rem; color: #52525b; line-height: 1.4; font-style: italic; }
 
   /* ── agent roster ── */
   .roster-stats { font-family: ui-monospace, monospace; font-size: 0.66rem; color: #a1a1aa; display: flex; gap: 0.4rem; align-items: center; }

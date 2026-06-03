@@ -273,43 +273,81 @@ export const composeAction = (sysId: string, path: string, action: 'up' | 'down'
     { path, action },
   );
 
-// ── E5: Easy Deploy (dgx-only) ──
+// ── E5: Easy Deploy — model+container picker, template flags, progress ──
+/** The four highlighted (tunable) flags + an advanced "extra" escape hatch. */
+export interface DeployTemplateFlags {
+  max_model_len: number;          // vLLM --max-model-len (0 = omit)
+  gpu: string;                    // "all" | "1" | "0,1"
+  max_num_batched_tokens: number; // vLLM --max-num-batched-tokens (0 = omit)
+  max_num_seqs: number;           // vLLM --max-num-seqs = max concurrent sessions
+  extra: string;                  // additional raw server args
+}
+/** A curated catalog entry: a model paired with its serving container + defaults. */
 export interface DeployCatalogEntry {
-  image: string;
-  label: string;
-  kind: string;      // "model-server" | "comfyui" | …
-  note?: string;
+  id: string;
+  model: string;                  // HF model id / human label
+  container_image: string;        // serving image (+ version), e.g. vllm/vllm-openai:vX
+  kind: 'llm' | 'imagegen' | 'tts' | 'embedding' | string;
+  description: string;
+  template_flags: DeployTemplateFlags;
 }
 export interface DeployCatalog {
   ok: boolean;
   catalog?: DeployCatalogEntry[];
   deploy_dir?: string;
+  allowed_via?: string;             // "dgx" | "docker+gpu"
+  installed_containers?: ContainerInfo[]; // docker ps -a on the box
+  installed_models?: string[];      // detected model ids / dir names
   live_catalog_todo?: string;
   err?: string;
 }
 export const getDeployCatalog = (sysId: string) =>
   req<DeployCatalog>('GET', `/agent/systems/${sysId}/deploy/catalog`);
 
+/** The flags POSTed to /deploy (null/0 = omit the corresponding server arg). */
 export interface DeployFlags {
-  model_len?: number | null;
-  max_batch?: number | null;
-  gpu?: string;            // "all" | "1" | "0,1"
-  max_sessions?: number | null;
+  max_model_len?: number | null;
+  gpu?: string;                    // "all" | "1" | "0,1"
+  max_num_batched_tokens?: number | null;
+  max_num_seqs?: number | null;
+  extra?: string;
 }
 export interface DeployResult {
   ok: boolean;
-  deployed?: boolean;      // true = compose up -d ran
-  name?: string;
+  name?: string;           // deploy id for status polling
   image?: string;
+  model?: string;
+  kind?: string;
   compose?: string;        // the generated docker-compose.yml
   path?: string;           // where it was written on the box
-  out?: string;            // command output
+  phase?: string;          // initial phase ("writing")
+  out?: string;            // launcher output
   err?: string;
 }
 export const deployImage = (
   sysId: string,
-  body: { image: string; name: string; kind: string; flags: DeployFlags; deploy_now: boolean },
+  body: {
+    model_id?: string;     // catalog entry id (preferred)
+    image?: string;        // or a direct image override
+    model?: string;        // model id (positional/--model for vLLM)
+    name: string;
+    kind: string;
+    flags: DeployFlags;
+  },
 ) => req<DeployResult>('POST', `/agent/systems/${sysId}/deploy`, body);
+
+/** Progress poll for the install bar. */
+export interface DeployStatus {
+  ok: boolean;
+  name?: string;
+  phase?: 'writing' | 'pulling' | 'starting' | 'running' | 'failed' | string;
+  percent?: number;        // 0–100
+  done?: boolean;          // phase is running | failed
+  log?: string;            // short tail of the docker output
+  err?: string;
+}
+export const getDeployStatus = (sysId: string, name: string) =>
+  req<DeployStatus>('GET', `/agent/systems/${sysId}/deploy/status?name=${encodeURIComponent(name)}`);
 
 /** One agent in an OpenClaw gateway's pantheon (from its /agents API). */
 export interface AgentInfo {

@@ -2248,87 +2248,265 @@ pub async fn compose_action(
     }
 }
 
-// ── E5: Easy Deploy (AEON-7 GHCR images on the DGX) ───────────────────────
+// ── E5: Easy Deploy — model + container picker, template flags, progress ──────
 //
-// Framework + v1. Restricted to systems with role "dgx" (the GB10 box). We hold
-// a small *seeded, admin-editable* list of GHCR images (model servers + a
-// ComfyUI image) — the live AEON-7 GHCR catalog needs `gh` / a registry token
-// which isn't available here, so live-fetch is a TODO. From a chosen image +
-// flags (max model length, max batch size, GPU allocation, max concurrent
-// sessions) we generate a docker-compose snippet and, by default, SAVE it into a
-// per-deploy dir on the DGX *without* pulling the (multi-GB) image. An explicit
-// "deploy now" then runs `docker compose up -d` for it.
+// The "easy button" for standing up a model server (or ComfyUI) on a GPU box.
+// Redesigned from the raw flag-form v1 into a curated picker:
 //
-// TODO (needs the agent-task plumbing): "hand the repo's agents.md to an agent
-// to set this up for me" — i.e. dispatch the generated compose + an agents.md
-// brief to an OpenClaw agent that has SSH access to the DGX and let it do the
-// pull/tune/launch. That requires an agent-task dispatch channel we don't have
-// wired yet; left as a placeholder here + in the UI.
+//   • A CURATED CATALOG (`deploy_catalog`) pairs each model with the serving
+//     container image that runs it (+ a version tag) and SENSIBLE TEMPLATE FLAGS
+//     (max model length, GPU allocation, max batched tokens, max seqs/sessions).
+//     vLLM-served LLMs → a vLLM image; image-gen → a ComfyUI image. The list is
+//     editable in code below — a live GHCR/registry catalog fetch is a future
+//     enhancement (needs `gh`/a registry token, not installed here).
+//   • The same catalog response reports WHAT'S ALREADY ON THE BOX: `docker ps -a`
+//     plus any models we can detect (HF cache dirs, common model roots, and the
+//     `--served-model-name` of any running vLLM) so the UI can flag "already
+//     deployed / available".
+//   • `deploy_image` (POST /deploy) renders a compose into a UNIQUE per-deploy
+//     dir `~/aeon-deploy/<name>/`, then KICKS OFF `docker compose pull && up -d`
+//     in the BACKGROUND (nohup, writes a status file) and returns immediately
+//     with a deploy id — the pull is multi-GB and slow.
+//   • `deploy_status` (GET /deploy/status) reads that status file and reports a
+//     phase (writing|pulling|starting|running|failed) + a rough percent for the
+//     UI's progress bar. Bounded + robust (never hangs the request).
+//
+// SAFETY: we only ever CREATE under `~/aeon-deploy/<name>/` (refuse to clobber an
+// existing dir) and pull/launch — we never touch or delete pre-existing stacks.
+//
+// Restricted to systems that can actually run this: the `dgx` role OR any system
+// reporting docker + an NVIDIA GPU (probed live).
 
 const DEPLOY_DIR: &str = "$HOME/aeon-deploy";
 
-/// Seeded GHCR image catalog (admin-editable in the UI; this is just the
-/// server-side default the UI seeds from). Marked clearly as placeholders.
-fn seeded_deploy_catalog() -> serde_json::Value {
-    json!([
-        {
-            "image": "ghcr.io/aeon-7/vllm-model-server:latest",
-            "label": "vLLM model server (placeholder)",
-            "kind": "model-server",
-            "note": "Edit to your real AEON-7 GHCR tag. Flags map to vLLM args."
-        },
-        {
-            "image": "ghcr.io/aeon-7/comfyui:latest",
-            "label": "ComfyUI (placeholder)",
-            "kind": "comfyui",
-            "note": "Edit to your real AEON-7 GHCR tag."
+/// One curated catalog entry: a model paired with the serving-container image
+/// (+ version) that runs it, plus sensible default ("template") flags.
+fn cat(
+    id: &str,
+    model: &str,
+    container_image: &str,
+    kind: &str,
+    description: &str,
+    max_model_len: i64,
+    gpu: &str,
+    max_num_batched_tokens: i64,
+    max_num_seqs: i64,
+    extra: &str,
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "model": model,
+        "container_image": container_image,
+        "kind": kind,                 // llm | imagegen | tts | embedding
+        "description": description,
+        "template_flags": {
+            "max_model_len": max_model_len,
+            "gpu": gpu,               // "all" | "1" | "0,1"
+            "max_num_batched_tokens": max_num_batched_tokens,
+            "max_num_seqs": max_num_seqs,
+            "extra": extra,           // additional server args, space-separated
         }
+    })
+}
+
+/// CURATED Easy-Deploy catalog — models paired with the serving container that
+/// runs them + sensible template flags. EDIT HERE to add models / bump image
+/// tags. A live GHCR/registry catalog fetch is a future enhancement (`gh` isn't
+/// installed here). vLLM images serve the LLM/embedding entries (HF model id as
+/// the positional arg); the ComfyUI image serves image-gen.
+///
+/// Defaults are tuned for a single big-VRAM box (e.g. the GB10 / a 24-48GB card):
+/// modest `--max-model-len`, single-GPU tensor-parallel, conservative batch.
+fn curated_deploy_catalog() -> serde_json::Value {
+    // vLLM OpenAI-compatible server image (pin a known-good tag; bump as needed).
+    const VLLM: &str = "vllm/vllm-openai:v0.6.6";
+    // ComfyUI image for image generation.
+    const COMFY: &str = "ghcr.io/ai-dock/comfyui:latest";
+    json!([
+        // ── LLMs (vLLM-served) ──
+        cat("qwen3-8b", "Qwen/Qwen3-8B", VLLM, "llm",
+            "Qwen3 8B — strong general/agentic model; comfortable on a single GPU.",
+            16384, "1", 8192, 16, ""),
+        cat("qwen3-14b", "Qwen/Qwen3-14B", VLLM, "llm",
+            "Qwen3 14B — bigger Qwen3; great quality/throughput tradeoff.",
+            16384, "1", 8192, 12, ""),
+        cat("qwen3-32b", "Qwen/Qwen3-32B", VLLM, "llm",
+            "Qwen3 32B — high quality; wants a large-VRAM GPU (or tensor-parallel).",
+            16384, "1", 8192, 8, ""),
+        cat("llama31-8b", "meta-llama/Llama-3.1-8B-Instruct", VLLM, "llm",
+            "Llama 3.1 8B Instruct — Meta's solid 8B chat model (HF-gated; accept the license).",
+            16384, "1", 8192, 16, ""),
+        cat("llama33-70b", "meta-llama/Llama-3.3-70B-Instruct", VLLM, "llm",
+            "Llama 3.3 70B Instruct — frontier-class open weights; needs lots of VRAM (multi-GPU).",
+            16384, "all", 8192, 6, ""),
+        cat("mistral-small-24b", "mistralai/Mistral-Small-24B-Instruct-2501", VLLM, "llm",
+            "Mistral Small 24B Instruct — efficient mid-size instruct model.",
+            16384, "1", 8192, 10, ""),
+        cat("gemma2-9b", "google/gemma-2-9b-it", VLLM, "llm",
+            "Gemma 2 9B Instruct — Google's compact instruct model (HF-gated).",
+            8192, "1", 8192, 16, ""),
+        // ── Embeddings (vLLM in embedding mode) ──
+        cat("bge-m3-embed", "BAAI/bge-m3", VLLM, "embedding",
+            "BGE-M3 multilingual embeddings — served by vLLM in --task embed mode.",
+            8192, "1", 8192, 32, "--task embed"),
+        // ── Image generation (ComfyUI) ──
+        cat("comfyui", "ComfyUI (bring your own checkpoints)", COMFY, "imagegen",
+            "ComfyUI for image generation (SD/SDXL/Flux). Mount/download checkpoints into the container.",
+            0, "1", 0, 0, ""),
     ])
 }
 
-/// GET /agent/systems/:id/deploy/catalog — the seeded GHCR image list + the
-/// deploy dir on the box. dgx-only.
+/// Shell snippet (no quoting hazards) that prints what's already on the box: a
+/// `docker ps -a` section and a best-effort list of detected models (HF cache
+/// repo dirs, common model roots, and the `--served-model-name` of any running
+/// vLLM). Sections are delimited by markers we split on.
+const INSTALLED_PROBE: &str = r#"echo '@@CONTAINERS@@'
+docker ps -a --no-trunc --format '{{json .}}' 2>/dev/null || true
+echo '@@MODELS@@'
+# HF hub cache repos: ~/.cache/huggingface/hub/models--<org>--<name> → org/name
+for base in "$HOME/.cache/huggingface/hub" /root/.cache/huggingface/hub; do
+  [ -d "$base" ] && ls -1 "$base" 2>/dev/null | sed -n 's#^models--##p' | sed 's#--#/#g'
+done
+# Common model roots: top-level dir names (one level deep)
+for d in "$HOME/models" /models /opt/models /raid/models /srv/models; do
+  [ -d "$d" ] && find "$d" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null
+done
+# Any running vLLM's served-model-name(s) from its cmdline
+for p in $(pgrep -f vllm 2>/dev/null); do
+  tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | grep -A1 -- '--served-model-name' | tail -n1
+  tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | grep -A1 -- '--model' | tail -n1
+done
+echo '@@END@@'
+"#;
+
+/// Probe the box for installed/known containers + detectable models. Returns
+/// (containers, models). Never fails hard — a probe error just yields empties.
+fn gather_installed(sys: &System) -> (Vec<serde_json::Value>, Vec<String>) {
+    let out = match ssh_capture(sys, INSTALLED_PROBE) {
+        Ok(o) => o,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let mut section = "";
+    let mut containers: Vec<serde_json::Value> = Vec::new();
+    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for line in out.lines() {
+        match line.trim() {
+            "@@CONTAINERS@@" => section = "containers",
+            "@@MODELS@@" => section = "models",
+            "@@END@@" => section = "",
+            _ => match section {
+                "containers" => {
+                    if let Some(c) = parse_container_line(line) {
+                        containers.push(c);
+                    }
+                }
+                "models" => {
+                    let m = line.trim();
+                    // keep org/name or plain dir names; drop obvious junk/paths
+                    if !m.is_empty() && m.len() <= 200 && !m.starts_with('-') && !m.starts_with('/') {
+                        models.insert(m.to_string());
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    (containers, models.into_iter().collect())
+}
+
+/// True if this system may use Easy Deploy: the `dgx` role, OR it reports docker
+/// AND an NVIDIA GPU (probed live, bounded by ssh_capture's timeout).
+fn deploy_allowed(sys: &System) -> (bool, String) {
+    if sys.roles.iter().any(|r| r == "dgx") {
+        return (true, "dgx".into());
+    }
+    // Probe: does docker exist + is there an NVIDIA GPU?
+    let probe = "command -v docker >/dev/null 2>&1 && echo HAVE_DOCKER; \
+                 (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -qi gpu && echo HAVE_GPU) || true";
+    match ssh_capture(sys, probe) {
+        Ok(o) => {
+            let docker = o.contains("HAVE_DOCKER");
+            let gpu = o.contains("HAVE_GPU");
+            if docker && gpu {
+                (true, "docker+gpu".into())
+            } else if !docker {
+                (false, "no docker on this system".into())
+            } else {
+                (false, "no NVIDIA GPU detected on this system".into())
+            }
+        }
+        Err(e) => (false, format!("could not probe system: {e}")),
+    }
+}
+
+/// GET /agent/systems/:id/deploy/catalog — the curated model+container catalog
+/// (with template flags) + what's already on the box (containers + detected
+/// models). Allowed for dgx systems or any docker+GPU box.
 pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
     let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
         return Json(json!({"ok": false, "err": "no such system"}));
     };
-    if !sys.roles.iter().any(|r| r == "dgx") {
-        return Json(json!({"ok": false, "err": "Easy Deploy is only available for systems with the \"dgx\" role"}));
+    let res = tokio::task::spawn_blocking(move || {
+        let (allowed, why) = deploy_allowed(&sys);
+        if !allowed {
+            return Err(format!("Easy Deploy needs a GPU + docker — {why}"));
+        }
+        let (containers, models) = gather_installed(&sys);
+        Ok((why, containers, models))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((why, containers, models)) => Json(json!({
+            "ok": true,
+            "catalog": curated_deploy_catalog(),
+            "deploy_dir": DEPLOY_DIR,
+            "allowed_via": why,                 // "dgx" | "docker+gpu"
+            "installed_containers": containers, // docker ps -a (slim shape)
+            "installed_models": models,         // detected model ids / dir names
+            "live_catalog_todo": "Catalog is curated in code (curated_deploy_catalog). A live GHCR/registry fetch is a future enhancement (`gh`/registry token not available here).",
+        })),
+        Err(e) => Json(json!({"ok": false, "err": e})),
     }
-    Json(json!({
-        "ok": true,
-        "catalog": seeded_deploy_catalog(),
-        "deploy_dir": DEPLOY_DIR,
-        "live_catalog_todo": "Live AEON-7 GHCR catalog fetch needs `gh`/a registry token (not available here) — edit the list above instead.",
-    }))
 }
 
 #[derive(Deserialize, Default)]
 pub struct DeployFlags {
+    /// vLLM `--max-model-len` (context window). 0/None = omit (image default).
     #[serde(default)]
-    model_len: Option<i64>,
-    #[serde(default)]
-    max_batch: Option<i64>,
+    max_model_len: Option<i64>,
     /// GPU allocation: "all" | a count ("1") | a device list ("0,1").
     #[serde(default)]
     gpu: Option<String>,
+    /// vLLM `--max-num-batched-tokens`. 0/None = omit.
     #[serde(default)]
-    max_sessions: Option<i64>,
+    max_num_batched_tokens: Option<i64>,
+    /// vLLM `--max-num-seqs` = max concurrent sequences/sessions. 0/None = omit.
+    #[serde(default)]
+    max_num_seqs: Option<i64>,
+    /// Extra raw server args, space-separated (the "advanced" escape hatch).
+    #[serde(default)]
+    extra: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct DeployReq {
-    image: String,
+    /// Catalog entry id (preferred) — resolves model + container_image + kind.
+    #[serde(default)]
+    model_id: Option<String>,
+    /// Direct image override (used when not picking a catalog id).
+    #[serde(default)]
+    image: Option<String>,
+    /// Model / HF id (positional arg for vLLM). Optional for non-LLM images.
+    #[serde(default)]
+    model: Option<String>,
+    /// Deploy name → container name + `~/aeon-deploy/<name>/`.
     name: String,
     #[serde(default)]
     flags: DeployFlags,
-    /// "model-server" (vLLM-style flags) | "comfyui" | anything else (generic).
+    /// "llm" | "embedding" | "imagegen" | "tts" | … (drives flag→arg mapping).
     #[serde(default)]
     kind: String,
-    /// When true, actually `docker compose up -d` after writing (pulls + runs).
-    /// Default false = generate + save only (safe; no multi-GB pull).
-    #[serde(default)]
-    deploy_now: bool,
 }
 
 /// Validate a GHCR-ish image ref to a safe token (no shell-meta, sane charset).
@@ -2340,20 +2518,49 @@ fn sanitize_image_ref(image: &str) -> String {
     if ok { s.to_string() } else { String::new() }
 }
 
-/// Build a docker-compose.yml string for the deploy from the chosen flags. We
-/// keep it minimal + readable: GPU via `deploy.resources.reservations.devices`,
-/// the model/batch flags as the container `command`, and max-sessions surfaced
-/// as an env var the server can read.
-fn render_deploy_compose(name: &str, image: &str, kind: &str, f: &DeployFlags) -> String {
+/// Validate a HuggingFace model id / path to a safe token.
+fn sanitize_model_ref(model: &str) -> String {
+    let s = model.trim();
+    let ok = !s.is_empty()
+        && s.len() <= 256
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_'));
+    if ok { s.to_string() } else { String::new() }
+}
+
+/// Filter the "extra" args field to a safe subset: vLLM-style flags, numbers,
+/// model-ish tokens. Anything with shell metacharacters is dropped (defense in
+/// depth — the whole compose is base64'd to the box, but we still avoid letting
+/// junk into the generated command line).
+fn sanitize_extra_args(extra: &str) -> String {
+    extra
+        .split_whitespace()
+        .filter(|t| {
+            t.len() <= 128
+                && t.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ','))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build a docker-compose.yml string for the deploy. GPU via
+/// `deploy.resources.reservations.devices`; for vLLM-served kinds (llm /
+/// embedding) we emit the model + the four highlighted flags (+ extra) as the
+/// container `command`; for other kinds we surface the values as env so any
+/// server can read them.
+fn render_deploy_compose(
+    name: &str,
+    image: &str,
+    model: &str,
+    kind: &str,
+    f: &DeployFlags,
+) -> String {
     let gpu = f.gpu.as_deref().unwrap_or("all").trim().to_string();
-    // GPU reservation: "all" → count: all; a bare number → that count; a device
-    // list "0,1" → device_ids.
     let gpu_block = if gpu == "all" || gpu.is_empty() {
         "          - driver: nvidia\n            count: all\n            capabilities: [gpu]".to_string()
     } else if gpu.chars().all(|c| c.is_ascii_digit()) {
         format!("          - driver: nvidia\n            count: {gpu}\n            capabilities: [gpu]")
     } else {
-        // device list
         let ids = gpu
             .split(',')
             .map(|s| s.trim())
@@ -2363,30 +2570,63 @@ fn render_deploy_compose(name: &str, image: &str, kind: &str, f: &DeployFlags) -
             .join(", ");
         format!("          - driver: nvidia\n            device_ids: [{ids}]\n            capabilities: [gpu]")
     };
+    // tensor-parallel-size = the GPU count when a bare number / device list.
+    let tp_size: Option<i64> = if gpu.chars().all(|c| c.is_ascii_digit()) && !gpu.is_empty() {
+        gpu.parse().ok()
+    } else if gpu.contains(',') {
+        Some(gpu.split(',').filter(|s| !s.trim().is_empty()).count() as i64)
+    } else {
+        None
+    };
 
-    // Command + env derived from flags. For a model-server we emit vLLM-style
-    // args; otherwise we just surface the values as env so any server can read
-    // them, and leave command unset (image default entrypoint).
+    let is_vllm = kind == "llm" || kind == "embedding";
     let mut cmd_args: Vec<String> = Vec::new();
     let mut env_lines: Vec<String> = Vec::new();
-    if kind == "model-server" {
-        if let Some(ml) = f.model_len {
-            cmd_args.push(format!("--max-model-len {ml}"));
+    if is_vllm {
+        if !model.is_empty() {
+            cmd_args.push(format!("--model {model}"));
+            cmd_args.push(format!("--served-model-name {model}"));
         }
-        if let Some(mb) = f.max_batch {
-            cmd_args.push(format!("--max-num-seqs {mb}"));
+        if let Some(tp) = tp_size {
+            if tp > 1 {
+                cmd_args.push(format!("--tensor-parallel-size {tp}"));
+            }
+        }
+        if let Some(v) = f.max_model_len.filter(|v| *v > 0) {
+            cmd_args.push(format!("--max-model-len {v}"));
+        }
+        if let Some(v) = f.max_num_batched_tokens.filter(|v| *v > 0) {
+            cmd_args.push(format!("--max-num-batched-tokens {v}"));
+        }
+        if let Some(v) = f.max_num_seqs.filter(|v| *v > 0) {
+            cmd_args.push(format!("--max-num-seqs {v}"));
+        }
+        if let Some(extra) = f.extra.as_deref() {
+            let e = sanitize_extra_args(extra);
+            if !e.is_empty() {
+                cmd_args.push(e);
+            }
         }
     } else {
-        if let Some(ml) = f.model_len {
-            env_lines.push(format!("      MAX_MODEL_LEN: \"{ml}\""));
+        if let Some(v) = f.max_model_len.filter(|v| *v > 0) {
+            env_lines.push(format!("      MAX_MODEL_LEN: \"{v}\""));
         }
-        if let Some(mb) = f.max_batch {
-            env_lines.push(format!("      MAX_BATCH_SIZE: \"{mb}\""));
+        if let Some(v) = f.max_num_batched_tokens.filter(|v| *v > 0) {
+            env_lines.push(format!("      MAX_NUM_BATCHED_TOKENS: \"{v}\""));
+        }
+        if let Some(v) = f.max_num_seqs.filter(|v| *v > 0) {
+            env_lines.push(format!("      MAX_NUM_SEQS: \"{v}\""));
+        }
+        if let Some(extra) = f.extra.as_deref() {
+            let e = sanitize_extra_args(extra);
+            if !e.is_empty() {
+                env_lines.push(format!("      EXTRA_ARGS: \"{e}\""));
+            }
         }
     }
-    if let Some(ms) = f.max_sessions {
-        env_lines.push(format!("      MAX_CONCURRENT_SESSIONS: \"{ms}\""));
-    }
+    // Pass HF token through from the host env if present (gated models).
+    env_lines.push("      HUGGING_FACE_HUB_TOKEN: \"${HUGGING_FACE_HUB_TOKEN:-}\"".to_string());
+
     let command_line = if cmd_args.is_empty() {
         String::new()
     } else {
@@ -2397,76 +2637,288 @@ fn render_deploy_compose(name: &str, image: &str, kind: &str, f: &DeployFlags) -
     } else {
         format!("    environment:\n{}\n", env_lines.join("\n"))
     };
+    // vLLM serves OpenAI API on 8000; ComfyUI on 8188. Surface a sensible port.
+    let port = if is_vllm { 8000 } else { 8188 };
 
     format!(
-        "# Generated by AEON Magick — Agent Dash Easy Deploy (E5).\n\
-         # Review before deploying. Flags: model_len={ml:?} max_batch={mb:?} gpu={gpu} max_sessions={ms:?}\n\
+        "# Generated by AEON Magick — Agent Dash Easy Deploy.\n\
+         # model={model} kind={kind} gpu={gpu} max_model_len={ml:?} max_num_batched_tokens={mbt:?} max_num_seqs={ms:?}\n\
          services:\n  \
          {name}:\n    \
          image: {image}\n    \
          container_name: {name}\n    \
-         restart: unless-stopped\n\
+         restart: unless-stopped\n    \
+         ipc: host\n    \
+         ports:\n      \
+         - \"{port}:{port}\"\n\
          {command_line}\
          {env_block}    \
          deploy:\n      \
          resources:\n        \
          reservations:\n          \
          devices:\n{gpu_block}\n",
-        ml = f.model_len,
-        mb = f.max_batch,
-        ms = f.max_sessions,
+        ml = f.max_model_len,
+        mbt = f.max_num_batched_tokens,
+        ms = f.max_num_seqs,
     )
 }
 
-/// POST /agent/systems/:id/deploy — generate a compose snippet from the image +
-/// flags, write it to a per-deploy dir on the DGX, and (only if deploy_now)
-/// `docker compose up -d`. dgx-only. Returns the generated compose + the path.
+/// Remote launcher script. Writes the compose into a UNIQUE per-deploy dir
+/// (refusing to clobber), seeds a status file, then backgrounds
+/// `docker compose pull && up -d` with nohup, streaming progress into the log so
+/// `deploy_status` can report a phase + percent. Returns immediately.
+///
+/// Status file format (first line is the phase token, rest is the live log):
+///   PHASE=<writing|pulling|starting|running|failed>
+///   …docker output…
+fn render_launch_script(dir: &str, compose_b64: &str) -> String {
+    format!(
+        r#"set -e
+DIR="{dir}"
+if [ -d "$DIR" ]; then echo "EXISTS"; exit 3; fi
+mkdir -p "$DIR"
+echo "{compose_b64}" | base64 -d > "$DIR/docker-compose.yml"
+STATUS="$DIR/deploy.status"
+LOG="$DIR/deploy.log"
+printf 'PHASE=writing\n' > "$STATUS"
+# Background the slow pull+up. We re-write the phase line as we go and append
+# docker's stdout/stderr (which carries pull progress) to the log + status.
+nohup bash -c '
+  cd "'"$DIR"'"
+  printf "PHASE=pulling\n" > "'"$STATUS"'"
+  if docker compose pull >>"'"$LOG"'" 2>&1; then
+    printf "PHASE=starting\n" > "'"$STATUS"'"
+    if docker compose up -d >>"'"$LOG"'" 2>&1; then
+      printf "PHASE=running\n" > "'"$STATUS"'"
+    else
+      printf "PHASE=failed\n" > "'"$STATUS"'"
+    fi
+  else
+    printf "PHASE=failed\n" > "'"$STATUS"'"
+  fi
+  cat "'"$LOG"'" >> "'"$STATUS"'"
+' >/dev/null 2>&1 &
+echo "STARTED $DIR"
+"#
+    )
+}
+
+/// POST /agent/systems/:id/deploy — resolve a catalog entry (or a direct image),
+/// render a compose into a unique `~/aeon-deploy/<name>/`, and KICK OFF
+/// pull+up in the background. Returns immediately with the deploy name so the UI
+/// can poll `deploy_status`. Allowed for dgx or any docker+GPU box.
 pub async fn deploy_image(Path(id): Path<String>, Json(req): Json<DeployReq>) -> impl IntoResponse {
     let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
         return Json(json!({"ok": false, "err": "no such system"}));
     };
-    if !sys.roles.iter().any(|r| r == "dgx") {
-        return Json(json!({"ok": false, "err": "Easy Deploy is only available for systems with the \"dgx\" role"}));
+
+    // Resolve image / model / kind from the catalog id when given, else direct.
+    let (mut image, mut model, mut kind) = (
+        req.image.clone().unwrap_or_default(),
+        req.model.clone().unwrap_or_default(),
+        req.kind.clone(),
+    );
+    if let Some(mid) = req.model_id.as_deref() {
+        if let serde_json::Value::Array(entries) = curated_deploy_catalog() {
+            if let Some(e) = entries.iter().find(|e| e.get("id").and_then(|x| x.as_str()) == Some(mid)) {
+                if image.is_empty() {
+                    image = e.get("container_image").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                }
+                if model.is_empty() {
+                    model = e.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                }
+                if kind.is_empty() {
+                    kind = e.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                }
+            }
+        }
     }
-    let image = sanitize_image_ref(&req.image);
+
+    let image = sanitize_image_ref(&image);
     if image.is_empty() {
-        return Json(json!({"ok": false, "err": "invalid image reference"}));
+        return Json(json!({"ok": false, "err": "invalid or missing image reference"}));
+    }
+    // Model is required for vLLM-served kinds (it's the positional/--model arg);
+    // for image-gen / generic it can be empty.
+    let kind = kind.trim().to_string();
+    let model = if model.trim().is_empty() {
+        String::new()
+    } else {
+        let m = sanitize_model_ref(&model);
+        if m.is_empty() {
+            return Json(json!({"ok": false, "err": "invalid model reference"}));
+        }
+        m
+    };
+    if (kind == "llm" || kind == "embedding") && model.is_empty() {
+        return Json(json!({"ok": false, "err": "this kind needs a model id"}));
     }
     let name = sanitize_docker_name(&req.name);
     if name.is_empty() {
         return Json(json!({"ok": false, "err": "invalid deploy name (use [A-Za-z0-9._-])"}));
     }
-    let compose = render_deploy_compose(&name, &image, req.kind.trim(), &req.flags);
-    let deploy_now = req.deploy_now;
+
+    let compose = render_deploy_compose(&name, &image, &model, &kind, &req.flags);
     let compose_b64 = b64(compose.as_bytes());
     let name_c = name.clone();
     let res = tokio::task::spawn_blocking(move || {
-        // Write the compose into $DEPLOY_DIR/<name>/docker-compose.yml. Only run
-        // it when deploy_now — otherwise just save (no pull, no launch).
         let dir = format!("{DEPLOY_DIR}/{name_c}");
-        let run = if deploy_now {
-            format!(" && cd \"{dir}\" && docker compose up -d 2>&1")
-        } else {
-            String::new()
-        };
+        let script = render_launch_script(&dir, &compose_b64);
+        // base64 the whole launcher so the nested quoting survives the ssh hop.
+        let remote = format!("echo {} | base64 -d | bash", b64(script.as_bytes()));
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => {
+            if out.contains("EXISTS") {
+                return Json(json!({
+                    "ok": false,
+                    "err": format!("a deploy named \"{name}\" already exists at {DEPLOY_DIR}/{name} — pick another name"),
+                }));
+            }
+            Json(json!({
+                "ok": true,
+                "name": name,                 // deploy id for status polling
+                "image": image,
+                "model": model,
+                "kind": kind,
+                "compose": compose,
+                "path": format!("{DEPLOY_DIR}/{name}/docker-compose.yml"),
+                "phase": "writing",
+                "out": out.trim(),
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e, "compose": compose})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DeployStatusQuery {
+    name: String,
+}
+
+/// Map a phase token → a rough percent for the progress bar (when we can't parse
+/// a finer pull percentage from the log).
+fn phase_percent(phase: &str) -> i64 {
+    match phase {
+        "writing" => 10,
+        "pulling" => 50,
+        "starting" => 90,
+        "running" => 100,
+        "failed" => 100,
+        _ => 0,
+    }
+}
+
+/// Try to refine pull progress from the docker log tail. `docker compose pull`
+/// prints per-layer lines; we approximate overall % as the mean of the latest
+/// per-component percentages we can see, scaled into the pulling band (10–85%).
+fn parse_pull_percent(log: &str) -> Option<i64> {
+    let mut pcts: Vec<f64> = Vec::new();
+    for line in log.lines().rev().take(200) {
+        // Lines like "Pulling 3f4d… 45%" or "… Downloading [===> ] 45%".
+        if let Some(idx) = line.rfind('%') {
+            let start = line[..idx]
+                .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            if let Ok(p) = line[start..idx].parse::<f64>() {
+                if (0.0..=100.0).contains(&p) {
+                    pcts.push(p);
+                    if pcts.len() >= 12 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if pcts.is_empty() {
+        return None;
+    }
+    let mean = pcts.iter().sum::<f64>() / pcts.len() as f64;
+    // Scale 0–100 of the pull into the 10–85 band so the bar still advances to
+    // "starting" (90) and "running" (100) afterwards.
+    Some((10.0 + mean * 0.75).round() as i64)
+}
+
+/// GET /agent/systems/:id/deploy/status?name=<name> — report deploy progress for
+/// the UI's progress bar: a phase + a rough percent + a short log tail. Bounded
+/// + robust (a missing/empty status file just reads as "writing").
+pub async fn deploy_status(
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DeployStatusQuery>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let name = sanitize_docker_name(&q.name);
+    if name.is_empty() {
+        return Json(json!({"ok": false, "err": "invalid deploy name"}));
+    }
+    let name_c = name.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let dir = format!("{DEPLOY_DIR}/{name_c}");
+        // Read the phase line + the last ~25 log lines in one shot. `|| true`
+        // keeps it from failing when files don't exist yet.
         let remote = format!(
-            "mkdir -p \"{dir}\" && echo {compose_b64} | base64 -d > \"{dir}/docker-compose.yml\" && echo \"WROTE {dir}/docker-compose.yml\"{run}"
+            "S=\"{dir}/deploy.status\"; L=\"{dir}/deploy.log\"; \
+             echo '@@PHASE@@'; (head -n1 \"$S\" 2>/dev/null) || true; \
+             echo '@@LOG@@'; (tail -n 25 \"$L\" 2>/dev/null) || true; \
+             echo '@@END@@'"
         );
         ssh_capture(&sys, &remote)
     })
     .await
     .unwrap_or_else(|_| Err("join error".into()));
     match res {
-        Ok(out) => Json(json!({
-            "ok": true,
-            "deployed": deploy_now,
-            "name": name,
-            "image": image,
-            "compose": compose,
-            "path": format!("{DEPLOY_DIR}/{name}/docker-compose.yml"),
-            "out": out.trim(),
-        })),
-        Err(e) => Json(json!({"ok": false, "err": e, "compose": compose})),
+        Ok(out) => {
+            let mut section = "";
+            let mut phase_line = String::new();
+            let mut log = String::new();
+            for line in out.lines() {
+                match line.trim() {
+                    "@@PHASE@@" => section = "phase",
+                    "@@LOG@@" => section = "log",
+                    "@@END@@" => section = "",
+                    _ => match section {
+                        "phase" => {
+                            if phase_line.is_empty() {
+                                phase_line = line.trim().to_string();
+                            }
+                        }
+                        "log" => {
+                            log.push_str(line);
+                            log.push('\n');
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            let phase = phase_line
+                .strip_prefix("PHASE=")
+                .unwrap_or("writing")
+                .trim()
+                .to_string();
+            let phase = if phase.is_empty() { "writing".to_string() } else { phase };
+            // Percent: prefer parsed pull % while pulling, else phase-based.
+            let percent = if phase == "pulling" {
+                parse_pull_percent(&log).unwrap_or_else(|| phase_percent(&phase))
+            } else {
+                phase_percent(&phase)
+            };
+            let done = phase == "running" || phase == "failed";
+            Json(json!({
+                "ok": true,
+                "name": name,
+                "phase": phase,    // writing | pulling | starting | running | failed
+                "percent": percent,
+                "done": done,
+                "log": log.trim_end(),
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
     }
 }
 

@@ -151,10 +151,13 @@ pub fn build_router(cfg: Config) -> Router {
             get(crate::agent_connect::compose_get).put(crate::agent_connect::compose_put),
         )
         .route("/agent/systems/:id/compose/action", post(crate::agent_connect::compose_action))
-        // E5: Easy Deploy (dgx-only) — seeded GHCR image list + generate/save
-        // (optionally launch) a compose from tuning flags.
+        // E5: Easy Deploy — curated model+container catalog (with template
+        // flags) + what's already on the box; POST kicks off a background
+        // pull+up into a unique ~/aeon-deploy/<name>/; status drives the
+        // progress bar. dgx or any docker+GPU box.
         .route("/agent/systems/:id/deploy/catalog", get(crate::agent_connect::deploy_catalog))
         .route("/agent/systems/:id/deploy", post(crate::agent_connect::deploy_image))
+        .route("/agent/systems/:id/deploy/status", get(crate::agent_connect::deploy_status))
         .route("/agent/systems/:id/agents", get(crate::agent_connect::system_agents))
         .route("/agent/systems/:id/usage", get(crate::agent_connect::system_usage))
         // F7b: deploy a NEW persona — create the workspace + SOUL/IDENTITY,
