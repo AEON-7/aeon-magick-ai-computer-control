@@ -47,6 +47,23 @@
   let skillResult: api.AddSkillResult | null = null;
   let customSkillName = '';
   let customSkillFile: File | null = null;
+  // F7a: persona files (Soul + Identity) editor
+  let personaFiles: Record<api.PersonaWhich, api.PersonaFile | null> = { soul: null, identity: null };
+  let personaDraft: Record<api.PersonaWhich, string> = { soul: '', identity: '' };
+  let personaLoading: Record<api.PersonaWhich, boolean> = { soul: false, identity: false };
+  let personaSaving: Record<api.PersonaWhich, boolean> = { soul: false, identity: false };
+  let personaMsg: Record<api.PersonaWhich, string> = { soul: '', identity: '' };
+  // F7a: the two persona files to render (typed here so the template needs no casts).
+  const PERSONA_FILES: { which: api.PersonaWhich; label: string; file: string; hint: string }[] = [
+    { which: 'soul', label: 'Soul', file: 'SOUL.md', hint: 'the essence: voice, values, manner (the system prompt)' },
+    { which: 'identity', label: 'Identity', file: 'IDENTITY.md', hint: 'the facts: name, era, domain, emoji' },
+  ];
+  // F7b: deploy a new persona
+  let showNewPersona = false;
+  let npSysId = '';
+  let np: api.NewPersonaInput = { id: '', name: '', emoji: '', identity: '', soul: '', voice: '', corpus_seed: '', model: '' };
+  let npBusy = false;
+  let npResult: api.NewPersonaResult | null = null;
   // per-system power controls
   let lastMac: Record<string, string> = {};
   let powerBusy = '';
@@ -921,6 +938,9 @@
     skillResult = null;
     customSkillName = '';
     customSkillFile = null;
+    personaFiles = { soul: null, identity: null };
+    personaDraft = { soul: '', identity: '' };
+    personaMsg = { soul: '', identity: '' };
     detailLoading = true;
     try {
       detail = await api.getAgentDetail(sysId, a.id);
@@ -989,6 +1009,81 @@
   $: corpusFiles = (corpus?.files ?? []).filter(
     (f) => !corpusFilter.trim() || f.path.toLowerCase().includes(corpusFilter.toLowerCase()),
   );
+  // ── F7a: persona files (Soul + Identity) view/edit ──────────────────
+  async function loadPersonaFile(which: api.PersonaWhich) {
+    if (!detailAgent || personaLoading[which]) return;
+    personaLoading = { ...personaLoading, [which]: true };
+    personaMsg = { ...personaMsg, [which]: '' };
+    try {
+      const r = await api.getAgentPersonaFile(detailSys, detailAgent.id, which);
+      personaFiles = { ...personaFiles, [which]: r };
+      personaDraft = { ...personaDraft, [which]: r.ok ? (r.content ?? '') : personaDraft[which] };
+      if (!r.ok) personaMsg = { ...personaMsg, [which]: r.err ?? 'load failed' };
+    } catch (e) {
+      const msg = (e as any)?.message ?? String(e);
+      personaFiles = { ...personaFiles, [which]: { ok: false, err: msg } };
+      personaMsg = { ...personaMsg, [which]: msg };
+    } finally {
+      personaLoading = { ...personaLoading, [which]: false };
+    }
+  }
+  async function savePersonaFile(which: api.PersonaWhich) {
+    if (!detailAgent || personaSaving[which]) return;
+    personaSaving = { ...personaSaving, [which]: true };
+    personaMsg = { ...personaMsg, [which]: '' };
+    try {
+      const r = await api.putAgentPersonaFile(detailSys, detailAgent.id, which, personaDraft[which]);
+      if (r.ok) {
+        personaMsg = { ...personaMsg, [which]: `saved (${r.bytes_written ?? 0} bytes)` };
+        // refresh the on-disk view so exists/size reflect the write
+        personaFiles = {
+          ...personaFiles,
+          [which]: { ...(personaFiles[which] ?? { ok: true }), ok: true, exists: true, content: personaDraft[which] },
+        };
+      } else {
+        personaMsg = { ...personaMsg, [which]: r.err ?? 'save failed' };
+      }
+    } catch (e) {
+      personaMsg = { ...personaMsg, [which]: (e as any)?.message ?? String(e) };
+    } finally {
+      personaSaving = { ...personaSaving, [which]: false };
+    }
+  }
+  // ── F7b: deploy a new persona ───────────────────────────────────────
+  function openNewPersona(sysId: string) {
+    npSysId = sysId;
+    np = { id: '', name: '', emoji: '', identity: '', soul: '', voice: '', corpus_seed: '', model: '' };
+    npResult = null;
+    showNewPersona = true;
+  }
+  function closeNewPersona() {
+    showNewPersona = false;
+    npResult = null;
+  }
+  async function submitNewPersona() {
+    if (npBusy) return;
+    const id = (np.id || '').trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_-]*$/.test(id)) {
+      npResult = { ok: false, err: 'id must be lowercase, start with a letter, and use only [a-z0-9_-]' };
+      return;
+    }
+    npBusy = true;
+    npResult = null;
+    try {
+      npResult = await api.createPersona(npSysId, { ...np, id });
+      // on success, refresh that system's roster so the new persona shows up
+      if (npResult.ok) {
+        api
+          .getSystemAgents(npSysId)
+          .then((r) => (agents = { ...agents, [npSysId]: r }))
+          .catch(() => {});
+      }
+    } catch (e) {
+      npResult = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      npBusy = false;
+    }
+  }
   // ── E1: add-skill ───────────────────────────────────────────────────
   // Skills already on the agent (so quick-add chips can hide ones it has).
   $: agentSkillSet = new Set(detail?.skills ?? []);
@@ -1367,17 +1462,23 @@
             <div class="space-y-3">
               <div class="flex items-baseline justify-between flex-wrap gap-2">
                 <h2 class="section-title">Pantheon <span class="text-zinc-600 font-normal">· {s.label}</span></h2>
-                {#if r?.reachable}
-                  <div class="roster-stats">
-                    <span><b>{sum.count}</b> agents</span>
-                    <span class="dot-sep">·</span>
-                    <span class="text-live-300"><b>{sum.active}</b> active</span>
-                  </div>
-                {:else if r}
-                  <span class="text-amber-300 text-[11px] font-mono">{r.err || 'roster unavailable'}</span>
-                {:else}
-                  <span class="text-zinc-600 text-[11px] font-mono">loading roster…</span>
-                {/if}
+                <div class="flex items-baseline gap-2">
+                  {#if r?.reachable}
+                    <div class="roster-stats">
+                      <span><b>{sum.count}</b> agents</span>
+                      <span class="dot-sep">·</span>
+                      <span class="text-live-300"><b>{sum.active}</b> active</span>
+                    </div>
+                    <!-- F7b: deploy a new persona on this gateway. -->
+                    <button class="new-persona-btn" title="Deploy a new agent persona" on:click={() => openNewPersona(s.id)}>
+                      <span class="np-plus">+</span> New persona
+                    </button>
+                  {:else if r}
+                    <span class="text-amber-300 text-[11px] font-mono">{r.err || 'roster unavailable'}</span>
+                  {:else}
+                    <span class="text-zinc-600 text-[11px] font-mono">loading roster…</span>
+                  {/if}
+                </div>
               </div>
 
               {#if r?.reachable}
@@ -1880,6 +1981,42 @@
           <p class="agd-dim agd-avail">AEON-7 GitHub skill marketplace: TODO (needs <code class="agd-inline">gh</code>, not installed on the Pi).</p>
         </section>
 
+        <!-- F7a: Soul + Identity — the persona's markdown in its workspace. -->
+        {#each PERSONA_FILES as pf}
+          {@const w = pf.which}
+          <section class="agd-sec">
+            <h3 class="agd-h3">{pf.label} <span class="agd-adminonly">{pf.file}</span></h3>
+            <p class="agd-dim">The persona's {pf.hint}.</p>
+            {#if !personaFiles[w] && !personaLoading[w]}
+              <button class="btn-primary text-xs agd-filebtn" on:click={() => loadPersonaFile(w)}>View / edit {pf.label}</button>
+            {:else if personaLoading[w]}
+              <p class="agd-dim">loading {pf.file}…</p>
+            {:else if personaFiles[w] && !personaFiles[w].ok}
+              <p class="agd-warn">{personaFiles[w].err}</p>
+              <button class="btn-primary text-xs agd-filebtn" on:click={() => loadPersonaFile(w)}>Retry</button>
+            {:else if personaFiles[w]}
+              <p class="agd-mono agd-dim agd-clip">{personaFiles[w].path || pf.file}{#if !personaFiles[w].exists} · (new — not on disk yet){/if}</p>
+              <textarea
+                class="agd-persona-edit"
+                spellcheck="false"
+                bind:value={personaDraft[w]}
+                placeholder={`Write ${pf.label} in markdown…`}
+              ></textarea>
+              <div class="agd-persona-actions">
+                <button
+                  class="btn-primary text-xs agd-filebtn"
+                  class:agd-disabled={personaSaving[w]}
+                  on:click={() => savePersonaFile(w)}
+                >
+                  {personaSaving[w] ? 'saving…' : 'Save ' + pf.label}
+                </button>
+                <button class="agd-chip" on:click={() => loadPersonaFile(w)} disabled={personaSaving[w]}>Reload</button>
+                {#if personaMsg[w]}<span class="agd-mono agd-dim">{personaMsg[w]}</span>{/if}
+              </div>
+            {/if}
+          </section>
+        {/each}
+
         <div class="agd-grid2">
           <section class="agd-sec">
             <h3 class="agd-h3">Voice
@@ -1965,6 +2102,125 @@
         </section>
 
         <p class="agd-soon">Stretch TODOs: corpus upload/edit · voice designer-edit / clone upload · AEON-7 GitHub skill marketplace.</p>
+      </div>
+    </div>
+  {/if}
+
+  <!-- F7b: deploy a new persona modal. -->
+  {#if showNewPersona}
+    <div class="agd-overlay" role="button" tabindex="-1"
+         on:click={closeNewPersona} on:keydown={(e) => e.key === 'Escape' && closeNewPersona()}>
+      <div class="agd np-modal" role="dialog" tabindex="-1"
+           on:click|stopPropagation on:keydown|stopPropagation>
+        <header class="agd-head">
+          <span class="agd-emoji">{np.emoji || '✨'}</span>
+          <div class="min-w-0 flex-1">
+            <div class="agd-name">New persona</div>
+            <div class="agd-model">on {npSysId}</div>
+          </div>
+          <button class="agd-close" on:click={closeNewPersona} title="close">✕</button>
+        </header>
+        <div class="agd-body">
+          <p class="agd-dim">
+            Scaffolds the workspace + <code class="agd-inline">SOUL.md</code>/<code class="agd-inline">IDENTITY.md</code>,
+            registers the OpenClaw agent, sets its identity, and reloads the gateway. The Matrix account + voice
+            (which need secrets) are returned as the remaining commands.
+          </p>
+
+          <section class="agd-sec">
+            <div class="np-row2">
+              <label class="np-field">
+                <span class="np-lbl">Handle / id <span class="agd-dim">(lowercase)</span></span>
+                <input class={inputCls + ' w-full'} placeholder="ada" bind:value={np.id} disabled={npBusy} />
+              </label>
+              <label class="np-field np-emoji-field">
+                <span class="np-lbl">Emoji</span>
+                <input class={inputCls + ' w-full'} placeholder="✨" bind:value={np.emoji} disabled={npBusy} />
+              </label>
+            </div>
+            <div class="np-row2">
+              <label class="np-field">
+                <span class="np-lbl">Display name</span>
+                <input class={inputCls + ' w-full'} placeholder="Ada Lovelace" bind:value={np.name} disabled={npBusy} />
+              </label>
+              <label class="np-field">
+                <span class="np-lbl">Model</span>
+                <input class={inputCls + ' w-full'} placeholder="vllm/qwen36-deep" bind:value={np.model} disabled={npBusy} />
+              </label>
+            </div>
+            <label class="np-field">
+              <span class="np-lbl">Voice <span class="agd-dim">— clone name or designer description</span></span>
+              <input class={inputCls + ' w-full'} placeholder="warm, measured English mathematician" bind:value={np.voice} disabled={npBusy} />
+            </label>
+          </section>
+
+          <section class="agd-sec">
+            <h3 class="agd-h3">Identity <span class="agd-adminonly">IDENTITY.md</span></h3>
+            <p class="agd-dim">Facts: era, domain, one-line self-description. Leave blank to seed a template.</p>
+            <textarea class="agd-persona-edit" spellcheck="false" bind:value={np.identity} disabled={npBusy}
+              placeholder="The unambiguous facts about the persona…"></textarea>
+          </section>
+
+          <section class="agd-sec">
+            <h3 class="agd-h3">Soul <span class="agd-adminonly">SOUL.md</span></h3>
+            <p class="agd-dim">The essence (2nd person — it becomes the system prompt). Leave blank to seed a template.</p>
+            <textarea class="agd-persona-edit" spellcheck="false" bind:value={np.soul} disabled={npBusy}
+              placeholder="You are…  voice, cadence, values, manner."></textarea>
+          </section>
+
+          <section class="agd-sec">
+            <h3 class="agd-h3">Corpus seed <span class="agd-adminonly">optional</span></h3>
+            <p class="agd-dim">A single markdown note to ground retrieval from day one (dropped into the corpus vault).</p>
+            <textarea class="agd-persona-edit agd-persona-short" spellcheck="false" bind:value={np.corpus_seed} disabled={npBusy}
+              placeholder="Optional starter knowledge…"></textarea>
+          </section>
+
+          <div class="np-submit">
+            <button class="btn-primary text-xs agd-filebtn" class:agd-disabled={npBusy || !np.id?.trim()} on:click={submitNewPersona}>
+              {npBusy ? 'provisioning…' : 'Deploy persona'}
+            </button>
+            <span class="agd-dim agd-mono">creates workspace + registers agent + reloads gateway</span>
+          </div>
+
+          {#if npResult}
+            {#if npResult.ok}
+              <section class="agd-sec np-result-ok">
+                <h3 class="agd-h3">Provisioned “{npResult.display}” {npResult.emoji || ''} <span class="agd-chip" class:am={npResult.registered}>{npResult.registered ? 'registered' : 'files only'}</span></h3>
+                {#if npResult.report?.steps?.length}
+                  <ul class="np-steps">
+                    {#each npResult.report.steps as st}
+                      <li class:np-ok={st.ok} class:np-bad={!st.ok}>
+                        <span class="np-step-mark">{st.ok ? '✓' : '✕'}</span>
+                        <span class="np-step-name">{st.step}</span>
+                        {#if st.detail}<span class="agd-mono agd-dim np-step-detail">{st.detail}</span>{/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if npResult.manual_steps?.length}
+                  <p class="agd-dim agd-avail">Remaining manual steps (need secrets / homeserver admin):</p>
+                  {#each npResult.manual_steps as ms}
+                    <div class="agd-token np-manual">
+                      <div class="agd-mono">{ms.title}</div>
+                      <div class="agd-dim np-why">{ms.why}</div>
+                      <pre class="agd-corpus-pre np-cmd">{ms.cmd}</pre>
+                    </div>
+                  {/each}
+                {/if}
+                {#if npResult.todo}<p class="agd-soon">{npResult.todo}</p>{/if}
+              </section>
+            {:else}
+              <p class="agd-warn">{npResult.err}</p>
+              {#if npResult.report?.steps?.length}
+                <ul class="np-steps">
+                  {#each npResult.report.steps as st}
+                    <li class:np-ok={st.ok} class:np-bad={!st.ok}><span class="np-step-mark">{st.ok ? '✓' : '✕'}</span> <span class="np-step-name">{st.step}</span></li>
+                  {/each}
+                </ul>
+              {/if}
+            {/if}
+          {/if}
+        </div>
       </div>
     </div>
   {/if}
@@ -2563,4 +2819,41 @@
   .term-pane-body :global(.xterm-viewport) { background: transparent !important; }
   .term-pane-body :global(.xterm-viewport)::-webkit-scrollbar { width: 8px; }
   .term-pane-body :global(.xterm-viewport)::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 4px; }
+
+  /* ── F7a: persona (Soul/Identity) editor ── */
+  .agd-persona-edit {
+    width: 100%; min-height: 11rem; resize: vertical;
+    font-family: ui-monospace, monospace; font-size: 0.66rem; color: #d4d4dc; line-height: 1.5;
+    background: #0a0a10; border: 1px solid #23232f; border-radius: 0.4rem; padding: 0.5rem;
+  }
+  .agd-persona-edit:focus { outline: none; border-color: #6d28d9; }
+  .agd-persona-edit:disabled { opacity: 0.6; }
+  .agd-persona-short { min-height: 6rem; }
+  .agd-persona-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+
+  /* ── F7b: new-persona button + modal ── */
+  .new-persona-btn {
+    font-family: ui-monospace, monospace; font-size: 0.6rem; color: #6ee7b7;
+    background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.35);
+    border-radius: 0.4rem; padding: 0.18rem 0.55rem; cursor: pointer; line-height: 1.2;
+    display: inline-flex; align-items: center; gap: 0.25rem;
+  }
+  .new-persona-btn:hover { background: rgba(52, 211, 153, 0.18); border-color: rgba(52, 211, 153, 0.6); color: #a7f3d0; }
+  .np-plus { font-size: 0.85rem; font-weight: 700; line-height: 1; }
+  .np-modal { max-width: 640px; }
+  .np-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+  .np-emoji-field { max-width: 7rem; }
+  .np-field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .np-lbl { font-family: ui-monospace, monospace; font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.06em; color: #a1a1aa; }
+  .np-submit { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  .np-result-ok { border-color: rgba(52, 211, 153, 0.35); }
+  .np-steps { display: flex; flex-direction: column; gap: 0.25rem; font-family: ui-monospace, monospace; font-size: 0.62rem; }
+  .np-steps li { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; }
+  .np-ok .np-step-mark { color: #6ee7b7; }
+  .np-bad .np-step-mark { color: #fca5a5; }
+  .np-step-name { color: #d4d4dc; }
+  .np-step-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
+  .np-manual { margin-top: 0.2rem; }
+  .np-why { font-size: 0.62rem; }
+  .np-cmd { max-height: 11rem; }
 </style>

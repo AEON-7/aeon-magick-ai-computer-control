@@ -495,6 +495,79 @@ export const addAgentSkill = (
     file_b64,
   });
 
+// ── F7a: per-agent persona files (Soul + Identity) ──
+export type PersonaWhich = 'soul' | 'identity';
+export interface PersonaFile {
+  ok: boolean;
+  which?: PersonaWhich;
+  filename?: string;          // SOUL.md | IDENTITY.md
+  workspace?: string | null;  // resolved workspace dir on the gateway
+  path?: string | null;
+  exists?: boolean;
+  size?: number;
+  content?: string;
+  err?: string;
+}
+export interface PersonaFileWrite {
+  ok: boolean;
+  which?: PersonaWhich;
+  filename?: string;
+  path?: string;
+  bytes_written?: number | null;
+  err?: string;
+}
+export const getAgentPersonaFile = (sysId: string, agentId: string, which: PersonaWhich) =>
+  req<PersonaFile>(
+    'GET',
+    `/agent/systems/${sysId}/agents/${agentId}/persona-file?which=${which}`,
+  );
+export const putAgentPersonaFile = (
+  sysId: string,
+  agentId: string,
+  which: PersonaWhich,
+  content: string,
+) =>
+  req<PersonaFileWrite>('PUT', `/agent/systems/${sysId}/agents/${agentId}/persona-file`, {
+    which,
+    content,
+  });
+
+// ── F7b: deploy a new agent persona ──
+export interface NewPersonaInput {
+  id: string;
+  name?: string;
+  emoji?: string;
+  identity?: string;
+  soul?: string;
+  voice?: string;
+  corpus_seed?: string;
+  model?: string;
+}
+export interface PersonaStep {
+  step: string;
+  ok: boolean;
+  detail: string;
+}
+export interface ManualStep {
+  title: string;
+  why: string;
+  cmd: string;
+}
+export interface NewPersonaResult {
+  ok: boolean;
+  id?: string;
+  display?: string;
+  emoji?: string;
+  model?: string;
+  registered?: boolean;
+  report?: { id?: string; workspace?: string; steps?: PersonaStep[]; registered?: boolean; err?: string };
+  manual_steps?: ManualStep[];
+  todo?: string;
+  err?: string;
+}
+export const createPersona = (sysId: string, input: NewPersonaInput) =>
+  req<NewPersonaResult>('POST', `/agent/systems/${sysId}/personas`, input);
+
 export const snapshotURL = () => `${API}/streamer/snapshot?t=${Date.now()}`;
 export const streamURL = () => `${API}/streamer/stream`;
 

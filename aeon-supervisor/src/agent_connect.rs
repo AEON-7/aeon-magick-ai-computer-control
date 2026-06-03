@@ -1059,11 +1059,52 @@ fn send_wol(mac: &str) -> Result<(), String> {
 const MATRIX_HS: &str = "http://127.0.0.1:8008";
 
 /// Resolve-creds python shared by GET + POST: finds the agent's Matrix
-/// user_id + access_token from the known cred locations, prints them as
-/// `USER_ID\nTOKEN` (or `ERR ...`). base64'd over SSH (argv[1] = agent id).
+/// user_id + access_token, prints them as `USER_ID\nTOKEN` (or `ERR ...`).
+/// base64'd over SSH (argv[1] = agent id).
+///
+/// Per the create-agentic-personas blueprint, the canonical per-agent
+/// Matrix/VoIP credentials live in a standard `.env` at `~/voip-<id>/.env`
+/// (mode 600) with vars MATRIX_HOMESERVER_URL / MATRIX_USER_ID /
+/// MATRIX_ACCESS_TOKEN (verified on the live gateway: @<id>:matrix.unhash.me,
+/// homeserver http://127.0.0.1:8008). We resolve that .env FIRST and fall back
+/// to the legacy ~/.openclaw_<id>_creds.json record only if the .env is absent
+/// or incomplete.
 const MATRIX_CREDS_PY: &str = r#"import json,os,sys,glob
 aid=sys.argv[1]
 h=os.path.expanduser('~')
+
+def parse_env(path):
+    """Minimal .env reader: KEY=VALUE, skipping comments/blanks, stripping
+    surrounding quotes and trailing inline comments on unquoted values."""
+    out={}
+    try:
+        with open(path) as f:
+            for line in f:
+                s=line.strip()
+                if not s or s.startswith('#') or '=' not in s: continue
+                k,v=s.split('=',1)
+                k=k.strip()
+                if k.startswith('export '): k=k[7:].strip()
+                v=v.strip()
+                if len(v)>=2 and v[0]==v[-1] and v[0] in ('"',"'"):
+                    v=v[1:-1]
+                else:
+                    # drop an inline comment on an unquoted value (" # ...").
+                    hp=v.find(' #')
+                    if hp>=0: v=v[:hp].rstrip()
+                out[k]=v
+    except Exception:
+        return {}
+    return out
+
+# 1) Standard per-agent .env (the create-agentic-personas layout).
+env=parse_env(h+'/voip-%s/.env'%aid)
+uid=env.get('MATRIX_USER_ID')
+tok=env.get('MATRIX_ACCESS_TOKEN')
+if uid and tok and not tok.startswith('<'):
+    print(uid); print(tok); sys.exit(0)
+
+# 2) Fall back to the legacy JSON credential records.
 cands=[h+'/.openclaw_%s_creds.json'%aid,
        h+'/.openclaw/credentials/%s.json'%aid,
        h+'/.openclaw/credentials/%s_creds.json'%aid,
@@ -1078,7 +1119,7 @@ for p in cands:
     tok=d.get('access_token') or d.get('accessToken') or d.get('token')
     if uid and tok:
         print(uid); print(tok); sys.exit(0)
-print('ERR no Matrix creds for "%s" (looked in ~/.openclaw_%s_creds.json and ~/.openclaw/credentials/)'%(aid,aid))
+print('ERR no Matrix creds for "%s" (looked in ~/voip-%s/.env and ~/.openclaw_%s_creds.json + ~/.openclaw/credentials/)'%(aid,aid,aid))
 "#;
 
 /// Resolve `(user_id, access_token)` for an agent by running MATRIX_CREDS_PY
@@ -1599,6 +1640,208 @@ pub async fn agent_corpus_file(
                 "content": p.get("content").cloned().unwrap_or(json!("")),
             }))
         }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+// ── E6/F7a: per-agent persona files (Soul + Identity) ─────────────────────
+//
+// A persona's character lives in markdown in its workspace (per the
+// create-agentic-personas blueprint, verified on the gateway):
+//   <workspace>/SOUL.md      — the essence: voice, values, manner (the system prompt)
+//   <workspace>/IDENTITY.md  — the facts: name, era, domain, emoji
+// We resolve <workspace> from the agent's `workspace` config (falling back to
+// the ~/.openclaw/workspace-<id> convention, which is what every persona on the
+// gateway actually uses), then read/write exactly SOUL.md or IDENTITY.md. Both
+// paths are traversal-guarded: only the two whitelisted filenames are ever
+// touched, and the resolved target must stay directly under the workspace root.
+
+/// Map the `which` query value to the exact persona filename. Whitelist-only —
+/// anything else is rejected so the param can never select an arbitrary file.
+fn persona_filename(which: &str) -> Option<&'static str> {
+    match which.trim().to_ascii_lowercase().as_str() {
+        "soul" => Some("SOUL.md"),
+        "identity" => Some("IDENTITY.md"),
+        _ => None,
+    }
+}
+
+/// READ mode python: print one persona file's contents, traversal-guarded.
+/// argv[1] = agent id, argv[2] = filename (SOUL.md|IDENTITY.md). base64'd over SSH.
+const PERSONA_READ_PY: &str = r#"import json,os,sys
+h=os.path.expanduser('~')
+aid=sys.argv[1]; fn=sys.argv[2]
+# Resolve the workspace root from config, else the convention.
+ws=None
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+    for a in ((d.get('agents') or {}).get('list') or []):
+        if isinstance(a,dict) and a.get('id')==aid:
+            ws=a.get('workspace'); break
+except Exception:
+    pass
+if not ws:
+    ws=h+'/.openclaw/workspace-%s'%aid
+rootr=os.path.realpath(ws)
+target=os.path.realpath(os.path.join(rootr,fn))
+# Guard: target must be a direct child of the workspace root.
+if os.path.dirname(target)!=rootr:
+    print(json.dumps({'err':'path escapes workspace root'})); sys.exit(0)
+out={'workspace':ws,'path':fn,'exists':os.path.isfile(target)}
+if os.path.isfile(target):
+    try:
+        sz=os.path.getsize(target)
+        if sz>1024*1024:
+            print(json.dumps({'err':'file too large to edit (%d bytes)'%sz})); sys.exit(0)
+        out['size']=sz
+        out['content']=open(target,'rb').read().decode('utf-8','replace')
+    except Exception as e:
+        print(json.dumps({'err':'read: '+str(e)})); sys.exit(0)
+else:
+    out['size']=0; out['content']=''
+print(json.dumps(out))
+"#;
+
+/// RESOLVE-PATH python for the write path: print the absolute, traversal-checked
+/// target path for `<workspace>/<fn>` (or `ERR ...`). argv[1]=aid, argv[2]=fn.
+/// We resolve the path on the gateway (where the config lives) and then do the
+/// base64 write to that exact path, so the write target can never escape.
+const PERSONA_PATH_PY: &str = r#"import json,os,sys
+h=os.path.expanduser('~')
+aid=sys.argv[1]; fn=sys.argv[2]
+ws=None
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+    for a in ((d.get('agents') or {}).get('list') or []):
+        if isinstance(a,dict) and a.get('id')==aid:
+            ws=a.get('workspace'); break
+except Exception:
+    pass
+if not ws:
+    ws=h+'/.openclaw/workspace-%s'%aid
+rootr=os.path.realpath(ws)
+target=os.path.realpath(os.path.join(rootr,fn))
+if os.path.dirname(target)!=rootr:
+    print('ERR path escapes workspace root'); sys.exit(0)
+if not os.path.isdir(rootr):
+    print('ERR workspace does not exist: '+rootr); sys.exit(0)
+print(target)
+"#;
+
+#[derive(Deserialize)]
+pub struct PersonaFileQuery {
+    /// "soul" | "identity" — selects SOUL.md / IDENTITY.md.
+    which: String,
+}
+
+#[derive(Deserialize)]
+pub struct PersonaFileWriteReq {
+    /// "soul" | "identity".
+    which: String,
+    /// Full new file contents (UTF-8 markdown).
+    content: String,
+}
+
+/// GET /agent/systems/:id/agents/:aid/persona-file?which=soul|identity — read
+/// the agent's SOUL.md or IDENTITY.md (traversal-guarded, 1 MB cap).
+pub async fn agent_persona_file_get(
+    Path((id, agent_id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<PersonaFileQuery>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let Some(fname) = persona_filename(&q.which) else {
+        return Json(json!({"ok": false, "err": "which must be 'soul' or 'identity'"}));
+    };
+    let aid = sanitize_id(&agent_id);
+    let res = tokio::task::spawn_blocking(move || {
+        let remote = format!(
+            "echo {} | base64 -d | python3 - {} {}",
+            b64(PERSONA_READ_PY.as_bytes()),
+            aid,
+            fname
+        );
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(stdout) => {
+            let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({"err": "bad response"}));
+            if let Some(e) = p.get("err").and_then(|x| x.as_str()) {
+                return Json(json!({"ok": false, "err": e}));
+            }
+            Json(json!({
+                "ok": true,
+                "which": q.which,
+                "filename": fname,
+                "workspace": p.get("workspace").cloned().unwrap_or(serde_json::Value::Null),
+                "path": p.get("path").cloned().unwrap_or(serde_json::Value::Null),
+                "exists": p.get("exists").cloned().unwrap_or(json!(false)),
+                "size": p.get("size").cloned().unwrap_or(json!(0)),
+                "content": p.get("content").cloned().unwrap_or(json!("")),
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// PUT /agent/systems/:id/agents/:aid/persona-file?which=soul|identity — write
+/// the agent's SOUL.md or IDENTITY.md. The new content is shipped base64'd over
+/// SSH and written to the gateway-resolved, traversal-checked target path.
+pub async fn agent_persona_file_put(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<PersonaFileWriteReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let Some(fname) = persona_filename(&req.which) else {
+        return Json(json!({"ok": false, "err": "which must be 'soul' or 'identity'"}));
+    };
+    // Cap the payload (a persona file is prose; 1 MB is very generous).
+    if req.content.len() > 1024 * 1024 {
+        return Json(json!({"ok": false, "err": "content too large (max 1 MB)"}));
+    }
+    let aid = sanitize_id(&agent_id);
+    let content_b64 = b64(req.content.as_bytes());
+    let which = req.which.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // 1) Resolve + traversal-check the absolute target path on the gateway.
+        let path_cmd = format!(
+            "echo {} | base64 -d | python3 - {} {}",
+            b64(PERSONA_PATH_PY.as_bytes()),
+            aid,
+            fname
+        );
+        let target = ssh_capture(&sys, &path_cmd)?;
+        let target = target.trim();
+        if target.is_empty() || target.starts_with("ERR") {
+            return Err(if target.is_empty() {
+                "could not resolve persona file path".into()
+            } else {
+                target[3..].trim().to_string()
+            });
+        }
+        // 2) Write the new contents atomically (temp + mv) to that exact path.
+        //    `target` came from realpath() on the gateway and is single-quoted.
+        let write_cmd = format!(
+            "echo {content_b64} | base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
+        );
+        let bytes = ssh_capture(&sys, &write_cmd)?;
+        Ok::<_, String>((target.to_string(), bytes.trim().to_string()))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((path, bytes)) => Json(json!({
+            "ok": true,
+            "which": which,
+            "filename": fname,
+            "path": path,
+            "bytes_written": bytes.parse::<i64>().ok(),
+        })),
         Err(e) => Json(json!({"ok": false, "err": e})),
     }
 }
@@ -2224,5 +2467,306 @@ pub async fn deploy_image(Path(id): Path<String>, Json(req): Json<DeployReq>) ->
             "out": out.trim(),
         })),
         Err(e) => Json(json!({"ok": false, "err": e, "compose": compose})),
+    }
+}
+
+// ── F7b: deploy a NEW agent persona ───────────────────────────────────────
+//
+// Provision a brand-new persona on the OpenClaw gateway, following the method
+// from the create-agentic-personas repo. That repo's `new-persona.sh` is not
+// installed on the gateway, so we replicate its SAFE, idempotent steps directly
+// over the agent-connect SSH key:
+//
+//   1. create the workspace  ~/.openclaw/workspace-<id>/  (refuse to clobber)
+//   2. write SOUL.md + IDENTITY.md from the admin's input (the two files that
+//      *are* the persona), plus a minimal AGENTS.md/USER.md; optional corpus seed
+//   3. register the OpenClaw agent:  `openclaw agents add <id> --workspace … --model …`
+//   4. set its identity:             `openclaw agents set-identity --agent <id> --name … --emoji …`
+//   5. reload the gateway:           `openclaw gateway restart`
+//
+// What we DELIBERATELY do NOT automate (it needs homeserver admin + minted
+// secrets that must live in mode-600 files, never flow through this API): the
+// Matrix account creation and the per-agent ~/voip-<id>/.env. Those exact
+// commands are RETURNED to the admin (the non-invasive `config_change` pattern
+// used by provision_agent / add_skill). The voice clip/description and call-line
+// systemd bring-up are likewise returned as the remaining steps.
+//
+// (Letting an existing operator agent run the whole loop via the repo's
+// `create-agentic-persona` SKILL is the eventual "let an agent set it up" path —
+// it needs task-dispatch plumbing to the gateway that doesn't exist here yet, so
+// it's surfaced as a TODO in the response rather than executed.)
+
+/// Validate a persona id to the repo's rule: lowercase, starts with a letter,
+/// then [a-z0-9_-]. Returns the cleaned id or None.
+fn valid_persona_id(id: &str) -> Option<String> {
+    let s = id.trim().to_ascii_lowercase();
+    let mut chars = s.chars();
+    let first_ok = matches!(chars.next(), Some(c) if c.is_ascii_lowercase());
+    let rest_ok = s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'));
+    if first_ok && rest_ok && s.len() <= 40 { Some(s) } else { None }
+}
+
+/// Keep an emoji/short identity token shell-safe (no quotes/backticks/newlines).
+/// We pass it single-quoted in the remote command, so just strip single quotes
+/// and control chars and cap the length.
+fn clean_short_field(s: &str, max: usize) -> String {
+    s.trim()
+        .chars()
+        .filter(|c| *c != '\'' && *c != '\\' && !c.is_control())
+        .take(max)
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub struct NewPersonaReq {
+    /// Persona handle / id (lowercase; also the Matrix localpart). Required.
+    id: String,
+    /// Display name (e.g. "Ada Lovelace"). Defaults to capitalized id.
+    #[serde(default)]
+    name: String,
+    /// Identity emoji.
+    #[serde(default)]
+    emoji: String,
+    /// IDENTITY.md body (facts). If empty, a template is seeded.
+    #[serde(default)]
+    identity: String,
+    /// SOUL.md body (manner/voice). If empty, a template is seeded.
+    #[serde(default)]
+    soul: String,
+    /// Voice: a clone name (short token) OR a designer description (a sentence).
+    /// Recorded into IDENTITY/notes + echoed in the returned voice step. Optional.
+    #[serde(default)]
+    voice: String,
+    /// Optional corpus seed: a single markdown note dropped into the agent's
+    /// corpus vault so retrieval has something to ground on from day one.
+    #[serde(default)]
+    corpus_seed: String,
+    /// Model id to pin (defaults to the roster's chat model).
+    #[serde(default)]
+    model: String,
+}
+
+/// The provisioning python: creates the workspace + persona files, optional
+/// corpus seed, then runs the openclaw CLI steps. Emits a JSON report of every
+/// step. All inputs arrive base64'd via argv to avoid any quoting issues.
+/// argv: 1=id 2=display 3=emoji 4=model 5=soul_b64 6=identity_b64 7=corpus_b64
+const NEW_PERSONA_PY: &str = r#"import json,os,sys,base64,subprocess,shutil
+h=os.path.expanduser('~')
+aid=sys.argv[1]; disp=sys.argv[2]; emoji=sys.argv[3]; model=sys.argv[4]
+def d64(i): return base64.b64decode(sys.argv[i]).decode('utf-8','replace')
+soul=d64(5); ident=d64(6); corpus=d64(7)
+ws=h+'/.openclaw/workspace-%s'%aid
+rep={'id':aid,'workspace':ws,'steps':[]}
+def step(name,ok,detail=''):
+    rep['steps'].append({'step':name,'ok':bool(ok),'detail':str(detail)[:600]})
+
+# Guard: never clobber an existing persona.
+if os.path.exists(ws):
+    print(json.dumps({'err':'workspace already exists: '+ws,'id':aid})); sys.exit(0)
+# Also refuse if the id is already in the roster.
+try:
+    cfg=json.load(open(h+'/.openclaw/openclaw.json'))
+    if any(isinstance(a,dict) and a.get('id')==aid for a in ((cfg.get('agents') or {}).get('list') or [])):
+        print(json.dumps({'err':'agent id already in roster: '+aid,'id':aid})); sys.exit(0)
+except Exception:
+    pass
+
+# 1. workspace + persona files
+try:
+    os.makedirs(ws+'/knowledge',exist_ok=True)
+    os.makedirs(ws+'/skills',exist_ok=True)
+    open(ws+'/SOUL.md','w').write(soul)
+    open(ws+'/IDENTITY.md','w').write(ident)
+    # Minimal housekeeping files so the workspace matches the standard layout.
+    if not os.path.exists(ws+'/AGENTS.md'):
+        open(ws+'/AGENTS.md','w').write('# %s — workspace notes\n\nThis is %s\'s home. Memory lives in memory/. Edit SOUL.md/IDENTITY.md to shape who you are.\n'%(disp,disp))
+    if not os.path.exists(ws+'/USER.md'):
+        open(ws+'/USER.md','w').write('# Who you serve\n\nYour operator. Be direct, honest, and useful.\n')
+    step('workspace+persona-files',True,ws)
+except Exception as e:
+    print(json.dumps({'err':'workspace setup: '+str(e),'id':aid,'steps':rep['steps']})); sys.exit(0)
+
+# 2. optional corpus seed
+if corpus.strip():
+    try:
+        cdir=ws+'/memory/%s-corpus'%aid
+        os.makedirs(cdir,exist_ok=True)
+        open(cdir+'/seed.md','w').write(corpus)
+        step('corpus-seed',True,cdir+'/seed.md')
+    except Exception as e:
+        step('corpus-seed',False,str(e))
+
+# locate the openclaw CLI (on PATH for a login shell; fall back to the known bin)
+oc=shutil.which('openclaw') or (h+'/.npm-global/bin/openclaw')
+def run(args):
+    try:
+        p=subprocess.run([oc]+args,capture_output=True,text=True,timeout=120)
+        return p.returncode==0,(p.stdout or '')+(p.stderr or '')
+    except Exception as e:
+        return False,str(e)
+
+# 3. register the agent
+ok,out=run(['agents','add',aid,'--workspace',ws,'--model',model,'--non-interactive','--json'])
+step('openclaw agents add',ok,out.strip())
+registered=ok
+
+# 4. set identity (name + emoji) — best-effort, non-fatal
+if registered:
+    ia=['agents','set-identity','--agent',aid,'--name',disp]
+    if emoji: ia+=['--emoji',emoji]
+    ok2,out2=run(ia)
+    step('openclaw agents set-identity',ok2,out2.strip())
+
+# 5. reload the gateway so the new agent is live
+if registered:
+    ok3,out3=run(['gateway','restart'])
+    step('openclaw gateway restart',ok3,out3.strip())
+
+rep['registered']=registered
+print(json.dumps(rep))
+"#;
+
+/// POST /agent/systems/:id/personas — provision a new persona on the gateway.
+/// Creates the workspace + SOUL/IDENTITY files (+ optional corpus seed) and runs
+/// the openclaw register/identity/reload steps, then returns the report plus the
+/// exact remaining manual commands (Matrix account, voip .env, voice, call line)
+/// that need secrets and so are intentionally NOT automated here.
+pub async fn agent_create_persona(
+    Path(id): Path<String>,
+    Json(req): Json<NewPersonaReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let Some(pid) = valid_persona_id(&req.id) else {
+        return Json(json!({"ok": false, "err": "id must be lowercase, start with a letter, and use only [a-z0-9_-]"}));
+    };
+    // Display name: provided, else Capitalize(id).
+    let display = {
+        let d = req.name.trim();
+        if d.is_empty() {
+            let mut c = pid.chars();
+            match c.next() {
+                Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                None => pid.clone(),
+            }
+        } else {
+            d.to_string()
+        }
+    };
+    let display = clean_short_field(&display, 80);
+    let emoji = clean_short_field(&req.emoji, 16);
+    let model = {
+        let m = req.model.trim();
+        if m.is_empty() { "vllm/qwen36-deep".to_string() } else { clean_short_field(m, 64) }
+    };
+    // Seed SOUL.md / IDENTITY.md from the input, or a sensible starter template
+    // (mirrors templates/persona/{SOUL,IDENTITY}.md but pre-filled). Cap sizes.
+    let soul = {
+        let s = req.soul.trim();
+        if s.is_empty() {
+            format!(
+                "# You are {display}\n\nYou are {display}.\n\n## How you sound\n- (cadence, vocabulary, humor)\n\n## What you care about\n- (obsessions, values you defend)\n\n## How you treat the person you talk to\n- You are their collaborator. When uncertain, you say so plainly.\n\n## Boundaries\n- You are an AI *interpretation* of {display}, not the person; say so when it matters.\n"
+            )
+        } else {
+            s.to_string()
+        }
+    };
+    let identity = {
+        let s = req.identity.trim();
+        let voice_line = if req.voice.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n## Voice\n{}\n", req.voice.trim())
+        };
+        if s.is_empty() {
+            format!(
+                "# Identity\n\n- **Display name:** {display}\n- **Handle:** {pid}\n- **Emoji:** {emoji}\n- **Domain of authority:** (what they genuinely know — and its edges)\n\n## One-line self-description\n> \"...\"\n\n## Honesty clause\nThis is an AI interpretation, not the real person; when a listener could be misled, say so.\n{voice_line}"
+            )
+        } else {
+            format!("{s}{voice_line}")
+        }
+    };
+    if soul.len() > 256 * 1024 || identity.len() > 256 * 1024 || req.corpus_seed.len() > 512 * 1024 {
+        return Json(json!({"ok": false, "err": "persona text too large"}));
+    }
+    let soul_b64 = b64(soul.as_bytes());
+    let ident_b64 = b64(identity.as_bytes());
+    let corpus_b64 = b64(req.corpus_seed.trim().as_bytes());
+    let (pid_c, disp_c, emoji_c, model_c) = (pid.clone(), display.clone(), emoji.clone(), model.clone());
+    let sys_address = sys.address.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let remote = format!(
+            "echo {} | base64 -d | python3 - {} '{}' '{}' '{}' {} {} {}",
+            b64(NEW_PERSONA_PY.as_bytes()),
+            pid_c,
+            disp_c,
+            emoji_c,
+            model_c,
+            soul_b64,
+            ident_b64,
+            corpus_b64
+        );
+        ssh_capture(&sys, &remote)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+
+    // The remaining manual steps (need secrets / homeserver admin — not automated).
+    let hs = "matrix.unhash.me";
+    let manual_steps = json!([
+        {
+            "title": "Create the Matrix account + mint a token",
+            "why": "Needs homeserver admin; the token is a secret that must live in a mode-600 .env, not flow through this API.",
+            "cmd": format!(
+                "# on the gateway ({}): register @{}:{} and log in for a token\ncurl -s -XPOST http://127.0.0.1:8008/_matrix/client/v3/login -d '{{\"type\":\"m.login.password\",\"identifier\":{{\"type\":\"m.id.user\",\"user\":\"{}\"}},\"password\":\"<{}-password>\",\"initial_device_display_name\":\"{}-voip\"}}'",
+                sys_address, pid, hs, pid, pid, pid
+            )
+        },
+        {
+            "title": "Create the per-agent voip .env (Matrix/VoIP creds)",
+            "why": "This is where the avatar/voice creds live (Feature 6 reads it). Fill the token from the step above.",
+            "cmd": format!(
+                "mkdir -p ~/voip-{pid}/secrets ~/voip-{pid}/crypto-store && chmod 700 ~/voip-{pid}/secrets ~/voip-{pid}/crypto-store\ncat > ~/voip-{pid}/.env <<'ENV'\nMATRIX_HOMESERVER_URL=http://127.0.0.1:8008\nMATRIX_USER_ID=@{pid}:{hs}\nMATRIX_ACCESS_TOKEN=<paste-token>\nMATRIX_DEVICE_NAME=OpenClaw Voice {pid}\nAUTHORIZED_USERS=@you:{hs}\nENV\nchmod 600 ~/voip-{pid}/.env"
+            )
+        },
+        {
+            "title": "Give it a voice (Qwen3-TTS)",
+            "why": "Pick clone (reference audio) or design (description) in the voip .env.",
+            "cmd": if req.voice.trim().is_empty() {
+                "# set VOXTRAL_TTS_MODE=voice_design + VOXTRAL_VOICE_DESCRIPTION=\"...\" in the voip .env (docs/06)".to_string()
+            } else {
+                format!("# voice you entered: {:?}\n# add to ~/voip-{}/.env: VOXTRAL_VOICE={} (clone) OR VOXTRAL_TTS_MODE=voice_design + VOXTRAL_VOICE_DESCRIPTION=\"{}\"", req.voice.trim(), pid, pid, req.voice.trim())
+            }
+        },
+        {
+            "title": "Gate who may summon it, then (optionally) bring up the call line",
+            "why": "Mention-gating + per-agent systemd voip services.",
+            "cmd": format!(
+                "echo '{{\"allowFrom\":[\"@you:{hs}\"]}}' > ~/.openclaw/credentials/matrix-{pid}-allowFrom.json\n# call line (after the .env + scaffold from create-agentic-personas):\n# systemctl --user enable --now {pid}-voip-stt {pid}-voip-tts matrix-voip-agent-{pid}"
+            )
+        }
+    ]);
+    let todo_agent_path = "Letting an existing operator agent run the whole create-agentic-persona SKILL end-to-end (incl. the Matrix account + voice) would need task-dispatch plumbing from the supervisor into the gateway, which doesn't exist yet — tracked as a TODO.";
+
+    match res {
+        Ok(stdout) => {
+            let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({"err": format!("bad response: {}", stdout.trim().chars().take(300).collect::<String>())}));
+            if let Some(e) = p.get("err").and_then(|x| x.as_str()) {
+                return Json(json!({"ok": false, "err": e, "report": p}));
+            }
+            Json(json!({
+                "ok": true,
+                "id": pid,
+                "display": display,
+                "emoji": emoji,
+                "model": model,
+                "registered": p.get("registered").cloned().unwrap_or(json!(false)),
+                "report": p,
+                "manual_steps": manual_steps,
+                "todo": todo_agent_path,
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e, "manual_steps": manual_steps, "todo": todo_agent_path})),
     }
 }

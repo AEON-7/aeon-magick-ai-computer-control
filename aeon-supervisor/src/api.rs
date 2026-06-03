@@ -157,6 +157,15 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/agent/systems/:id/deploy", post(crate::agent_connect::deploy_image))
         .route("/agent/systems/:id/agents", get(crate::agent_connect::system_agents))
         .route("/agent/systems/:id/usage", get(crate::agent_connect::system_usage))
+        // F7b: deploy a NEW persona — create the workspace + SOUL/IDENTITY,
+        // register the OpenClaw agent, set identity, reload the gateway; return
+        // the remaining (secret-bearing) Matrix/voice steps for the admin. The
+        // base64 persona text can be sizable → raise the JSON body limit.
+        .route(
+            "/agent/systems/:id/personas",
+            post(crate::agent_connect::agent_create_persona)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/agent/systems/:id/agents/:aid/detail", get(crate::agent_connect::agent_detail))
         .route(
             "/agent/systems/:id/agents/:aid/provision",
@@ -181,6 +190,14 @@ pub fn build_router(cfg: Config) -> Router {
         // (traversal-guarded under <workspace>/memory/<id>-corpus on the gateway).
         .route("/agent/systems/:id/agents/:aid/corpus", get(crate::agent_connect::agent_corpus_list))
         .route("/agent/systems/:id/agents/:aid/corpus/file", get(crate::agent_connect::agent_corpus_file))
+        // F7a: per-agent persona files — view/edit SOUL.md + IDENTITY.md in the
+        // agent's workspace (traversal-guarded to those two filenames; base64
+        // write over the agent-connect SSH key). ?which=soul|identity.
+        .route(
+            "/agent/systems/:id/agents/:aid/persona-file",
+            get(crate::agent_connect::agent_persona_file_get)
+                .put(crate::agent_connect::agent_persona_file_put),
+        )
         // E1: per-agent effective TTS voice (override or gateway default) +
         // clone-name vs designer-description classification.
         .route("/agent/systems/:id/agents/:aid/voice", get(crate::agent_connect::agent_voice))
