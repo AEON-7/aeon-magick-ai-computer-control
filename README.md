@@ -1,16 +1,15 @@
-# AEON Magick AI Computer Control
+# AEON Magick — AI Computer Control
 
-> _The Universe's Strangest Peripheral_
+### This isn't just Agentic AI — it's *Robo*-Agentic AI.
 
-A Raspberry Pi turned into a sleek little box that pretends to be a monitor,
-a keyboard, a mouse, and a trackpad — all at once — and hands the resulting
-**see + act** loop to an AI agent (or you).
+Vision, reasoning, and interacting with any system **exactly like a human would**:
+see the screen, move the mouse, type, click. No SDK in your code. No plugin in
+your browser. No agent embedded in your files. A Raspberry Pi pretends to be a
+monitor, a keyboard, a mouse, and a trackpad — all at once — and hands the
+resulting **see + act** loop to an AI agent (or to you, from a browser, anywhere
+in the world).
 
-Plug it between your laptop and a Pi 4. The laptop sees a USB keyboard and
-mouse it can trust. The Pi sees the laptop's HDMI through a video capture
-device. A web UI streams the laptop's screen back to your browser. An AI
-agent reads frames, decides what to do, and sends back keyboard / mouse /
-gesture events. The laptop never knows it's been politely possessed.
+> _The Universe's Strangest Peripheral._
 
 ```
         ┌──────────────────┐                          ┌──────────────────┐
@@ -19,134 +18,252 @@ gesture events. The laptop never knows it's been politely possessed.
         │   Windows, Linux,│ ───────────────────────► │   │ web UI on  │ │
         │   BIOS, FileVault│                          │   │ laptop or  │ │
         │   prompt, …)     │ ◄─────────────────────── │   │ AI agent   │ │
-        └──────────────────┘   USB-C OTG ← Pi gadget  │   │            │ │
-                                emulating Logitech /  │   │ keyboard + │ │
-                                Apple keyboard+mouse  │   │ mouse +    │ │
-                                                      │   │ trackpad   │ │
-                                                      │   │ gestures   │ │
+        └──────────────────┘   USB-C OTG ← Pi gadget  │   │ kbd+mouse+ │ │
+                                emulating Logitech /  │   │ trackpad + │ │
+                                Apple keyboard+mouse  │   │ gestures   │ │
                                                       │   └────────────┘ │
                                                       └──────────────────┘
 ```
 
-## Why this exists
+---
 
-Most "AI computer use" projects sit *inside* the operating system they're
-trying to drive. Browser plugins. Accessibility APIs. Screen recorders that
-need permission. Those work, but they're chatty — every approach reveals
-itself, every screen reveals its agent, and you can't drive **anything** at
-the BIOS, the FileVault unlock prompt, the Windows OOBE, the firmware
-update screen, the wall of "Hi, please type your password" that Linux
-distros open with on a fresh install.
+## Why this is different
 
-This box doesn't care. It looks like a USB keyboard and a USB mouse. To the
-target OS it's just hardware. There is nothing to install on the target.
-There is nothing to grant permission to. The target doesn't even know
-anything is connected besides a perfectly normal-looking peripheral.
+Most "AI computer use" tools live *inside* the machine they drive — a browser
+extension, an accessibility shim, a screen-recorder daemon, an SDK linked into
+your app. They work, but they're **chatty**: every screen reveals its agent,
+every approach asks permission, and none of them can touch the BIOS, the
+FileVault unlock, the Windows OOBE, the firmware updater, or the login wall a
+fresh Linux install opens with.
 
-It's the strangest USB device in the universe and also the most boring one.
+AEON Magick drives the machine **itself** — vision-first, from the outside.
 
-## What it does, in one bullet list
+| Typical agent tool | AEON Magick |
+|---|---|
+| Installs software / an SDK on the target | **Nothing installed.** The target sees a USB keyboard + mouse. |
+| Needs OS APIs, permissions, a logged-in session | **Works pre-OS / BIOS / lock screen** — it's just hardware. |
+| An agent lives in your files; revoking it is fiddly | **Failsafe kill switch:** pull the plug or revoke the key → access is *instantly* gone. |
+| Screen-scrapes through accessibility trees | **Sees real pixels** over HDMI; clicks exact coordinates. |
+| Drives one app, one browser | **Drives the whole machine**, plus a fleet of them. |
 
-- 🎹 **Pretends to be a keyboard/mouse/trackpad** via USB-C OTG (Linux gadget framework) — five hot-swappable personas, including an **absolute pointer** (`generic-absolute`, ideal for AI agents) and an Apple Magic Keyboard + Trackpad multi-touch descriptor
-- 🎥 **Captures HDMI** via Elgato Cam Link 4K (or any UVC device) — MJPEG or low-latency **H.264/WebCodecs**, native source resolution (`match_source`), 1080p60 capable
-- 🌐 **Optional USB ethernet adapter** on the same cable — host pipes its WAN through the Pi (`isolation` / `sharing` / `restricted` modes)
-- 🔒 **Optional encrypted DNS** (DNSCrypt v2 + DoH) — Cloudflare / Quad9 / AdGuard / NextDNS / Mullvad — for both the Pi AND USB clients
-- 🕳️ **Optional VPN tunnel** — Tailscale · WireGuard · OpenVPN · **Tor** (with bridge presets: direct/obfs4/meek-azure/snowflake/custom) · I2P — with kill-switch + LAN-bypass
-- 💿 **Optional USB-CDROM disk** — upload an ISO, expose it to the host as a bootable read-only drive
-- 🤖 **REST + MCP** — every operation atomic; macros + prompts shipped; works with any AI agent
-- 🎯 **Zero-touch first-boot** — captive-portal WiFi wizard, generated admin password on `/boot/firmware/`
-- 🔐 **argon2 + HMAC-signed cookies** — TLS with self-signed cert (or BYO), scoped API tokens (admin/full/macros/read)
+**Full agent empowerment, monitoring, and control** is the through-line of
+everything below.
 
-## Personas
+---
 
-`aeon-hid` builds a USB composite HID gadget on the Pi's USB-C OTG port. It
-ships five identities you can hot-swap (via API or web UI):
+## Zero software, full computer control
+
+Plug the box between any machine and the capture side. The target gets a USB-HID
+keyboard + mouse/trackpad it trusts; the box gets the target's HDMI through a
+video-capture device. The web UI streams the screen to your browser; an AI agent
+reads frames and sends back keyboard / mouse / gesture events. The target never
+knows it's been politely possessed — there is nothing to install and nothing to
+grant permission to.
+
+![The live computer-control view — HDMI in, USB-HID out, streamed to the browser](docs/images/control.png)
+
+- 🎹 **Keyboard / mouse / trackpad over USB-C OTG** — five hot-swappable HID
+  personas, including an **absolute pointer** (`generic-absolute`, ideal for AI
+  agents) and an Apple Magic Keyboard + Trackpad multi-touch descriptor.
+- 🎥 **HDMI capture** via Elgato Cam Link 4K (or any UVC device) — MJPEG or
+  low-latency **H.264/WebCodecs**, native source resolution, 1080p60 capable.
+- ⚡ **Works pre-OS** — BIOS, FileVault, Windows OOBE, firmware screens. To the
+  target it's just a perfectly boring peripheral.
+
+---
+
+## The ultimate AI jump box
+
+A bird's-eye view of — and control plane over — your **entire AI
+infrastructure**: gateways, DGX Sparks, model servers. Live GPU / CPU / RAM per
+host, a token-usage timeline, and your whole agent pantheon at a glance.
+
+![Agent dashboard — connected systems, GPU/CPU/RAM, token usage, and the pantheon](docs/images/agent-overview.png)
+
+One console watches every box you've connected: NVIDIA GB10 / RTX VRAM, load,
+temperature, container counts, and per-agent token burn — with reboot / shutdown
+/ wake on each system.
+
+---
+
+## Easy custom agent personas
+
+Build, provision, and customize each persona from the console: profile photo →
+Matrix avatar, corpus, voice, and the persona's **Soul** (`SOUL.md` — the system
+prompt) and **Identity** (`IDENTITY.md` — name, era, domain, emoji).
+
+![Per-agent detail — provisioning, SSH, avatar, corpus, Soul/Identity, add-skill](docs/images/agent-detail.png)
+
+### Auto skill-deploy on provisioning
+
+Grant an agent an **Aeon Magick API key** and the supervisor drops the Aeon
+Magick skill (plus a scoped access file) straight into that agent's gateway
+workspace — instant, first-class access via a provisioned **MCP server and/or
+REST API**. Optionally grant a scoped **SSH key** to the Pi (human-admin action;
+never exposed to the agent over the API). Add capabilities by clicking
+ready-made skill chips or uploading a `SKILL.md` / `.tar` of your own.
+
+---
+
+## Outstanding Docker orchestration + monitoring
+
+Live container stats across every connected host, compose edit / up / down, and
+log tails — all from the browser.
+
+![Containers — live stats across hosts, compose control, logs](docs/images/containers.png)
+
+### One-click Easy Deploy
+
+Pick a model from **AEON-7's live model + container catalog** (tokenless,
+auto-updating straight from GHCR), tune the flags that matter, and hit
+**Deploy** — the image pull + start runs in the background with a progress bar.
+
+![Easy Deploy — AEON-7 catalog with a GPU% slider + context/batch/concurrency flags](docs/images/easy-deploy.png)
+
+The headline control is a **GPU VRAM slider** (`--gpu-memory-utilization`), with
+**context length** (`--max-model-len`), **GPU devices** (tensor-parallel),
+**max batch** (`--max-num-batched-tokens`), and **max concurrent sessions**
+(`--max-num-seqs`) right beside it.
+
+---
+
+## Multi-pane terminal
+
+Concurrent SSH windows — across one system or a mix of systems — for hands-on
+control of your whole fleet, without leaving the dashboard. Backed by a PTY
+WebSocket bridge and `xterm.js`.
+
+![Terminal — concurrent SSH panes across multiple systems](docs/images/terminal.png)
+
+---
+
+## One-click surveillance resistance
+
+VPN, **Tor**, **I2P**, and **DNSCrypt** — layered over the target's traffic with
+a button. The box doubles as a network appliance: the same USB-C that delivers
+HID can add a virtual ethernet adapter and pipe the host's WAN through the Pi.
+Built for privacy, and for operating under oppressive regimes.
+
+![Privacy stack — VPN / Tor (bridge presets) / I2P / DNSCrypt, with a kill-switch](docs/images/network-privacy.png)
+
+- 🕳️ **VPN tunnel** — Tailscale · WireGuard · OpenVPN · **Tor** (transparent
+  proxy + DNS-over-Tor, bridge presets: direct / obfs4 / meek-azure / snowflake
+  / custom) · I2P. Built-in **kill-switch** drops WAN if the tunnel falls;
+  LAN-bypass keeps management reachable.
+- 🔒 **Encrypted DNS** — local `dnscrypt-proxy` (true DNSCrypt v2 + DoH):
+  Cloudflare / Quad9 / AdGuard / NextDNS / Mullvad. Plaintext DNS never leaves
+  the device — for the Pi *and* every USB-connected client.
+- 🌐 **USB ethernet modes** — **isolation** (host reaches internet via NAT,
+  can't see your LAN — guest-laptop safe), **sharing** (full LAN bridge),
+  **restricted** (WAN only). 250+ Mbit on USB 3.0.
+- 🌍 **Worldwide remote access** via **Tailscale** — preinstalled, drive the box
+  from anywhere.
+
+---
+
+## Full audit trails + logs
+
+Know exactly **when** each agent touched the system and **what** it did. Every
+login, logout, password/token change, scope denial, persona swap, and non-GET
+mutation is logged with the authenticated actor, the HTTP method + path, and the
+outcome.
+
+![Audit log — every privileged action, attributed to an actor](docs/images/audit.png)
+
+A live **Security Console** sits alongside it: inbound/outbound throughput,
+iptables DROP/REJECT counters, a heuristic anomaly detector (traffic spikes,
+blacklisted-domain attempts, SYN floods), and active-client conntrack.
+
+![Security console — firewall counters + intrusion heuristics](docs/images/security.png)
+
+---
+
+## Agents-first interfaces (REST + MCP)
+
+Two ways for an AI agent to drive the box, sharing TLS + auth so credentials
+issued at first boot work for both:
+
+- **REST + curl** — every input op is an atomic POST under `/api/hid/*`;
+  snapshots are a single GET. Scriptable from any language.
+- **MCP (Model Context Protocol)** — the supervisor speaks MCP Streamable HTTP
+  at `/api/mcp`, exposing the same op surface as named tools. Drop the URL into
+  Claude Desktop or any MCP client and operate the device with first-class tool
+  calls.
+
+Scoped **API tokens** (admin / full / macros / read) gate access, and the token
+page is where you mint, scope, and revoke them.
+
+![API tokens — scoped keys for agents, REST, and MCP](docs/images/tokens.png)
+
+Stored **macros** (`/etc/aeon/macros/*.toml`) and **prompts**
+(`/etc/aeon/prompts/*.md`) round it out: keyboard-driven sequences you don't want
+to re-author, and short playbooks an agent can fetch to prime itself.
+
+> Atomic-op discipline (inherited from `cursed-hid`): the input API exposes
+> `type`, `key chord`, `click`, `move` — never a `key_down` that a dropped packet
+> could leave stuck on the wire.
+
+---
+
+## HID personas
+
+`aeon-hid` builds a USB composite HID gadget on the Pi's USB-C OTG port. It ships
+five identities you can hot-swap (via API or web UI):
 
 | Persona | What the host sees | Use this when |
 |---|---|---|
-| `generic-composite` | Boot keyboard + relative boot mouse, VID `1d6b` (Linux Foundation) | You want maximum compatibility and a small attack surface. |
-| `generic-absolute` | Boot keyboard + **absolute pointer**, VID `1d6b` | You're driving with an **AI agent** — `click_at`/`move_abs` land the cursor on exact screen coordinates, no relative drift. Linux-safe. |
-| `logitech-mx` | Logitech Unifying Receiver (VID `046d`), MX-Keys-style keyboard + MX-Master-style mouse + consumer media keys | You want media keys and extra mouse buttons. (Can wedge `aeon-hid` on Linux targets — prefer `generic-*` there.) |
-| `apple-magic-stable` | Apple VID (`05ac`), Apple keyboard + working trackpad (pointer + keys) | You're on a **macOS** target and want a reliable Apple-flavored keyboard + pointer. |
-| `apple-magic` (experimental) | Apple VID (`05ac`), Apple keyboard + Magic Trackpad multi-touch | You want **macOS gesture support** — 2/3/4-finger swipes, pinch, rotate. Not fully solved — see [`docs/design/apple-mt.md`](./docs/design/apple-mt.md) for the Apple HID descriptor saga. |
+| `generic-composite` | Boot keyboard + relative boot mouse, VID `1d6b` (Linux Foundation) | Maximum compatibility, small attack surface. |
+| `generic-absolute` | Boot keyboard + **absolute pointer**, VID `1d6b` | You're driving with an **AI agent** — `click_at`/`move_abs` land on exact coordinates, no relative drift. Linux-safe. |
+| `logitech-mx` | Logitech Unifying Receiver (VID `046d`), MX-Keys + MX-Master + media keys | You want media keys and extra mouse buttons. (Prefer `generic-*` on Linux targets.) |
+| `apple-magic-stable` | Apple VID (`05ac`), Apple keyboard + working trackpad | macOS target, reliable Apple-flavored keyboard + pointer. |
+| `apple-magic` (experimental) | Apple VID (`05ac`), Apple keyboard + Magic Trackpad multi-touch | macOS **gesture support** — 2/3/4-finger swipes, pinch, rotate. See [`docs/design/apple-mt.md`](./docs/design/apple-mt.md). |
 
-Switching persona requires a USB re-enumeration on the target. Takes about
-a second. The target host briefly sees the device disappear and a different
-one appear in its place.
+Switching persona triggers a ~1-second USB re-enumeration on the target.
+
+---
 
 ## Network — three independent layers
 
-The box doubles as a network appliance. All three layers are independent
-and any subset can be active.
+The box doubles as a network appliance. All three layers are independent; any
+subset can be active.
 
 | Layer | What it does |
 |---|---|
-| **USB ethernet** (CDC NCM gadget) | The same USB-C that delivers HID adds a virtual ethernet adapter. Three modes: **isolation** (host reaches the Pi + internet via NAT, *cannot* see your LAN — guest-laptop safe), **sharing** (full LAN bridge), **restricted** (WAN only, host can't even see the Pi). 250+ Mbit on USB 3.0. |
-| **DNSCrypt** | Optional local `dnscrypt-proxy` on `127.0.2.1:53`. Curated providers (Cloudflare, Quad9, AdGuard, NextDNS, Mullvad, Cloudflare-for-Families). When enabled, both the Pi *and* every USB-connected client resolve via encrypted DoH. Plaintext DNS never leaves the device. |
-| **VPN tunnel** | One of: Tailscale (just paste an auth-key) · WireGuard (paste a `.conf`) · OpenVPN (paste a `.ovpn` + optional creds) · **Tor** (transparent proxy + DNS-over-Tor with bridge presets: direct / obfs4 / meek-azure / snowflake / custom) · I2P (garlic-routed, optional outproxy). Built-in **kill-switch** drops WAN if the tunnel falls; LAN-bypass keeps management always reachable. |
+| **USB ethernet** (CDC NCM gadget) | Adds a virtual ethernet adapter on the same USB-C. Three modes: **isolation** / **sharing** / **restricted**. 250+ Mbit on USB 3.0. |
+| **DNSCrypt** | Local `dnscrypt-proxy` on `127.0.2.1:53`. Curated providers; both the Pi *and* every USB client resolve via encrypted DoH. |
+| **VPN tunnel** | Tailscale · WireGuard · OpenVPN · **Tor** (bridge presets) · I2P, with kill-switch + LAN-bypass. |
 
-Live VPN status panel polls every few seconds — bootstrap %, exit IP +
-country (or Tor circuit hops with `Guard → Middle → Exit`), peer count
-for Tailscale/WireGuard, handshake age. The "rotate identity" button
-sends `SIGNAL NEWNYM` to Tor, force-cycles WireGuard peers, etc.
+The live status panel polls every few seconds — bootstrap %, exit IP + country
+(or Tor circuit hops `Guard → Middle → Exit`), peer count, handshake age. The
+"rotate identity" button sends `SIGNAL NEWNYM` to Tor, cycles WireGuard peers,
+etc.
 
-## First-boot setup wizard
+---
 
-A `aeon-setup` WiFi AP comes up automatically if the device can't reach
-the internet for ~90 seconds. Connecting to it triggers the captive
-portal flow on every OS (Apple's `hotspot-detect.html`, Android's
-`generate_204`, Windows' `ncsi.txt` — all served via tiny HTTP listener
-on :80, with DNS wildcard + iptables redirect catching anything else),
-which auto-launches a browser pointing at the live-scanning WiFi picker.
-Pick a network, type the password, the device joins, the AP tears
-itself down. Zero monitor, zero keyboard, zero serial cable.
+## More that's in the box
 
-## USB-CDROM disk drive
+- 💿 **USB-CDROM disk drive** — upload an ISO via the web UI; the Pi exposes it
+  as a read-only USB CDROM the target boots from. Multi-GB streaming uploads
+  with SHA-256 verification + atomic rename; hot-swap the "inserted" disk
+  without unplugging.
+- 🎯 **Zero-touch first boot** — an `aeon-setup` WiFi AP comes up automatically
+  if the device can't reach the internet for ~90 s. Connecting triggers the
+  captive-portal flow on every OS and launches a live-scanning WiFi picker. Pick
+  a network, type the password, the AP tears itself down. Zero monitor, zero
+  keyboard, zero serial cable.
+- 🔐 **Hardened by default** — argon2 password + HMAC-signed cookies, TLS with a
+  self-signed cert (or BYO), a generated admin password dropped on
+  `/boot/firmware/` at first boot.
+- 👁️ **Adaptive vision pipeline** — `aeon-streamer` runs ffmpeg with
+  `-f image2pipe` so frames stream into the supervisor's memory with no
+  intermediate disk writes; a `tokio::sync::watch` channel fans the latest frame
+  to the MJPEG stream, the snapshot endpoint, and the watchdog. Two watchdog
+  loops respawn ffmpeg when the source signal changes (target wakes from sleep,
+  resolution renegotiates) — fresh frames within ~5 s of an HDMI hot-plug.
 
-Upload an ISO via the web UI; the Pi exposes it as a read-only USB CDROM
-the target boots from. Useful for booting installers, recovery images,
-or shimming a Linux live-USB onto a sealed device. Multi-GB streaming
-uploads with SHA-256 verification + atomic rename so a half-uploaded ISO
-can't corrupt your library. Hot-swap the "inserted" disk without
-unplugging the USB cable.
+---
 
-## Vision
-
-`aeon-streamer` runs ffmpeg with `-f image2pipe` so MJPEG frames stream
-straight into the supervisor's memory via stdout — no intermediate disk
-writes, no half-written-frame races, no jpeg corruption when the browser
-fetches at exactly the wrong microsecond. A single `tokio::sync::watch`
-channel fans the latest frame out to all consumers: the multipart MJPEG
-HTTP stream, the snapshot endpoint, and the watchdog. Two watchdog loops
-— one based on the v4l2 format-list hash, one based on the watch channel
-going stale — kick ffmpeg to respawn whenever the source signal changes.
-Hot-plugging the HDMI cable on the target and getting fresh frames within
-~5 seconds is the design target.
-
-The capture pipeline auto-detects format and resolution from the v4l2
-device (MJPEG passthrough preferred; YUV/RGB sources get encoded), and
-adapts on the fly when the source resolution changes (e.g. when the
-target laptop wakes from sleep and renegotiates).
-
-## Agents-first interfaces
-
-Two ways for an AI agent to drive the box:
-
-- **REST + curl** — every input op is an atomic POST under `/api/hid/*`.
-  Snapshots are a single GET. Easy to script from any language.
-- **MCP (Model Context Protocol)** — the supervisor speaks MCP Streamable
-  HTTP at `/api/mcp`, exposing the same op surface as named tools. Drop
-  the URL into Claude Desktop, `@modelcontextprotocol/sdk`, or any MCP
-  client and you're operating the device with first-class tool calls,
-  no wrapper required.
-
-Both transports share TLS + Basic auth, so credentials issued at first
-boot work for both. Stored **macros** (`/etc/aeon/macros/*.toml`) and
-**prompts** (`/etc/aeon/prompts/*.md`) round it out: keyboard-driven
-sequences you don't want to re-author every session, and short
-playbooks an agent can fetch to prime itself.
-
-## What's in the box (the image)
+## What's in the image
 
 ```
 aeon (system user), running:
@@ -154,54 +271,39 @@ aeon (system user), running:
   /usr/local/bin/aeon-hid            ← USB gadget configfs + atomic-op API
   /usr/local/bin/aeon-supervisor     ← HTTPS frontend (rustls), routes /api/*,
                                        MCP server at /api/mcp, macros + prompts,
-                                       and serves /
+                                       agent dash, containers, terminal, serves /
 
 /etc/aeon/
   streamer.toml hid.toml supervisor.toml    ← runtime config
-  auth.toml                                 ← argon2 admin password, regenerated on first boot
-  cert.pem key.pem                          ← self-signed TLS, regenerated on first boot
-  macros/   scripts/   prompts/             ← user-editable action library
+  auth.toml                                 ← argon2 admin password (first boot)
+  cert.pem key.pem                          ← self-signed TLS (first boot)
+  macros/ scripts/ prompts/                 ← user-editable action library
 
-/usr/share/aeon/
-  web/        ← SvelteKit single-page app
-  macros/     ← shipped read-only macros (open-spotlight, cmd-tab, see-then-click, …)
-  prompts/    ← shipped agent playbooks (agent-quickstart, macos-shortcuts)
+/usr/share/aeon/web/                         ← the SvelteKit single-page app
+/etc/systemd/system/                         ← aeon-{streamer,hid,supervisor},
+                                               firstboot, netwatch, net-services,
+                                               dnscrypt-proxy, tor
 
-/etc/systemd/system/
-  aeon-streamer.service  aeon-hid.service  aeon-supervisor.service
-  aeon-firstboot.service                    ← oneshot: generates admin password, applies aeon-setup.toml
-  aeon-netwatch.service + .timer            ← polls connectivity; spins up `aeon-setup` WiFi AP if offline for 90s+
-  aeon-net-services.service                 ← oneshot: applies network.toml (usb_eth + dnscrypt + vpn) on changes
-  dnscrypt-proxy.service tor.service        ← lazy-started by aeon-net-services when enabled
-
-/usr/share/aeon/web/
-  the SvelteKit single-page app
-
-/usr/local/bin/aeon-firstboot
-/usr/local/bin/aeon-netwatch
-/usr/local/bin/aeon-net-services             ← applies network config; idempotent
-
-/etc/udev/rules.d/99-aeon-capture.rules    ← Elgato Cam Link 4K + MS2109 → /dev/kvmd-video
-
-/var/lib/aeon/iso/                           ← uploaded ISOs + .meta sidecars
-
-In /boot/firmware/ on the SD card after first boot:
-  aeon-credentials.txt   ← admin password (mode 0600, delete it once you've noted it)
+In /boot/firmware/ after first boot:
+  aeon-credentials.txt   ← admin password (mode 0600; delete once noted)
 ```
 
-Tailscale is preinstalled but disabled by default. Drop an
-`aeon-setup.toml` onto the boot partition before first boot to wire it up
-automatically (see [`AGENTS.md`](./AGENTS.md)).
+Tailscale is preinstalled but disabled by default. Drop an `aeon-setup.toml` onto
+the boot partition before first boot to wire it up automatically (see
+[`AGENTS.md`](./AGENTS.md)).
+
+---
 
 ## Project layout
 
 ```
 aeon-streamer/    Rust — adaptive capture supervisor + watchdog
 aeon-hid/         Rust — USB gadget + persona + atomic-op input API
-aeon-supervisor/  Rust — HTTPS frontend, /api/* proxy, argon2 auth
+aeon-supervisor/  Rust — HTTPS frontend, /api/* + MCP, argon2 auth, agent dash,
+                         containers, terminal, network/privacy, audit
 aeon-web/         SvelteKit — dark UI, live stream canvas, input capture
 image-builder/    pi-gen overlay producing aeon-magick.img.xz
-docs/             Design notes (Apple multi-touch, the cursed-hid lineage)
+docs/             Design notes + showcase screenshots
 scripts/          Cross-compile + web-build helpers
 AGENTS.md         Setup + day-to-day usage, for humans AND AIs
 SKILL.md          Manifest an AI agent loads to operate the device
@@ -209,29 +311,33 @@ ARCHITECTURE.md   How the daemons split work and why
 BUILDING.md       Compile + build the image on macOS or Linux
 ```
 
+---
+
 ## Getting started
 
-[`AGENTS.md`](./AGENTS.md) is the read-this-first document. It walks
-through flashing the SD card, first-boot, finding your generated admin
-password, opening the web UI, and pairing an AI agent.
+[`AGENTS.md`](./AGENTS.md) is the read-this-first document: flashing the SD card,
+first boot, finding your generated admin password, opening the web UI, and
+pairing an AI agent.
 
-[`BUILDING.md`](./BUILDING.md) is for when you want to rebuild from source.
+[`BUILDING.md`](./BUILDING.md) is for rebuilding from source.
+
+The screenshots above were captured from the live web UI and **redacted** (private
+IPs, hostnames, the Matrix homeserver, tokens, and keys are masked) by
+[`scripts/capture-screenshots.js`](./scripts/capture-screenshots.js) — re-runnable
+against your own device.
+
+---
 
 ## Lineage
 
-Descended from [`cursed-hid`](https://github.com/albert/cursed-hid), an
-ESP32-S2 dongle that emulated a Logitech Unifying Receiver. Cursed-hid's
-firmware did all the input naturalism on-device (Bezier mouse paths,
-log-normal keystroke timing) and accepted only **logical operations** over
-WebSocket — never raw press/release primitives that could leave a key
-stuck on the wire if a packet dropped. AEON Magick AI Computer Control
-inherits that design lesson: the input HTTP API exposes `type`, `key
-chord`, `click`, `move` — never `key_down` followed by a separate `key_up`.
-
-Borrows configfs USB-gadget patterns and the ustreamer v4l2 capture loop
-from [PiKVM](https://github.com/pikvm/pikvm). We are not a fork; we are a
-sibling project with a different goal: agent-grade computer control, not
-remote KVM administration.
+Descended from [`cursed-hid`](https://github.com/albert/cursed-hid), an ESP32-S2
+dongle that emulated a Logitech Unifying Receiver and accepted only **logical
+operations** over WebSocket — never raw press/release primitives that could leave
+a key stuck if a packet dropped. AEON Magick inherits that lesson. It borrows
+configfs USB-gadget patterns and the ustreamer v4l2 capture loop from
+[PiKVM](https://github.com/pikvm/pikvm) — but we're not a fork; we're a sibling
+project with a different goal: **agent-grade computer control**, not remote KVM
+administration.
 
 ## License
 
@@ -239,10 +345,10 @@ MIT. See [`LICENSE`](./LICENSE).
 
 ## Hard rules (non-negotiable)
 
-This software exists to drive **the user's own computers**, the **user's
-own accounts**, the **user's own services**. It is not a tool to bypass
-fraud controls, automate access to other people's accounts, or evade
-device-attestation on a service the user is not authorized to operate
-against. The naturalism layer (when enabled) is for accessibility and
-reliability — not as cover for impersonation. If you build something
-sketchy on top of this, that's on you, and we will not help.
+This software exists to drive **the user's own computers**, the **user's own
+accounts**, the **user's own services**. It is not a tool to bypass fraud
+controls, automate access to other people's accounts, or evade
+device-attestation on a service the user is not authorized to operate against.
+The naturalism layer (when enabled) is for accessibility and reliability — not
+cover for impersonation. If you build something sketchy on top of this, that's on
+you, and we will not help.
