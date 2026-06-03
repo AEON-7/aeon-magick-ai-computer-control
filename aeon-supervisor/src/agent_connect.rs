@@ -2549,10 +2549,10 @@ fn http_get_json_simple(url: &str) -> Result<serde_json::Value, String> {
     }
 }
 
-/// CURATED, commonly-used vLLM models — kept (and merged with the live AEON-7
-/// fetch below). EDIT HERE to add stock models / bump image tags. Defaults are
-/// tuned for a single big-VRAM box (e.g. the GB10 / DGX Spark): 128k context,
-/// 70% VRAM util (NOT 1.0 — that OOMs), single-GPU, conservative batch.
+/// CURATED upstream vLLM models — NO LONGER merged into the catalog (AEON-7 wants
+/// an AEON-7-only / live-HF catalog). Retained for reference / quick re-enable.
+/// Defaults: 128k context, 70% VRAM util (NOT 1.0 — that OOMs), single-GPU.
+#[allow(dead_code)]
 fn curated_commonly_used() -> Vec<serde_json::Value> {
     const VLLM: &str = VLLM_IMAGE;
     const ML: i64 = DEFAULT_MODEL_LEN; // 128k
@@ -2591,20 +2591,10 @@ fn curated_commonly_used() -> Vec<serde_json::Value> {
 /// cached) merged with the curated commonly-used vLLM list (deduped by model id).
 /// `live` carries (entries, note) where note flags fallback/auth issues for the UI.
 fn deploy_catalog_merged() -> (Vec<serde_json::Value>, Option<String>) {
+    // AEON-7 ONLY: the catalog is a live pull of AEON-7's whole HuggingFace
+    // collection — no generic/upstream models. The DGX-Spark-optimized ComfyUI
+    // image is the one always-offered AEON-7 container.
     let (mut live, note) = aeon7_live_catalog();
-    // Merge the curated commonly-used models, skipping any whose model id is
-    // already present from the live fetch (dedupe).
-    let have: std::collections::HashSet<String> = live
-        .iter()
-        .filter_map(|e| e.get("model").and_then(|x| x.as_str()).map(|s| s.to_lowercase()))
-        .collect();
-    for c in curated_commonly_used() {
-        let m = c.get("model").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
-        if m.is_empty() || !have.contains(&m) {
-            live.push(c);
-        }
-    }
-    // Always offer the DGX-Spark-optimized ComfyUI image (image-gen) last.
     live.push(comfyui_entry());
     (live, note)
 }
