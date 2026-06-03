@@ -643,6 +643,7 @@
     };
   }
   function showBucketLabel(n: number, i: number): boolean {
+    if (range === 'all') return true; // per-agent emoji bars — label every one
     if (n <= 14) return true;
     return i % Math.ceil(n / 8) === 0;
   }
@@ -664,7 +665,9 @@
     range = 'year';
   }
 
-  // ── connected-systems actions (unchanged) ───────────────────────────
+  // ── connected-systems actions ───────────────────────────────────────
+  let regId = ''; // which system's inline (masked) SSH-password field is open
+  let regPw = '';
   function rolesArr(): string[] {
     const r: string[] = [];
     if (roleOpenclaw) r.push('openclaw');
@@ -686,20 +689,25 @@
       port = 22;
       roleOpenclaw = roleHermes = roleDgx = false;
       await refresh();
+      regId = res.id ?? ''; // immediately open the masked SSH-password prompt for the new system
+      regPw = '';
     } finally {
       adding = false;
     }
   }
-  async function onRegister(s: api.ConnectedSystem) {
-    const pw = prompt(
-      `One-time SSH password for ${s.ssh_user}@${s.address} — used ONCE to install the Pi's key, never stored. Leave blank if you'll authorize manually.`,
-    );
-    if (pw === null) return;
-    busyId = s.id;
+  function onRegister(s: api.ConnectedSystem) {
+    // open an inline masked SSH-password field for this system (dots-concealed)
+    regId = s.id;
+    regPw = '';
     delete fallback[s.id];
     fallback = fallback;
+  }
+  async function doRegister(s: api.ConnectedSystem) {
+    busyId = s.id;
     try {
-      const res = await api.registerSystem(s.id, pw);
+      const res = await api.registerSystem(s.id, regPw);
+      regPw = '';
+      regId = '';
       if (!res.ok && res.authorize_command) {
         fallback[s.id] = res.authorize_command;
         fallback = fallback;
@@ -1593,8 +1601,8 @@
           {#if systems.length}
             {#each systems as s (s.id)}
               <button class="term-open-btn" on:click={() => openTerminal(s.id)}
-                      title={`SSH to ${s.ssh_user}@${s.address}:${s.port}`}>
-                <span>{roleIcon(s.roles)}</span> {s.label}
+                      title={`Add a terminal — SSH to ${s.ssh_user}@${s.address}:${s.port}`}>
+                <span class="term-plus">+</span><span>{roleIcon(s.roles)}</span> {s.label}
               </button>
             {/each}
           {:else}
@@ -1681,6 +1689,15 @@
                 <button class="btn text-xs" on:click={() => onTest(s)} disabled={busyId === s.id}>test</button>
                 <button class="btn text-xs ml-auto text-red-300" on:click={() => onRemove(s)}>remove</button>
               </div>
+              {#if regId === s.id}
+                <form class="flex flex-wrap gap-2 items-center" on:submit|preventDefault={() => doRegister(s)}>
+                  <input class="{inputCls} flex-1 min-w-[180px]" type="password" autocomplete="off"
+                         placeholder="SSH password for {s.ssh_user}@{s.address} — used once, never stored"
+                         bind:value={regPw} disabled={busyId === s.id} />
+                  <button class="btn-primary text-xs" type="submit" disabled={busyId === s.id}>{busyId === s.id ? 'registering…' : 'authenticate'}</button>
+                  <button class="btn text-xs" type="button" on:click={() => (regId = '')}>cancel</button>
+                </form>
+              {/if}
               {#if fallback[s.id]}
                 <div class="text-[10px] font-mono text-amber-300 space-y-1">
                   <p>Password auth unavailable — run this on {s.address}, then Test:</p>
@@ -2436,6 +2453,7 @@
     font-family: ui-monospace, monospace; font-size: 0.66rem; text-transform: uppercase;
     letter-spacing: 0.08em; color: #71717a; margin-right: 0.15rem;
   }
+  .term-plus { color: #6ee7b7; font-weight: 700; margin-right: 0.1rem; }
   .term-open-btn {
     display: inline-flex; align-items: center; gap: 0.35rem;
     padding: 0.28rem 0.6rem; border-radius: 0.45rem; cursor: pointer;

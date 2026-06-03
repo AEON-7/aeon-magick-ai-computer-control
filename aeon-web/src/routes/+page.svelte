@@ -1276,19 +1276,7 @@
         </button>
       </div>
 
-      <!-- One-time gesture hint on first entry (fades after 6s) -->
-      {#if isTouchDevice}
-        <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 z-10
-                    flex justify-center pointer-events-none">
-          <div class="px-4 py-2 rounded-lg
-                      bg-ink-900/40 border border-cursed-500/30 backdrop-blur-sm
-                      text-zinc-400 font-mono text-[11px] text-center
-                      max-w-[260px] animate-pulse"
-               style="animation-iteration-count: 3; animation-duration: 2s;">
-            tap = click · long-press = right · two-finger tap = right · drag = move · two-finger drag = scroll
-          </div>
-        </div>
-      {/if}
+      <!-- (gesture hint overlay removed — touch interaction is intuitive) -->
     {/if}
   </main>
 
