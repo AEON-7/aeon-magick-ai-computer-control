@@ -192,6 +192,7 @@ export interface SystemMetrics {
   reachable: boolean;
   host?: string;
   load?: string;
+  cpu?: string;   // CPU busy %, 0–100 integer string
   mem?: string;
   gpus?: { name: string; util: string; mem_used: string; mem_total: string; temp: string }[];
   containers?: string[];
@@ -218,8 +219,9 @@ export interface ContainerStats {
 export interface ContainerInfo {
   name: string;
   image: string;
-  state: string;     // running | exited | created | paused | …
+  state: string;     // running | exited | created | paused | … (raw, may be unreliable)
   status: string;    // "Up 4 hours" | "Exited (137) 2 months ago"
+  running: boolean;  // robust: State=="running" || Status starts "Up"
   ports: string;
   compose_project: string;
   compose_config_files: string;

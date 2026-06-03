@@ -827,10 +827,16 @@
       composeSaving = false;
     }
   }
-  function cStateCls(state: string): string {
-    if (state === 'running') return 'cst-run';
-    if (state === 'exited' || state === 'dead') return 'cst-exit';
+  /** Badge class from the robust `running` flag (State is unreliable on some boxes). */
+  function cStateCls(c: api.ContainerInfo): string {
+    if (c.running) return 'cst-run';
+    if (c.state === 'exited' || c.state === 'dead' || c.status.trim().startsWith('Exited'))
+      return 'cst-exit';
     return 'cst-other';
+  }
+  /** Badge label: trust `running` first, fall back to the raw state when stopped. */
+  function cStateLabel(c: api.ContainerInfo): string {
+    return c.running ? 'running' : c.state || 'exited';
   }
   /** "12.3%" → clamped 0-100 number for a bar width. */
   function pctNum(s?: string): number {
@@ -1256,6 +1262,26 @@
                   {/each}
                 {/if}
 
+                <!-- CPU + RAM bars (non-DGX; on a DGX the unified VRAM bar above
+                     already covers memory, since GB10 system RAM *is* the VRAM). -->
+                {#if !isDgx(s)}
+                  {@const pm = parseMem(m.mem)}
+                  <div class="sys-bars">
+                    {#if m.cpu}
+                      <div class="sbar">
+                        <div class="sbar-top"><span>CPU</span><span style="color:{utilColor(m.cpu)}">{m.cpu}%</span></div>
+                        <div class="gauge sm"><div class="gauge-fill" style="width:{clampPct(m.cpu)}%; background:{utilColor(m.cpu)}; box-shadow:0 0 8px {utilColor(m.cpu)}88"></div></div>
+                      </div>
+                    {/if}
+                    {#if pm}
+                      <div class="sbar">
+                        <div class="sbar-top"><span>RAM</span><span style="color:{utilColor(pm.pct)}">{gb(pm.used)} / {gb(pm.total)} GB · {pm.pct}%</span></div>
+                        <div class="gauge sm"><div class="gauge-fill" style="width:{clampPct(pm.pct)}%; background:{utilColor(pm.pct)}; box-shadow:0 0 8px {utilColor(pm.pct)}88"></div></div>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+
                 <div class="tiles">
                   <div class="tile"><div class="tile-num">{m.load?.split(' ')[0] || '—'}</div><div class="tile-lbl">load</div></div>
                   <div class="tile"><div class="tile-num">{memTile(s, m)}</div><div class="tile-lbl">{isDgx(s) ? 'unified' : 'mem'}</div></div>
@@ -1424,13 +1450,13 @@
                 {#each cData.containers as c (c.name)}
                   <div class="ctr">
                     <div class="ctr-main">
-                      <span class="ctr-state {cStateCls(c.state)}">{c.state}</span>
+                      <span class="ctr-state {cStateCls(c)}">{cStateLabel(c)}</span>
                       <div class="ctr-id">
                         <div class="ctr-name">{c.name}</div>
                         <div class="ctr-img" title={c.image}>{c.image}</div>
                       </div>
                       <div class="ctr-actions">
-                        {#if c.state === 'running'}
+                        {#if c.running}
                           <button class="ctr-btn" disabled={cBusy === c.name}
                                   on:click={() => doContainerAction(c.name, 'restart')} title="Restart">⟳</button>
                           <button class="ctr-btn stop" disabled={cBusy === c.name}
@@ -2035,6 +2061,14 @@
     padding: 0 0.2rem;
     margin-left: 0.15rem;
   }
+
+  .sys-bars { display: flex; flex-direction: column; gap: 0.4rem; }
+  .sbar { display: flex; flex-direction: column; gap: 0.25rem; }
+  .sbar-top {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: ui-monospace, monospace; font-size: 0.62rem; color: #8b8b96;
+  }
+  .sbar-top span:last-child { font-weight: 600; white-space: nowrap; }
 
   .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; }
   .tile { background: rgba(12, 12, 20, 0.5); border: 1px solid #20202b; border-radius: 0.5rem; padding: 0.4rem; text-align: center; }

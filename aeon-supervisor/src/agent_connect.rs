@@ -328,6 +328,7 @@ fn gather_metrics(sys: &System) -> serde_json::Value {
     let target = format!("{}@{}", sys.ssh_user, sys.address);
     let remote = "echo HOST:$(hostname); \
         echo LOAD:$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null); \
+        echo CPU:$(A=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5}' /proc/stat); sleep 0.25; B=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5}' /proc/stat); echo \"$A $B\" | awk '{dt=$3-$1; di=$4-$2; if(dt>0) printf \"%.0f\", 100*(dt-di)/dt}'); \
         echo MEM:$(free -m 2>/dev/null | awk '/Mem:/{print $3\"/\"$2}'); \
         echo GPU:$(nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -4 | tr '\\n' ';'); \
         echo DOCKER:$(docker ps --format '{{.Names}}' 2>/dev/null | tr '\\n' ','); \
@@ -356,6 +357,7 @@ fn gather_metrics(sys: &System) -> serde_json::Value {
 
 fn parse_metrics(s: &str) -> serde_json::Value {
     let (mut host, mut load, mut mem) = (String::new(), String::new(), String::new());
+    let mut cpu = String::new();
     let mut mac = String::new();
     let mut gpus: Vec<serde_json::Value> = Vec::new();
     let mut containers: Vec<String> = Vec::new();
@@ -364,6 +366,8 @@ fn parse_metrics(s: &str) -> serde_json::Value {
             host = v.trim().into();
         } else if let Some(v) = line.strip_prefix("LOAD:") {
             load = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("CPU:") {
+            cpu = v.trim().into();
         } else if let Some(v) = line.strip_prefix("MEM:") {
             mem = v.trim().into();
         } else if let Some(v) = line.strip_prefix("GPU:") {
@@ -379,7 +383,7 @@ fn parse_metrics(s: &str) -> serde_json::Value {
             mac = v.trim().to_string();
         }
     }
-    json!({"reachable": true, "host": host, "load": load, "mem": mem, "gpus": gpus, "containers": containers, "mac": mac})
+    json!({"reachable": true, "host": host, "load": load, "cpu": cpu, "mem": mem, "gpus": gpus, "containers": containers, "mac": mac})
 }
 
 // ── per-agent roster (the OpenClaw pantheon) ─────────────────────────────
@@ -1644,11 +1648,19 @@ fn parse_container_line(line: &str) -> Option<serde_json::Value> {
             config_files = c.to_string();
         }
     }
+    // `State` (running|exited|…) is unreliable/absent on some of these boxes, so
+    // derive a robust `running` flag: trust State when it says "running", else
+    // fall back to the always-present `Status` string ("Up 4 hours" → running,
+    // "Exited (137) 2 months ago" → not).
+    let state = get("State");
+    let status = get("Status");
+    let running = state == "running" || status.trim_start().starts_with("Up");
     Some(json!({
         "name": get("Names"),
         "image": get("Image"),
-        "state": get("State"),     // running | exited | created | paused | …
-        "status": get("Status"),   // "Up 4 hours" | "Exited (137) 2 months ago"
+        "state": state,            // running | exited | created | paused | …
+        "status": status,          // "Up 4 hours" | "Exited (137) 2 months ago"
+        "running": running,        // robust: State=="running" || Status starts "Up"
         "ports": get("Ports"),
         "compose_project": project,
         "compose_config_files": config_files,
@@ -1735,7 +1747,7 @@ fn gather_containers(sys: &System) -> Result<serde_json::Value, String> {
             if let Some(o) = c.as_object_mut() {
                 o.insert("stats".into(), st);
             }
-            let running = c.get("state").and_then(|x| x.as_str()) == Some("running");
+            let running = c.get("running").and_then(|x| x.as_bool()).unwrap_or(false);
             if running {
                 // config_files is comma-separated when there are several (a
                 // single path may itself contain spaces, so DON'T split on space).
@@ -1749,8 +1761,8 @@ fn gather_containers(sys: &System) -> Result<serde_json::Value, String> {
     }
     // Sort: running first, then by name.
     containers.sort_by(|a, b| {
-        let ar = a.get("state").and_then(|x| x.as_str()) == Some("running");
-        let br = b.get("state").and_then(|x| x.as_str()) == Some("running");
+        let ar = a.get("running").and_then(|x| x.as_bool()).unwrap_or(false);
+        let br = b.get("running").and_then(|x| x.as_bool()).unwrap_or(false);
         br.cmp(&ar).then_with(|| {
             a.get("name").and_then(|x| x.as_str()).unwrap_or("")
                 .cmp(b.get("name").and_then(|x| x.as_str()).unwrap_or(""))
@@ -1774,7 +1786,7 @@ fn gather_containers(sys: &System) -> Result<serde_json::Value, String> {
             .cmp(b.get("path").and_then(|x| x.as_str()).unwrap_or(""))
     });
 
-    let running = containers.iter().filter(|c| c.get("state").and_then(|x| x.as_str()) == Some("running")).count();
+    let running = containers.iter().filter(|c| c.get("running").and_then(|x| x.as_bool()).unwrap_or(false)).count();
     Ok(json!({
         "ok": true,
         "containers": containers,
