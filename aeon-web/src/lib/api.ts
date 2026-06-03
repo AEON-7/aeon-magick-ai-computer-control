@@ -274,10 +274,11 @@ export const composeAction = (sysId: string, path: string, action: 'up' | 'down'
   );
 
 // ── E5: Easy Deploy — model+container picker, template flags, progress ──
-/** The four highlighted (tunable) flags + an advanced "extra" escape hatch. */
+/** The highlighted (tunable) flags + an advanced "extra" escape hatch. */
 export interface DeployTemplateFlags {
-  max_model_len: number;          // vLLM --max-model-len (0 = omit)
-  gpu: string;                    // "all" | "1" | "0,1"
+  max_model_len: number;          // vLLM --max-model-len (0 = omit). Default 128k.
+  gpu: string;                    // "all" | "1" | "0,1" — which/how many devices
+  gpu_mem_util: number;           // 0.0–1.0 → vLLM --gpu-memory-utilization (the % VRAM slider). Default 0.7.
   max_num_batched_tokens: number; // vLLM --max-num-batched-tokens (0 = omit)
   max_num_seqs: number;           // vLLM --max-num-seqs = max concurrent sessions
   extra: string;                  // additional raw server args
@@ -299,6 +300,7 @@ export interface DeployCatalog {
   installed_containers?: ContainerInfo[]; // docker ps -a on the box
   installed_models?: string[];      // detected model ids / dir names
   live_catalog_todo?: string;
+  ghcr_needs_token?: boolean;       // GHCR packages API is 401 unauth → containers seeded
   err?: string;
 }
 export const getDeployCatalog = (sysId: string) =>
@@ -307,7 +309,8 @@ export const getDeployCatalog = (sysId: string) =>
 /** The flags POSTed to /deploy (null/0 = omit the corresponding server arg). */
 export interface DeployFlags {
   max_model_len?: number | null;
-  gpu?: string;                    // "all" | "1" | "0,1"
+  gpu?: string;                    // "all" | "1" | "0,1" — which/how many devices
+  gpu_mem_util?: number;           // 0.0–1.0 → --gpu-memory-utilization (% VRAM slider)
   max_num_batched_tokens?: number | null;
   max_num_seqs?: number | null;
   extra?: string;

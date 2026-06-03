@@ -2295,8 +2295,17 @@ pub async fn compose_action(
 
 const DEPLOY_DIR: &str = "$HOME/aeon-deploy";
 
+/// Default context window for new deploys: 128k (131072). The big-VRAM boxes we
+/// target (GB10 / DGX Spark) comfortably hold this for the curated model sizes.
+const DEFAULT_MODEL_LEN: i64 = 131072;
+/// Default GPU VRAM utilization (NOT 1.0 — that OOMs the box). vLLM's
+/// `--gpu-memory-utilization` is a 0.0–1.0 fraction; the UI presents it as a
+/// 0–100% slider (default 70%).
+const DEFAULT_GPU_UTIL: f64 = 0.7;
+
 /// One curated catalog entry: a model paired with the serving-container image
 /// (+ version) that runs it, plus sensible default ("template") flags.
+#[allow(clippy::too_many_arguments)]
 fn cat(
     id: &str,
     model: &str,
@@ -2305,6 +2314,7 @@ fn cat(
     description: &str,
     max_model_len: i64,
     gpu: &str,
+    gpu_mem_util: f64,
     max_num_batched_tokens: i64,
     max_num_seqs: i64,
     extra: &str,
@@ -2317,7 +2327,8 @@ fn cat(
         "description": description,
         "template_flags": {
             "max_model_len": max_model_len,
-            "gpu": gpu,               // "all" | "1" | "0,1"
+            "gpu": gpu,               // "all" | "1" | "0,1" — which/how many devices
+            "gpu_mem_util": gpu_mem_util, // 0.0–1.0 → vLLM --gpu-memory-utilization (the % VRAM slider)
             "max_num_batched_tokens": max_num_batched_tokens,
             "max_num_seqs": max_num_seqs,
             "extra": extra,           // additional server args, space-separated
@@ -2325,51 +2336,283 @@ fn cat(
     })
 }
 
-/// CURATED Easy-Deploy catalog — models paired with the serving container that
-/// runs them + sensible template flags. EDIT HERE to add models / bump image
-/// tags. A live GHCR/registry catalog fetch is a future enhancement (`gh` isn't
-/// installed here). vLLM images serve the LLM/embedding entries (HF model id as
-/// the positional arg); the ComfyUI image serves image-gen.
-///
-/// Defaults are tuned for a single big-VRAM box (e.g. the GB10 / a 24-48GB card):
-/// modest `--max-model-len`, single-GPU tensor-parallel, conservative batch.
-fn curated_deploy_catalog() -> serde_json::Value {
-    // vLLM OpenAI-compatible server image (pin a known-good tag; bump as needed).
-    const VLLM: &str = "vllm/vllm-openai:v0.6.6";
-    // ComfyUI image for image generation.
-    const COMFY: &str = "ghcr.io/ai-dock/comfyui:latest";
-    json!([
+// vLLM OpenAI-compatible server image (pin a known-good tag; bump as needed).
+const VLLM_IMAGE: &str = "vllm/vllm-openai:v0.6.6";
+
+// ── Live AEON-7 catalog (HuggingFace models + GHCR containers) ────────────────
+//
+// "AEON-7 easy model deployment" pulls LIVE from AEON-7's PUBLIC HuggingFace repos
+// (no auth) so newly-published models show up automatically, paired with the
+// matching AEON-7 GHCR serving container. GHCR's packages API requires a token
+// (it 401s unauthenticated), so the container side is a SEEDED list of the known
+// images (admin-editable in code) until a GHCR token is wired in.
+//
+// EXCLUDED per spec: any model tagged/named step3.7 (marked broken) and any
+// Nemotron model (marked experimental).
+//
+// The fetch is cached briefly (CATALOG_TTL) so the catalog endpoint stays fast;
+// on a fetch failure we fall back to the curated list + a note.
+
+const HF_MODELS_URL: &str = "https://huggingface.co/api/models?author=AEON-7&limit=100";
+/// GHCR org packages API — surfaced for documentation; it 401s without a token.
+const GHCR_PACKAGES_URL: &str = "https://api.github.com/orgs/AEON-7/packages?package_type=container";
+/// How long a live HF fetch is cached before we re-fetch.
+const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(420); // 7 min
+
+/// SEEDED AEON-7 GHCR serving containers (GHCR needs a token → can't list live).
+/// `(image_ref, [model-name substrings it serves], short quickstart description)`.
+/// Image refs confirmed from the models' HuggingFace cards; admin can edit here.
+fn aeon7_ghcr_seed() -> Vec<(&'static str, &'static [&'static str], &'static str)> {
+    vec![
+        ("ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3",
+         &["Qwen3.6-27B-AEON-Ultimate"][..],
+         "vLLM DFlash serving container for Qwen3.6-27B AEON-Ultimate (DGX Spark / GB10, NVFP4, speculative decoding). 32 tok/s median, ~350ms TTFT."),
+        ("ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2",
+         &["Gemma-4-26B-A4B"][..],
+         "vLLM DFlash serving container for Gemma-4 26B-A4B (DGX Spark, NVFP4 + speculative decoding)."),
+        ("ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest",
+         &["Gemma-4-31B", "Gemma-4-E4B", "supergemma4"][..],
+         "vLLM DGX-Spark serving container for the Gemma-4 NVFP4 family (31B / E4B / SuperGemma4)."),
+        ("ghcr.io/aeon-7/vllm-dflash:latest",
+         &["DFlash-Qwen3.5"][..],
+         "Generic vLLM DFlash serving container for the Qwen3.5 DFlash drafters."),
+        ("ghcr.io/aeon-7/vllm-spark-omni-q36:latest",
+         &["Qwen3.6-35B-A3B", "Multimodal"][..],
+         "vLLM DGX-Spark omni container for the Qwen3.6-35B-A3B / multimodal NVFP4 builds."),
+    ]
+}
+
+/// Standalone GHCR images that aren't tied to one HF model but the admin wants
+/// surfaced. `(id, image_ref, kind, description)`.
+fn aeon7_ghcr_standalone() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    vec![
+        // ComfyUI optimized for DGX Spark. (No image ref was published on the HF
+        // cards; this is a sensible seeded ghcr.io/aeon-7 ref the admin can edit.)
+        ("aeon7-comfyui-dgx-spark", "ghcr.io/aeon-7/comfyui-dgx-spark:latest", "imagegen",
+         "ComfyUI container optimized for DGX Spark (Blackwell / GB10) — image generation (SD/SDXL/Flux). Mount or download checkpoints into the container. Seeded GHCR ref (edit if the tag differs)."),
+    ]
+}
+
+/// ComfyUI catalog entry (DGX-Spark-optimized) — always offered for image-gen.
+fn comfyui_entry() -> serde_json::Value {
+    let (id, image, kind, desc) = aeon7_ghcr_standalone()[0];
+    cat(id, "ComfyUI (bring your own checkpoints)", image, kind, desc,
+        0, "1", DEFAULT_GPU_UTIL, 0, 0, "")
+}
+
+/// Pick the best-matching seeded GHCR serving container for an HF model name.
+/// Returns (image_ref, short_container_desc) or falls back to the stock vLLM image.
+fn pair_container(model_name: &str) -> (String, Option<String>) {
+    let lower = model_name.to_lowercase();
+    for (image, needles, desc) in aeon7_ghcr_seed() {
+        if needles.iter().any(|n| lower.contains(&n.to_lowercase())) {
+            return (image.to_string(), Some(desc.to_string()));
+        }
+    }
+    (VLLM_IMAGE.to_string(), None)
+}
+
+/// True if a model must be EXCLUDED: step3.7 (broken) or Nemotron (experimental).
+/// Checks both the id (name) and the tag list.
+fn excluded_model(id: &str, tags: &[String]) -> bool {
+    let l = id.to_lowercase();
+    let name_hit = l.contains("step-3.7") || l.contains("step3.7") || l.contains("step3p7")
+        || l.contains("nemotron");
+    let tag_hit = tags.iter().any(|t| {
+        let t = t.to_lowercase();
+        t == "step3p7" || t.contains("step-3.7") || t.contains("step3.7") || t.contains("nemotron")
+    });
+    name_hit || tag_hit
+}
+
+/// Derive a short, human description for an HF model from its id + tags (the
+/// list API carries no card text; this stays fast — no per-model README fetch).
+fn describe_model(short: &str, tags: &[String], pipeline: &str, downloads: i64) -> String {
+    let has = |t: &str| tags.iter().any(|x| x.eq_ignore_ascii_case(t));
+    let mut bits: Vec<String> = Vec::new();
+    if has("uncensored") || has("abliterated") || has("heretic") || has("decensored") {
+        bits.push("abliterated / uncensored".into());
+    }
+    if has("nvfp4") || has("fp4") { bits.push("NVFP4".into()); }
+    else if has("bf16") || has("bfloat16") { bits.push("BF16".into()); }
+    else if has("gguf") { bits.push("GGUF".into()); }
+    if has("dflash") || has("speculative-decoding") { bits.push("DFlash spec-decode".into()); }
+    if has("multimodal") || has("vision") || pipeline.contains("image-text") || pipeline == "any-to-any" {
+        bits.push("multimodal".into());
+    }
+    if has("dgx-spark") || has("gb10") || has("blackwell") { bits.push("DGX Spark".into()); }
+    if has("moe") || has("mixture-of-experts") { bits.push("MoE".into()); }
+    let suffix = if bits.is_empty() { String::new() } else { format!(" — {}", bits.join(", ")) };
+    let dl = if downloads >= 1000 { format!("  ({}k downloads)", downloads / 1000) }
+        else if downloads > 0 { format!("  ({} downloads)", downloads) } else { String::new() };
+    format!("AEON-7 {short}{suffix}.{dl}")
+}
+
+/// Fetch AEON-7's public HuggingFace models and turn them into catalog entries
+/// (filtered + paired with a GHCR serving container). Returns (entries, note).
+/// Note is set on fetch failure (UI shows "live fetch unavailable").
+fn fetch_aeon7_from_hf() -> (Vec<serde_json::Value>, Option<String>) {
+    let v = match http_get_json_simple(HF_MODELS_URL) {
+        Ok(v) => v,
+        Err(e) => return (Vec::new(), Some(format!("AEON-7 HuggingFace fetch unavailable ({e}) — showing curated models only."))),
+    };
+    let Some(arr) = v.as_array() else {
+        return (Vec::new(), Some("AEON-7 HuggingFace returned an unexpected shape — showing curated models only.".into()));
+    };
+    // Build (downloads, entry) pairs so we can present the most-used first.
+    let mut scored: Vec<(i64, serde_json::Value)> = Vec::new();
+    for m in arr {
+        let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("");
+        if id.is_empty() { continue; }
+        let tags: Vec<String> = m.get("tags").and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if excluded_model(id, &tags) { continue; }
+        // Skip obvious non-servable staging/draft artifacts.
+        let lower = id.to_lowercase();
+        if lower.contains("staging") { continue; }
+        let pipeline = m.get("pipeline_tag").and_then(|x| x.as_str()).unwrap_or("");
+        let library = m.get("library_name").and_then(|x| x.as_str()).unwrap_or("");
+        let downloads = m.get("downloads").and_then(|x| x.as_i64()).unwrap_or(0);
+        let short = id.strip_prefix("AEON-7/").unwrap_or(id);
+        // GGUF builds aren't vLLM-served; surface them but mark kind generic.
+        let kind = if library == "gguf" || tags.iter().any(|t| t.eq_ignore_ascii_case("gguf")) {
+            "llm-gguf"
+        } else {
+            "llm"
+        };
+        let (image, cdesc) = pair_container(short);
+        let mut desc = describe_model(short, &tags, pipeline, downloads);
+        if let Some(cd) = cdesc { desc = format!("{desc}  Serving container: {cd}"); }
+        // id: a docker-safe slug from the model name.
+        let slug = short.to_lowercase().chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let slug = slug.trim_matches('-').to_string();
+        scored.push((downloads, cat(
+            &format!("aeon7-{slug}"), id, &image, kind, &desc,
+            DEFAULT_MODEL_LEN, "1", DEFAULT_GPU_UTIL, 8192, 8, "",
+        )));
+    }
+    // Most-downloaded AEON-7 models first.
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    (scored.into_iter().map(|(_, e)| e).collect(), None)
+}
+
+/// Cached live AEON-7 catalog. Returns (entries, note). Re-fetches at most every
+/// CATALOG_TTL; serves the cached copy in between. Thread-safe via a Mutex.
+fn aeon7_live_catalog() -> (Vec<serde_json::Value>, Option<String>) {
+    use std::sync::{Mutex, OnceLock};
+    struct Cache {
+        at: std::time::Instant,
+        entries: Vec<serde_json::Value>,
+        note: Option<String>,
+    }
+    static CACHE: OnceLock<Mutex<Option<Cache>>> = OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = guard.as_ref() {
+            if c.at.elapsed() < CATALOG_TTL {
+                return (c.entries.clone(), c.note.clone());
+            }
+        }
+    }
+    let (entries, note) = fetch_aeon7_from_hf();
+    // On a fetch failure (empty + note), keep any prior good cache rather than
+    // blanking the live section — only overwrite the cache on a non-empty result.
+    let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if entries.is_empty() {
+        if let Some(c) = guard.as_ref() {
+            // Stale-but-usable: return the previous good entries, with the new note.
+            return (c.entries.clone(), note.or_else(|| c.note.clone()));
+        }
+    }
+    *guard = Some(Cache { at: std::time::Instant::now(), entries: entries.clone(), note: note.clone() });
+    (entries, note)
+}
+
+/// Minimal blocking GET → JSON (public, no auth) for the HF catalog fetch.
+/// HF rejects requests without a User-Agent, so we always send one.
+fn http_get_json_simple(url: &str) -> Result<serde_json::Value, String> {
+    match ureq::get(url)
+        .set("User-Agent", "AEON-Magick-AgentDash/1.0")
+        .set("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(8))
+        .call()
+    {
+        Ok(resp) => {
+            let body = resp.into_string().map_err(|e| format!("read body: {e}"))?;
+            serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))
+        }
+        Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
+        Err(ureq::Error::Transport(t)) => Err(format!("network: {t}")),
+    }
+}
+
+/// CURATED, commonly-used vLLM models — kept (and merged with the live AEON-7
+/// fetch below). EDIT HERE to add stock models / bump image tags. Defaults are
+/// tuned for a single big-VRAM box (e.g. the GB10 / DGX Spark): 128k context,
+/// 70% VRAM util (NOT 1.0 — that OOMs), single-GPU, conservative batch.
+fn curated_commonly_used() -> Vec<serde_json::Value> {
+    const VLLM: &str = VLLM_IMAGE;
+    const ML: i64 = DEFAULT_MODEL_LEN; // 128k
+    const U: f64 = DEFAULT_GPU_UTIL; // 0.7
+    vec![
         // ── LLMs (vLLM-served) ──
         cat("qwen3-8b", "Qwen/Qwen3-8B", VLLM, "llm",
             "Qwen3 8B — strong general/agentic model; comfortable on a single GPU.",
-            16384, "1", 8192, 16, ""),
+            ML, "1", U, 8192, 16, ""),
         cat("qwen3-14b", "Qwen/Qwen3-14B", VLLM, "llm",
             "Qwen3 14B — bigger Qwen3; great quality/throughput tradeoff.",
-            16384, "1", 8192, 12, ""),
+            ML, "1", U, 8192, 12, ""),
         cat("qwen3-32b", "Qwen/Qwen3-32B", VLLM, "llm",
             "Qwen3 32B — high quality; wants a large-VRAM GPU (or tensor-parallel).",
-            16384, "1", 8192, 8, ""),
+            ML, "1", U, 8192, 8, ""),
         cat("llama31-8b", "meta-llama/Llama-3.1-8B-Instruct", VLLM, "llm",
             "Llama 3.1 8B Instruct — Meta's solid 8B chat model (HF-gated; accept the license).",
-            16384, "1", 8192, 16, ""),
+            ML, "1", U, 8192, 16, ""),
         cat("llama33-70b", "meta-llama/Llama-3.3-70B-Instruct", VLLM, "llm",
             "Llama 3.3 70B Instruct — frontier-class open weights; needs lots of VRAM (multi-GPU).",
-            16384, "all", 8192, 6, ""),
+            ML, "all", U, 8192, 6, ""),
         cat("mistral-small-24b", "mistralai/Mistral-Small-24B-Instruct-2501", VLLM, "llm",
             "Mistral Small 24B Instruct — efficient mid-size instruct model.",
-            16384, "1", 8192, 10, ""),
+            ML, "1", U, 8192, 10, ""),
         cat("gemma2-9b", "google/gemma-2-9b-it", VLLM, "llm",
             "Gemma 2 9B Instruct — Google's compact instruct model (HF-gated).",
-            8192, "1", 8192, 16, ""),
+            ML, "1", U, 8192, 16, ""),
         // ── Embeddings (vLLM in embedding mode) ──
         cat("bge-m3-embed", "BAAI/bge-m3", VLLM, "embedding",
             "BGE-M3 multilingual embeddings — served by vLLM in --task embed mode.",
-            8192, "1", 8192, 32, "--task embed"),
-        // ── Image generation (ComfyUI) ──
-        cat("comfyui", "ComfyUI (bring your own checkpoints)", COMFY, "imagegen",
-            "ComfyUI for image generation (SD/SDXL/Flux). Mount/download checkpoints into the container.",
-            0, "1", 0, 0, ""),
-    ])
+            8192, "1", U, 8192, 32, "--task embed"),
+    ]
+}
+
+/// The full Easy-Deploy catalog = live AEON-7 (HF models + GHCR containers,
+/// cached) merged with the curated commonly-used vLLM list (deduped by model id).
+/// `live` carries (entries, note) where note flags fallback/auth issues for the UI.
+fn deploy_catalog_merged() -> (Vec<serde_json::Value>, Option<String>) {
+    let (mut live, note) = aeon7_live_catalog();
+    // Merge the curated commonly-used models, skipping any whose model id is
+    // already present from the live fetch (dedupe).
+    let have: std::collections::HashSet<String> = live
+        .iter()
+        .filter_map(|e| e.get("model").and_then(|x| x.as_str()).map(|s| s.to_lowercase()))
+        .collect();
+    for c in curated_commonly_used() {
+        let m = c.get("model").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
+        if m.is_empty() || !have.contains(&m) {
+            live.push(c);
+        }
+    }
+    // Always offer the DGX-Spark-optimized ComfyUI image (image-gen) last.
+    live.push(comfyui_entry());
+    (live, note)
+}
+
+/// Back-compat shim used by `deploy_image`'s catalog-id resolution. Returns the
+/// merged catalog as a JSON array (live + curated + comfyui).
+fn curated_deploy_catalog() -> serde_json::Value {
+    serde_json::Value::Array(deploy_catalog_merged().0)
 }
 
 /// Shell snippet (no quoting hazards) that prints what's already on the box: a
@@ -2455,9 +2698,10 @@ fn deploy_allowed(sys: &System) -> (bool, String) {
     }
 }
 
-/// GET /agent/systems/:id/deploy/catalog — the curated model+container catalog
-/// (with template flags) + what's already on the box (containers + detected
-/// models). Allowed for dgx systems or any docker+GPU box.
+/// GET /agent/systems/:id/deploy/catalog — the MERGED model+container catalog
+/// (live AEON-7 HuggingFace models + paired GHCR serving containers, cached,
+/// merged with the curated commonly-used vLLM list) + what's already on the box
+/// (containers + detected models). Allowed for dgx systems or any docker+GPU box.
 pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
     let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
         return Json(json!({"ok": false, "err": "no such system"}));
@@ -2468,20 +2712,35 @@ pub async fn deploy_catalog(Path(id): Path<String>) -> impl IntoResponse {
             return Err(format!("Easy Deploy needs a GPU + docker — {why}"));
         }
         let (containers, models) = gather_installed(&sys);
-        Ok((why, containers, models))
+        // Build the merged catalog inside the blocking task (it makes the cached
+        // HF fetch). `note` flags live-fetch fallback for the UI.
+        let (catalog, note) = deploy_catalog_merged();
+        Ok((why, containers, models, catalog, note))
     })
     .await
     .unwrap_or_else(|_| Err("join error".into()));
     match res {
-        Ok((why, containers, models)) => Json(json!({
-            "ok": true,
-            "catalog": curated_deploy_catalog(),
-            "deploy_dir": DEPLOY_DIR,
-            "allowed_via": why,                 // "dgx" | "docker+gpu"
-            "installed_containers": containers, // docker ps -a (slim shape)
-            "installed_models": models,         // detected model ids / dir names
-            "live_catalog_todo": "Catalog is curated in code (curated_deploy_catalog). A live GHCR/registry fetch is a future enhancement (`gh`/registry token not available here).",
-        })),
+        Ok((why, containers, models, catalog, note)) => {
+            // GHCR's packages API needs a token (it 401s unauthenticated), so the
+            // AEON-7 container side is a seeded list until a token is wired in.
+            let ghcr_note = format!(
+                "AEON-7 GHCR containers are seeded (the GitHub packages API {GHCR_PACKAGES_URL} \
+                 returns 401 without a token). Edit aeon7_ghcr_seed()/aeon7_ghcr_standalone() to adjust."
+            );
+            let live_note = note.unwrap_or_else(|| {
+                "Live AEON-7 HuggingFace catalog (cached ~7m), step3.7 + Nemotron filtered out, merged with curated vLLM models.".into()
+            });
+            Json(json!({
+                "ok": true,
+                "catalog": catalog,
+                "deploy_dir": DEPLOY_DIR,
+                "allowed_via": why,                 // "dgx" | "docker+gpu"
+                "installed_containers": containers, // docker ps -a (slim shape)
+                "installed_models": models,         // detected model ids / dir names
+                "live_catalog_todo": format!("{live_note} {ghcr_note}"),
+                "ghcr_needs_token": true,
+            }))
+        }
         Err(e) => Json(json!({"ok": false, "err": e})),
     }
 }
@@ -2491,9 +2750,15 @@ pub struct DeployFlags {
     /// vLLM `--max-model-len` (context window). 0/None = omit (image default).
     #[serde(default)]
     max_model_len: Option<i64>,
-    /// GPU allocation: "all" | a count ("1") | a device list ("0,1").
+    /// GPU allocation: "all" | a count ("1") | a device list ("0,1") — WHICH /
+    /// HOW MANY devices (drives the compose device reservation + tensor-parallel).
     #[serde(default)]
     gpu: Option<String>,
+    /// GPU VRAM utilization as a 0.0–1.0 fraction → vLLM `--gpu-memory-utilization`.
+    /// This is the headline control (the UI's % VRAM slider). Default 0.7 if
+    /// omitted; clamped to (0,1]. NEVER defaults to 1.0 (that OOMs the box).
+    #[serde(default)]
+    gpu_mem_util: Option<f64>,
     /// vLLM `--max-num-batched-tokens`. 0/None = omit.
     #[serde(default)]
     max_num_batched_tokens: Option<i64>,
@@ -2595,6 +2860,20 @@ fn render_deploy_compose(
         None
     };
 
+    // GPU VRAM utilization (the % slider) → vLLM --gpu-memory-utilization.
+    // Clamp to (0,1]; default to 0.7 if omitted/invalid — NEVER 1.0 (OOMs).
+    let mem_util = {
+        let raw = f.gpu_mem_util.unwrap_or(DEFAULT_GPU_UTIL);
+        let v = if raw.is_finite() && raw > 0.0 { raw } else { DEFAULT_GPU_UTIL };
+        (v.min(1.0) * 100.0).round() / 100.0 // 2-dp, capped at 1.0
+    };
+    // Context window: default to 128k when not supplied (0 still means "omit").
+    let model_len: Option<i64> = match f.max_model_len {
+        Some(0) => None,                       // explicit 0 = omit (image default)
+        Some(v) if v > 0 => Some(v),
+        _ => Some(DEFAULT_MODEL_LEN),          // unset → 128k
+    };
+
     let is_vllm = kind == "llm" || kind == "embedding";
     let mut cmd_args: Vec<String> = Vec::new();
     let mut env_lines: Vec<String> = Vec::new();
@@ -2608,7 +2887,9 @@ fn render_deploy_compose(
                 cmd_args.push(format!("--tensor-parallel-size {tp}"));
             }
         }
-        if let Some(v) = f.max_model_len.filter(|v| *v > 0) {
+        // Headline VRAM% control.
+        cmd_args.push(format!("--gpu-memory-utilization {mem_util}"));
+        if let Some(v) = model_len {
             cmd_args.push(format!("--max-model-len {v}"));
         }
         if let Some(v) = f.max_num_batched_tokens.filter(|v| *v > 0) {
@@ -2624,7 +2905,10 @@ fn render_deploy_compose(
             }
         }
     } else {
-        if let Some(v) = f.max_model_len.filter(|v| *v > 0) {
+        // Non-vLLM kinds (image-gen / gguf / generic): surface values as env so
+        // any server image can read them (incl. the VRAM fraction).
+        env_lines.push(format!("      GPU_MEMORY_UTILIZATION: \"{mem_util}\""));
+        if let Some(v) = model_len {
             env_lines.push(format!("      MAX_MODEL_LEN: \"{v}\""));
         }
         if let Some(v) = f.max_num_batched_tokens.filter(|v| *v > 0) {
@@ -2658,7 +2942,7 @@ fn render_deploy_compose(
 
     format!(
         "# Generated by AEON Magick — Agent Dash Easy Deploy.\n\
-         # model={model} kind={kind} gpu={gpu} max_model_len={ml:?} max_num_batched_tokens={mbt:?} max_num_seqs={ms:?}\n\
+         # model={model} kind={kind} gpu={gpu} gpu_mem_util={mem_util} max_model_len={ml:?} max_num_batched_tokens={mbt:?} max_num_seqs={ms:?}\n\
          services:\n  \
          {name}:\n    \
          image: {image}\n    \
@@ -2673,7 +2957,7 @@ fn render_deploy_compose(
          resources:\n        \
          reservations:\n          \
          devices:\n{gpu_block}\n",
-        ml = f.max_model_len,
+        ml = model_len,
         mbt = f.max_num_batched_tokens,
         ms = f.max_num_seqs,
     )

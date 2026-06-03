@@ -100,11 +100,12 @@
   let deployEntries: api.DeployCatalogEntry[] = [];
   let deploySel = -1;                               // index into deployEntries (-1 = none)
   let deployName = '';
-  // the 4 highlighted flags (pre-filled from the picked entry's template)
-  let dfModelLen: number | null = 16384;
-  let dfGpu = '1';
+  // the highlighted flags (pre-filled from the picked entry's template)
+  let dfModelLen: number | null = 131072;           // default 128k context
+  let dfGpu = '1';                                  // which/how many devices ("all" | "1" | "0,1")
+  let dfGpuPct = 70;                                // % of total GPU VRAM (slider) → --gpu-memory-utilization. NOT 100 (OOMs).
   let dfMaxBatchTok: number | null = 8192;
-  let dfMaxSeqs: number | null = 16;
+  let dfMaxSeqs: number | null = 8;
   let dfExtra = '';                                 // advanced: raw extra args
   let depAdvOpen = false;                           // advanced flags collapsed
   let deployBusy = false;
@@ -690,8 +691,9 @@
   }
 
   // ── connected-systems actions ───────────────────────────────────────
-  let regId = ''; // which system's inline (masked) SSH-password field is open
-  let regPw = '';
+  // Per-system one-time SSH password (several systems can be unconnected at
+  // once). NEVER stored server-side; cleared on a successful authenticate.
+  let authPw: Record<string, string> = {};
   function rolesArr(): string[] {
     const r: string[] = [];
     if (roleOpenclaw) r.push('openclaw');
@@ -713,26 +715,27 @@
       port = 22;
       roleOpenclaw = roleHermes = roleDgx = false;
       await refresh();
-      regId = res.id ?? ''; // immediately open the masked SSH-password prompt for the new system
-      regPw = '';
+      // The new card shows its always-visible masked SSH-password input itself
+      // (it's not 'connected'); no open-toggle needed.
     } finally {
       adding = false;
     }
   }
-  function onRegister(s: api.ConnectedSystem) {
-    // open an inline masked SSH-password field for this system (dots-concealed)
-    regId = s.id;
-    regPw = '';
-    delete fallback[s.id];
-    fallback = fallback;
-  }
+  /** Authenticate: push the Pi's key using the one-time SSH password for this
+   *  system. On success the card flips to connected (input disappears); on
+   *  failure we surface the manual authorize command and keep the auth section. */
   async function doRegister(s: api.ConnectedSystem) {
     busyId = s.id;
     try {
-      const res = await api.registerSystem(s.id, regPw);
-      regPw = '';
-      regId = '';
-      if (!res.ok && res.authorize_command) {
+      const res = await api.registerSystem(s.id, authPw[s.id] ?? '');
+      if (res.ok) {
+        // Connected — clear the one-time password + any stale fallback.
+        delete authPw[s.id];
+        authPw = authPw;
+        delete fallback[s.id];
+        fallback = fallback;
+      } else if (res.authorize_command) {
+        // Show the SSH instructions; keep the auth section visible to retry.
         fallback[s.id] = res.authorize_command;
         fallback = fallback;
       }
@@ -903,7 +906,7 @@
     const base = (c?.id || 'aeon-deploy').toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
     return base.replace(/^-+|-+$/g, '') || 'aeon-deploy';
   }
-  /** Pick a catalog entry → pre-fill the name + the 4 highlighted flags. */
+  /** Pick a catalog entry → pre-fill the name + the highlighted flags. */
   function pickEntry(i: number) {
     deploySel = i;
     const e = deployEntries[i];
@@ -911,7 +914,10 @@
     deployName = suggestName(e);
     const t = e.template_flags;
     dfModelLen = t.max_model_len || null;
-    dfGpu = t.gpu || 'all';
+    dfGpu = t.gpu || '1';
+    // VRAM% slider ← template's gpu_mem_util (0.0–1.0). Default 70% (never 100).
+    dfGpuPct = Math.round(((t.gpu_mem_util && t.gpu_mem_util > 0 ? t.gpu_mem_util : 0.7)) * 100);
+    if (!(dfGpuPct > 0 && dfGpuPct <= 100)) dfGpuPct = 70;
     dfMaxBatchTok = t.max_num_batched_tokens || null;
     dfMaxSeqs = t.max_num_seqs || null;
     dfExtra = t.extra || '';
@@ -932,7 +938,7 @@
   }
   function kindLabel(k: string): string {
     return (
-      { llm: 'LLM', imagegen: 'image-gen', tts: 'TTS', embedding: 'embedding' }[k] ?? k
+      { llm: 'LLM', 'llm-gguf': 'LLM (GGUF)', imagegen: 'image-gen', tts: 'TTS', embedding: 'embedding' }[k] ?? k
     );
   }
   /** Container image → short "name:tag" chip text. */
@@ -991,6 +997,7 @@
         flags: {
           max_model_len: dfModelLen,
           gpu: dfGpu,
+          gpu_mem_util: Math.min(100, Math.max(1, dfGpuPct)) / 100, // % VRAM slider → 0.0–1.0
           max_num_batched_tokens: dfMaxBatchTok,
           max_num_seqs: dfMaxSeqs,
           extra: dfExtra,
@@ -1804,24 +1811,38 @@
                   {/each}
                 </div>
 
-                <!-- selected-entry editor: name + 4 highlighted flags + advanced -->
+                <!-- selected-entry editor: name + highlighted flags + advanced -->
                 {#if deploySel >= 0 && deployEntries[deploySel]}
                   <div class="dep-editor">
                     <div class="dep-ed-head">
                       <span class="dep-ed-title">{deployEntries[deploySel].model}</span>
                       <span class="dep-ed-img">→ {deployEntries[deploySel].container_image}</span>
                     </div>
+                    {#if deployEntries[deploySel].description}
+                      <p class="dep-ed-desc">{deployEntries[deploySel].description}</p>
+                    {/if}
 
                     <label class="dep-f wide"><span>deploy name</span>
                       <input class="dep-in" bind:value={deployName} placeholder="deploy name" /></label>
 
-                    <!-- the four flags people tune, big + labeled -->
+                    <!-- headline control: % of total GPU VRAM (the slider) -->
+                    <div class="dep-vram">
+                      <div class="dep-vram-head">
+                        <span class="dep-hl-lbl">GPU VRAM allocation</span>
+                        <span class="dep-vram-pct">{dfGpuPct}%</span>
+                        <span class="dep-hl-flag">--gpu-memory-utilization {(dfGpuPct / 100).toFixed(2)}</span>
+                      </div>
+                      <input class="dep-slider" type="range" min="10" max="100" step="1" bind:value={dfGpuPct} />
+                      <p class="dep-vram-note">% of each GPU's total VRAM vLLM may use. Default 70% — going to 100% commonly OOMs the box.</p>
+                    </div>
+
+                    <!-- the other flags people tune, labeled -->
                     <div class="dep-hl-grid">
                       <label class="dep-hl"><span class="dep-hl-lbl">max model length</span>
                         <span class="dep-hl-flag">--max-model-len</span>
                         <input class="dep-in" type="number" min="0" bind:value={dfModelLen} /></label>
-                      <label class="dep-hl"><span class="dep-hl-lbl">GPU allocation</span>
-                        <span class="dep-hl-flag">device / -tp / -util</span>
+                      <label class="dep-hl"><span class="dep-hl-lbl">GPU devices</span>
+                        <span class="dep-hl-flag">count / list (tensor-parallel)</span>
                         <input class="dep-in" bind:value={dfGpu} placeholder="all / 1 / 0,1" /></label>
                       <label class="dep-hl"><span class="dep-hl-lbl">max batch</span>
                         <span class="dep-hl-flag">--max-num-batched-tokens</span>
@@ -1983,25 +2004,37 @@
                 </div>
                 <span class="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full {badgeCls(s.status)}">{s.status || 'pending'}</span>
               </div>
-              <div class="flex gap-2">
-                <button class="btn text-xs" on:click={() => onRegister(s)} disabled={busyId === s.id}>register (SSH key)</button>
-                <button class="btn text-xs" on:click={() => onTest(s)} disabled={busyId === s.id}>test</button>
-                <button class="btn text-xs ml-auto text-red-300" on:click={() => onRemove(s)}>remove</button>
-              </div>
-              {#if regId === s.id}
-                <form class="flex flex-wrap gap-2 items-center" on:submit|preventDefault={() => doRegister(s)}>
-                  <input class="{inputCls} flex-1 min-w-[180px]" type="password" autocomplete="off"
-                         placeholder="SSH password for {s.ssh_user}@{s.address} — used once, never stored"
-                         bind:value={regPw} disabled={busyId === s.id} />
-                  <button class="btn-primary text-xs" type="submit" disabled={busyId === s.id}>{busyId === s.id ? 'registering…' : 'authenticate'}</button>
-                  <button class="btn text-xs" type="button" on:click={() => (regId = '')}>cancel</button>
-                </form>
-              {/if}
-              {#if fallback[s.id]}
-                <div class="text-[10px] font-mono text-amber-300 space-y-1">
-                  <p>Password auth unavailable — run this on {s.address}, then Test:</p>
-                  <code class="block bg-ink-900 rounded p-2 break-all text-zinc-200">{fallback[s.id]}</code>
+              {#if s.status === 'connected'}
+                <!-- Connected: a green state + test/remove. No auth input. -->
+                <div class="flex gap-2 items-center">
+                  <span class="flex items-center gap-1.5 text-xs text-live-300">
+                    <span class="h-2 w-2 rounded-full bg-live-400 shadow-[0_0_6px_#34d399]"></span>connected
+                  </span>
+                  <button class="btn text-xs" on:click={() => onTest(s)} disabled={busyId === s.id}>
+                    {busyId === s.id ? 'testing…' : 'test connection'}
+                  </button>
+                  <button class="btn text-xs ml-auto text-red-300" on:click={() => onRemove(s)}>remove</button>
                 </div>
+              {:else}
+                <!-- Not connected: always-visible masked password + single
+                     authenticate button (+ test to re-validate, + remove). -->
+                <form class="flex flex-wrap gap-2 items-center" on:submit|preventDefault={() => doRegister(s)}>
+                  <input class="{inputCls} flex-1 min-w-[200px]" type="password" autocomplete="off"
+                         placeholder="SSH password for {s.ssh_user}@{s.address} — used once, never stored"
+                         bind:value={authPw[s.id]} disabled={busyId === s.id} />
+                  <button class="btn-primary text-xs" type="submit" disabled={busyId === s.id}>
+                    {busyId === s.id ? 'authenticating…' : 'authenticate'}
+                  </button>
+                  <button class="btn text-xs" type="button" on:click={() => onTest(s)} disabled={busyId === s.id}>test</button>
+                  <button class="btn text-xs text-red-300" type="button" on:click={() => onRemove(s)}>remove</button>
+                </form>
+                {#if fallback[s.id]}
+                  <div class="text-[10px] font-mono text-amber-300 space-y-1">
+                    <p>Password auth unavailable — run this on {s.address} as {s.ssh_user}, then hit <b>test</b>:</p>
+                    <code class="block bg-ink-900 rounded p-2 break-all text-zinc-200">{fallback[s.id]}</code>
+                    <button class="btn text-xs" type="button" on:click={() => copy(fallback[s.id])}>copy command</button>
+                  </div>
+                {/if}
               {/if}
             </div>
           {/each}
@@ -2670,6 +2703,7 @@
   .dep-ed-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
   .dep-ed-title { font-size: 0.82rem; color: #f4f4f5; font-weight: 700; }
   .dep-ed-img { font-family: ui-monospace, monospace; font-size: 0.6rem; color: #93c5fd; }
+  .dep-ed-desc { font-size: 0.64rem; color: #a1a1aa; line-height: 1.45; }
 
   .dep-in {
     background: #0a0a10; border: 1px solid #2a2a38; border-radius: 0.35rem; padding: 0.3rem 0.5rem;
@@ -2690,6 +2724,20 @@
   .dep-hl-lbl { font-size: 0.68rem; color: #ede9fe; font-weight: 600; }
   .dep-hl-flag { font-family: ui-monospace, monospace; font-size: 0.54rem; color: #a78bfa; }
   .dep-hl .dep-in { width: 100%; margin-top: 0.15rem; font-size: 0.78rem; }
+
+  /* headline GPU VRAM % slider */
+  .dep-vram {
+    display: flex; flex-direction: column; gap: 0.35rem; padding: 0.6rem 0.7rem;
+    border: 1px solid rgba(167, 139, 250, 0.45); border-radius: 0.55rem;
+    background: rgba(167, 139, 250, 0.1);
+  }
+  .dep-vram-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+  .dep-vram-pct {
+    font-family: ui-monospace, monospace; font-size: 1rem; font-weight: 700; color: #c4b5fd;
+    margin-left: auto;
+  }
+  .dep-slider { width: 100%; accent-color: #a78bfa; cursor: pointer; }
+  .dep-vram-note { font-size: 0.58rem; color: #71717a; line-height: 1.4; }
 
   .dep-adv-toggle {
     align-self: flex-start; font-family: ui-monospace, monospace; font-size: 0.62rem; color: #a1a1aa;
