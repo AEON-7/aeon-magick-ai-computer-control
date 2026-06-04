@@ -1981,7 +1981,7 @@
           <h2 class="font-mono text-xs uppercase tracking-wider text-cursed-300">Add a connected system</h2>
           <div class="grid grid-cols-2 gap-2">
             <input class="{inputCls} col-span-2" placeholder="Label (e.g. OpenClaw)" bind:value={label} />
-            <input class={inputCls} placeholder="Address (e.g. 192.168.1.155)" bind:value={address} />
+            <input class={inputCls} placeholder="Address (e.g. 192.168.1.50)" bind:value={address} />
             <div class="flex gap-2">
               <input class="{inputCls} flex-1" placeholder="ssh user" bind:value={sshUser} />
               <input class="{inputCls} w-20" type="number" placeholder="port" bind:value={port} />

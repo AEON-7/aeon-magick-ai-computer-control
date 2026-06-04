@@ -3793,7 +3793,9 @@ pub async fn agent_create_persona(
     .unwrap_or_else(|_| Err("join error".into()));
 
     // The remaining manual steps (need secrets / homeserver admin — not automated).
-    let hs = "matrix.unhash.me";
+    // Generic homeserver placeholder so no specific Matrix domain is baked into
+    // the image; the admin substitutes their own homeserver in the example.
+    let hs = "<your-matrix-homeserver>";
     let manual_steps = json!([
         {
             "title": "Create the Matrix account + mint a token",

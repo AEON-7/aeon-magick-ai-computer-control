@@ -313,18 +313,35 @@ BUILDING.md       Compile + build the image on macOS or Linux
 
 ---
 
-## Getting started
+## Hardware you'll need
 
-[`AGENTS.md`](./AGENTS.md) is the read-this-first document: flashing the SD card,
-first boot, finding your generated admin password, opening the web UI, and
-pairing an AI agent.
+A small, cheap bill of materials — most of it you may already own:
 
-[`BUILDING.md`](./BUILDING.md) is for rebuilding from source.
+| Part | What / why | Notes |
+|---|---|---|
+| **Raspberry Pi 4** (2 GB+) | The appliance. Its USB-C port runs **USB-OTG gadget mode** to emulate a keyboard + mouse + trackpad to the target. | Pi 4 is the tested platform. **Use a Pi 4** — the Pi 5's USB-C is power-only and can't act as the HID gadget. |
+| **microSD card** (16 GB+) | Boots the AEON Magick image. | A fast A1/A2 card helps stream latency. |
+| **HDMI video-capture device** | The "eyes" — pipes the target's HDMI into the Pi as a USB camera. | **Elgato Cam Link 4K** (rock-solid 1080p60 / 4K30) **or any ~$10 MS2109-based HDMI→USB stick**. Both auto-detected (UVC) — no drivers. |
+| **USB-C data cable** | Pi-C → target-C — carries the emulated keyboard/mouse and powers the Pi from the target. | Must be **data-capable**; a charge-only cable powers the Pi but enumerates no HID (`keyboard_online` reads false). |
+| **HDMI cable** | Target's HDMI-out → the capture device. | |
+| *(optional)* **Tailscale** | Reach the box — and everything it can see — from anywhere in the world. | Enabled during enrollment. |
 
-The screenshots above were captured from the live web UI and **redacted** (private
-IPs, hostnames, the Matrix homeserver, tokens, and keys are masked) by
-[`scripts/capture-screenshots.js`](./scripts/capture-screenshots.js) — re-runnable
-against your own device.
+Nothing is installed on the **target** — it only ever sees a USB keyboard/mouse and an HDMI sink. Works on macOS, Windows, Linux, and even pre-OS (BIOS, FileVault, Windows OOBE). The Pi is powered over the USB-C link by the target (or via its GPIO 5V pins); the capture device draws power from the Pi's USB-A.
+
+---
+
+## Quick start
+
+1. **Flash the image.** Grab the latest `image_vNN-aeon-magick.img.xz` from the [Releases](../../releases) page and write it with **Raspberry Pi Imager** ("Use custom" → the `.img.xz`) or:
+   `xzcat image_vNN-aeon-magick.img.xz | sudo dd of=/dev/diskN bs=4M status=progress`
+2. **First boot → join WiFi.** On first power-up the Pi becomes its own WiFi access point (**`aeon-setup`**). Connect to it from a laptop/phone; a captive-portal wizard opens — pick your home WiFi + password. *(WiFi beats Ethernet for stream latency on the Pi 4 — its Ethernet sits behind a USB bridge while WiFi is on a PCIe lane — so prefer WiFi enrollment.)*
+3. **Open the web UI.** The Pi joins your network and is reachable at `https://<pi-ip>/` (or `https://aeon-magick.local/`). Accept the self-signed cert and set/confirm the **admin password** — a random one is generated at first boot and written to `aeon-credentials.txt` on the SD card's boot partition.
+4. **Wire the target.** Pi **USB-C → target USB-C** (data cable) for keyboard/mouse; target **HDMI-out → capture device → Pi USB-A** for vision.
+5. **Drive it — or hand it to an AI.** The UI now streams the target's screen: type, click, run macros. To empower an agent, mint a token on the **API Keys** page (or provision one from the **Agent Dash**), point it at `https://<pi>/api` (REST) or `https://<pi>/api/mcp` (MCP), and the skill auto-deploys into its workspace.
+
+Zero software on the target, full control from your browser or your AI — and a hard kill switch: unplug it or revoke the key and access is instantly gone.
+
+For the deep dive (the agent skill, macros, personas, the privacy stack) read [`AGENTS.md`](./AGENTS.md); to rebuild from source see [`BUILDING.md`](./BUILDING.md). The screenshots above were captured from the live UI and **redacted** by [`scripts/capture-screenshots.js`](./scripts/capture-screenshots.js) (re-runnable against your own device).
 
 ---
 
