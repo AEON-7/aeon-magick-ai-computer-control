@@ -1483,6 +1483,37 @@ except Exception as e:
     print(json.dumps({'err':'read: '+str(e)}))
 "#;
 
+/// RESOLVE-PATH mode python for corpus WRITE/DELETE: print the absolute,
+/// traversal-checked target path for `<corpus-root>/<rel>` (or `ERR ...`).
+/// argv[1]=agent id, argv[2]=base64'd relative path. Same root-derivation as the
+/// list/read scripts. We do NOT require the file to exist (uploads create it),
+/// but the target must stay strictly UNDER the corpus root (never the root
+/// itself), so neither an upload nor a delete can ever escape or nuke the vault.
+const CORPUS_PATH_PY: &str = r#"import os,sys,base64
+h=os.path.expanduser('~')
+aid=sys.argv[1]
+rel=base64.b64decode(sys.argv[2]).decode('utf-8','replace')
+import json
+root=None
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+    for a in ((d.get('agents') or {}).get('list') or []):
+        if isinstance(a,dict) and a.get('id')==aid:
+            ws=a.get('workspace')
+            if ws: root=os.path.join(ws,'memory',aid+'-corpus')
+            break
+except Exception:
+    pass
+if not root:
+    root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+rootr=os.path.realpath(root)
+target=os.path.realpath(os.path.join(rootr,rel))
+# Guard: target must be strictly UNDER the corpus root (never == root).
+if not target.startswith(rootr+os.sep):
+    print('ERR path escapes corpus root'); sys.exit(0)
+print(target)
+"#;
+
 /// GET /agent/systems/:id/agents/:aid/corpus — list the agent's corpus files
 /// (relative path + size) + the resolved root.
 pub async fn agent_corpus_list(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
@@ -1647,9 +1678,21 @@ fn drop_skill(sys: &System, skill: &str, kind: &str, file_b64: &str) -> Result<S
 // (voice / identity.voice / tts.*) so we check those first, then fall back to
 // the global. We also classify the value: a short single-token name → a named
 // clone; a long descriptive sentence → a voice-designer description.
+//
+// The *manageable* per-agent voice actually lives in the agent's voip env file
+// `$HOME/voip-<id>/.env` on the gateway:
+//   VOXTRAL_VOICE=<clone-name>               — the named clone sample to use
+//   VOXTRAL_VOICE_DESCRIPTION=<designer text> — free-text voice-designer prompt
+// The clone .wav samples themselves live on the DGX (the system whose roles
+// contain "dgx") under TTS_VOICES_DIR. We read both env values alongside the
+// config-derived effective voice, and provide write paths for each.
+
+/// Where the named-clone .wav samples live on the DGX/TTS host.
+const TTS_VOICES_DIR: &str = "/home/albert/stacks/pocket-tts-server/voices";
 
 /// VOICE python: resolve the agent's effective voice + its source + the global
-/// default. argv[1] = agent id. base64'd over SSH.
+/// default, AND read the agent's `~/voip-<id>/.env` (VOXTRAL_VOICE +
+/// VOXTRAL_VOICE_DESCRIPTION). argv[1] = agent id. base64'd over SSH.
 const VOICE_PY: &str = r#"import json,os,sys
 h=os.path.expanduser('~')
 aid=sys.argv[1]
@@ -1681,14 +1724,29 @@ def kind(v):
     s=v.strip()
     if len(s)>60 or s.count(' ')>=4 or '.' in s: return 'designer'
     return 'clone'
+# voip env: VOXTRAL_VOICE + VOXTRAL_VOICE_DESCRIPTION
+envp=os.path.join(h,'voip-%s'%aid,'.env')
+clone_name=None; descr=None; env_exists=os.path.isfile(envp)
+if env_exists:
+    try:
+        for ln in open(envp,encoding='utf-8',errors='replace'):
+            s=ln.rstrip('\n')
+            if s.startswith('VOXTRAL_VOICE='):
+                clone_name=s[len('VOXTRAL_VOICE='):]
+            elif s.startswith('VOXTRAL_VOICE_DESCRIPTION='):
+                descr=s[len('VOXTRAL_VOICE_DESCRIPTION='):]
+    except Exception:
+        pass
 print(json.dumps({'voice':eff,'source':src,'kind':kind(eff),
                   'is_override':ov is not None,'global':glob,'provider':glob_provider,
-                  'found':bool(a)}))
+                  'found':bool(a),'env_path':envp,'env_exists':env_exists,
+                  'clone_name':clone_name,'description':descr}))
 "#;
 
 /// GET /agent/systems/:id/agents/:aid/voice — the agent's effective TTS voice
 /// (per-agent override if any, else the gateway default) + whether it looks
-/// like a named clone vs a voice-designer description.
+/// like a named clone vs a voice-designer description + the voip-env clone name
+/// & designer description.
 pub async fn agent_voice(Path((id, agent_id)): Path<(String, String)>) -> impl IntoResponse {
     let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
         return Json(json!({"ok": false, "err": "no such system"}));
@@ -1711,8 +1769,240 @@ pub async fn agent_voice(Path((id, agent_id)): Path<(String, String)>) -> impl I
                 "is_override": p.get("is_override").cloned().unwrap_or(json!(false)),
                 "global": p.get("global").cloned().unwrap_or(serde_json::Value::Null),
                 "provider": p.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                "env_path": p.get("env_path").cloned().unwrap_or(serde_json::Value::Null),
+                "env_exists": p.get("env_exists").cloned().unwrap_or(json!(false)),
+                "clone_name": p.get("clone_name").cloned().unwrap_or(serde_json::Value::Null),
+                "description": p.get("description").cloned().unwrap_or(serde_json::Value::Null),
             }))
         }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// ENV-SET python: replace-or-append a single `KEY=value` line in the agent's
+/// `$HOME/voip-<id>/.env`, preserving every other line, written atomically
+/// (temp + os.replace). Creates the dir + file if absent. argv[1]=agent id,
+/// argv[2]=env key, argv[3]=base64'd value (so newlines/quotes survive). base64'd
+/// over SSH. Prints `OK <path>` or `ERR <msg>`.
+const VOICE_ENV_SET_PY: &str = r#"import os,sys,base64
+h=os.path.expanduser('~')
+aid=sys.argv[1]; key=sys.argv[2]
+val=base64.b64decode(sys.argv[3]).decode('utf-8','replace')
+# Collapse any embedded newlines so the value stays a single env line.
+val=val.replace('\r',' ').replace('\n',' ')
+d=os.path.join(h,'voip-%s'%aid)
+p=os.path.join(d,'.env')
+try:
+    os.makedirs(d,exist_ok=True)
+    lines=[]
+    if os.path.isfile(p):
+        lines=open(p,encoding='utf-8',errors='replace').read().split('\n')
+    out=[]; done=False
+    for ln in lines:
+        if ln.startswith(key+'='):
+            if not done:
+                out.append(key+'='+val); done=True
+            # drop any duplicate KEY= lines
+        else:
+            out.append(ln)
+    if not done:
+        # append before any trailing blank line for tidiness
+        while out and out[-1]=='':
+            out.pop()
+        out.append(key+'='+val)
+    txt='\n'.join(out)
+    if not txt.endswith('\n'): txt+='\n'
+    tmp=p+'.aeon.tmp'
+    open(tmp,'w',encoding='utf-8').write(txt)
+    os.replace(tmp,p)
+    print('OK '+p)
+except Exception as e:
+    print('ERR '+str(e))
+"#;
+
+/// Find the registered system whose roles contain "dgx" (where the clone .wav
+/// samples live). Returns None if no such system is registered.
+fn dgx_system() -> Option<System> {
+    load_systems().into_iter().find(|s| s.roles.iter().any(|r| r == "dgx"))
+}
+
+/// Write VOXTRAL_VOICE / VOXTRAL_VOICE_DESCRIPTION into the agent's voip env on
+/// the gateway via VOICE_ENV_SET_PY (atomic replace-or-append). Returns the
+/// resolved .env path.
+fn set_voice_env(sys: &System, aid: &str, key: &str, value: &str) -> Result<String, String> {
+    let cmd = format!(
+        "echo {} | base64 -d | python3 - {} {} {}",
+        b64(VOICE_ENV_SET_PY.as_bytes()),
+        aid,
+        key,
+        b64(value.as_bytes())
+    );
+    let out = ssh_capture(sys, &cmd)?;
+    let out = out.trim();
+    if out.starts_with("OK") {
+        Ok(out[2..].trim().to_string())
+    } else if out.starts_with("ERR") {
+        Err(out[3..].trim().to_string())
+    } else {
+        Err(format!("unexpected env-set output: {}", out.chars().take(120).collect::<String>()))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct VoiceDesignerReq {
+    /// Free-text voice-designer prompt → VOXTRAL_VOICE_DESCRIPTION.
+    description: String,
+}
+
+/// POST /agent/systems/:id/agents/:aid/voice/designer — set the agent's
+/// VOXTRAL_VOICE_DESCRIPTION (designer prompt) in `~/voip-<id>/.env`.
+pub async fn agent_voice_designer_put(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<VoiceDesignerReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    if req.description.len() > 2000 {
+        return Json(json!({"ok": false, "err": "description too long (max 2000 chars)"}));
+    }
+    let aid = sanitize_id(&agent_id);
+    let value = req.description.clone();
+    let res = tokio::task::spawn_blocking(move || set_voice_env(&sys, &aid, "VOXTRAL_VOICE_DESCRIPTION", &value))
+        .await
+        .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(path) => Json(json!({"ok": true, "env_path": path, "description": req.description})),
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct VoiceCloneReq {
+    /// Named clone → VOXTRAL_VOICE.
+    name: String,
+}
+
+/// POST /agent/systems/:id/agents/:aid/voice/clone — point the agent at a named
+/// clone by setting VOXTRAL_VOICE in `~/voip-<id>/.env`.
+pub async fn agent_voice_clone_set(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<VoiceCloneReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let name = sanitize_skill_name(&req.name);
+    if name.is_empty() {
+        return Json(json!({"ok": false, "err": "clone name required"}));
+    }
+    let aid = sanitize_id(&agent_id);
+    let value = name.clone();
+    let res = tokio::task::spawn_blocking(move || set_voice_env(&sys, &aid, "VOXTRAL_VOICE", &value))
+        .await
+        .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(path) => Json(json!({"ok": true, "env_path": path, "clone_name": name})),
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// GET /agent/systems/:id/agents/:aid/voice/clones — list the named clone
+/// samples available on the DGX/TTS host (basenames of TTS_VOICES_DIR/*.wav,
+/// `.wav` stripped). No DGX system registered → empty list + a note. (The :id /
+/// :aid path params are ignored here — the clones are a host-global pool — but
+/// keeping them keeps the route under the agent for a consistent UI surface.)
+pub async fn agent_voice_clones_list(Path((_id, _agent_id)): Path<(String, String)>) -> impl IntoResponse {
+    let Some(dgx) = dgx_system() else {
+        return Json(json!({"ok": true, "clones": [], "note": "no DGX/TTS host registered"}));
+    };
+    let res = tokio::task::spawn_blocking(move || {
+        // This is a MULTI-line output, and ssh_capture drops one line off the top
+        // (either the eaten __AEONHDR__ marker or, if that survived, the first real
+        // line). Emit a sacrificial `__AEONPAD__` first line so the dropped line is
+        // never a real clone name, then filter the pad out below. `2>/dev/null` so a
+        // missing dir just yields nothing; one basename (no .wav) per line.
+        let cmd = format!(
+            "echo __AEONPAD__; for f in {TTS_VOICES_DIR}/*.wav; do [ -e \"$f\" ] && basename \"$f\" .wav; done 2>/dev/null"
+        );
+        ssh_capture(&dgx, &cmd)
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok(out) => {
+            let clones: Vec<String> = out
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && *l != "__AEONPAD__")
+                .map(|l| l.to_string())
+                .collect();
+            Json(json!({"ok": true, "clones": clones, "dir": TTS_VOICES_DIR}))
+        }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct VoiceCloneUploadReq {
+    /// Clone name → `<TTS_VOICES_DIR>/<name>.wav` on the DGX + VOXTRAL_VOICE.
+    name: String,
+    /// base64-encoded .wav bytes.
+    wav_b64: String,
+}
+
+/// POST /agent/systems/:id/agents/:aid/voice/clone/upload — upload a new clone
+/// sample .wav to the DGX/TTS host, then point this agent at it (VOXTRAL_VOICE).
+/// NOTE: a brand-new clone may require a TTS-server reload to register before it
+/// can be synthesized — that reload is out of scope here.
+pub async fn agent_voice_clone_upload(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<VoiceCloneUploadReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let Some(dgx) = dgx_system() else {
+        return Json(json!({"ok": false, "err": "no DGX/TTS host registered to receive the clone sample"}));
+    };
+    let name = sanitize_skill_name(&req.name);
+    if name.is_empty() {
+        return Json(json!({"ok": false, "err": "clone name required"}));
+    }
+    use base64::Engine;
+    let raw = match base64::engine::general_purpose::STANDARD.decode(req.wav_b64.trim()) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => return Json(json!({"ok": false, "err": "empty wav"})),
+        Err(e) => return Json(json!({"ok": false, "err": format!("bad base64: {e}")})),
+    };
+    if raw.len() > 16 * 1024 * 1024 {
+        return Json(json!({"ok": false, "err": "wav too large (max 16 MB)"}));
+    }
+    let wav_b64 = b64(&raw);
+    let aid = sanitize_id(&agent_id);
+    let name_for_path = name.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // 1) Land the sample on the DGX. `name` is sanitized → safe single-quoted.
+        let target = format!("{TTS_VOICES_DIR}/{name_for_path}.wav");
+        let up = format!(
+            "mkdir -p {TTS_VOICES_DIR} && echo {wav_b64} | base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
+        );
+        let bytes = ssh_capture(&dgx, &up)?;
+        // 2) Point this agent at the new clone (gateway voip env).
+        let env_path = set_voice_env(&sys, &aid, "VOXTRAL_VOICE", &name_for_path)?;
+        Ok::<_, String>((target, bytes.trim().to_string(), env_path))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((path, bytes, env_path)) => Json(json!({
+            "ok": true,
+            "clone_name": name,
+            "wav_path": path,
+            "bytes_written": bytes.parse::<i64>().ok(),
+            "env_path": env_path,
+            "note": "the TTS server may need a reload to register a brand-new clone",
+        })),
         Err(e) => Json(json!({"ok": false, "err": e})),
     }
 }
@@ -1755,6 +2045,133 @@ pub async fn agent_corpus_file(
                 "content": p.get("content").cloned().unwrap_or(json!("")),
             }))
         }
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CorpusFileWriteReq {
+    /// Relative path under the corpus root (e.g. "notes/foo.md"). For an upload
+    /// this is the new file's name; for an edit it's the existing file's path.
+    path: String,
+    /// base64-encoded new file bytes.
+    content_b64: String,
+}
+
+/// POST /agent/systems/:id/agents/:aid/corpus/file — upload a new corpus file or
+/// overwrite an existing one. Body bytes are decoded + size-capped here, the
+/// absolute target is resolved + traversal-checked on the gateway (CORPUS_PATH_PY),
+/// then written atomically (temp + mv), creating any parent dirs. Same vertical as
+/// agent_persona_file_put, but the path is a free relative path under the vault.
+pub async fn agent_corpus_file_put(
+    Path((id, agent_id)): Path<(String, String)>,
+    Json(req): Json<CorpusFileWriteReq>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    if req.path.trim().is_empty() {
+        return Json(json!({"ok": false, "err": "path required"}));
+    }
+    // Decode + size-cap the upload before shipping it over SSH (8 MB).
+    use base64::Engine;
+    let raw = match base64::engine::general_purpose::STANDARD.decode(req.content_b64.trim()) {
+        Ok(b) => b,
+        Err(e) => return Json(json!({"ok": false, "err": format!("bad base64: {e}")})),
+    };
+    if raw.len() > 8 * 1024 * 1024 {
+        return Json(json!({"ok": false, "err": "file too large (max 8 MB)"}));
+    }
+    let aid = sanitize_id(&agent_id);
+    let rel_b64 = b64(req.path.as_bytes());
+    let content_b64 = b64(&raw);
+    let rel = req.path.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // 1) Resolve + traversal-check the absolute target path on the gateway.
+        let path_cmd = format!(
+            "echo {} | base64 -d | python3 - {} {}",
+            b64(CORPUS_PATH_PY.as_bytes()),
+            aid,
+            rel_b64
+        );
+        let target = ssh_capture(&sys, &path_cmd)?;
+        let target = target.trim();
+        if target.is_empty() || target.starts_with("ERR") {
+            return Err(if target.is_empty() {
+                "could not resolve corpus file path".into()
+            } else {
+                target[3..].trim().to_string()
+            });
+        }
+        // 2) Write the new contents atomically (temp + mv), creating parent dirs.
+        //    `target` came from realpath() on the gateway and is single-quoted.
+        let write_cmd = format!(
+            "mkdir -p \"$(dirname '{target}')\" && echo {content_b64} | base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
+        );
+        let bytes = ssh_capture(&sys, &write_cmd)?;
+        Ok::<_, String>((target.to_string(), bytes.trim().to_string()))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((path, bytes)) => Json(json!({
+            "ok": true,
+            "path": rel,
+            "abs_path": path,
+            "bytes_written": bytes.parse::<i64>().ok(),
+        })),
+        Err(e) => Json(json!({"ok": false, "err": e})),
+    }
+}
+
+/// DELETE /agent/systems/:id/agents/:aid/corpus/file?path=… — remove one corpus
+/// file. The target is resolved + traversal-checked on the gateway (must be a
+/// FILE strictly under the corpus root, never the root), then `rm -f`'d.
+pub async fn agent_corpus_file_delete(
+    Path((id, agent_id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<CorpusFileQuery>,
+) -> impl IntoResponse {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    if q.path.trim().is_empty() {
+        return Json(json!({"ok": false, "err": "path required"}));
+    }
+    let aid = sanitize_id(&agent_id);
+    let rel_b64 = b64(q.path.as_bytes());
+    let rel = q.path.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // 1) Resolve + traversal-check the absolute target path on the gateway.
+        let path_cmd = format!(
+            "echo {} | base64 -d | python3 - {} {}",
+            b64(CORPUS_PATH_PY.as_bytes()),
+            aid,
+            rel_b64
+        );
+        let target = ssh_capture(&sys, &path_cmd)?;
+        let target = target.trim();
+        if target.is_empty() || target.starts_with("ERR") {
+            return Err(if target.is_empty() {
+                "could not resolve corpus file path".into()
+            } else {
+                target[3..].trim().to_string()
+            });
+        }
+        // 2) Delete — but only if it's actually a regular file (never a dir/root).
+        let del_cmd = format!(
+            "if [ -f '{target}' ]; then rm -f '{target}' && echo deleted; else echo 'ERR not a file'; fi"
+        );
+        let out = ssh_capture(&sys, &del_cmd)?;
+        let out = out.trim().to_string();
+        if out.starts_with("ERR") {
+            return Err(out[3..].trim().to_string());
+        }
+        Ok::<_, String>((target.to_string(), out))
+    })
+    .await
+    .unwrap_or_else(|_| Err("join error".into()));
+    match res {
+        Ok((path, _out)) => Json(json!({"ok": true, "path": rel, "abs_path": path, "deleted": true})),
         Err(e) => Json(json!({"ok": false, "err": e})),
     }
 }

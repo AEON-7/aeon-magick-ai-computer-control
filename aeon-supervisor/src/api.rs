@@ -194,10 +194,18 @@ pub fn build_router(cfg: Config) -> Router {
                 .post(crate::agent_connect::agent_avatar_set)
                 .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
-        // E1: per-agent corpus browse/view (read-only). List files + read one
-        // (traversal-guarded under <workspace>/memory/<id>-corpus on the gateway).
+        // E1: per-agent corpus browse/view + write. List files + read one + upload/
+        // overwrite (POST, base64 body) + delete (DELETE ?path=) — all traversal-
+        // guarded under <workspace>/memory/<id>-corpus on the gateway. Base64 file
+        // payload → raise the default 2MB body limit on the file route.
         .route("/agent/systems/:id/agents/:aid/corpus", get(crate::agent_connect::agent_corpus_list))
-        .route("/agent/systems/:id/agents/:aid/corpus/file", get(crate::agent_connect::agent_corpus_file))
+        .route(
+            "/agent/systems/:id/agents/:aid/corpus/file",
+            get(crate::agent_connect::agent_corpus_file)
+                .post(crate::agent_connect::agent_corpus_file_put)
+                .delete(crate::agent_connect::agent_corpus_file_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
         // F7a: per-agent persona files — view/edit SOUL.md + IDENTITY.md in the
         // agent's workspace (traversal-guarded to those two filenames; base64
         // write over the agent-connect SSH key). ?which=soul|identity.
@@ -207,8 +215,20 @@ pub fn build_router(cfg: Config) -> Router {
                 .put(crate::agent_connect::agent_persona_file_put),
         )
         // E1: per-agent effective TTS voice (override or gateway default) +
-        // clone-name vs designer-description classification.
+        // clone-name vs designer-description classification + voip-env values.
         .route("/agent/systems/:id/agents/:aid/voice", get(crate::agent_connect::agent_voice))
+        // Voice management: designer-description + named-clone selection live in
+        // the agent's `~/voip-<id>/.env` on the gateway; clone .wav samples live
+        // on the DGX. designer/clone set the env; clones lists the DGX samples;
+        // clone/upload lands a new .wav on the DGX (20MB body limit) + selects it.
+        .route("/agent/systems/:id/agents/:aid/voice/designer", post(crate::agent_connect::agent_voice_designer_put))
+        .route("/agent/systems/:id/agents/:aid/voice/clone", post(crate::agent_connect::agent_voice_clone_set))
+        .route("/agent/systems/:id/agents/:aid/voice/clones", get(crate::agent_connect::agent_voice_clones_list))
+        .route(
+            "/agent/systems/:id/agents/:aid/voice/clone/upload",
+            post(crate::agent_connect::agent_voice_clone_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024)),
+        )
         // E1: add-skill — custom upload (drop into the gateway's shared skills
         // dir) or quick-add an existing skill; returns the non-invasive
         // skills-array config_change. Base64 file payload → raise body limit.

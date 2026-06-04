@@ -507,11 +507,41 @@ export interface CorpusFile {
   content?: string;
   err?: string;
 }
+export interface CorpusFileWrite {
+  ok: boolean;
+  path?: string;
+  abs_path?: string;
+  bytes_written?: number | null;
+  err?: string;
+}
+export interface CorpusFileDelete {
+  ok: boolean;
+  path?: string;
+  abs_path?: string;
+  deleted?: boolean;
+  err?: string;
+}
 export const getAgentCorpus = (sysId: string, agentId: string) =>
   req<CorpusList>('GET', `/agent/systems/${sysId}/agents/${agentId}/corpus`);
 export const getAgentCorpusFile = (sysId: string, agentId: string, path: string) =>
   req<CorpusFile>(
     'GET',
+    `/agent/systems/${sysId}/agents/${agentId}/corpus/file?path=${encodeURIComponent(path)}`,
+  );
+/** Upload a new corpus file or overwrite an existing one (content as base64). */
+export const putAgentCorpusFile = (
+  sysId: string,
+  agentId: string,
+  path: string,
+  content_b64: string,
+) =>
+  req<CorpusFileWrite>('POST', `/agent/systems/${sysId}/agents/${agentId}/corpus/file`, {
+    path,
+    content_b64,
+  });
+export const deleteAgentCorpusFile = (sysId: string, agentId: string, path: string) =>
+  req<CorpusFileDelete>(
+    'DELETE',
     `/agent/systems/${sysId}/agents/${agentId}/corpus/file?path=${encodeURIComponent(path)}`,
   );
 
@@ -524,10 +554,66 @@ export interface AgentVoice {
   is_override?: boolean;       // true = per-agent override, false = inherits global
   global?: string | null;      // the gateway-wide default voice
   provider?: string | null;    // TTS provider (e.g. "openai")
+  // voip-env (gateway ~/voip-<id>/.env) — the *manageable* per-agent voice:
+  env_path?: string | null;    // resolved .env path on the gateway
+  env_exists?: boolean;        // whether that .env exists yet
+  clone_name?: string | null;  // VOXTRAL_VOICE (named clone)
+  description?: string | null; // VOXTRAL_VOICE_DESCRIPTION (designer prompt)
   err?: string;
 }
 export const getAgentVoice = (sysId: string, agentId: string) =>
   req<AgentVoice>('GET', `/agent/systems/${sysId}/agents/${agentId}/voice`);
+
+// Voice management: designer-description + named-clone selection (gateway env);
+// clone listing + upload (DGX/TTS host).
+export interface VoiceDesignerResult {
+  ok: boolean;
+  env_path?: string;
+  description?: string;
+  err?: string;
+}
+export interface VoiceCloneSetResult {
+  ok: boolean;
+  env_path?: string;
+  clone_name?: string;
+  err?: string;
+}
+export interface VoiceClonesList {
+  ok: boolean;
+  clones?: string[];           // basenames of the DGX *.wav samples (no .wav)
+  dir?: string;
+  note?: string;               // e.g. "no DGX/TTS host registered"
+  err?: string;
+}
+export interface VoiceCloneUploadResult {
+  ok: boolean;
+  clone_name?: string;
+  wav_path?: string;
+  bytes_written?: number | null;
+  env_path?: string;
+  note?: string;
+  err?: string;
+}
+export const putAgentVoiceDesigner = (sysId: string, agentId: string, description: string) =>
+  req<VoiceDesignerResult>('POST', `/agent/systems/${sysId}/agents/${agentId}/voice/designer`, {
+    description,
+  });
+export const setAgentVoiceClone = (sysId: string, agentId: string, name: string) =>
+  req<VoiceCloneSetResult>('POST', `/agent/systems/${sysId}/agents/${agentId}/voice/clone`, {
+    name,
+  });
+export const getAgentVoiceClones = (sysId: string, agentId: string) =>
+  req<VoiceClonesList>('GET', `/agent/systems/${sysId}/agents/${agentId}/voice/clones`);
+export const uploadAgentVoiceClone = (
+  sysId: string,
+  agentId: string,
+  name: string,
+  wav_b64: string,
+) =>
+  req<VoiceCloneUploadResult>('POST', `/agent/systems/${sysId}/agents/${agentId}/voice/clone/upload`, {
+    name,
+    wav_b64,
+  });
 
 // ── E1: per-agent add-skill ──
 export interface AddSkillResult {

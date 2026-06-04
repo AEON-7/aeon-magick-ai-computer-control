@@ -34,15 +34,32 @@
   let avatar: api.AgentAvatar | null = null;
   let avatarBusy = false;
   let avatarMsg = '';
-  // E1: corpus browser
+  // E1: corpus browser + write (upload / edit / delete)
   let corpus: api.CorpusList | null = null;
   let corpusLoading = false;
   let corpusFile: api.CorpusFile | null = null;
   let corpusFilePath = '';
   let corpusFileLoading = false;
   let corpusFilter = '';
+  let corpusUploading = false;
+  let corpusMsg = '';
+  let corpusEditing = false;          // viewer in edit mode (pre → textarea)
+  let corpusDraft = '';               // edited file text
+  let corpusSaving = false;
+  let corpusBusyPath = '';            // file path currently being deleted ('' = idle)
   // E1: voice
   let voice: api.AgentVoice | null = null;
+  // E1: voice management (designer description + named-clone select/upload)
+  let voiceDescDraft = '';
+  let voiceDescSaving = false;
+  let voiceMsg = '';
+  let voiceClones: api.VoiceClonesList | null = null;
+  let voiceClonesLoading = false;
+  let voicePick = '';                 // selected clone name in the <select>
+  let voiceCloneSaving = false;
+  let voiceUploadName = '';
+  let voiceUploadFile: File | null = null;
+  let voiceUploading = false;
   // E1: add-skill
   let skillBusy = '';                 // skill name currently being added ('' = idle)
   let skillResult: api.AddSkillResult | null = null;
@@ -1140,7 +1157,17 @@
     corpusFile = null;
     corpusFilePath = '';
     corpusFilter = '';
+    corpusMsg = '';
+    corpusEditing = false;
+    corpusDraft = '';
+    corpusBusyPath = '';
     voice = null;
+    voiceDescDraft = '';
+    voiceMsg = '';
+    voiceClones = null;
+    voicePick = '';
+    voiceUploadName = '';
+    voiceUploadFile = null;
     skillBusy = '';
     skillResult = null;
     customSkillName = '';
@@ -1164,7 +1191,13 @@
       .catch((e) => (avatar = { ok: false, err: (e as any)?.message ?? String(e) }));
     api
       .getAgentVoice(sysId, a.id)
-      .then((r) => (voice = r))
+      .then((r) => {
+        voice = r;
+        if (r.ok) {
+          voiceDescDraft = r.description ?? '';
+          voicePick = r.clone_name ?? '';
+        }
+      })
       .catch((e) => (voice = { ok: false, err: (e as any)?.message ?? String(e) }));
   }
   function closeDetail() {
@@ -1195,8 +1228,11 @@
     corpusFilePath = path;
     corpusFile = null;
     corpusFileLoading = true;
+    corpusEditing = false;
+    corpusMsg = '';
     try {
       corpusFile = await api.getAgentCorpusFile(detailSys, detailAgent.id, path);
+      corpusDraft = corpusFile.ok ? (corpusFile.content ?? '') : '';
     } catch (e) {
       corpusFile = { ok: false, err: (e as any)?.message ?? String(e) };
     } finally {
@@ -1206,6 +1242,90 @@
   function closeCorpusFile() {
     corpusFile = null;
     corpusFilePath = '';
+    corpusEditing = false;
+    corpusDraft = '';
+  }
+  /** UTF-8-safe base64 of a JS string (matches the gateway's base64 -d). */
+  function b64Text(s: string): string {
+    return btoa(unescape(encodeURIComponent(s)));
+  }
+  // ── E1: corpus upload / edit / delete ───────────────────────────────
+  async function onCorpusUpload(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file || !detailAgent || corpusUploading) {
+      if (input) input.value = '';
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      corpusMsg = 'file too large (max 8 MB)';
+      input.value = '';
+      return;
+    }
+    corpusUploading = true;
+    corpusMsg = '';
+    try {
+      const content_b64 = await fileToB64(file);
+      const r = await api.putAgentCorpusFile(detailSys, detailAgent.id, file.name, content_b64);
+      if (r.ok) {
+        corpusMsg = `uploaded ${r.path} (${fmtBytes(r.bytes_written ?? 0)})`;
+        await loadCorpus();
+      } else {
+        corpusMsg = r.err ?? 'upload failed';
+      }
+    } catch (e) {
+      corpusMsg = (e as any)?.message ?? String(e);
+    } finally {
+      corpusUploading = false;
+      input.value = '';
+    }
+  }
+  async function saveCorpusEdit() {
+    if (!detailAgent || !corpusFilePath || corpusSaving) return;
+    corpusSaving = true;
+    corpusMsg = '';
+    try {
+      const r = await api.putAgentCorpusFile(
+        detailSys,
+        detailAgent.id,
+        corpusFilePath,
+        b64Text(corpusDraft),
+      );
+      if (r.ok) {
+        corpusMsg = `saved ${r.path} (${fmtBytes(r.bytes_written ?? 0)})`;
+        corpusEditing = false;
+        // reflect the new content locally without a round-trip
+        corpusFile = { ...(corpusFile ?? { ok: true }), ok: true, content: corpusDraft, size: r.bytes_written ?? undefined };
+        await loadCorpus(); // refresh sizes in the list (keeps current selection)
+        corpusFilePath = r.path ?? corpusFilePath;
+      } else {
+        corpusMsg = r.err ?? 'save failed';
+      }
+    } catch (e) {
+      corpusMsg = (e as any)?.message ?? String(e);
+    } finally {
+      corpusSaving = false;
+    }
+  }
+  async function deleteCorpusFile(path: string) {
+    if (!detailAgent || corpusBusyPath) return;
+    if (!confirm(`Delete corpus file “${path}”? This cannot be undone.`)) return;
+    corpusBusyPath = path;
+    corpusMsg = '';
+    try {
+      const r = await api.deleteAgentCorpusFile(detailSys, detailAgent.id, path);
+      if (r.ok) {
+        corpusMsg = `deleted ${r.path}`;
+        if (corpusFilePath === path) closeCorpusFile();
+        await loadCorpus();
+      } else {
+        corpusMsg = r.err ?? 'delete failed';
+      }
+    } catch (e) {
+      corpusMsg = (e as any)?.message ?? String(e);
+    } finally {
+      corpusBusyPath = '';
+    }
   }
   function fmtBytes(n?: number): string {
     n = n ?? 0;
@@ -1254,6 +1374,87 @@
       personaMsg = { ...personaMsg, [which]: (e as any)?.message ?? String(e) };
     } finally {
       personaSaving = { ...personaSaving, [which]: false };
+    }
+  }
+  // ── E1: voice management (designer description + named-clone) ────────
+  async function saveVoiceDesigner() {
+    if (!detailAgent || voiceDescSaving) return;
+    voiceDescSaving = true;
+    voiceMsg = '';
+    try {
+      const r = await api.putAgentVoiceDesigner(detailSys, detailAgent.id, voiceDescDraft);
+      if (r.ok) {
+        voiceMsg = 'designer description saved';
+        if (voice?.ok) voice = { ...voice, description: voiceDescDraft, env_exists: true };
+      } else {
+        voiceMsg = r.err ?? 'save failed';
+      }
+    } catch (e) {
+      voiceMsg = (e as any)?.message ?? String(e);
+    } finally {
+      voiceDescSaving = false;
+    }
+  }
+  async function loadVoiceClones() {
+    if (!detailAgent || voiceClonesLoading) return;
+    voiceClonesLoading = true;
+    try {
+      voiceClones = await api.getAgentVoiceClones(detailSys, detailAgent.id);
+    } catch (e) {
+      voiceClones = { ok: false, err: (e as any)?.message ?? String(e) };
+    } finally {
+      voiceClonesLoading = false;
+    }
+  }
+  async function useVoiceClone() {
+    if (!detailAgent || !voicePick.trim() || voiceCloneSaving) return;
+    voiceCloneSaving = true;
+    voiceMsg = '';
+    try {
+      const r = await api.setAgentVoiceClone(detailSys, detailAgent.id, voicePick.trim());
+      if (r.ok) {
+        voiceMsg = `clone set to “${r.clone_name}”`;
+        if (voice?.ok) voice = { ...voice, clone_name: r.clone_name ?? voicePick, env_exists: true };
+      } else {
+        voiceMsg = r.err ?? 'set failed';
+      }
+    } catch (e) {
+      voiceMsg = (e as any)?.message ?? String(e);
+    } finally {
+      voiceCloneSaving = false;
+    }
+  }
+  function onVoiceClonePick(e: Event) {
+    const f = (e.currentTarget as HTMLInputElement).files?.[0] ?? null;
+    voiceUploadFile = f;
+    // default the clone name to the file's base name if the field is empty
+    if (f && !voiceUploadName.trim()) voiceUploadName = f.name.replace(/\.[^.]+$/, '');
+  }
+  async function uploadVoiceClone() {
+    if (!detailAgent || !voiceUploadFile || !voiceUploadName.trim() || voiceUploading) return;
+    if (voiceUploadFile.size > 16 * 1024 * 1024) {
+      voiceMsg = 'sample too large (max 16 MB)';
+      return;
+    }
+    const name = voiceUploadName.trim();
+    voiceUploading = true;
+    voiceMsg = '';
+    try {
+      const wav_b64 = await fileToB64(voiceUploadFile);
+      const r = await api.uploadAgentVoiceClone(detailSys, detailAgent.id, name, wav_b64);
+      if (r.ok) {
+        voiceMsg = `uploaded “${r.clone_name}” (${fmtBytes(r.bytes_written ?? 0)}) — ${r.note ?? ''}`;
+        voiceUploadFile = null;
+        if (voice?.ok) voice = { ...voice, clone_name: r.clone_name ?? name, env_exists: true };
+        voicePick = r.clone_name ?? name;
+        await loadVoiceClones(); // pick up the new sample in the select
+      } else {
+        voiceMsg = r.err ?? 'upload failed';
+      }
+    } catch (e) {
+      voiceMsg = (e as any)?.message ?? String(e);
+    } finally {
+      voiceUploading = false;
     }
   }
   // ── F7b: deploy a new persona ───────────────────────────────────────
@@ -2381,16 +2582,92 @@
                 {voice.is_override ? 'per-agent override' : 'inherits gateway default'}
                 {#if voice.provider} · {voice.provider}{/if}
               </p>
+              {#if voice.clone_name}<p class="agd-dim agd-avail">clone: <span class="agd-mono">{voice.clone_name}</span></p>{/if}
             {/if}
           </section>
           <section class="agd-sec"><h3 class="agd-h3">Corpus mode</h3><p class="agd-mono">{detail?.corpus || '—'}</p></section>
         </div>
+
         {#if voice?.ok}
-          <p class="agd-dim agd-avail">Voice source: <span class="agd-mono">{voice.source}</span>. Edit designer-description / upload a clone sample: TODO.</p>
+          <section class="agd-sec">
+            <h3 class="agd-h3">Voice management</h3>
+            <p class="agd-dim agd-avail">
+              Source: <span class="agd-mono">{voice.source}</span>.
+              {#if voice.env_path}voip env: <span class="agd-mono agd-clip">{voice.env_path}</span>{:else}no voip env path resolved{/if}
+              {#if !voice.env_exists} · <span class="agd-warn">(.env not created yet — saving creates it)</span>{/if}
+            </p>
+
+            <!-- Designer description (VOXTRAL_VOICE_DESCRIPTION) -->
+            <div class="agd-voice-block">
+              <div class="agd-mono agd-dim">Designer description</div>
+              <textarea
+                class="agd-persona-edit agd-persona-short"
+                spellcheck="false"
+                placeholder="Describe the voice (tone, accent, pace, character)…"
+                bind:value={voiceDescDraft}
+              ></textarea>
+              <div class="agd-persona-actions">
+                <button
+                  class="btn-primary text-xs agd-filebtn"
+                  class:agd-disabled={voiceDescSaving}
+                  on:click={saveVoiceDesigner}
+                >{voiceDescSaving ? 'saving…' : 'Save description'}</button>
+              </div>
+            </div>
+
+            <!-- Named clone: select existing (DGX) or upload a new sample -->
+            <div class="agd-voice-block">
+              <div class="agd-mono agd-dim">Named clone</div>
+              {#if voiceClones == null && !voiceClonesLoading}
+                <button class="agd-chip" on:click={loadVoiceClones}>List clones (DGX)</button>
+              {:else if voiceClonesLoading}
+                <p class="agd-dim">listing clones…</p>
+              {:else if voiceClones && !voiceClones.ok}
+                <p class="agd-warn">{voiceClones.err}</p>
+                <button class="agd-chip" on:click={loadVoiceClones}>retry</button>
+              {:else if voiceClones}
+                {#if voiceClones.note}<p class="agd-dim agd-avail">{voiceClones.note}</p>{/if}
+                <div class="agd-voice-row">
+                  <select class={inputCls + ' flex-1'} bind:value={voicePick}>
+                    <option value="">— pick a clone —</option>
+                    {#each voiceClones.clones ?? [] as c}
+                      <option value={c}>{c}</option>
+                    {/each}
+                  </select>
+                  <button
+                    class="btn-primary text-xs agd-filebtn"
+                    class:agd-disabled={voiceCloneSaving || !voicePick.trim()}
+                    on:click={useVoiceClone}
+                  >{voiceCloneSaving ? 'setting…' : 'Use clone'}</button>
+                  <button class="agd-chip" on:click={loadVoiceClones} disabled={voiceClonesLoading}>refresh</button>
+                </div>
+              {/if}
+
+              <div class="agd-voice-row">
+                <input
+                  class={inputCls + ' flex-1'}
+                  placeholder="new clone name"
+                  bind:value={voiceUploadName}
+                />
+                <label class="btn-primary text-xs agd-filebtn" class:agd-disabled={voiceUploading}>
+                  {voiceUploadFile ? voiceUploadFile.name : 'Choose .wav'}
+                  <input type="file" accept="audio/*,.wav" on:change={onVoiceClonePick} hidden />
+                </label>
+                <button
+                  class="btn-primary text-xs agd-filebtn"
+                  class:agd-disabled={voiceUploading || !voiceUploadFile || !voiceUploadName.trim()}
+                  on:click={uploadVoiceClone}
+                >{voiceUploading ? 'uploading…' : 'Upload sample'}</button>
+              </div>
+              <p class="agd-dim agd-avail">Sample lands on the TTS host (DGX); the voice server may need a reload to register a brand-new clone.</p>
+            </div>
+
+            {#if voiceMsg}<p class="agd-mono agd-dim">{voiceMsg}</p>{/if}
+          </section>
         {/if}
 
         <section class="agd-sec">
-          <h3 class="agd-h3">Corpus Files <span class="agd-adminonly">read-only</span></h3>
+          <h3 class="agd-h3">Corpus Files</h3>
           {#if !corpus && !corpusLoading}
             <p class="agd-dim">The agent's knowledge vault (markdown notes) on the gateway.</p>
             <button class="btn-primary text-xs agd-filebtn" on:click={loadCorpus}>Browse corpus</button>
@@ -2401,8 +2678,17 @@
           {:else if corpus}
             <p class="agd-mono agd-dim agd-clip">{corpus.root} · {corpus.count} files</p>
             {#if !corpus.exists}
-              <p class="agd-dim">No corpus vault found for this agent yet.</p>
-            {:else if corpus.count}
+              <p class="agd-dim">No corpus vault found for this agent yet — uploading a file creates it.</p>
+            {/if}
+            <!-- Upload a new corpus file (creates the vault if absent). -->
+            <div class="agd-voice-row">
+              <label class="btn-primary text-xs agd-filebtn" class:agd-disabled={corpusUploading}>
+                {corpusUploading ? 'uploading…' : 'Upload file'}
+                <input type="file" on:change={onCorpusUpload} hidden />
+              </label>
+              <button class="agd-chip" on:click={loadCorpus} disabled={corpusLoading}>refresh list</button>
+            </div>
+            {#if corpus.exists && corpus.count}
               <input
                 class={inputCls + ' w-full'}
                 placeholder="filter files…"
@@ -2410,14 +2696,21 @@
               />
               <div class="agd-corpus-list">
                 {#each corpusFiles.slice(0, 400) as f}
-                  <button
-                    class="agd-corpus-row"
-                    class:sel={corpusFilePath === f.path}
-                    on:click={() => viewCorpusFile(f.path)}
-                  >
-                    <span class="agd-corpus-path">{f.path}</span>
-                    <span class="agd-corpus-size">{fmtBytes(f.size)}</span>
-                  </button>
+                  <div class="agd-corpus-rowwrap" class:sel={corpusFilePath === f.path}>
+                    <button
+                      class="agd-corpus-row agd-corpus-rowbtn"
+                      on:click={() => viewCorpusFile(f.path)}
+                    >
+                      <span class="agd-corpus-path">{f.path}</span>
+                      <span class="agd-corpus-size">{fmtBytes(f.size)}</span>
+                    </button>
+                    <button
+                      class="agd-corpus-del"
+                      title="delete {f.path}"
+                      disabled={corpusBusyPath === f.path}
+                      on:click={() => deleteCorpusFile(f.path)}
+                    >{corpusBusyPath === f.path ? '…' : '🗑'}</button>
+                  </div>
                 {/each}
                 {#if corpusFiles.length > 400}
                   <p class="agd-dim">…{corpusFiles.length - 400} more (refine the filter)</p>
@@ -2426,13 +2719,13 @@
                   <p class="agd-dim">no files match “{corpusFilter}”</p>
                 {/if}
               </div>
-              <button class="agd-copy" on:click={loadCorpus}>refresh list</button>
             {/if}
             {#if corpusFilePath}
               <div class="agd-corpus-view">
                 <div class="agd-token-row">
                   <span class="agd-mono agd-dim agd-clip">{corpusFilePath}{#if corpusFile?.size != null} · {fmtBytes(corpusFile.size)}{/if}</span>
                   <span>
+                    {#if corpusFile?.ok && !corpusEditing}<button class="agd-copy" on:click={() => { corpusDraft = corpusFile?.content ?? ''; corpusEditing = true; }}>edit</button>{/if}
                     {#if corpusFile?.content}<button class="agd-copy" on:click={() => copy(corpusFile?.content ?? '')}>copy</button>{/if}
                     <button class="agd-copy" on:click={closeCorpusFile}>close</button>
                   </span>
@@ -2442,15 +2735,25 @@
                 {:else if corpusFile && !corpusFile.ok}
                   <p class="agd-warn">{corpusFile.err}</p>
                 {:else if corpusFile}
-                  <pre class="agd-corpus-pre">{corpusFile.content}</pre>
+                  {#if corpusEditing}
+                    <textarea class="agd-corpus-edit" spellcheck="false" bind:value={corpusDraft}></textarea>
+                    <div class="agd-persona-actions">
+                      <button
+                        class="btn-primary text-xs agd-filebtn"
+                        class:agd-disabled={corpusSaving}
+                        on:click={saveCorpusEdit}
+                      >{corpusSaving ? 'saving…' : 'Save'}</button>
+                      <button class="agd-chip" on:click={() => { corpusEditing = false; corpusDraft = corpusFile?.content ?? ''; }} disabled={corpusSaving}>cancel</button>
+                    </div>
+                  {:else}
+                    <pre class="agd-corpus-pre">{corpusFile.content}</pre>
+                  {/if}
                 {/if}
               </div>
             {/if}
           {/if}
-          <p class="agd-dim agd-avail">Upload / edit: TODO — read-only browse for v1.</p>
+          {#if corpusMsg}<p class="agd-mono agd-dim">{corpusMsg}</p>{/if}
         </section>
-
-        <p class="agd-soon">Stretch TODOs: corpus upload/edit · voice designer-edit / clone upload · AEON-7 GitHub skill marketplace.</p>
       </div>
     </div>
   {/if}
@@ -3163,6 +3466,29 @@
     border-radius: 0.35rem; padding: 0.5rem; max-height: 16rem; overflow: auto; white-space: pre-wrap;
     word-break: break-word; line-height: 1.45;
   }
+  /* file row wrapper: clickable row (fills) + a delete button */
+  .agd-corpus-rowwrap { display: flex; align-items: stretch; border-bottom: 1px solid #16161f; }
+  .agd-corpus-rowwrap.sel { background: rgba(99, 102, 241, 0.14); }
+  .agd-corpus-rowwrap.sel .agd-corpus-row { color: #c4b5fd; }
+  .agd-corpus-rowbtn { flex: 1 1 auto; min-width: 0; border-bottom: none; }
+  .agd-corpus-del {
+    flex: none; padding: 0 0.5rem; font-size: 0.7rem; color: #71717a; cursor: pointer;
+    background: transparent; border: none; border-left: 1px solid #16161f;
+  }
+  .agd-corpus-del:hover:not(:disabled) { color: #f87171; background: rgba(248, 113, 113, 0.1); }
+  .agd-corpus-del:disabled { opacity: 0.5; cursor: default; }
+  .agd-corpus-edit {
+    width: 100%; min-height: 12rem; resize: vertical;
+    font-family: ui-monospace, monospace; font-size: 0.62rem; color: #c4c4cc; line-height: 1.45;
+    background: #0a0a10; border: 1px solid #23232f; border-radius: 0.35rem; padding: 0.5rem;
+  }
+  .agd-corpus-edit:focus { outline: none; border-color: #6d28d9; }
+  /* ── E1: voice management ── */
+  .agd-voice-block {
+    display: flex; flex-direction: column; gap: 0.35rem;
+    border-top: 1px solid #1c1c26; padding-top: 0.5rem; margin-top: 0.25rem;
+  }
+  .agd-voice-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   /* ── E1: add-skill ── */
   .agd-chip-add { cursor: pointer; }
   .agd-chip-add:hover:not(:disabled) { color: #6ee7b7; background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.4); }
