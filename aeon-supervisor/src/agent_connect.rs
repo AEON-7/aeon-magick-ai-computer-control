@@ -310,6 +310,105 @@ pub async fn test_system(Path(id): Path<String>) -> impl IntoResponse {
     Json(json!({"ok": ok, "status": if ok {"connected"} else {"unreachable"}}))
 }
 
+/// A device seen on the Pi's tailnet (`tailscale status --json`). `address` is
+/// the stable 100.x Tailscale IP — reachable over the `tailscale0` interface
+/// from ANY network the Pi sits on, which is why we add systems by this address
+/// rather than a LAN hostname that only resolves on the local segment.
+#[derive(Serialize)]
+struct TailscaleDevice {
+    hostname: String,
+    dns_name: String,
+    address: String,
+    os: String,
+    online: bool,
+    is_self: bool,
+}
+
+/// Pull one node (Self or a Peer) out of the tailscale status JSON. Returns
+/// None if it has no IPv4 Tailscale address (nothing we could SSH to).
+fn parse_ts_node(node: &serde_json::Value, is_self: bool) -> Option<TailscaleDevice> {
+    let address = node
+        .get("TailscaleIPs")
+        .and_then(|x| x.as_array())
+        .and_then(|arr| arr.iter().filter_map(|i| i.as_str()).find(|s| s.contains('.')))?
+        .to_string();
+    let hostname = node.get("HostName").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let dns_name = node
+        .get("DNSName")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_string();
+    let os = node.get("OS").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let online = node.get("Online").and_then(|x| x.as_bool()).unwrap_or(false);
+    Some(TailscaleDevice { hostname, dns_name, address, os, online, is_self })
+}
+
+/// GET /agent/tailscale/devices — discover devices on the Pi's tailnet by
+/// shelling out to `tailscale status --json` locally. The user picks one and we
+/// add it as a connected system by its Tailscale address, so SSH routes over
+/// the tailnet (works from any network, not just the Pi's current LAN). This is
+/// read-only membership info — no creds; SSH auth still flows through the normal
+/// one-time-password → key handshake when the device is actually added.
+/// Admin-only via the `/api/agent/` scope gate.
+pub async fn tailscale_devices() -> impl IntoResponse {
+    // `tailscale status --json` is read-only and local. Try PATH, then the
+    // absolute install path the image uses.
+    let out = Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .or_else(|_| Command::new("/usr/bin/tailscale").args(["status", "--json"]).output());
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            return Json(json!({
+                "ok": false, "up": false, "devices": [],
+                "err": format!("tailscale CLI not available: {e}"),
+            }))
+        }
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Json(json!({
+            "ok": false, "up": false, "devices": [],
+            "err": if err.is_empty() {
+                "tailscale status failed — enable Tailscale in Network → VPN → Tailscale first.".to_string()
+            } else { err },
+        }));
+    }
+    let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(json!({
+                "ok": false, "up": false, "devices": [],
+                "err": format!("parse tailscale status: {e}"),
+            }))
+        }
+    };
+    let up = v.get("BackendState").and_then(|x| x.as_str()).unwrap_or("") == "Running";
+    let mut devices: Vec<TailscaleDevice> = Vec::new();
+    if let Some(self_node) = v.get("Self") {
+        if let Some(d) = parse_ts_node(self_node, true) {
+            devices.push(d);
+        }
+    }
+    if let Some(peers) = v.get("Peer").and_then(|x| x.as_object()) {
+        for node in peers.values() {
+            if let Some(d) = parse_ts_node(node, false) {
+                devices.push(d);
+            }
+        }
+    }
+    // Online peers first, then alphabetical; the Pi itself sinks to the bottom.
+    devices.sort_by(|a, b| {
+        a.is_self
+            .cmp(&b.is_self)
+            .then(b.online.cmp(&a.online))
+            .then_with(|| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()))
+    });
+    Json(json!({"ok": true, "up": up, "devices": devices}))
+}
+
 /// GET /agent/systems/:id/metrics — a live SSH-gathered snapshot of a system
 /// (host, load, mem, GPUs, docker containers). The per-agent roster (pantheon)
 /// is a separate, gateway-specific integration layered on top later.

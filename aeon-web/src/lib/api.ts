@@ -188,6 +188,21 @@ export const registerSystem = (id: string, password: string) =>
   );
 export const testSystem = (id: string) =>
   req<{ ok: boolean; status?: string }>('POST', `/agent/systems/${id}/test`);
+// Devices discovered on the Pi's tailnet (for "+ Add device from Tailscale").
+// `address` is the stable 100.x Tailscale IP we add the system by.
+export interface TailscaleDevice {
+  hostname: string;
+  dns_name: string;
+  address: string;
+  os: string;
+  online: boolean;
+  is_self: boolean;
+}
+export const tailscaleDevices = () =>
+  req<{ ok: boolean; up: boolean; devices: TailscaleDevice[]; err?: string }>(
+    'GET',
+    '/agent/tailscale/devices',
+  );
 export interface SystemMetrics {
   reachable: boolean;
   host?: string;

@@ -84,6 +84,24 @@
   let busyId = '';
   let fallback: Record<string, string> = {};
 
+  // add-from-Tailscale flow — pick a device off the tailnet, then the standard
+  // add → register (ssh-copy-id) handshake runs with its Tailscale address.
+  let showTs = false;
+  let tsLoading = false;
+  let tsUp = true;
+  let tsErr = '';
+  let tsDevices: api.TailscaleDevice[] = [];
+  let tsPick = '';
+  let tsUser = 'root';
+  let tsPort = 22;
+  let tsLabel = '';
+  let tsPassword = '';
+  let tsRoleOpenclaw = false;
+  let tsRoleHermes = false;
+  let tsRoleDgx = false;
+  let tsBusy = false;
+  let tsStatus = '';
+
   // ── E4: Container Management ──
   let cSys = '';                                   // selected system id
   let cData: api.ContainerList | null = null;
@@ -720,6 +738,78 @@
       // (it's not 'connected'); no open-toggle needed.
     } finally {
       adding = false;
+    }
+  }
+  async function openTs() {
+    showTs = true;
+    tsLoading = true;
+    tsErr = '';
+    tsStatus = '';
+    try {
+      const res = await api.tailscaleDevices();
+      tsUp = res.up;
+      if (!res.ok) {
+        tsErr = res.err ?? 'failed to query Tailscale';
+        tsDevices = [];
+      } else {
+        tsDevices = res.devices ?? [];
+      }
+    } catch (e) {
+      tsErr = String(e);
+    } finally {
+      tsLoading = false;
+    }
+  }
+  function onTsPick() {
+    const d = tsDevices.find((x) => x.address === tsPick);
+    if (d && !tsLabel.trim()) tsLabel = d.hostname || d.dns_name || d.address;
+  }
+  function resetTs() {
+    tsPick = '';
+    tsUser = 'root';
+    tsPort = 22;
+    tsLabel = '';
+    tsPassword = '';
+    tsRoleOpenclaw = tsRoleHermes = tsRoleDgx = false;
+    tsStatus = '';
+  }
+  async function addFromTailscale() {
+    if (!tsPick || !tsPassword) return;
+    tsBusy = true;
+    tsStatus = 'connecting';
+    try {
+      const roles: string[] = [];
+      if (tsRoleOpenclaw) roles.push('openclaw');
+      if (tsRoleHermes) roles.push('hermes');
+      if (tsRoleDgx) roles.push('dgx');
+      const add = await api.addSystem({
+        label: tsLabel,
+        address: tsPick,
+        ssh_user: tsUser,
+        port: tsPort,
+        roles,
+      });
+      if (!add.ok || !add.id) {
+        tsStatus = 'error: ' + (add.err ?? 'add failed');
+        return;
+      }
+      const reg = await api.registerSystem(add.id, tsPassword);
+      tsPassword = '';
+      if (reg.ok && reg.status === 'connected') {
+        tsStatus = 'connected';
+        await refresh();
+        showTs = false;
+        resetTs();
+      } else {
+        // Created but the key handshake didn't confirm — it lands in the list
+        // as pending, where the password can be retried.
+        tsStatus = 'pending';
+        await refresh();
+      }
+    } catch (e) {
+      tsStatus = 'error: ' + String(e);
+    } finally {
+      tsBusy = false;
     }
   }
   /** Authenticate: push the Pi's key using the one-time SSH password for this
@@ -1993,6 +2083,57 @@
             </div>
           </div>
           <button class="btn-primary text-xs" on:click={onAdd} disabled={adding || !address.trim()}>add system</button>
+        </section>
+
+        <section class="space-y-2 p-4 rounded-lg border border-ink-800 bg-ink-950/40">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="font-mono text-xs uppercase tracking-wider text-cursed-300">Add device from Tailscale network</h2>
+            <button class="btn text-xs" on:click={() => (showTs ? (showTs = false) : openTs())}>
+              {showTs ? 'close' : '+ Add device from Tailscale'}
+            </button>
+          </div>
+          <p class="text-[11px] text-zinc-500">Reach a device by its Tailscale address (100.x) over the tailnet — works from any network, no LAN line-of-sight needed. Pick it from the list and give an SSH login.</p>
+          {#if showTs}
+            {#if tsLoading}
+              <p class="text-xs text-zinc-400">Scanning your tailnet…</p>
+            {:else if tsErr}
+              <p class="text-xs text-red-300">{tsErr}</p>
+              <p class="text-[11px] text-zinc-500">Enable Tailscale under <span class="font-mono text-zinc-400">Network → VPN → Tailscale</span>, then reopen this.</p>
+            {:else if !tsDevices.length}
+              <p class="text-xs text-zinc-400">No devices found on the tailnet yet.</p>
+            {:else}
+              <div class="grid grid-cols-2 gap-2">
+                <select class="{inputCls} col-span-2" bind:value={tsPick} on:change={onTsPick}>
+                  <option value="" disabled>Select a Tailscale device…</option>
+                  {#each tsDevices as d}
+                    <option value={d.address} disabled={d.is_self}>
+                      {d.hostname || d.dns_name || d.address} — {d.address}{d.is_self ? ' (this Pi)' : d.online ? ' • online' : ' • offline'}
+                    </option>
+                  {/each}
+                </select>
+                <input class="{inputCls} col-span-2" placeholder="Label" bind:value={tsLabel} />
+                <div class="flex gap-2">
+                  <input class="{inputCls} flex-1" placeholder="ssh user" bind:value={tsUser} />
+                  <input class="{inputCls} w-20" type="number" placeholder="port" bind:value={tsPort} />
+                </div>
+                <input class={inputCls} type="password" placeholder="ssh password" bind:value={tsPassword} autocomplete="new-password" />
+                <div class="col-span-2 flex items-center gap-4 text-xs text-zinc-300">
+                  <label class="flex items-center gap-1"><input type="checkbox" bind:checked={tsRoleOpenclaw} /> OpenClaw</label>
+                  <label class="flex items-center gap-1"><input type="checkbox" bind:checked={tsRoleHermes} /> Hermes</label>
+                  <label class="flex items-center gap-1"><input type="checkbox" bind:checked={tsRoleDgx} /> DGX Spark</label>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 flex-wrap">
+                <button class="btn-primary text-xs" on:click={addFromTailscale} disabled={tsBusy || !tsPick || !tsPassword}>
+                  {tsBusy ? 'connecting…' : 'add & connect'}
+                </button>
+                {#if tsStatus === 'connected'}<span class="text-xs text-live-300">✓ connected</span>{/if}
+                {#if tsStatus === 'pending'}<span class="text-xs text-amber-300">added — key handshake didn't confirm; retry the password in the list below</span>{/if}
+                {#if tsStatus.startsWith('error')}<span class="text-xs text-red-300">{tsStatus}</span>{/if}
+              </div>
+              <p class="text-[11px] text-zinc-500">The password is used once to install this Pi's key on the device, then discarded — never stored.</p>
+            {/if}
+          {/if}
         </section>
 
         <section class="space-y-2">

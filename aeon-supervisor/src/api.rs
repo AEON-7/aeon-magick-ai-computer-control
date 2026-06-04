@@ -131,6 +131,11 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/streamer/recordings/:id/thumb", get(crate::proxy::get_recording_thumb))
         // Agent Dash — Connected Systems registry + SSH key provisioning.
         .route("/agent/pubkey", get(crate::agent_connect::get_pubkey))
+        // Discover devices on the Pi's tailnet (tailscale status --json) so the
+        // user can add a system by its Tailscale address — reachable over the
+        // tailnet from any network, not just the Pi's current LAN. Admin-only
+        // via the /api/agent/ scope gate.
+        .route("/agent/tailscale/devices", get(crate::agent_connect::tailscale_devices))
         .route("/agent/systems",
             get(crate::agent_connect::list_systems).post(crate::agent_connect::add_system))
         .route("/agent/systems/:id", axum::routing::delete(crate::agent_connect::remove_system))

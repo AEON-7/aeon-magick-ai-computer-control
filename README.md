@@ -113,6 +113,13 @@ That's the whole enrollment. The box is now a permanent member of your tailnet:
   whole tailnet — route a device's traffic out through it (and through the
   VPN / Tor / DNSCrypt stack layered behind it).
 
+**And it cuts both ways.** From the Agent Dashboard, **"+ Add device from
+Tailscale"** lists every machine on your tailnet in a dropdown — pick one, give an
+SSH login, and it's added as a managed system reachable over the tailnet by its
+stable `100.x` address (not a LAN hostname that only resolves on one network). So
+the box doesn't just *become* reachable from anywhere — it can **reach everything
+else on your tailnet** the same way, from wherever it happens to be plugged in.
+
 Pair this with the jump-box view and **your entire AI infrastructure — gateways,
 DGX Sparks, every model server it can SSH to — becomes reachable through one small
 box you can carry in a pocket.**
