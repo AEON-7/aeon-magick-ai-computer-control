@@ -686,6 +686,42 @@ ensure_tailscale_mesh_route() {
     ip -6 route replace fd7a:115c:a1e0::/48 dev tailscale0 2>/dev/null || true
 }
 
+# v92: Keep tailnet traffic DIRECT even when transparent Tor / the UDP-leak
+# block / the kill-switch are active. Transparent Tor REDIRECTs all the Pi's TCP
+# to Tor's port (which can't route a 100.x tailnet IP → connections time out,
+# systems show "offline"), and the UDP-leak REJECT drops tailscaled's encrypted
+# underlay (forcing slow DERP-relay instead of a direct path). These exemptions
+# are INSERTED at the top of the chains so they always win: tailnet-destined
+# traffic (100.64/10) skips the Tor redirect, and tailscaled's underlay
+# (fwmark 0x80000) + tunnel egress are always allowed. Idempotent; gated on
+# tailscale.enabled (teardown when off); re-applied every pass after apply_tor.
+apply_tailscale_bypass() {
+    local tag="aeon-ts-bypass"
+    [ "$(toml_get tailscale enabled false)" = "true" ] || { teardown_tailscale_bypass; return 0; }
+    # Tailnet destinations bypass the Tor transparent redirect (Pi's own = nat
+    # OUTPUT; forwarded tailnet-to-tailnet = PREROUTING). WAN-bound exit-node
+    # traffic is NOT matched here (different dest), so it still rides Tor/VPN.
+    iptables -t nat -C OUTPUT -d 100.64.0.0/10 -j RETURN -m comment --comment "$tag" 2>/dev/null \
+        || iptables -t nat -I OUTPUT 1 -d 100.64.0.0/10 -j RETURN -m comment --comment "$tag"
+    iptables -t nat -C PREROUTING -d 100.64.0.0/10 -j RETURN -m comment --comment "$tag" 2>/dev/null \
+        || iptables -t nat -I PREROUTING 1 -d 100.64.0.0/10 -j RETURN -m comment --comment "$tag"
+    # tailscaled's encrypted UDP underlay (fwmark 0x80000) must never be blocked
+    # by the UDP-leak REJECT or the kill-switch — else no direct path.
+    iptables -C OUTPUT -m mark --mark 0x80000/0xff0000 -j ACCEPT -m comment --comment "$tag" 2>/dev/null \
+        || iptables -I OUTPUT 1 -m mark --mark 0x80000/0xff0000 -j ACCEPT -m comment --comment "$tag"
+    # The Pi's own traffic INTO the tunnel survives the kill-switch.
+    iptables -C OUTPUT -o tailscale0 -j ACCEPT -m comment --comment "$tag" 2>/dev/null \
+        || iptables -I OUTPUT 1 -o tailscale0 -j ACCEPT -m comment --comment "$tag"
+    log "tailscale: bypass installed — tailnet (100.64/10) skips Tor; underlay UDP (0x80000) + tailscale0 egress allowed (mesh stays direct)"
+}
+teardown_tailscale_bypass() {
+    local tag="aeon-ts-bypass"
+    while iptables -t nat -D OUTPUT -d 100.64.0.0/10 -j RETURN -m comment --comment "$tag" 2>/dev/null; do :; done
+    while iptables -t nat -D PREROUTING -d 100.64.0.0/10 -j RETURN -m comment --comment "$tag" 2>/dev/null; do :; done
+    while iptables -D OUTPUT -m mark --mark 0x80000/0xff0000 -j ACCEPT -m comment --comment "$tag" 2>/dev/null; do :; done
+    while iptables -D OUTPUT -o tailscale0 -j ACCEPT -m comment --comment "$tag" 2>/dev/null; do :; done
+}
+
 apply_tailscale() {
     local enabled="$(toml_get tailscale enabled false)"
     local auth_key="$(toml_get tailscale auth_key '')"
@@ -2263,4 +2299,7 @@ reassert_policy_routing
 # v92: re-pin the tailnet mesh route LAST — after every VPN bounce + DNSCrypt
 # NM-flush — so mesh traffic (100.64/10) always stays direct over tailscale0.
 ensure_tailscale_mesh_route
+# v92: tailnet bypass LAST too — after apply_tor's redirects + the UDP block are
+# built — so it inserts the tailnet/underlay exemptions on top of them.
+apply_tailscale_bypass
 log "aeon-net-services done"
