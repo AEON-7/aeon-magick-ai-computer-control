@@ -92,8 +92,9 @@ captive portal, and it enrolls itself onto your WiFi. Step by step:
    unplugged (if a cable is connected the Pi uses it and won't start the setup
    AP).
 2. **Wait ~90 s for the setup hotspot.** After ~90 seconds without internet the
-   Pi spins up its own WiFi access point — SSID **`aeon-setup`**, password
-   **`aeon-setup-pw`**.
+   Pi spins up its own WiFi access point — SSID **`aeon-setup`**. Its WPA2 password is **unique to this device** —
+   read it from `aeon-credentials.txt` on the SD card's boot partition (it's
+   generated on first boot, never baked into the image).
 3. **Join `aeon-setup`** from your phone or laptop. Every modern OS pops a
    **captive-portal sheet** that auto-opens the WiFi picker — no IP to
    remember. If it doesn't appear, open a browser to any `http://` address
@@ -125,8 +126,10 @@ up by creating an empty `aeon-force-ap` file on the SD card's boot partition
    you set the password yourself. Once submitted, the device transitions
    to "locked" state and your session cookie is set automatically; you
    land on the main UI.
-6. SSH uses a separate credential: user `admin`, default password
-   `aeon-default-change-me`. Change it with `passwd` after first login.
+6. SSH uses a separate credential: user `admin`, with a **per-device random
+   password** generated on first boot — read it from `aeon-credentials.txt` on
+   the SD card's boot partition. Completing the web setup wizard replaces it
+   with your chosen password (console + SSH share one credential).
 
 ### Path 3 — Pre-configured before first boot (best for fleets)
 
@@ -1253,8 +1256,9 @@ Then trigger via `run_macro` from the agent.
 
 ## SSH access
 
-`ssh admin@aeon-magick.local`. Default password
-`aeon-default-change-me` — change it with `passwd` after first login.
+`ssh admin@aeon-magick.local`. The password is **per-device** — generated on
+first boot and written to `aeon-credentials.txt` on the SD card's boot
+partition; the web setup wizard then replaces it with your chosen password.
 
 Use SSH for inspecting logs:
 
