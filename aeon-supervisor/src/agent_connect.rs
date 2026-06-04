@@ -751,6 +751,58 @@ fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
     }
 }
 
+/// Like `ssh_capture`, but streams `stdin_data` to the remote command's STDIN
+/// instead of embedding it in the command line. REQUIRED for file writes whose
+/// payload can exceed Linux's MAX_ARG_STRLEN (~128 KB per single argv element) —
+/// e.g. a voice-clone `.wav`, a large corpus file, an avatar image, a skill
+/// tarball. Symptom of the old argv approach: `Argument list too long (os
+/// error 7)`. The remote reads the bytes from stdin (e.g. `base64 -d > FILE`).
+/// Longer remote `timeout` since big transfers over the tailnet take a while.
+fn ssh_capture_stdin(sys: &System, remote: &str, stdin_data: Vec<u8>) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let target = format!("{}@{}", sys.ssh_user, sys.address);
+    let wrapped = format!("echo __AEONHDR__; {remote}");
+    let mut child = Command::new("ssh")
+        .arg("-i")
+        .arg(key_path())
+        .args([
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=8",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=12",
+            "-p", &sys.port.to_string(),
+            &target, "timeout", "180", "bash", "-lc", &wrapped,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Write stdin from a thread so the remote emitting the __AEONHDR__ line on
+    // stdout can never deadlock us mid-write. Dropping `si` closes stdin (EOF).
+    let mut si = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
+    let writer = std::thread::spawn(move || {
+        let _ = si.write_all(&stdin_data);
+    });
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let _ = writer.join();
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let cleaned = if let Some(pos) = s.find("__AEONHDR__") {
+            let after = &s[pos..];
+            after.find('\n').map(|i| &after[i + 1..]).unwrap_or("")
+        } else {
+            s.find('\n').map(|i| &s[i + 1..]).unwrap_or(&s)
+        };
+        Ok(cleaned.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("ssh failed").to_string())
+    }
+}
+
 type ProvMap = std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>;
 fn provisioned_path() -> PathBuf {
     PathBuf::from(DIR).join("provisioned.json")
@@ -1346,7 +1398,7 @@ pub async fn agent_avatar_set(
         //    gateway (base64-decoded) and curl --data-binary it. Capture the
         //    content_uri from the JSON response.
         let upload = format!(
-            "TMP=$(mktemp); echo {img_b64} | base64 -d > \"$TMP\"; \
+            "TMP=$(mktemp); base64 -d > \"$TMP\"; \
              RESP=$(curl -s --max-time 30 -X POST \
                -H 'Authorization: Bearer {tok}' \
                -H 'Content-Type: {ct}' \
@@ -1354,7 +1406,7 @@ pub async fn agent_avatar_set(
                '{MATRIX_HS}/_matrix/media/v3/upload'); \
              rm -f \"$TMP\"; echo \"$RESP\""
         );
-        let up_body = ssh_capture(&sys, &upload)?;
+        let up_body = ssh_capture_stdin(&sys, &upload, img_b64.into_bytes())?;
         let upv: serde_json::Value = serde_json::from_str(up_body.trim())
             .map_err(|_| format!("upload returned non-JSON: {}", up_body.trim().chars().take(200).collect::<String>()))?;
         let mxc = upv
@@ -1657,17 +1709,17 @@ fn drop_skill(sys: &System, skill: &str, kind: &str, file_b64: &str) -> Result<S
     let dir = format!("$HOME/.openclaw/workspace/skills/{skill}");
     let remote = if kind == "md" {
         format!(
-            "mkdir -p {dir} && echo {file_b64} | base64 -d > {dir}/SKILL.md && echo {dir}",
+            "mkdir -p {dir} && base64 -d > {dir}/SKILL.md && echo {dir}",
         )
     } else {
         // tar: write to a temp file, detect gzip by magic bytes, extract into dir.
         format!(
-            "mkdir -p {dir} && TMP=$(mktemp) && echo {file_b64} | base64 -d > \"$TMP\" && \
+            "mkdir -p {dir} && TMP=$(mktemp) && base64 -d > \"$TMP\" && \
              if gzip -t \"$TMP\" 2>/dev/null; then tar -xzf \"$TMP\" -C {dir}; else tar -xf \"$TMP\" -C {dir}; fi && \
              rm -f \"$TMP\" && echo {dir}",
         )
     };
-    ssh_capture(sys, &remote).map(|s| s.trim().to_string())
+    ssh_capture_stdin(sys, &remote, file_b64.as_bytes().to_vec()).map(|s| s.trim().to_string())
 }
 
 // ── E1: per-agent voice ──────────────────────────────────────────────────
@@ -1985,9 +2037,9 @@ pub async fn agent_voice_clone_upload(
         // 1) Land the sample on the DGX. `name` is sanitized → safe single-quoted.
         let target = format!("{TTS_VOICES_DIR}/{name_for_path}.wav");
         let up = format!(
-            "mkdir -p {TTS_VOICES_DIR} && echo {wav_b64} | base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
+            "mkdir -p {TTS_VOICES_DIR} && base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
         );
-        let bytes = ssh_capture(&dgx, &up)?;
+        let bytes = ssh_capture_stdin(&dgx, &up, wav_b64.into_bytes())?;
         // 2) Point this agent at the new clone (gateway voip env).
         let env_path = set_voice_env(&sys, &aid, "VOXTRAL_VOICE", &name_for_path)?;
         Ok::<_, String>((target, bytes.trim().to_string(), env_path))
@@ -2106,9 +2158,9 @@ pub async fn agent_corpus_file_put(
         // 2) Write the new contents atomically (temp + mv), creating parent dirs.
         //    `target` came from realpath() on the gateway and is single-quoted.
         let write_cmd = format!(
-            "mkdir -p \"$(dirname '{target}')\" && echo {content_b64} | base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
+            "mkdir -p \"$(dirname '{target}')\" && base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
         );
-        let bytes = ssh_capture(&sys, &write_cmd)?;
+        let bytes = ssh_capture_stdin(&sys, &write_cmd, content_b64.into_bytes())?;
         Ok::<_, String>((target.to_string(), bytes.trim().to_string()))
     })
     .await
@@ -2359,9 +2411,9 @@ pub async fn agent_persona_file_put(
         // 2) Write the new contents atomically (temp + mv) to that exact path.
         //    `target` came from realpath() on the gateway and is single-quoted.
         let write_cmd = format!(
-            "echo {content_b64} | base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
+            "base64 -d > '{target}.aeon.tmp' && mv '{target}.aeon.tmp' '{target}' && wc -c < '{target}'"
         );
-        let bytes = ssh_capture(&sys, &write_cmd)?;
+        let bytes = ssh_capture_stdin(&sys, &write_cmd, content_b64.into_bytes())?;
         Ok::<_, String>((target.to_string(), bytes.trim().to_string()))
     })
     .await
@@ -2720,9 +2772,9 @@ pub async fn compose_put(
         // discovered compose files here). Write atomically via a temp + mv.
         let remote = format!(
             "F='{path_c}'; if [ ! -f \"$F\" ]; then echo '@@NOFILE@@'; \
-             else TMP=$(mktemp) && echo {content_b64} | base64 -d > \"$TMP\" && mv \"$TMP\" \"$F\" && echo '@@OK@@'; fi"
+             else TMP=$(mktemp) && base64 -d > \"$TMP\" && mv \"$TMP\" \"$F\" && echo '@@OK@@'; fi"
         );
-        ssh_capture(&sys, &remote)
+        ssh_capture_stdin(&sys, &remote, content_b64.into_bytes())
     })
     .await
     .unwrap_or_else(|_| Err("join error".into()));
