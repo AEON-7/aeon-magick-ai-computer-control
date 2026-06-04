@@ -9,6 +9,7 @@
   import * as api from '$lib/api';
   import TipJar from '$lib/components/TipJar.svelte';
   import RulesEditor from '$lib/components/RulesEditor.svelte';
+  import OverlayStatus from '$lib/components/OverlayStatus.svelte';
 
   // ── USB ethernet ──
   let usbState: api.UsbNetState | null = null;
@@ -2172,152 +2173,22 @@ obfs4 …`}
             <!--      vpn.provider field, which silently hid Tor +     -->
             <!--      I2P status after the v58 toggle split.           -->
             <!-- ────────────────────────────────────────────────────── -->
-            {#if statusOverlays.length > 0}
+            <!-- ────────────────────────────────────────────────────── -->
+            <!-- v91: each overlay's live status now renders under ITS    -->
+            <!--      OWN section. The VPN panel shows only the clearnet   -->
+            <!--      VPN overlay; Tailscale status lives in the Tailscale -->
+            <!--      section and Tor/I2P status in the Privacy Overlay    -->
+            <!--      Networks panel (see OverlayStatus.svelte).           -->
+            <!-- ────────────────────────────────────────────────────── -->
+            {#if statusOverlays.some((o) => o.kind === 'vpn')}
               <div class="mt-4 pt-4 border-t border-ink-700 space-y-4">
-                {#each statusOverlays as ov (ov.kind + ':' + ov.provider)}
-                  <div class="space-y-3 p-3 rounded-lg border border-ink-800 bg-ink-950/40">
-                    <header class="flex items-center justify-between gap-2">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <span class="font-mono text-xs uppercase tracking-wider text-zinc-300">
-                          {overlayLabel(ov)}
-                        </span>
-                        {#if ov.state === 'connected'}
-                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                       bg-live-900/40 border border-live-500/40
-                                       text-live-300 text-[10px] font-mono uppercase">
-                            <span class="h-1.5 w-1.5 rounded-full bg-live-400 animate-pulse"></span>
-                            connected
-                          </span>
-                        {:else if ov.state === 'establishing'}
-                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                       bg-amber-900/40 border border-amber-500/40
-                                       text-amber-300 text-[10px] font-mono uppercase">
-                            <span class="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-                            establishing
-                          </span>
-                        {:else if ov.state === 'reconnecting'}
-                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                       bg-amber-900/40 border border-amber-500/40
-                                       text-amber-300 text-[10px] font-mono uppercase">
-                            reconnecting
-                          </span>
-                        {:else}
-                          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-                                       bg-red-900/40 border border-red-500/40
-                                       text-red-300 text-[10px] font-mono uppercase">
-                            <span class="h-1.5 w-1.5 rounded-full bg-red-400"></span>
-                            {ov.state}
-                          </span>
-                        {/if}
-                      </div>
-
-                      <!-- One rotate button per overlay isn't worth it
-                           — Tor's NEWNYM, Tailscale reset, WG reconnect
-                           and i2pd tunnel rebuild are all triggered by
-                           the single /api/network/vpn/rotate endpoint
-                           which knows which to call based on what's
-                           active. Show the rotate button only on the
-                           first overlay so the row doesn't get noisy. -->
-                      {#if ov === statusOverlays[0]}
-                        <button class="btn text-xs whitespace-nowrap"
-                                on:click={rotateIdentity}
-                                disabled={rotating || ov.state !== 'connected'}
-                                title="Refresh identity / circuits / keys">
-                          {rotating ? 'rotating…' : '↻ change identity'}
-                        </button>
-                      {/if}
-                    </header>
-
-                    {#if ov === statusOverlays[0] && rotateMsg}
-                      <p class="text-xs font-mono text-zinc-400">{rotateMsg}</p>
-                    {/if}
-
-                    <p class="text-xs text-zinc-400">{ov.summary}</p>
-
-                    <!-- Bootstrap progress bar (Tor / I2P) -->
-                    {#if ov.bootstrap_percent !== null && ov.bootstrap_percent !== undefined && ov.bootstrap_percent < 100}
-                      <div class="space-y-1">
-                        <div class="flex justify-between text-[10px] font-mono text-zinc-500">
-                          <span>BOOTSTRAP</span>
-                          <span>{ov.bootstrap_percent}%</span>
-                        </div>
-                        <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
-                          <div class="h-full bg-cursed-500 transition-all duration-300"
-                               style="width: {ov.bootstrap_percent}%"></div>
-                        </div>
-                      </div>
-                    {/if}
-
-                    <!-- Public IP + country -->
-                    {#if ov.public_ip}
-                      <div class="flex items-center gap-3 text-xs font-mono">
-                        <span class="text-zinc-500">Public IP:</span>
-                        <span class="text-zinc-200">{ov.public_ip}</span>
-                        {#if ov.public_country}
-                          <span class="text-cursed-300 uppercase tracking-wider">
-                            {ov.public_country}
-                          </span>
-                        {/if}
-                      </div>
-                    {/if}
-
-                    <!-- Tor circuit list -->
-                    {#if ov.detail.circuits && ov.detail.circuits.length > 0}
-                      <div class="space-y-1">
-                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                          Active circuits ({ov.detail.circuits.length})
-                        </p>
-                        <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px] text-zinc-400">
-                          {#each ov.detail.circuits.slice(0, 6) as c}
-                            <div class="truncate">
-                              <span class="text-zinc-600">#{c.id}</span>
-                              {c.hops.join(' → ')}
-                            </div>
-                          {/each}
-                        </div>
-                      </div>
-                    {/if}
-
-                    <!-- Tailscale peer list — Tailscale-only. WireGuard
-                         providers (wireguard/mullvad/ivpn) also expose a WG
-                         "peer" but with no host/ips, which rendered here as
-                         "undefined undefined". Gate strictly to tailscale. -->
-                    {#if ov.provider === 'tailscale' && ov.detail.peers && ov.detail.peers.length > 0}
-                      <div class="space-y-1">
-                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                          Tailnet peers ({ov.detail.peers.length})
-                        </p>
-                        <div class="space-y-0.5 max-h-32 overflow-y-auto font-mono text-[10px]">
-                          {#each ov.detail.peers as p}
-                            <div class="flex items-center gap-2 truncate">
-                              <span class={p.online ? 'text-live-400' : 'text-zinc-600'}>●</span>
-                              <span class="text-zinc-300">{p.host}</span>
-                              <span class="text-zinc-500">{p.ips?.[0]}</span>
-                              {#if p.exit_node}
-                                <span class="text-cursed-400 text-[9px]">[exit]</span>
-                              {/if}
-                            </div>
-                          {/each}
-                        </div>
-                      </div>
-                    {/if}
-
-                    <!-- I2P peer count -->
-                    {#if ov.detail.active_peers !== undefined}
-                      <p class="text-xs font-mono text-zinc-400">
-                        <span class="text-zinc-500">Active peers:</span>
-                        {ov.detail.active_peers}
-                      </p>
-                    {/if}
-
-                    <!-- WireGuard handshake age -->
-                    {#if ov.detail.handshake_age_s !== undefined && ov.detail.handshake_age_s !== null}
-                      <p class="text-xs font-mono text-zinc-400">
-                        <span class="text-zinc-500">Last handshake:</span>
-                        {ov.detail.handshake_age_s}s ago
-                      </p>
-                    {/if}
-                  </div>
+                {#each statusOverlays.filter((o) => o.kind === 'vpn') as ov (ov.kind + ':' + ov.provider)}
+                  <OverlayStatus
+                    overlay={ov}
+                    label={overlayLabel(ov)}
+                    {rotating}
+                    {rotateMsg}
+                    onRotate={rotateIdentity} />
                 {/each}
               </div>
             {/if}
@@ -2372,6 +2243,13 @@ obfs4 …`}
             {#if tsOverlay.summary}
               <p class="text-[11px] text-zinc-500 leading-snug">{tsOverlay.summary}</p>
             {/if}
+          </div>
+
+          <!-- v91: full live-status card (tailnet IP + peers/machines).
+               No rotate button — identity rotation is driven from the VPN
+               panel via the single /rotate endpoint. -->
+          <div class="ml-7">
+            <OverlayStatus overlay={tsOverlay} label="Tailscale" />
           </div>
         {/if}
 
@@ -2791,6 +2669,25 @@ obfs4 …`}
               </button>
               {#if vpnMsg}<span class="text-xs text-live-300">{vpnMsg}</span>{/if}
             </div>
+
+            <!-- v91: live Tor + I2P status (bootstrap %, relay circuits,
+                 active peers), polled every 4 s. Moved here from the VPN
+                 panel so each overlay's status sits under its own section. -->
+            {#if statusOverlays.some((o) => o.kind === 'tor' || o.kind === 'i2p')}
+              <div class="pt-4 mt-2 border-t border-ink-700 space-y-3">
+                <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                  Live status
+                </p>
+                {#each statusOverlays.filter((o) => o.kind === 'tor' || o.kind === 'i2p') as ov (ov.kind)}
+                  <OverlayStatus
+                    overlay={ov}
+                    label={overlayLabel(ov)}
+                    {rotating}
+                    {rotateMsg}
+                    onRotate={ov.kind === 'tor' ? rotateIdentity : null} />
+                {/each}
+              </div>
+            {/if}
           </section>
         </div>
       </details>
