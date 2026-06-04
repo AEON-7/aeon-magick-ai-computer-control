@@ -670,6 +670,22 @@ aeon_drop_pair_insert() { aeon_block_pair_insert "$1" "$2" "$3" "drop" "${@:4}";
 # with it. Reads section `tailscale` (not `vpn.tailscale`). Owns its full
 # lifecycle: `tailscale up --reset` when enabled, `tailscale down` when
 # disabled — nothing else tears the mesh down anymore.
+# v92: Pin the tailnet CGNAT range to tailscale0 in the MAIN table so MESH
+# traffic (100.64.0.0/10) ALWAYS routes direct over tailscale0 and is NEVER
+# captured by a full-tunnel VPN (OpenVPN redirect-gateway's 0.0.0.0/1 routes, or
+# a WireGuard default) — and is RESTORED after the DNSCrypt NM-reactivation
+# flushes tailscaled's table 52 (the bug: with OpenVPN up, a tailnet IP fell
+# through to `dev tun0` and timed out). /10 beats the VPN's /1-or-default by
+# longest-prefix-match. Called from apply_tailscale AND as the last step of
+# main() (after every VPN bounce + NM churn).
+ensure_tailscale_mesh_route() {
+    [ "$(toml_get tailscale enabled false)" = "true" ] || return 0
+    ip link show tailscale0 >/dev/null 2>&1 || return 0
+    ip route replace 100.64.0.0/10 dev tailscale0 2>/dev/null \
+        && log "tailscale: pinned mesh route 100.64.0.0/10 -> tailscale0 (direct, bypasses VPN)"
+    ip -6 route replace fd7a:115c:a1e0::/48 dev tailscale0 2>/dev/null || true
+}
+
 apply_tailscale() {
     local enabled="$(toml_get tailscale enabled false)"
     local auth_key="$(toml_get tailscale auth_key '')"
@@ -727,6 +743,7 @@ apply_tailscale() {
     fi
     /usr/bin/tailscale up "${args[@]}" 2>&1 | tee -a "$LOG" || true
     log "tailscale up applied"
+    ensure_tailscale_mesh_route
 }
 
 apply_vpn_wireguard() {
@@ -2243,4 +2260,7 @@ apply_i2p
 apply_dnscrypt
 apply_tailscale_exit_node
 reassert_policy_routing
+# v92: re-pin the tailnet mesh route LAST — after every VPN bounce + DNSCrypt
+# NM-flush — so mesh traffic (100.64/10) always stays direct over tailscale0.
+ensure_tailscale_mesh_route
 log "aeon-net-services done"
