@@ -92,9 +92,9 @@ captive portal, and it enrolls itself onto your WiFi. Step by step:
    unplugged (if a cable is connected the Pi uses it and won't start the setup
    AP).
 2. **Wait ~90 s for the setup hotspot.** After ~90 seconds without internet the
-   Pi spins up its own WiFi access point — SSID **`aeon-setup`**. Its WPA2 password is **unique to this device** —
-   read it from `aeon-credentials.txt` on the SD card's boot partition (it's
-   generated on first boot, never baked into the image).
+   Pi spins up its own WiFi access point — SSID **`aeon-setup`**, password
+   **`aeon-setup-pw`** (a static default — the AP is proximity-locked and
+   joining it doesn't grant admin, so it stays fixed for easy onboarding).
 3. **Join `aeon-setup`** from your phone or laptop. Every modern OS pops a
    **captive-portal sheet** that auto-opens the WiFi picker — no IP to
    remember. If it doesn't appear, open a browser to any `http://` address

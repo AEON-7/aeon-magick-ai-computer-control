@@ -304,23 +304,18 @@ known_client_wifi_count() {
 }
 
 ensure_ap_profile() {
-    # (Re)create the AP connection profile if absent, with a PER-DEVICE PSK.
-    # The PSK is generated once into /var/lib/aeon/ap-psk (also done at firstboot,
-    # which records it in the boot-partition credentials file) so no two devices
-    # flashed from the same image share the setup-AP password. Whichever of
-    # firstboot/netwatch runs first generates it; both read the same file.
-    if [ ! -s /var/lib/aeon/ap-psk ]; then
-        mkdir -p /var/lib/aeon
-        tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16 > /var/lib/aeon/ap-psk
-        chmod 600 /var/lib/aeon/ap-psk
-    fi
-    local ap_psk; ap_psk="$(cat /var/lib/aeon/ap-psk 2>/dev/null)"
-    [ -n "$ap_psk" ] || ap_psk="aeon-setup-pw"
+    # (Re)create the AP connection profile with the default SSID/PSK if absent.
+    # The setup-AP PSK is intentionally a STATIC documented default
+    # (aeon-setup-pw), NOT per-device: the AP is proximity-locked (an attacker
+    # must be in Wi-Fi RF range — it's never remotely reachable), only broadcasts
+    # in setup mode, and joining it doesn't grant admin (the wizard still forces
+    # you to set the admin password). A known default keeps onboarding simple; it
+    # can be changed later and is preserved across reconfigs (see ap_set_l3).
     if ! nmcli con show "$AP_CON" >/dev/null 2>&1; then
         nmcli con add type wifi con-name "$AP_CON" ifname "$AP_IFACE" ssid "$AP_CON" \
             mode ap autoconnect no >/dev/null 2>&1
         nmcli con mod "$AP_CON" \
-            wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$ap_psk" >/dev/null 2>&1
+            wifi-sec.key-mgmt wpa-psk wifi-sec.psk "aeon-setup-pw" >/dev/null 2>&1
     fi
 }
 

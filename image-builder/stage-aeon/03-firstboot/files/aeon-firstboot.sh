@@ -22,10 +22,11 @@ mkdir -p /etc/aeon
 # (replacing pi-gen's build-time default) and recorded on this device's own boot
 # partition — so no two devices flashed from the same image share a login.
 
-# Mint per-device secrets: (a) the admin console+SSH password; (b) the setup-AP
-# Wi-Fi PSK (shared with aeon-netwatch via /var/lib/aeon/ap-psk). Nothing secret
-# is baked into the image. The web setup wizard can still replace the admin
-# password later.
+# Mint a per-device admin console+SSH password (replacing pi-gen's build-time
+# default) so no two devices flashed from the same image share an SSH login.
+# Nothing secret is baked into the image; the web setup wizard can still replace
+# it later. (The setup-AP Wi-Fi PSK stays a STATIC default — proximity-locked,
+# setup-mode-only, and joining it doesn't grant admin; see aeon-netwatch.)
 ADMIN_PW="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
 if echo "admin:${ADMIN_PW}" | chpasswd 2>/dev/null; then
     echo "admin password randomized (unique per device)"
@@ -33,13 +34,6 @@ else
     ADMIN_PW="aeon-default-change-me"
     echo "WARN: chpasswd failed — admin keeps the build default; change with passwd"
 fi
-if [ ! -s /var/lib/aeon/ap-psk ]; then
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16 > /var/lib/aeon/ap-psk
-    chmod 600 /var/lib/aeon/ap-psk
-fi
-AP_PSK="$(cat /var/lib/aeon/ap-psk 2>/dev/null)"
-[ -n "$AP_PSK" ] || AP_PSK="aeon-setup-pw"
-
 if [ ! -f /etc/aeon/auth.toml ]; then
     /usr/local/bin/aeon-supervisor --generate-auth /etc/aeon/auth.toml >/dev/null 2>&1 || true
     cat > /boot/firmware/aeon-credentials.txt <<'EOF'
@@ -58,7 +52,7 @@ if [ ! -f /etc/aeon/auth.toml ]; then
 #    device broadcasts its own network shortly after boot:
 #
 #       Wi-Fi network: aeon-setup
-#       password:      __AP_PSK__
+#       password:      aeon-setup-pw
 #       then open:     https://192.168.50.1/   (a setup page should also
 #                      pop up automatically as a captive portal)
 #
@@ -80,7 +74,7 @@ if [ ! -f /etc/aeon/auth.toml ]; then
 #
 # Delete this file once you've completed setup.
 EOF
-    sed -i "s|__AP_PSK__|${AP_PSK}|; s|__ADMIN_PW__|${ADMIN_PW}|" /boot/firmware/aeon-credentials.txt
+    sed -i "s|__ADMIN_PW__|${ADMIN_PW}|" /boot/firmware/aeon-credentials.txt
     chmod 600 /boot/firmware/aeon-credentials.txt
     echo "wrote /boot/firmware/aeon-credentials.txt (per-device credentials)"
 fi
