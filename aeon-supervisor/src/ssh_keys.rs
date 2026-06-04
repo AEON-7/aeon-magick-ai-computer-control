@@ -164,6 +164,15 @@ pub async fn add_key(
             parent,
             std::fs::Permissions::from_mode(0o700),
         );
+        // CRITICAL: the supervisor runs as root, so create_dir_all makes
+        // ~/.ssh root-owned. sshd's StrictModes then refuses to read
+        // authorized_keys for the admin login ("Could not open user 'admin'
+        // authorized keys ... Permission denied") because admin can't even
+        // traverse a root-owned .ssh dir — so key auth silently never works.
+        // Chown the dir (not just the file below) back to the login user.
+        let _ = std::process::Command::new("chown")
+            .args(["admin:admin", &parent.to_string_lossy()])
+            .status();
     }
 
     // Read existing → de-dup by id → append → atomic-rename.
