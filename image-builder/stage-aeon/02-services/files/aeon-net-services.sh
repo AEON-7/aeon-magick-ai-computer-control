@@ -644,7 +644,14 @@ apply_tailscale() {
 
     systemctl enable --now tailscaled.service 2>/dev/null || true
 
-    local args=("--reset")
+    # Split-tunnel mesh ONLY. --accept-dns=false: do NOT overwrite
+    # /etc/resolv.conf with MagicDNS (100.100.100.100) — that collides with
+    # DNSCrypt / the normal resolver and breaks name resolution (looks like the
+    # whole network died). --accept-routes=false: only tailnet addresses
+    # (100.64.0.0/10) ride tailscale0; ALL other traffic stays on the existing
+    # upstream (none / VPN / VPN+Tor). The host default route + DNS are never
+    # hijacked — the mesh is purely additive.
+    local args=("--reset" "--accept-dns=false" "--accept-routes=false")
     if [ -n "$auth_key" ]; then
         args+=("--auth-key=$auth_key")
     fi

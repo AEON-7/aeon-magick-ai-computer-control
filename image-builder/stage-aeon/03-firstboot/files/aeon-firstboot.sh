@@ -101,7 +101,10 @@ print(f"TS_HOSTNAME={ts.get(\"hostname\", \"aeon-magick\")!r}")
         echo "wifi $WIFI_SSID configured"
     fi
     if [ -n "${TS_KEY:-}" ]; then
-        tailscale up --authkey="$TS_KEY" --hostname="$TS_HOSTNAME" --ssh || \
+        # Split-tunnel mesh only: don't let Tailscale hijack DNS (MagicDNS) or
+        # accept subnet routes — only tailnet addresses go over the mesh.
+        tailscale up --authkey="$TS_KEY" --hostname="$TS_HOSTNAME" --ssh \
+            --accept-dns=false --accept-routes=false || \
             echo "tailscale up failed (will retry on reboot)"
     fi
     # Don't leave a file with secrets on the public boot partition.
