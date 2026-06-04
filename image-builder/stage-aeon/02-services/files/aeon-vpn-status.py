@@ -442,10 +442,11 @@ def collect_overlays(cfg: dict) -> list[dict]:
     if (
         vpn_enabled
         and vpn_provider != "none"
-        # Skip legacy provider=tor / provider=i2p — those are surfaced
-        # via the dedicated tor.enabled / i2p.enabled paths below to
-        # avoid duplicate overlays after a config migration.
-        and vpn_provider not in ("tor", "i2p")
+        # Skip legacy provider=tor / provider=i2p / provider=tailscale —
+        # those are surfaced via the dedicated tor.enabled /
+        # i2p.enabled / tailscale.enabled paths below to avoid duplicate
+        # overlays after a config migration (v80 added tailscale here).
+        and vpn_provider not in ("tor", "i2p", "tailscale")
         and vpn_provider in PROVIDERS
     ):
         ov = {"kind": "vpn", "enabled": True}
@@ -466,6 +467,19 @@ def collect_overlays(cfg: dict) -> list[dict]:
     if bool(i2p.get("enabled", False)):
         ov = {"kind": "i2p", "enabled": True}
         ov.update(i2p_status(cfg))
+        overlays.append(ov)
+
+    # v80: Tailscale is an independent top-level [tailscale] toggle now
+    # (decoupled from vpn.provider, mirroring the v58 tor/i2p split).
+    # Emit its overlay whenever tailscale.enabled is true — REGARDLESS of
+    # which clearnet VPN is the active provider — so the mesh reports
+    # even when e.g. AirVPN is the WAN exit. Previously tailscale_status
+    # only ran when vpn.provider=="tailscale", so an independent mesh
+    # rendered as "disabled" the moment a commercial VPN was selected.
+    ts = cfg.get("tailscale", {})
+    if bool(ts.get("enabled", False)):
+        ov = {"kind": "tailscale", "enabled": True}
+        ov.update(tailscale_status(cfg))
         overlays.append(ov)
 
     return overlays

@@ -37,6 +37,14 @@ struct NetFile {
     tor: Tor,
     #[serde(default)]
     i2p: I2p,
+    /// v80+: Tailscale is an independent top-level toggle too —
+    /// the WireGuard mesh now runs ALONGSIDE any vpn.provider (or
+    /// none) instead of being a mutually-exclusive VPN choice.
+    /// Mirrors the v58 [tor]/[i2p] decoupling. Old configs with
+    /// vpn.provider="tailscale" get migrated by migrate_legacy()
+    /// at read time (copies the old vpn.tailscale.* fields up).
+    #[serde(default)]
+    tailscale: Tailscale,
 }
 
 /// v58: rewrite old vpn.provider="tor"/"i2p" configs into the new
@@ -57,7 +65,35 @@ fn migrate_legacy(nf: &mut NetFile) {
             nf.i2p.enabled = true;
             nf.vpn.provider = "none".into();
         }
+        "tailscale" => {
+            // v80: Tailscale decoupled from the VPN enum (mirrors the
+            // v58 tor/i2p migration). Flip tailscale.enabled=true and
+            // copy the old [vpn.tailscale] payload up to the new
+            // top-level [tailscale] section, then clear the provider.
+            // The auth_key especially MUST survive — losing it would
+            // silently break the mesh on the next apply.
+            tracing::info!("migrate: vpn.provider=tailscale → tailscale.enabled=true, vpn=none");
+            nf.tailscale.enabled = true;
+            nf.vpn.provider = "none".into();
+        }
         _ => {}
+    }
+    // v80: copy a legacy [vpn.tailscale] table (from older on-disk
+    // configs) up into the new top-level [tailscale]. Runs whether or
+    // not vpn.provider was "tailscale" — a user who had Tailscale
+    // configured but inactive still keeps their saved auth_key /
+    // hostname / exit-node prefs. Only fills fields the new section
+    // hasn't already set, so it's idempotent and never clobbers a
+    // value the user changed under the new schema. Once migrated, the
+    // legacy table is dropped on the next write_state().
+    if let Some(legacy) = nf.vpn.legacy_tailscale.take() {
+        let t = &mut nf.tailscale;
+        if t.auth_key.is_empty() { t.auth_key = legacy.auth_key; }
+        if t.hostname.is_empty() { t.hostname = legacy.hostname; }
+        // Booleans: OR them in — the legacy value wins only when the
+        // new field is still at its false default.
+        t.exit_node = t.exit_node || legacy.exit_node;
+        t.advertise_exit_node = t.advertise_exit_node || legacy.advertise_exit_node;
     }
 }
 
@@ -205,11 +241,19 @@ struct Vpn {
     #[serde(default = "default_lan_bypass")]
     lan_bypass: String,
     #[serde(default)]
-    tailscale: TailscaleCfg,
-    #[serde(default)]
     wireguard: WireguardCfg,
     #[serde(default)]
     openvpn: OpenvpnCfg,
+    /// v80: transitional capture of the OLD [vpn.tailscale] table so
+    /// migrate_legacy() can lift its values up to the new top-level
+    /// [tailscale] section. serde silently drops unknown TOML fields,
+    /// so without this field an old config's saved auth_key would
+    /// vanish before the migration ever saw it. Renamed to "tailscale"
+    /// on the wire (the legacy key); never written back out — once
+    /// migrate_legacy() consumes it, write_state() omits the empty
+    /// Option and the new [tailscale] section is canonical.
+    #[serde(rename = "tailscale", default, skip_serializing)]
+    legacy_tailscale: Option<TailscaleCfg>,
 }
 
 impl Default for Vpn {
@@ -219,9 +263,9 @@ impl Default for Vpn {
             provider: default_vpn_provider(),
             kill_switch: false,
             lan_bypass: default_lan_bypass(),
-            tailscale: TailscaleCfg::default(),
             wireguard: WireguardCfg::default(),
             openvpn: OpenvpnCfg::default(),
+            legacy_tailscale: None,
         }
     }
 }
@@ -302,6 +346,56 @@ struct I2p {
     over_vpn: bool,
 }
 
+// ── v80: Tailscale as a top-level independent toggle ─────────────────
+//
+// Old model: vpn.provider = "tailscale" made the WireGuard mesh a
+// mutually-exclusive VPN choice — you couldn't run Tailscale AND a
+// commercial WAN VPN at once. New model decouples it (mirrors the v58
+// tor/i2p split): the mesh runs alongside any vpn.provider (or none).
+// The mesh always stays direct; route_exit_via_vpn (Phase 2, default
+// off) is the opt-in that pipes exit-node + LAN client WAN traffic
+// through the active VPN/Tor instead.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Tailscale {
+    /// Master toggle. When true, tailscaled is brought up and
+    /// `tailscale up` runs with the fields below. Independent of any
+    /// VPN provider.
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    auth_key: String,
+    #[serde(default)]
+    hostname: String,
+    #[serde(default)]
+    exit_node: bool,
+    #[serde(default)]
+    advertise_exit_node: bool,
+    /// Phase 2 (DEFAULT OFF). When true AND advertise_exit_node is on
+    /// AND a clearnet VPN is up, exit-node + LAN-client WAN traffic is
+    /// fwmark-routed through the active VPN/Tor tunnel instead of the
+    /// bare ISP. The Tailscale mesh itself stays direct. Needs live
+    /// leak-testing before relying on it — see apply_tailscale_exit_
+    /// routing in aeon-net-services.sh.
+    #[serde(default)]
+    route_exit_via_vpn: bool,
+}
+
+impl Default for Tailscale {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auth_key: String::new(),
+            hostname: String::new(),
+            exit_node: false,
+            advertise_exit_node: false,
+            route_exit_via_vpn: false,
+        }
+    }
+}
+
+/// v80: legacy capture type for the OLD nested [vpn.tailscale] table.
+/// Only used transiently by migrate_legacy() to lift saved values into
+/// the new top-level [tailscale] section; no longer a live config path.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct TailscaleCfg {
     #[serde(default)]
@@ -904,11 +998,17 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
         "provider": s.vpn.provider,
         "kill_switch": s.vpn.kill_switch,
         "lan_bypass": s.vpn.lan_bypass,
+        // v80: tailscale is now a top-level independent toggle (like
+        // tor / i2p), read from [tailscale] not [vpn.tailscale]. Adds
+        // enabled + route_exit_via_vpn (Phase 2). SECURITY: never echo
+        // the auth_key — only a has_auth_key presence boolean.
         "tailscale": {
-            "hostname": s.vpn.tailscale.hostname,
-            "exit_node": s.vpn.tailscale.exit_node,
-            "advertise_exit_node": s.vpn.tailscale.advertise_exit_node,
-            "has_auth_key": !s.vpn.tailscale.auth_key.is_empty(),
+            "enabled": s.tailscale.enabled,
+            "hostname": s.tailscale.hostname,
+            "exit_node": s.tailscale.exit_node,
+            "advertise_exit_node": s.tailscale.advertise_exit_node,
+            "route_exit_via_vpn": s.tailscale.route_exit_via_vpn,
+            "has_auth_key": !s.tailscale.auth_key.is_empty(),
         },
         "wireguard": {
             "has_config": !s.vpn.wireguard.config.is_empty(),
@@ -955,8 +1055,10 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
         // tor.enabled / i2p.enabled fields, these two entries can
         // be dropped from the list.
         "providers": [
-            {"id": "none", "label": "None", "blurb": "No clearnet VPN. Traffic exits via the Pi's normal upstream (eth0/wlan0). Independent Tor + I2P can still be on for .onion / .i2p sites — see the toggles below."},
-            {"id": "tailscale", "label": "Tailscale", "blurb": "WireGuard mesh. Bring an auth-key from the Tailscale admin console. Optionally turn this Pi into an exit-node for your tailnet."},
+            {"id": "none", "label": "None", "blurb": "No clearnet VPN. Traffic exits via the Pi's normal upstream (eth0/wlan0). Independent Tor + I2P + Tailscale can still be on — see the toggles below."},
+            // v80: tailscale dropped from the VPN provider list — it's
+            // an independent top-level toggle now (runs alongside any
+            // VPN). The UI renders it in the Privacy Overlay section.
             {"id": "wireguard", "label": "WireGuard", "blurb": "Paste a working WireGuard .conf. We'll run it via wg-quick@aeon0."},
             {"id": "openvpn", "label": "OpenVPN", "blurb": "Paste a working .ovpn config. Username/password optional."},
             // v59: provider wizards. Underlying transport is WireGuard;
@@ -1015,6 +1117,9 @@ pub struct I2pPut {
 
 #[derive(Deserialize)]
 pub struct TailscalePut {
+    // v80: top-level independent toggle (mirrors TorPut/I2pPut).
+    #[serde(default)]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub auth_key: Option<String>,
     #[serde(default)]
@@ -1023,6 +1128,10 @@ pub struct TailscalePut {
     pub exit_node: Option<bool>,
     #[serde(default)]
     pub advertise_exit_node: Option<bool>,
+    /// Phase 2 (default off): pipe exit-node + LAN WAN traffic through
+    /// the active VPN/Tor. Gated downstream in aeon-net-services.sh.
+    #[serde(default)]
+    pub route_exit_via_vpn: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1069,11 +1178,18 @@ pub async fn put_vpn(
     if let Some(lb) = req.lan_bypass {
         nf.vpn.lan_bypass = lb;
     }
+    // v80: tailscale moved to a top-level [tailscale] section. PUT
+    // still accepts the same nested shape ({tailscale: {...}}) so the
+    // UI keeps working; we just write it to nf.tailscale.* now (mirror
+    // of the tor/i2p handling below). Pass an empty string to clear a
+    // secret (e.g. tailscale.auth_key="" to drop a stale key).
     if let Some(ts) = req.tailscale {
-        if let Some(v) = ts.auth_key { nf.vpn.tailscale.auth_key = v; }
-        if let Some(v) = ts.hostname { nf.vpn.tailscale.hostname = v; }
-        if let Some(v) = ts.exit_node { nf.vpn.tailscale.exit_node = v; }
-        if let Some(v) = ts.advertise_exit_node { nf.vpn.tailscale.advertise_exit_node = v; }
+        if let Some(v) = ts.enabled { nf.tailscale.enabled = v; }
+        if let Some(v) = ts.auth_key { nf.tailscale.auth_key = v; }
+        if let Some(v) = ts.hostname { nf.tailscale.hostname = v; }
+        if let Some(v) = ts.exit_node { nf.tailscale.exit_node = v; }
+        if let Some(v) = ts.advertise_exit_node { nf.tailscale.advertise_exit_node = v; }
+        if let Some(v) = ts.route_exit_via_vpn { nf.tailscale.route_exit_via_vpn = v; }
     }
     if let Some(wg) = req.wireguard {
         if let Some(v) = wg.config { nf.vpn.wireguard.config = v; }
@@ -1149,13 +1265,25 @@ pub async fn put_vpn(
         tracing::info!("PUT migration: provider=i2p → i2p.enabled=true, vpn=none");
         nf.i2p.enabled = true;
         nf.vpn.provider = "none".into();
+    } else if nf.vpn.provider == "tailscale" {
+        // v80: tailscale decoupled from the VPN enum. An older UI
+        // client may still send provider="tailscale" + a nested
+        // {tailscale: {...}} patch (which we already applied to
+        // nf.tailscale.* above). Migrate the selector PUT-time instead
+        // of 400ing: flip tailscale.enabled=true and clear the
+        // provider. Mirrors the tor/i2p PUT migration.
+        tracing::info!("PUT migration: provider=tailscale → tailscale.enabled=true, vpn=none");
+        nf.tailscale.enabled = true;
+        nf.vpn.provider = "none".into();
     }
     // v59: mullvad/ivpn join the list — they run as WireGuard tunnels but
     // their config comes from the provider wizard, not a pasted .conf.
     // v76: airvpn too (WireGuard by default, plus OpenVPN/SSL/SSH stealth
     // modes selected in its wizard; the mode lives in airvpn.toml).
+    // v80: tailscale REMOVED — it's an independent top-level toggle now,
+    // not a VPN provider (use tailscale.enabled).
     const VALID_VPN_PROVIDERS: &[&str] = &[
-        "none", "tailscale", "wireguard", "openvpn",
+        "none", "wireguard", "openvpn",
         "mullvad", "ivpn", "airvpn",
     ];
     if !VALID_VPN_PROVIDERS.contains(&nf.vpn.provider.as_str()) {
@@ -1163,7 +1291,7 @@ pub async fn put_vpn(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "ok": false,
-                "err": format!("vpn.provider '{}' not allowed — use tor.enabled / i2p.enabled for those", nf.vpn.provider),
+                "err": format!("vpn.provider '{}' not allowed — use tor.enabled / i2p.enabled / tailscale.enabled for those", nf.vpn.provider),
             })),
         ).into_response();
     }

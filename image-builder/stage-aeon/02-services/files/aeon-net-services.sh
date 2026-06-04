@@ -5,9 +5,14 @@
 #
 # Reads:   dnscrypt.{enabled,provider,location}
 #          vpn.{enabled,provider}
-#          vpn.tailscale.{auth_key,hostname,exit_node,advertise_exit_node}
+#          tailscale.{enabled,auth_key,hostname,exit_node,advertise_exit_node,route_exit_via_vpn}
 #          vpn.wireguard.config
 #          vpn.openvpn.{config,auth_username,auth_password}
+#
+# v80: Tailscale is an INDEPENDENT top-level toggle (like tor/i2p) — it
+# runs alongside any vpn.provider. It is no longer torn down by the VPN
+# apply path; apply_tailscale owns its own lifecycle via `--reset` /
+# `tailscale down`.
 #
 # Each function (dnscrypt / vpn) is idempotent and tolerates the others
 # being absent — safe to invoke on every config change.
@@ -459,11 +464,17 @@ stop_clearnet_vpns() {
     # v58: tighter version of stop_all_vpns that leaves tor + i2pd
     # alone. Called by apply_vpn so toggling a clearnet provider
     # doesn't bounce the independent Tor/I2P services.
+    #
+    # v80: also leaves Tailscale alone. Tailscale is an independent
+    # top-level toggle now — `apply_tailscale` owns its lifecycle via
+    # `tailscale up --reset` / `tailscale down`. Tearing the mesh down
+    # here meant every VPN apply/switch dropped the (now-independent)
+    # tailnet, severing remote management. The `tailscale down` line
+    # was removed for exactly that reason.
     systemctl stop wg-quick@aeon0.service 2>/dev/null || true
     systemctl disable wg-quick@aeon0.service 2>/dev/null || true
     systemctl stop openvpn-client@aeon.service 2>/dev/null || true
     systemctl disable openvpn-client@aeon.service 2>/dev/null || true
-    /usr/bin/tailscale down 2>/dev/null || true
     stop_airvpn_wrappers 2>/dev/null || true
     sweep_aeon_vpn_rules
 }
@@ -479,10 +490,11 @@ stop_all_vpns() {
     systemctl disable tor.service 2>/dev/null || true
     systemctl stop i2pd.service 2>/dev/null || true
     systemctl disable i2pd.service 2>/dev/null || true
-    # Tailscale: we don't fully stop tailscaled (it's the gateway daemon
-    # itself), just `tailscale down`. That removes the tailnet IP without
-    # killing the daemon.
-    /usr/bin/tailscale down 2>/dev/null || true
+    # v80: Tailscale is NOT torn down here anymore — it's an independent
+    # top-level toggle (like tor/i2p above), owned by apply_tailscale via
+    # `tailscale up --reset` / `tailscale down`. The old `tailscale down`
+    # in this VPN-teardown path dropped the mesh on every VPN switch,
+    # cutting remote management. apply_tailscale handles disable itself.
     # Sweep iptables rules we own. The v19 version used
     # `iptables-save | grep -v | iptables-restore` which is brittle:
     # one parse-rejected line and iptables-restore silently bails,
@@ -599,14 +611,34 @@ aeon_block_pair_insert() {
 aeon_drop_pair()        { aeon_block_pair        "$1" "$2" "$3" "drop" "${@:4}"; }
 aeon_drop_pair_insert() { aeon_block_pair_insert "$1" "$2" "$3" "drop" "${@:4}"; }
 
-apply_vpn_tailscale() {
-    local auth_key="$(toml_get vpn.tailscale auth_key '')"
-    local hostname="$(toml_get vpn.tailscale hostname '')"
-    local exit_node="$(toml_get vpn.tailscale exit_node false)"
-    local advertise_exit="$(toml_get vpn.tailscale advertise_exit_node false)"
+# v80: independent Tailscale toggle. Was apply_vpn_tailscale (dispatched
+# from apply_vpn's provider case); now gated on its own top-level
+# [tailscale] enabled flag and called directly from main(), so the mesh
+# runs ALONGSIDE any clearnet VPN instead of being mutually exclusive
+# with it. Reads section `tailscale` (not `vpn.tailscale`). Owns its full
+# lifecycle: `tailscale up --reset` when enabled, `tailscale down` when
+# disabled — nothing else tears the mesh down anymore.
+apply_tailscale() {
+    local enabled="$(toml_get tailscale enabled false)"
+    local auth_key="$(toml_get tailscale auth_key '')"
+    local hostname="$(toml_get tailscale hostname '')"
+    local exit_node="$(toml_get tailscale exit_node false)"
+    local advertise_exit="$(toml_get tailscale advertise_exit_node false)"
+
+    log "tailscale: enabled=$enabled advertise_exit=$advertise_exit exit_node=$exit_node"
 
     if [ ! -x /usr/bin/tailscale ]; then
         log "tailscale binary not present — skipping"
+        return 0
+    fi
+
+    if [ "$enabled" != "true" ]; then
+        # Bring the mesh down but leave tailscaled (the gateway daemon)
+        # running — `tailscale down` just drops the tailnet IP. Phase-2
+        # exit routing is torn down separately by apply_tailscale_exit_
+        # routing (which no-ops its teardown when the toggle is off).
+        /usr/bin/tailscale down 2>/dev/null || true
+        log "tailscale disabled — tailscale down (daemon left running)"
         return 0
     fi
 
@@ -1403,7 +1435,10 @@ detect_vpn_iface() {
         return
     fi
     case "$provider" in
-        tailscale) ip link show tailscale0 >/dev/null 2>&1 && echo "tailscale0" ;;
+        # v80: 'tailscale' is no longer a VPN provider (it's an
+        # independent mesh now), so it never appears here — and it must
+        # NOT: the VPN "iface" is the CLEARNET exit that exit-routing
+        # tunnels tailnet traffic through, never tailscale0 itself.
         # v74: mullvad + ivpn are the commercial wizard providers — they
         # ride the SAME wg-quick@aeon0 tunnel as a hand-rolled "wireguard"
         # provider. They were missing here, so detect_vpn_iface returned ""
@@ -1554,6 +1589,187 @@ PYEOF
     log "    (apps must opt in by configuring those proxies — not transparently routed)"
 }
 
+# ── v80 Phase 2: Tailscale exit-node + LAN traffic over the VPN ───────
+#
+# DEFAULT OFF. Gated on ALL of:
+#   tailscale.enabled = true
+#   tailscale.advertise_exit_node = true   (this Pi is an exit node)
+#   tailscale.route_exit_via_vpn = true    (the explicit opt-in)
+#   detect_vpn_iface returns a live VPN iface (aeon0 / tun0 / …)
+#
+# When on, WAN-bound traffic FORWARDED from the tailnet (exit-node
+# clients arriving on tailscale0) and from LAN devices (usb0) is
+# fwmark-routed through the active VPN/Tor tunnel — NOT the bare ISP.
+# The Tailscale mesh itself stays direct (the tailnet 100.64.0.0/10 and
+# tailscaled's own 0x80000-marked underlay are rescued back to the main
+# table). New fwmark 0x400 / table 400 — no collision with WG 0xca6c,
+# Tor 0x100, I2P 0x200, or Tailscale's own 0x80000.
+#
+# Rules are tagged "aeon-ts-exit" (NOT "aeon-vpn") so the VPN rule
+# sweeps (sweep_aeon_vpn_rules / stop_*_vpns) never touch them — this
+# layer has its own teardown below and is re-asserted from
+# reassert_policy_routing.
+TS_EXIT_FWMARK=0x400
+TS_EXIT_TABLE=400
+TS_EXIT_TAG=aeon-ts-exit
+# Rule pref numbers: the tailnet rescue MUST out-prioritise (lower pref
+# number = evaluated first) the fwmark rule so mesh traffic never gets
+# pulled into the VPN. Both sit below wg-quick's own rules (which live
+# in the low-thousands) but that's fine — these only ever match the
+# forwarded client subnets, never the Pi's own egress.
+TS_EXIT_RULE_PREF=8400        # fwmark 0x400 -> table 400
+TS_EXIT_RESCUE_PREF=8399      # to 100.64.0.0/10 -> main (higher priority)
+
+teardown_tailscale_exit_routing() {
+    # Idempotent removal of everything apply_tailscale_exit_routing adds.
+    # Safe to call when nothing is installed (every line tolerates absent
+    # rules). Used both by the gate-off path and as the pre-step of a
+    # clean re-add. Everything we install carries the aeon-ts-exit comment
+    # (or a known ip-rule selector), so teardown matches on that — no need
+    # to re-derive the subnets here.
+
+    # ip rules (delete by selector; loop in case duplicates ever stacked).
+    ip rule del fwmark "$TS_EXIT_FWMARK" table "$TS_EXIT_TABLE" 2>/dev/null || true
+    ip rule del to 100.64.0.0/10 lookup main pref "$TS_EXIT_RESCUE_PREF" 2>/dev/null || true
+    # Routing table.
+    ip route flush table "$TS_EXIT_TABLE" 2>/dev/null || true
+
+    # mangle PREROUTING marks (tailscale0 + usb0 sources).
+    for src in tailscale0 usb0; do
+        while iptables -t mangle -D PREROUTING -i "$src" \
+            -m comment --comment "$TS_EXIT_TAG" 2>/dev/null; do :; done
+    done
+
+    # NAT + FORWARD rules: line-number sweep of our tag across the
+    # relevant chains (reverse order so deletions don't renumber).
+    local table chain lines n
+    for table in nat filter; do
+        for chain in POSTROUTING FORWARD; do
+            lines=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+                | awk -v t="$TS_EXIT_TAG" '$0 ~ t {print $1}' | sort -rn)
+            for n in $lines; do
+                iptables -t "$table" -D "$chain" "$n" 2>/dev/null || true
+            done
+        done
+    done
+}
+
+apply_tailscale_exit_routing() {
+    local enabled adv route iface
+    enabled="$(toml_get tailscale enabled false)"
+    adv="$(toml_get tailscale advertise_exit_node false)"
+    route="$(toml_get tailscale route_exit_via_vpn false)"
+    iface="$(detect_vpn_iface)"
+
+    # Gate: ALL conditions must hold. Any miss → tear our rules down so
+    # toggling the feature off (or the VPN going away) cleans up, then
+    # bail. This is what makes the toggle reversible.
+    if [ "$enabled" != "true" ] || [ "$adv" != "true" ] \
+        || [ "$route" != "true" ] || [ -z "$iface" ]; then
+        teardown_tailscale_exit_routing
+        if [ "$route" = "true" ] && [ "$enabled" = "true" ] && [ "$adv" = "true" ] && [ -z "$iface" ]; then
+            log "tailscale exit-routing: requested but no clearnet VPN is up — torn down (needs a live VPN iface)"
+        else
+            log "tailscale exit-routing: off (enabled=$enabled advertise=$adv route_via_vpn=$route iface=${iface:-none}) — rules removed"
+        fi
+        return 0
+    fi
+
+    local lan_bypass usb_enabled usb_subnet
+    lan_bypass="$(toml_get vpn lan_bypass 192.168.0.0/16)"
+    usb_enabled="$(toml_get usb_ethernet enabled false)"
+    usb_subnet="$(toml_get usb_ethernet subnet 10.55.0.0/24)"
+
+    log "tailscale exit-routing: ON — forwarding tailnet+LAN WAN traffic through $iface via fwmark $TS_EXIT_FWMARK / table $TS_EXIT_TABLE (mesh stays direct)"
+
+    # Start from a clean slate so re-applies (and reassert_policy_routing
+    # re-runs) never stack duplicates. Mirrors apply_tor_over_vpn's
+    # delete-before-add discipline, just across more rule types.
+    teardown_tailscale_exit_routing
+
+    # ── 1. mangle PREROUTING: mark forwarded WAN-bound client traffic ──
+    # Match traffic FORWARDED in from the exit-node clients (tailscale0)
+    # and LAN devices (usb0), destined OFF-net. Exclusions (so the mark
+    # is only applied to genuine WAN traffic):
+    #   -d 100.64.0.0/10  → the tailnet itself (mesh stays direct)
+    #   -d <lan_bypass>   → the local LAN (don't tunnel intra-LAN)
+    #   -d <usb_subnet>   → the USB client subnet (intra-segment)
+    # Every forwarded WAN-bound packet from these sources gets marked
+    # (not just NEW) so the whole flow rides table 400 out the tunnel.
+    # The reply path returns on the VPN iface and is matched by the
+    # conntrack ESTABLISHED,RELATED FORWARD accept below + the main
+    # route table — it doesn't need the mark.
+    local src
+    for src in tailscale0 usb0; do
+        # usb0 source only matters when USB networking is up; tailscale0
+        # only exists when tailscaled is running. iptables tolerates a
+        # not-yet-present -i iface at rule-add time (it matches by name
+        # at runtime), so adding both unconditionally is safe + idempotent.
+        iptables -t mangle -A PREROUTING -i "$src" \
+            ! -d 100.64.0.0/10 \
+            ! -d "$lan_bypass" \
+            ! -d "$usb_subnet" \
+            -j MARK --set-mark "$TS_EXIT_FWMARK" \
+            -m comment --comment "$TS_EXIT_TAG"
+    done
+
+    # ── 2. policy routing: marked packets exit via the VPN iface ──
+    # Idempotent flush+add, mirroring apply_tor_over_vpn.
+    ip route flush table "$TS_EXIT_TABLE" 2>/dev/null || true
+    ip route add default dev "$iface" table "$TS_EXIT_TABLE" 2>/dev/null || true
+    ip rule del fwmark "$TS_EXIT_FWMARK" table "$TS_EXIT_TABLE" 2>/dev/null || true
+    ip rule add fwmark "$TS_EXIT_FWMARK" table "$TS_EXIT_TABLE" pref "$TS_EXIT_RULE_PREF"
+
+    # ── 3. mesh-stays-direct rescue ──
+    # A higher-priority (lower pref number) rule sends anything destined
+    # to the tailnet to the MAIN table, so mesh packets are NEVER pulled
+    # into table 400 even if something marks them. tailscaled installs
+    # its OWN bypass for its 0x80000-marked underlay (the packets it
+    # sends to peers' real endpoints) at a very high priority; we do NOT
+    # fight that rule — it must keep out-prioritising wg-quick's
+    # catch-all so the WireGuard mesh keeps reaching peers directly even
+    # while a clearnet wg-quick VPN owns the default route. This rescue
+    # only covers the tailnet CGNAT range; tailscaled owns the underlay.
+    ip rule del to 100.64.0.0/10 lookup main pref "$TS_EXIT_RESCUE_PREF" 2>/dev/null || true
+    ip rule add to 100.64.0.0/10 lookup main pref "$TS_EXIT_RESCUE_PREF"
+
+    # ── 4. NAT: masquerade the client sources onto the VPN iface ──
+    # Nothing else masquerades onto the VPN iface for these sources:
+    # NM-shared only NATs usb0 → the primary egress, and tailscaled NATs
+    # to the bare-ISP default — so without this the tunnelled packets
+    # leave with a 100.64/usb source the VPN peer drops. -C/-A makes it
+    # idempotent.
+    iptables -t nat -C POSTROUTING -o "$iface" -s 100.64.0.0/10 -j MASQUERADE \
+        -m comment --comment "$TS_EXIT_TAG" 2>/dev/null \
+        || iptables -t nat -A POSTROUTING -o "$iface" -s 100.64.0.0/10 -j MASQUERADE \
+            -m comment --comment "$TS_EXIT_TAG"
+    if [ "$usb_enabled" = "true" ]; then
+        iptables -t nat -C POSTROUTING -o "$iface" -s "$usb_subnet" -j MASQUERADE \
+            -m comment --comment "$TS_EXIT_TAG" 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -o "$iface" -s "$usb_subnet" -j MASQUERADE \
+                -m comment --comment "$TS_EXIT_TAG"
+    fi
+
+    # ── 5. FORWARD accepts (+ conntrack returns) ──
+    # Allow the forwarded client → VPN path and the established return.
+    # Idempotent via -C/-A. These also keep the path open when the
+    # kill-switch is on (see apply_kill_switch's FORWARD coordination).
+    local cin
+    for cin in tailscale0 usb0; do
+        [ "$cin" = "usb0" ] && [ "$usb_enabled" != "true" ] && continue
+        iptables -C FORWARD -i "$cin" -o "$iface" -j ACCEPT \
+            -m comment --comment "$TS_EXIT_TAG" 2>/dev/null \
+            || iptables -A FORWARD -i "$cin" -o "$iface" -j ACCEPT \
+                -m comment --comment "$TS_EXIT_TAG"
+        iptables -C FORWARD -i "$iface" -o "$cin" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+            -m comment --comment "$TS_EXIT_TAG" 2>/dev/null \
+            || iptables -A FORWARD -i "$iface" -o "$cin" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+                -m comment --comment "$TS_EXIT_TAG"
+    done
+
+    log "tailscale exit-routing: rules installed (mark $TS_EXIT_FWMARK, masquerade 100.64.0.0/10$([ "$usb_enabled" = "true" ] && echo " + $usb_subnet") -> $iface; tailnet rescued to main)"
+}
+
 apply_kill_switch() {
     local enabled="$(toml_get vpn kill_switch false)"
     local provider="$(toml_get vpn provider none)"
@@ -1623,6 +1839,38 @@ apply_kill_switch() {
             ;;
     esac
 
+    # ── v80 Phase 2: kill-switch ↔ exit-routing coordination ──
+    # When Tailscale exit-routing is ON, the exit-node + LAN clients reach
+    # the WAN via the FORWARD chain (not OUTPUT), riding the VPN iface.
+    # The kill-switch's job is "no clearnet leaks while the tunnel owns
+    # egress" — it must NOT black-hole that forwarded path. apply_tailscale_
+    # exit_routing already appended the FORWARD accepts (tagged aeon-ts-
+    # exit); here we re-assert them at the TOP of FORWARD (insert) so they
+    # take precedence over any stricter FORWARD policy, and only when the
+    # whole feature is actually engaged. Idempotent via -C guard.
+    local ks_enabled ks_adv ks_route ks_iface
+    ks_enabled="$(toml_get tailscale enabled false)"
+    ks_adv="$(toml_get tailscale advertise_exit_node false)"
+    ks_route="$(toml_get tailscale route_exit_via_vpn false)"
+    ks_iface="$(detect_vpn_iface)"
+    if [ "$ks_enabled" = "true" ] && [ "$ks_adv" = "true" ] \
+        && [ "$ks_route" = "true" ] && [ -n "$ks_iface" ]; then
+        local ks_usb; ks_usb="$(toml_get usb_ethernet enabled false)"
+        local ks_cin
+        for ks_cin in tailscale0 usb0; do
+            [ "$ks_cin" = "usb0" ] && [ "$ks_usb" != "true" ] && continue
+            iptables -C FORWARD -i "$ks_cin" -o "$ks_iface" -j ACCEPT \
+                -m comment --comment "$TS_EXIT_TAG" 2>/dev/null \
+                || iptables -I FORWARD 1 -i "$ks_cin" -o "$ks_iface" -j ACCEPT \
+                    -m comment --comment "$TS_EXIT_TAG"
+            iptables -C FORWARD -i "$ks_iface" -o "$ks_cin" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+                -m comment --comment "$TS_EXIT_TAG" 2>/dev/null \
+                || iptables -I FORWARD 1 -i "$ks_iface" -o "$ks_cin" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+                    -m comment --comment "$TS_EXIT_TAG"
+        done
+        log "kill-switch: Tailscale exit-routing active — FORWARD path to $ks_iface kept open for tailnet+LAN clients"
+    fi
+
     # Drop everything else outbound.
     # Kill-switch catchall: tunnel is down, block everything else.
     # ICMP host-unreachable is the right signal — tells apps the
@@ -1657,7 +1905,12 @@ apply_vpn() {
     fi
 
     case "$provider" in
-        tailscale)            apply_vpn_tailscale ;;
+        # v80: 'tailscale' is gone from this dispatch — it's an
+        # independent toggle handled by apply_tailscale() (called from
+        # main, gated on [tailscale] enabled). A legacy provider=tailscale
+        # is migrated to "none" by the supervisor at read time, so we
+        # should never see it here; if a direct TOML edit slips one
+        # through it falls to the unknown-provider warning below.
         wireguard)            apply_vpn_wireguard ;;
         openvpn)              apply_vpn_openvpn ;;
         mullvad|ivpn|azirevpn) apply_vpn_provider_wg "$provider" ;;
@@ -1882,24 +2135,42 @@ reassert_policy_routing() {
         apply_i2p_over_vpn
         log "vpn: re-asserted I2P over_vpn policy routing (fwmark 0x200 -> table 200)"
     fi
+    # v80 Phase 2: re-assert Tailscale exit-routing too. The wg-quick
+    # bounce above recreates aeon0 and drops table 400's default route
+    # (exactly like Tor/I2P's tables 100/200); the DNSCrypt NM churn can
+    # flush it independently. apply_tailscale_exit_routing is fully
+    # idempotent AND self-gating — it re-adds the mark/table/NAT/FORWARD
+    # rules when the feature is on, and is a no-op teardown when it's off
+    # (e.g. the VPN iface vanished), so calling it unconditionally here
+    # is safe.
+    apply_tailscale_exit_routing
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
-# v58 order:
-#   1. clearnet VPN (tailscale/wireguard/openvpn) — establishes
-#      tun0/wg0 default route if active.
+# v58 order (v80 inserts Tailscale + its exit routing):
+#   1. clearnet VPN (wireguard/openvpn/commercial) — establishes
+#      tun0/aeon0 default route if active.
+#   1b. (v80) Tailscale — independent mesh, brought up alongside any
+#      VPN. Must run after apply_vpn so the VPN iface exists before
+#      apply_tailscale_exit_routing tries to detect + route through it.
+#   1c. (v80, Phase 2, DEFAULT OFF) Tailscale exit routing — fwmark
+#      exit-node + LAN WAN traffic through the active VPN. Gated on
+#      tailscale.enabled + advertise_exit_node + route_exit_via_vpn +
+#      a live VPN iface; tears its own rules down otherwise.
 #   2. Tor — its iptables rules need the VPN's tunnel interface to
 #      exist before tor.over_vpn=true can fwmark traffic through it.
 #   3. I2P — independent; HTTP proxy bind needs usb0 + nothing else.
 #   4. DNSCrypt — bootstrap_resolvers may point at Tor's DNSPort
 #      when Tor is on, so set up Tor first.
 #   5. (v74) re-assert ALL policy routing — DNSCrypt's NM reactivation
-#      flushes wg-quick's table AND Tor/I2P's over_vpn tables (100/200);
-#      restore them in place once all NM churn is done.
+#      flushes wg-quick's table AND Tor/I2P/Tailscale over_vpn tables
+#      (100/200/400); restore them in place once all NM churn is done.
 apply_vpn
+apply_tailscale
+apply_tailscale_exit_routing
 apply_tor
 apply_i2p
 apply_dnscrypt

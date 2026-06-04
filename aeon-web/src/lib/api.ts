@@ -896,9 +896,15 @@ export interface VpnState {
   kill_switch: boolean;
   lan_bypass: string;
   tailscale: {
+    // v80: tailscale is an independent top-level toggle now (like
+    // tor/i2p), not a VPN provider. Adds enabled + route_exit_via_vpn
+    // (Phase 2, default off). has_auth_key is presence-only — the
+    // backend never echoes the secret.
+    enabled: boolean;
     hostname: string;
     exit_node: boolean;
     advertise_exit_node: boolean;
+    route_exit_via_vpn: boolean;
     has_auth_key: boolean;
   };
   wireguard: { has_config: boolean };
@@ -933,10 +939,14 @@ export interface VpnPatch {
   kill_switch?: boolean;
   lan_bypass?: string;
   tailscale?: {
+    // v80: top-level independent toggle. enabled + route_exit_via_vpn
+    // (Phase 2, default off) join the existing mesh fields.
+    enabled?: boolean;
     auth_key?: string;
     hostname?: string;
     exit_node?: boolean;
     advertise_exit_node?: boolean;
+    route_exit_via_vpn?: boolean;
   };
   wireguard?: { config?: string };
   openvpn?: {

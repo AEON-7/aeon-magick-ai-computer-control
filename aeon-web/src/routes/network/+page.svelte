@@ -131,10 +131,15 @@
   let vpnProvider: api.VpnProvider = 'none';
   let vpnKillSwitch = false;
   let vpnLanBypass = '192.168.0.0/16';
+  // v80: Tailscale is an independent overlay toggle now (mirrors
+  // tor/i2p) — its enable flag + fields live at the top level, not
+  // under the VPN provider. tsRouteExitViaVpn is Phase 2 (default off).
+  let tsEnabled = false;
   let tsAuthKey = '';
   let tsHostname = '';
   let tsExitNode = false;
   let tsAdvertiseExit = false;
+  let tsRouteExitViaVpn = false;
   let wgConfig = '';
   let ovConfig = '';
   let ovUser = '';
@@ -263,6 +268,10 @@
   // bar + relay-node listing that the v62 section restructure dropped even
   // though aeon-vpn-status.py still emits the data (GETINFO circuit-status).
   $: torOverlay = statusOverlays.find((o) => o.kind === 'tor');
+  // v80: live Tailscale overlay — drives the online/IP/peer status box in
+  // the new independent Tailscale section. aeon-vpn-status emits this
+  // whenever tailscale.enabled is true, regardless of the active VPN.
+  $: tsOverlay = statusOverlays.find((o) => o.kind === 'tailscale');
 
   // Labels for the overlay header — "Mullvad VPN" beats "wireguard"
   // when we know the user configured a wizard provider.
@@ -467,9 +476,15 @@
       vpnProvider = (v.provider === 'tor' || v.provider === 'i2p') ? 'none' : v.provider;
       vpnKillSwitch = v.kill_switch;
       vpnLanBypass = v.lan_bypass;
+      // v80: Tailscale state comes from the top-level [tailscale] block
+      // now (independent of vpnProvider). Loaded here so the new Privacy
+      // Overlay section renders its toggle + fields. has_auth_key drives
+      // the "already saved" hint; the secret itself is never echoed.
+      tsEnabled = v.tailscale.enabled ?? false;
       tsHostname = v.tailscale.hostname;
       tsExitNode = v.tailscale.exit_node;
       tsAdvertiseExit = v.tailscale.advertise_exit_node;
+      tsRouteExitViaVpn = v.tailscale.route_exit_via_vpn ?? false;
       ovUser = v.openvpn.auth_username;
       i2pOutproxy = v.i2p.outproxy;
       // Secrets are NOT echoed by the GET — start with empty inputs;
@@ -800,14 +815,7 @@
         kill_switch: vpnKillSwitch,
         lan_bypass: vpnLanBypass,
       };
-      if (vpnProvider === 'tailscale') {
-        patch.tailscale = {
-          hostname: tsHostname,
-          exit_node: tsExitNode,
-          advertise_exit_node: tsAdvertiseExit,
-        };
-        if (tsAuthKey) patch.tailscale.auth_key = tsAuthKey;
-      } else if (vpnProvider === 'wireguard' && wgConfig) {
+      if (vpnProvider === 'wireguard' && wgConfig) {
         patch.wireguard = { config: wgConfig };
       } else if (vpnProvider === 'openvpn') {
         patch.openvpn = { auth_username: ovUser };
@@ -833,6 +841,20 @@
         outproxy: i2pOutproxy,
         over_vpn: i2pOverVpn,
       };
+      // v80: Tailscale is an independent overlay now — its toggle +
+      // fields are saved on EVERY request (not gated on vpnProvider),
+      // exactly like the Tor + I2P overlays above. route_exit_via_vpn
+      // is the Phase-2 exit-routing opt-in (default off). The auth_key
+      // is only sent when the user typed a new one (blank keeps the
+      // saved key — the backend treats "" as an explicit clear).
+      patch.tailscale = {
+        enabled: tsEnabled,
+        hostname: tsHostname,
+        exit_node: tsExitNode,
+        advertise_exit_node: tsAdvertiseExit,
+        route_exit_via_vpn: tsRouteExitViaVpn,
+      };
+      if (tsAuthKey) patch.tailscale.auth_key = tsAuthKey;
       await api.setVpn(patch);
       vpnMsg = '✓ saved + applied (tunnel may take a few seconds)';
       setTimeout(() => (vpnMsg = ''), 4000);
@@ -1684,26 +1706,29 @@
         </div>
       </details>
 
-      <!-- ─── Privacy Overlay Networks (Tor + I2P) ─── -->
+      <!-- ─── Privacy Overlay Networks (Tor + I2P + Tailscale) ─── -->
       <details bind:open={overlaysOpen}
                class="bg-ink-900 border border-ink-700 rounded-xl">
         <summary class="cursor-pointer select-none px-6 py-4
                         flex items-center justify-between gap-3">
           <div class="flex items-center gap-3 min-w-0 flex-wrap">
             <span class="h-2 w-2 rounded-full flex-shrink-0
-                         {torEnabled || i2pEnabled ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
+                         {torEnabled || i2pEnabled || tsEnabled ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
             <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Privacy Overlay Networks
             </span>
             <span class="text-xs text-zinc-500 truncate">
-              {#if torEnabled && i2pEnabled}
-                Tor ({torMode === 'split_tunnel' ? '.onion only' : 'all traffic'}) + I2P
-              {:else if torEnabled}
-                Tor · {torMode === 'split_tunnel' ? '.onion only' : 'all traffic'}
-              {:else if i2pEnabled}
-                I2P only
+              <!-- v80: Tailscale joined this panel — summarise all three
+                   overlays as a compact comma list instead of the old
+                   Tor/I2P-only enumeration. -->
+              {#if torEnabled || i2pEnabled || tsEnabled}
+                {[
+                  torEnabled && `Tor (${torMode === 'split_tunnel' ? '.onion only' : 'all traffic'})`,
+                  i2pEnabled && 'I2P',
+                  tsEnabled && 'Tailscale',
+                ].filter(Boolean).join(' + ')}
               {:else}
-                both off
+                all off
               {/if}
             </span>
           </div>
@@ -1715,13 +1740,14 @@
           <section class="space-y-4">
             <header class="space-y-1">
               <p class="text-zinc-400 text-sm">
-                Tor and I2P are independent of the VPN — any combination
-                can run at the same time. <code class="text-cursed-300">.onion</code>
+                Tor, I2P and Tailscale are independent of the VPN — any
+                combination can run at the same time. <code class="text-cursed-300">.onion</code>
                 sites go through Tor, <code class="text-cursed-300">.i2p</code>
-                sites through I2P, clearnet through the VPN (or straight
-                WAN if no VPN). Tor's "all traffic" mode pulls clearnet
-                in too, but I2P always stays independent so the I2P
-                network stays reachable.
+                sites through I2P, the Tailscale mesh stays direct, and
+                clearnet goes through the VPN (or straight WAN if no VPN).
+                Tor's "all traffic" mode pulls clearnet in too, but I2P
+                and the Tailscale mesh always stay independent so those
+                networks stay reachable.
               </p>
               <!-- v62: browser compatibility tip (was on the user's
                    ask list — common failure mode is "I enabled Tor
@@ -1993,10 +2019,147 @@
               </div>
             </div>
 
-            <!-- v73: the overlay section now owns Tor + I2P end-to-end, so it
-                 gets its own Save & Apply. saveVpn() persists the toggles +
-                 Tor's bridge preset/bridges/mode/exit-country (and the VPN
-                 config too — it's one atomic network save). -->
+            <!-- ── Tailscale ── -->
+            <!-- v80: lifted out of the VPN-provider conditional into its
+                 own toggle-gated overlay (modeled on the Tor + I2P cards
+                 above). The mesh runs ALONGSIDE any VPN; tsEnabled is the
+                 single source of truth, saved on every request. -->
+            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" bind:checked={tsEnabled}
+                       class="w-4 h-4 accent-cursed-500" />
+                <span class="text-zinc-200 text-sm font-medium">Enable Tailscale</span>
+                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+                  • WireGuard mesh
+                </span>
+                <a href="/agent/dash" class="ml-auto text-[10px] px-2 py-1 rounded
+                          border border-cursed-500/40 text-cursed-300
+                          hover:bg-cursed-500/10 transition-colors font-mono">
+                  Tailnet devices →
+                </a>
+              </label>
+
+              <!-- live Tailscale status — online state + tailnet IP + peers.
+                   Polls every few seconds from aeon-vpn-status. Visible
+                   whenever Tailscale is enabled (independent of the VPN). -->
+              {#if tsEnabled && tsOverlay}
+                {@const connected = tsOverlay.state === 'connected'}
+                <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-1.5">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-xs font-mono uppercase tracking-wider
+                                 {connected ? 'text-live-300' : 'text-amber-300'}">
+                      {connected ? '● Tailscale connected' : '◐ Tailscale ' + (tsOverlay.state ?? 'starting')}
+                    </span>
+                  </div>
+                  {#if tsOverlay.summary}
+                    <p class="text-[11px] text-zinc-500 leading-snug">{tsOverlay.summary}</p>
+                  {/if}
+                </div>
+              {/if}
+
+              <div class="space-y-3 pl-7"
+                   class:opacity-40={!tsEnabled}
+                   class:pointer-events-none={!tsEnabled}>
+                <p class="text-[11px] text-zinc-500 leading-relaxed">
+                  Tailscale is a WireGuard mesh — it joins this Pi to your
+                  tailnet and stays <strong>direct</strong> (it does not ride
+                  any clearnet VPN). Runs alongside Tor / I2P / a WAN VPN in
+                  any combination.
+                </p>
+
+                <div class="space-y-1">
+                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-auth">
+                    Auth key
+                    {#if vpnState?.tailscale.has_auth_key}
+                      <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                        (one already saved — leave blank to keep it)
+                      </span>
+                    {/if}
+                  </label>
+                  <input id="ts-auth" type="password" bind:value={tsAuthKey}
+                         placeholder="tskey-auth-…"
+                         autocomplete="off"
+                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  <p class="text-xs text-zinc-500">
+                    Generate from
+                    <a class="text-cursed-300 hover:underline"
+                       href="https://login.tailscale.com/admin/settings/keys"
+                       target="_blank" rel="noreferrer">login.tailscale.com</a>
+                    — Settings → Keys → Generate auth key. One-time use is
+                    fine; we run <code>tailscale up</code> once with it
+                    and the daemon keeps the resulting node key.
+                  </p>
+                </div>
+
+                <div class="space-y-1">
+                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-host">
+                    Hostname (optional)
+                  </label>
+                  <input id="ts-host" type="text" bind:value={tsHostname}
+                         placeholder="aeon-magick"
+                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                  <p class="text-xs text-zinc-500">
+                    Name this device shows up as in your tailnet. Defaults
+                    to the Pi's hostname.
+                  </p>
+                </div>
+
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" bind:checked={tsAdvertiseExit}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-1">
+                    <div class="text-zinc-200 text-sm font-medium">Advertise as exit node</div>
+                    <p class="text-xs text-zinc-500">
+                      Make this Pi available as a tailnet exit node so
+                      <em>other</em> machines on your tailnet can route their
+                      WAN through it. You'll still need to approve the
+                      offer from the Tailscale admin UI.
+                    </p>
+                  </div>
+                </label>
+
+                <!-- v80 Phase 2 (DEFAULT OFF): exit-node + LAN traffic over
+                     the VPN. Only meaningful once this Pi advertises itself
+                     as an exit node, so gate the checkbox on tsAdvertiseExit. -->
+                {#if tsAdvertiseExit}
+                  <label class="flex items-start gap-3 cursor-pointer pl-7 pt-1">
+                    <input type="checkbox" bind:checked={tsRouteExitViaVpn}
+                           class="mt-1 w-4 h-4 accent-cursed-500" />
+                    <div class="space-y-1">
+                      <div class="text-zinc-200 text-sm font-medium">
+                        Route exit-node + LAN traffic over the VPN
+                      </div>
+                      <p class="text-xs text-zinc-500 leading-relaxed">
+                        Pipes WAN-bound traffic from exit-node clients and LAN
+                        devices through the active VPN/Tor. The Tailscale mesh
+                        itself stays direct. Requires a VPN to be enabled.
+                        ⚠ Needs live leak-testing before you rely on it.
+                      </p>
+                    </div>
+                  </label>
+                {/if}
+
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" bind:checked={tsExitNode}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-1">
+                    <div class="text-zinc-200 text-sm font-medium">Use a tailnet exit node</div>
+                    <p class="text-xs text-zinc-500">
+                      Route <em>this</em> Pi's outbound traffic through
+                      another tailnet exit node. After saving, SSH in and
+                      run <code>tailscale set --exit-node=&lt;host&gt;</code>
+                      to pick which one.
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <!-- v73/v80: the overlay section owns Tor + I2P + Tailscale
+                 end-to-end, so it gets its own Save & Apply. saveVpn()
+                 persists all three overlay toggles + Tor's bridge preset/
+                 bridges/mode/exit-country (and the VPN config too — it's
+                 one atomic network save). -->
             <div class="flex items-center gap-3 pt-3 border-t border-ink-700">
               <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
                 {vpnSaving ? 'saving…' : 'Save & Apply'}
@@ -2075,7 +2238,7 @@
             <div class="space-y-3 pl-7" class:opacity-40={!vpnEnabled} class:pointer-events-none={!vpnEnabled}>
               <p class="text-xs uppercase tracking-wider text-zinc-500">Provider</p>
               {#if vpnState}
-                {#each vpnState.providers.filter((p) => p.id !== 'tor' && p.id !== 'i2p') as p}
+                {#each vpnState.providers.filter((p) => p.id !== 'tor' && p.id !== 'i2p' && p.id !== 'tailscale') as p}
                   <label class="flex items-start gap-3 cursor-pointer">
                     <input type="radio" bind:group={vpnProvider} value={p.id}
                            class="mt-1 w-4 h-4 accent-cursed-500" />
@@ -2088,74 +2251,11 @@
               {/if}
             </div>
 
-            {#if vpnEnabled && vpnProvider === 'tailscale'}
-              <div class="space-y-3 pl-7">
-                <div class="space-y-1">
-                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-auth">
-                    Auth key
-                    {#if vpnState?.tailscale.has_auth_key}
-                      <span class="text-cursed-400 normal-case ml-1 text-[10px]">
-                        (one already saved — leave blank to keep it)
-                      </span>
-                    {/if}
-                  </label>
-                  <input id="ts-auth" type="password" bind:value={tsAuthKey}
-                         placeholder="tskey-auth-…"
-                         autocomplete="off"
-                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
-                  <p class="text-xs text-zinc-500">
-                    Generate from
-                    <a class="text-cursed-300 hover:underline"
-                       href="https://login.tailscale.com/admin/settings/keys"
-                       target="_blank" rel="noreferrer">login.tailscale.com</a>
-                    — Settings → Keys → Generate auth key. One-time use is
-                    fine; we run <code>tailscale up</code> once with it
-                    and the daemon keeps the resulting node key.
-                  </p>
-                </div>
-
-                <div class="space-y-1">
-                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-host">
-                    Hostname (optional)
-                  </label>
-                  <input id="ts-host" type="text" bind:value={tsHostname}
-                         placeholder="aeon-magick"
-                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
-                  <p class="text-xs text-zinc-500">
-                    Name this device shows up as in your tailnet. Defaults
-                    to the Pi's hostname.
-                  </p>
-                </div>
-
-                <label class="flex items-start gap-3 cursor-pointer">
-                  <input type="checkbox" bind:checked={tsAdvertiseExit}
-                         class="mt-1 w-4 h-4 accent-cursed-500" />
-                  <div class="space-y-1">
-                    <div class="text-zinc-200 text-sm font-medium">Advertise as exit node</div>
-                    <p class="text-xs text-zinc-500">
-                      Make this Pi available as a tailnet exit node so
-                      <em>other</em> machines on your tailnet can route their
-                      WAN through it. You'll still need to approve the
-                      offer from the Tailscale admin UI.
-                    </p>
-                  </div>
-                </label>
-
-                <label class="flex items-start gap-3 cursor-pointer">
-                  <input type="checkbox" bind:checked={tsExitNode}
-                         class="mt-1 w-4 h-4 accent-cursed-500" />
-                  <div class="space-y-1">
-                    <div class="text-zinc-200 text-sm font-medium">Use a tailnet exit node</div>
-                    <p class="text-xs text-zinc-500">
-                      Route <em>this</em> Pi's outbound traffic through
-                      another tailnet exit node. After saving, SSH in and
-                      run <code>tailscale set --exit-node=&lt;host&gt;</code>
-                      to pick which one.
-                    </p>
-                  </div>
-                </label>
-              </div>
-            {/if}
+            <!-- v80: the Tailscale config block moved OUT of the VPN
+                 provider conditional into its own toggle-gated section
+                 in the Privacy Overlay Networks panel above (it's an
+                 independent overlay now, like Tor + I2P — it runs
+                 alongside any VPN). -->
 
             {#if vpnEnabled && vpnProvider === 'wireguard'}
               <div class="space-y-2 pl-7">
