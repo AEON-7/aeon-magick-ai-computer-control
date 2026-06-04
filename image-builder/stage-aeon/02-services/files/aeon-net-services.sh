@@ -1799,9 +1799,6 @@ apply_kill_switch() {
     fi
 
     case "$provider" in
-        tailscale)
-            iptables -A OUTPUT -o tailscale0 -j ACCEPT -m comment --comment "aeon-vpn"
-            ;;
         wireguard|mullvad|ivpn)
             # v74: mullvad/ivpn ride wg-quick@aeon0 just like "wireguard".
             # They were missing here, so enabling the kill-switch on a
@@ -1838,6 +1835,20 @@ apply_kill_switch() {
             iptables -A OUTPUT -m owner --uid-owner i2pd -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true
             ;;
     esac
+
+    # ── Decoupled Tailscale mesh survives the kill-switch ──
+    # Tailscale is no longer a VPN provider; it can run ALONGSIDE a commercial
+    # VPN, and its mesh is meant to stay DIRECT (not via the VPN). When the mesh
+    # is enabled, let its OWN overlay out even under the kill-switch — otherwise
+    # enabling the kill-switch severs remote management over Tailscale. This
+    # allows only packets into tailscale0 + tailscaled's 0x80000-marked
+    # WireGuard underlay, never arbitrary clearnet. (Verify the 0x80000 mark on
+    # real hardware — it's Tailscale's documented bypass mark.)
+    if [ "$(toml_get tailscale enabled false)" = "true" ]; then
+        iptables -A OUTPUT -o tailscale0 -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true
+        iptables -A OUTPUT -m mark --mark 0x80000/0x80000 -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true
+        log "kill-switch: Tailscale mesh enabled — underlay (0x80000) + tailscale0 kept open (mesh stays direct)"
+    fi
 
     # ── v80 Phase 2: kill-switch ↔ exit-routing coordination ──
     # When Tailscale exit-routing is ON, the exit-node + LAN clients reach
