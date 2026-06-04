@@ -86,6 +86,39 @@ temperature, container counts, and per-agent token burn — with reboot / shutdo
 
 ---
 
+## Reach it from anywhere — one-key Tailscale enrollment
+
+The box is most useful when you can reach it — and *everything it can see* — from
+any device, anywhere, with **no port-forwarding, no static IP, no VPN gymnastics**.
+**Tailscale** (a zero-config WireGuard mesh) gives you exactly that in a single
+shot:
+
+1. **Network → VPN → Tailscale.** Paste a **one-time auth key** from
+   [login.tailscale.com](https://login.tailscale.com) (*Settings → Keys → Generate
+   auth key*), name it (defaults to `aeon-magick`), and Save.
+2. The Pi runs `tailscale up` **once** — and the daemon keeps the resulting node
+   key forever.
+
+That's the whole enrollment. The box is now a permanent member of your tailnet:
+
+- 🌍 **Local *and* remote, one address.** Reach it at a stable
+  `aeon-magick` / `100.x.y.z` from your laptop on the couch or your phone on the
+  far side of the planet — the web UI, the REST/MCP API, and the multi-pane
+  terminal all just work.
+- 🔁 **Survives moving networks.** The one-time key is consumed at enrollment, but
+  the **node identity persists.** Reboot it, carry it to hotel WiFi, a phone
+  hotspot, a different office — it pops back onto your tailnet at the *same* name.
+  The underlying LAN IP can churn all it likes; your address for it never changes.
+- 🚪 **Optional exit node.** One toggle turns the Pi into an exit node for your
+  whole tailnet — route a device's traffic out through it (and through the
+  VPN / Tor / DNSCrypt stack layered behind it).
+
+Pair this with the jump-box view and **your entire AI infrastructure — gateways,
+DGX Sparks, every model server it can SSH to — becomes reachable through one small
+box you can carry in a pocket.**
+
+---
+
 ## Easy custom agent personas
 
 Build, provision, and customize each persona from the console: profile photo →
