@@ -1,5 +1,7 @@
 # AEON Magick — AI Computer Control
 
+> ### _The Universe's Strangest Peripheral._
+
 ### This isn't just Agentic AI — it's *Robo*-Agentic AI.
 
 Vision, reasoning, and interacting with any system **exactly like a human would**:
@@ -8,8 +10,6 @@ your browser. No agent embedded in your files. A Raspberry Pi pretends to be a
 monitor, a keyboard, a mouse, and a trackpad — all at once — and hands the
 resulting **see + act** loop to an AI agent (or to you, from a browser, anywhere
 in the world).
-
-> _The Universe's Strangest Peripheral._
 
 ```
         ┌──────────────────┐                          ┌──────────────────┐
