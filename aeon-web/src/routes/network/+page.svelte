@@ -1785,10 +1785,9 @@
             </div>
 
             <!-- v80: the Tailscale config block moved OUT of the VPN
-                 provider conditional into its own toggle-gated section
-                 in the Privacy Overlay Networks panel above (it's an
-                 independent overlay now, like Tor + I2P — it runs
-                 alongside any VPN). -->
+                 provider conditional into its OWN top-level section below
+                 (an independent mesh — runs alongside any VPN, separate
+                 from the Tor + I2P privacy overlays). -->
 
             {#if vpnEnabled && vpnProvider === 'wireguard'}
               <div class="space-y-2 pl-7">
