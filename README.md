@@ -126,11 +126,13 @@ box you can carry in a pocket.**
 
 ---
 
-## Easy custom agent personas
+## Pantheon building
 
-Build, provision, and customize each persona from the console: profile photo →
-Matrix avatar, corpus, voice, and the persona's **Soul** (`SOUL.md` — the system
-prompt) and **Identity** (`IDENTITY.md` — name, era, domain, emoji).
+Your gateway's whole **pantheon** — every agent persona — is a live, clickable
+roster in the console, and spinning up a brand-new one is a single **+ New
+persona** away. Open any persona to build it out end-to-end: profile photo →
+Matrix avatar, a **custom voice**, a **corpus**, and its **Soul** (`SOUL.md` — the
+system prompt) and **Identity** (`IDENTITY.md` — name, era, domain, emoji).
 
 ![Per-agent detail — provisioning, SSH, avatar, corpus, Soul/Identity, add-skill](docs/images/agent-detail.png)
 
@@ -142,6 +144,29 @@ workspace — instant, first-class access via a provisioned **MCP server and/or
 REST API**. Optionally grant a scoped **SSH key** to the Pi (human-admin action;
 never exposed to the agent over the API). Add capabilities by clicking
 ready-made skill chips or uploading a `SKILL.md` / `.tar` of your own.
+
+### Custom voices — designer *or* clone
+
+Give each persona its own voice, two ways:
+
+- **Voice designer** — write a natural-language descriptor (e.g. _"Warm, measured
+  narrator with a faint British lilt; thoughtful and unhurried"_) and the TTS
+  engine synthesizes a matching voice. Edit it any time, right from the persona.
+- **Voice cloning** — upload a short, clean audio sample (a ~15–30 s `.wav` is the
+  sweet spot) and the persona speaks in that cloned voice. Pick from the existing
+  clone pool or drop in a new sample — it lands on the TTS host and the agent's
+  voice is pointed at it automatically.
+
+Both write straight to the persona's voice config on the gateway — no SSH, no
+file-shuffling, no terminal.
+
+### Build + browse the corpus
+
+Every persona keeps a **corpus** — its private, persistent knowledge base. From
+the console you can **upload** files into it, **edit** them in place, **browse and
+view** any file, and **selectively delete**. Writes are traversal-guarded to that
+agent's own corpus directory, and large files stream over SSH with no size cap —
+so a multi-megabyte reference or a whole research folder drops in cleanly.
 
 ---
 
