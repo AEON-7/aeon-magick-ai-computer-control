@@ -352,9 +352,13 @@ struct I2p {
 // mutually-exclusive VPN choice — you couldn't run Tailscale AND a
 // commercial WAN VPN at once. New model decouples it (mirrors the v58
 // tor/i2p split): the mesh runs alongside any vpn.provider (or none).
-// The mesh always stays direct; route_exit_via_vpn (Phase 2, default
-// off) is the opt-in that pipes exit-node + LAN client WAN traffic
-// through the active VPN/Tor instead.
+// The mesh always stays split-tunnel/direct (only the tailnet
+// 100.64.0.0/10 rides tailscale0). When this Pi is an advertised exit
+// node, its forwarded WAN-bound traffic is NOT special-cased — it rides
+// the Pi's normal egress and inherits whatever the box already has
+// (VPN / DNSCrypt / Tor), exactly like the usb0 LAN clients do. There is
+// no separate routing table and no toggle (see apply_tailscale_exit_node
+// in aeon-net-services.sh).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Tailscale {
     /// Master toggle. When true, tailscaled is brought up and
@@ -370,14 +374,6 @@ struct Tailscale {
     exit_node: bool,
     #[serde(default)]
     advertise_exit_node: bool,
-    /// Phase 2 (DEFAULT OFF). When true AND advertise_exit_node is on
-    /// AND a clearnet VPN is up, exit-node + LAN-client WAN traffic is
-    /// fwmark-routed through the active VPN/Tor tunnel instead of the
-    /// bare ISP. The Tailscale mesh itself stays direct. Needs live
-    /// leak-testing before relying on it — see apply_tailscale_exit_
-    /// routing in aeon-net-services.sh.
-    #[serde(default)]
-    route_exit_via_vpn: bool,
 }
 
 impl Default for Tailscale {
@@ -388,7 +384,6 @@ impl Default for Tailscale {
             hostname: String::new(),
             exit_node: false,
             advertise_exit_node: false,
-            route_exit_via_vpn: false,
         }
     }
 }
@@ -999,15 +994,14 @@ pub async fn get_vpn(State(_state): State<AppState>) -> Json<Value> {
         "kill_switch": s.vpn.kill_switch,
         "lan_bypass": s.vpn.lan_bypass,
         // v80: tailscale is now a top-level independent toggle (like
-        // tor / i2p), read from [tailscale] not [vpn.tailscale]. Adds
-        // enabled + route_exit_via_vpn (Phase 2). SECURITY: never echo
-        // the auth_key — only a has_auth_key presence boolean.
+        // tor / i2p), read from [tailscale] not [vpn.tailscale].
+        // SECURITY: never echo the auth_key — only a has_auth_key
+        // presence boolean.
         "tailscale": {
             "enabled": s.tailscale.enabled,
             "hostname": s.tailscale.hostname,
             "exit_node": s.tailscale.exit_node,
             "advertise_exit_node": s.tailscale.advertise_exit_node,
-            "route_exit_via_vpn": s.tailscale.route_exit_via_vpn,
             "has_auth_key": !s.tailscale.auth_key.is_empty(),
         },
         "wireguard": {
@@ -1128,10 +1122,6 @@ pub struct TailscalePut {
     pub exit_node: Option<bool>,
     #[serde(default)]
     pub advertise_exit_node: Option<bool>,
-    /// Phase 2 (default off): pipe exit-node + LAN WAN traffic through
-    /// the active VPN/Tor. Gated downstream in aeon-net-services.sh.
-    #[serde(default)]
-    pub route_exit_via_vpn: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1189,7 +1179,6 @@ pub async fn put_vpn(
         if let Some(v) = ts.hostname { nf.tailscale.hostname = v; }
         if let Some(v) = ts.exit_node { nf.tailscale.exit_node = v; }
         if let Some(v) = ts.advertise_exit_node { nf.tailscale.advertise_exit_node = v; }
-        if let Some(v) = ts.route_exit_via_vpn { nf.tailscale.route_exit_via_vpn = v; }
     }
     if let Some(wg) = req.wireguard {
         if let Some(v) = wg.config { nf.vpn.wireguard.config = v; }

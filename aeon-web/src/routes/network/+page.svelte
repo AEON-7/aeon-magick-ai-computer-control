@@ -131,15 +131,15 @@
   let vpnProvider: api.VpnProvider = 'none';
   let vpnKillSwitch = false;
   let vpnLanBypass = '192.168.0.0/16';
-  // v80: Tailscale is an independent overlay toggle now (mirrors
-  // tor/i2p) — its enable flag + fields live at the top level, not
-  // under the VPN provider. tsRouteExitViaVpn is Phase 2 (default off).
+  // v80: Tailscale is an independent toggle now (mirrors tor/i2p) — its
+  // enable flag + fields live at the top level, not under the VPN
+  // provider. Split-tunnel mesh only; exit-node traffic rides the Pi's
+  // normal egress (no toggle — see apply_tailscale_exit_node).
   let tsEnabled = false;
   let tsAuthKey = '';
   let tsHostname = '';
   let tsExitNode = false;
   let tsAdvertiseExit = false;
-  let tsRouteExitViaVpn = false;
   let wgConfig = '';
   let ovConfig = '';
   let ovUser = '';
@@ -477,14 +477,13 @@
       vpnKillSwitch = v.kill_switch;
       vpnLanBypass = v.lan_bypass;
       // v80: Tailscale state comes from the top-level [tailscale] block
-      // now (independent of vpnProvider). Loaded here so the new Privacy
-      // Overlay section renders its toggle + fields. has_auth_key drives
-      // the "already saved" hint; the secret itself is never echoed.
+      // now (independent of vpnProvider). Loaded here so the Tailscale
+      // section renders its toggle + fields. has_auth_key drives the
+      // "already saved" hint; the secret itself is never echoed.
       tsEnabled = v.tailscale.enabled ?? false;
       tsHostname = v.tailscale.hostname;
       tsExitNode = v.tailscale.exit_node;
       tsAdvertiseExit = v.tailscale.advertise_exit_node;
-      tsRouteExitViaVpn = v.tailscale.route_exit_via_vpn ?? false;
       ovUser = v.openvpn.auth_username;
       i2pOutproxy = v.i2p.outproxy;
       // Secrets are NOT echoed by the GET — start with empty inputs;
@@ -841,18 +840,16 @@
         outproxy: i2pOutproxy,
         over_vpn: i2pOverVpn,
       };
-      // v80: Tailscale is an independent overlay now — its toggle +
-      // fields are saved on EVERY request (not gated on vpnProvider),
-      // exactly like the Tor + I2P overlays above. route_exit_via_vpn
-      // is the Phase-2 exit-routing opt-in (default off). The auth_key
-      // is only sent when the user typed a new one (blank keeps the
-      // saved key — the backend treats "" as an explicit clear).
+      // v80: Tailscale is an independent toggle now — its fields are
+      // saved on EVERY request (not gated on vpnProvider), exactly like
+      // the Tor + I2P overlays. The auth_key is only sent when the user
+      // typed a new one (blank keeps the saved key — the backend treats
+      // "" as an explicit clear).
       patch.tailscale = {
         enabled: tsEnabled,
         hostname: tsHostname,
         exit_node: tsExitNode,
         advertise_exit_node: tsAdvertiseExit,
-        route_exit_via_vpn: tsRouteExitViaVpn,
       };
       if (tsAuthKey) patch.tailscale.auth_key = tsAuthKey;
       await api.setVpn(patch);
@@ -1706,470 +1703,6 @@
         </div>
       </details>
 
-      <!-- ─── Privacy Overlay Networks (Tor + I2P + Tailscale) ─── -->
-      <details bind:open={overlaysOpen}
-               class="bg-ink-900 border border-ink-700 rounded-xl">
-        <summary class="cursor-pointer select-none px-6 py-4
-                        flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3 min-w-0 flex-wrap">
-            <span class="h-2 w-2 rounded-full flex-shrink-0
-                         {torEnabled || i2pEnabled || tsEnabled ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
-            <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-              Privacy Overlay Networks
-            </span>
-            <span class="text-xs text-zinc-500 truncate">
-              <!-- v80: Tailscale joined this panel — summarise all three
-                   overlays as a compact comma list instead of the old
-                   Tor/I2P-only enumeration. -->
-              {#if torEnabled || i2pEnabled || tsEnabled}
-                {[
-                  torEnabled && `Tor (${torMode === 'split_tunnel' ? '.onion only' : 'all traffic'})`,
-                  i2pEnabled && 'I2P',
-                  tsEnabled && 'Tailscale',
-                ].filter(Boolean).join(' + ')}
-              {:else}
-                all off
-              {/if}
-            </span>
-          </div>
-          <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex-shrink-0">
-            {overlaysOpen ? '▾ close' : '▸ expand'}
-          </span>
-        </summary>
-        <div class="border-t border-ink-700 p-6 space-y-4">
-          <section class="space-y-4">
-            <header class="space-y-1">
-              <p class="text-zinc-400 text-sm">
-                Tor, I2P and Tailscale are independent of the VPN — any
-                combination can run at the same time. <code class="text-cursed-300">.onion</code>
-                sites go through Tor, <code class="text-cursed-300">.i2p</code>
-                sites through I2P, the Tailscale mesh stays direct, and
-                clearnet goes through the VPN (or straight WAN if no VPN).
-                Tor's "all traffic" mode pulls clearnet in too, but I2P
-                and the Tailscale mesh always stay independent so those
-                networks stay reachable.
-              </p>
-              <!-- v62: browser compatibility tip (was on the user's
-                   ask list — common failure mode is "I enabled Tor
-                   but my browser can't load anything"). -->
-              <div class="mt-2 p-3 rounded border border-ink-800 bg-ink-950/40
-                          text-[11px] text-zinc-400 leading-relaxed space-y-1.5">
-                <p>
-                  <span class="text-cursed-300 font-medium">Browser tuning for Tor mode.</span>
-                  Best supported: <strong>Brave, Chrome, Firefox</strong>.
-                  Safari + iCloud Private Relay conflict with Tor exits;
-                  disable Private Relay if you must use Safari.
-                </p>
-                <ul class="ml-4 list-disc space-y-1">
-                  <li>
-                    <strong>Disable the browser's secure DNS</strong> —
-                    Brave/Chrome <code>Settings → Security → Use secure DNS = off</code>;
-                    Firefox <code>about:preferences#privacy → DNS over HTTPS = off</code>.
-                    The browser's DoH conflicts with the Pi's encrypted DNS path.
-                  </li>
-                  <li>
-                    <strong>Allow .onion in non-Tor windows</strong> —
-                    Brave <code>brave://settings/privacy → Tor windows → Allow .onion in non-Tor windows = on</code>.
-                    Firefox <code>about:config → network.dns.blockDotOnion = false</code>.
-                    Without this, .onion URLs are blocked before they reach Tor's resolver.
-                  </li>
-                  <li>
-                    Want hardened anonymity (fingerprinting, anti-tracking,
-                    safer defaults)? Use <strong>Tor Browser</strong> on top
-                    of split-tunnel mode rather than transparent Tor.
-                  </li>
-                </ul>
-              </div>
-            </header>
-
-            <!-- ── Tor ── -->
-            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
-              <label class="flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" bind:checked={torEnabled}
-                       class="w-4 h-4 accent-cursed-500" />
-                <span class="text-zinc-200 text-sm font-medium">Enable Tor</span>
-                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
-                  • TransPort 9040 • DNSPort 5353
-                </span>
-              </label>
-
-              <!-- v73: live Tor status — bootstrap progress bar + relay
-                   circuit listing (restored; v62 dropped this view). Stays
-                   visible (not dimmed) whenever Tor is enabled. Data polls
-                   every 4s from aeon-vpn-status (GETINFO bootstrap + circuits). -->
-              {#if torEnabled}
-                <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-2">
-                  {#if torOverlay}
-                    {@const pct = torOverlay.bootstrap_percent ?? 0}
-                    {@const circuits = torOverlay.detail?.circuits ?? []}
-                    {@const connected = torOverlay.state === 'connected' || pct >= 100}
-                    <div class="flex items-center justify-between gap-2">
-                      <span class="text-xs font-mono uppercase tracking-wider
-                                   {connected ? 'text-live-300' : 'text-amber-300'}">
-                        {connected ? '● Tor connected' : '◐ Bootstrapping Tor'}
-                      </span>
-                      <span class="text-[11px] font-mono text-zinc-400">{pct}%</span>
-                    </div>
-                    <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
-                      <div class="h-full rounded-full transition-[width] duration-500
-                                  {connected ? 'bg-live-400' : 'bg-amber-400'}"
-                           style="width: {pct}%"></div>
-                    </div>
-                    {#if torOverlay.summary}
-                      <p class="text-[11px] text-zinc-500 leading-snug">{torOverlay.summary}</p>
-                    {/if}
-                    {#if circuits.length}
-                      <div class="pt-1 space-y-1">
-                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                          Relay circuits ({circuits.length}){#if torOverlay.public_country} · exit {torOverlay.public_country}{/if}
-                        </p>
-                        {#each circuits as c (c.id)}
-                          <div class="font-mono text-[11px] text-zinc-400 flex items-baseline gap-2">
-                            <span class="text-zinc-600 flex-shrink-0">#{c.id}</span>
-                            <span class="truncate">
-                              {#each c.hops as hop, i}<span class="{i === 0 ? 'text-cursed-300' : i === c.hops.length - 1 ? 'text-live-300' : 'text-zinc-300'}">{hop}</span>{#if i < c.hops.length - 1}<span class="text-zinc-600"> → </span>{/if}{/each}
-                            </span>
-                          </div>
-                        {/each}
-                      </div>
-                    {:else if connected}
-                      <p class="text-[11px] text-zinc-500">Connected — no circuits built yet (idle / split-tunnel).</p>
-                    {/if}
-                  {:else}
-                    <p class="text-[11px] text-zinc-500 font-mono">Starting Tor… status appears within a few seconds.</p>
-                  {/if}
-                </div>
-              {/if}
-
-              <div class="space-y-3 pl-7"
-                   class:opacity-40={!torEnabled}
-                   class:pointer-events-none={!torEnabled}>
-
-                <!-- Mode radio -->
-                <div class="space-y-2">
-                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">
-                    Routing mode
-                  </p>
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <label class="flex items-start gap-3 cursor-pointer p-3 rounded
-                                  border transition-colors
-                                  {torMode === 'split_tunnel'
-                                    ? 'bg-cursed-500/10 border-cursed-500/50'
-                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
-                      <input type="radio" bind:group={torMode} value="split_tunnel"
-                             class="mt-1 w-4 h-4 accent-cursed-500" />
-                      <div class="space-y-1 flex-1 min-w-0">
-                        <div class="text-zinc-200 text-sm">Split tunnel (.onion only)</div>
-                        <p class="text-[11px] text-zinc-500 leading-relaxed">
-                          Only TCP destined for a <code>.onion</code> address rides
-                          Tor. Clearnet keeps the default route (or the VPN if
-                          one is selected). Recommended default — Tor stays out
-                          of your normal browsing.
-                        </p>
-                      </div>
-                    </label>
-                    <label class="flex items-start gap-3 cursor-pointer p-3 rounded
-                                  border transition-colors
-                                  {torMode === 'transparent'
-                                    ? 'bg-cursed-500/10 border-cursed-500/50'
-                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
-                      <input type="radio" bind:group={torMode} value="transparent"
-                             class="mt-1 w-4 h-4 accent-cursed-500" />
-                      <div class="space-y-1 flex-1 min-w-0">
-                        <div class="text-zinc-200 text-sm">All traffic via Tor</div>
-                        <p class="text-[11px] text-zinc-500 leading-relaxed">
-                          Every TCP connection from the Pi + USB clients goes
-                          through Tor (except i2pd's — that always stays
-                          independent). Strongest privacy, slowest browsing,
-                          many sites break (CAPTCHA loops, geo-blocks).
-                        </p>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-
-                <!-- Over-VPN -->
-                <label class="flex items-start gap-3 cursor-pointer pt-2">
-                  <input type="checkbox" bind:checked={torOverVpn}
-                         disabled={!vpnEnabled || vpnProvider === 'none'}
-                         class="mt-1 w-4 h-4 accent-cursed-500" />
-                  <div class="space-y-0.5">
-                    <span class="text-zinc-300 text-sm">
-                      Nest Tor through the active VPN
-                    </span>
-                    <p class="text-[11px] text-zinc-500 leading-relaxed">
-                      Tor's circuit handshakes with entry guards exit through
-                      the VPN tunnel rather than the bare upstream — your ISP
-                      sees only VPN traffic. Requires a clearnet VPN to be on
-                      ({vpnEnabled && vpnProvider !== 'none'
-                        ? `currently: ${vpnProvider}`
-                        : 'currently none — toggle locked'}).
-                    </p>
-                  </div>
-                </label>
-
-                <!-- v77: Tor-over-VPN compatibility note. Hard-won across
-                     sessions: Tor only bootstraps through a STEALTH OpenVPN
-                     tunnel (AirVPN SSL/SSH). WireGuard can't reliably carry
-                     Tor, and commercial-VPN exit IPs are widely Tor-blacklisted.
-                     Amber when the active provider is a WireGuard/commercial one. -->
-                <div class="ml-7 p-2.5 rounded border text-[11px] leading-relaxed
-                            {['mullvad','ivpn','wireguard','azirevpn','tailscale'].includes(vpnProvider)
-                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-200/90'
-                              : 'border-cursed-500/30 bg-cursed-500/5 text-zinc-400'}">
-                  <span class="font-medium text-zinc-200">Tor-over-VPN works only over a stealth OpenVPN tunnel.</span>
-                  Use <strong>AirVPN's OpenVPN-over-SSL or -SSH</strong> (or a similar custom <code>.ovpn</code>).
-                  WireGuard fundamentally struggles to carry Tor traffic, and most commercial-VPN
-                  exit-IP ranges are blacklisted by the Tor network — so transparent Tor over
-                  WireGuard providers (Mullvad / IVPN / AirVPN-WireGuard) usually won't bootstrap
-                  (the watchdog auto-reverts it if it stalls).
-                  {#if ['mullvad','ivpn','wireguard','azirevpn','tailscale'].includes(vpnProvider)}
-                    <span class="block mt-1">⚠ Your active VPN (<code>{vpnProvider}</code>) is WireGuard / commercial-exit — Tor likely won't bootstrap. Switch to AirVPN SSL/SSH first.</span>
-                  {:else if vpnProvider === 'airvpn'}
-                    <span class="block mt-1">✓ AirVPN active — make sure it's an <strong>SSL</strong> or <strong>SSH</strong> stealth mode (not WireGuard) for Tor.</span>
-                  {/if}
-                </div>
-
-                <!-- v73: Tor bridge preset + custom bridges — moved here from
-                     the legacy VPN "Tor" provider. Tor is no longer a VPN
-                     provider, so this is the single place to configure it.
-                     Leave "direct" on open networks; obfs4/meek/snowflake help
-                     where Tor is blocked. Dimmed with the rest when Tor is off. -->
-                <div class="space-y-2 pt-3 border-t border-ink-800" role="radiogroup" aria-label="Tor bridge preset">
-                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">Bridge preset</p>
-                  {#if vpnState?.tor.presets}
-                    {#each vpnState.tor.presets as p}
-                      <label class="flex items-start gap-3 cursor-pointer">
-                        <input type="radio" bind:group={torPreset} value={p.id}
-                               class="mt-1 w-4 h-4 accent-cursed-500" />
-                        <div class="space-y-1 min-w-0">
-                          <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
-                          <p class="text-[11px] text-zinc-500">{p.blurb}</p>
-                        </div>
-                      </label>
-                    {/each}
-                  {/if}
-                </div>
-                {#if torPreset === 'custom'}
-                  <div class="space-y-1 pt-2">
-                    <label class="text-[11px] uppercase tracking-wider text-zinc-500 block" for="tor-br-ov">
-                      Custom bridge lines
-                      {#if vpnState?.tor.has_bridges}
-                        <span class="text-cursed-400 normal-case ml-1 text-[10px]">(saved — paste to replace, blank keeps)</span>
-                      {/if}
-                    </label>
-                    <textarea id="tor-br-ov" bind:value={torBridges} rows="4"
-                              placeholder="obfs4 12.34.56.78:443 FINGERPRINT cert=… iat-mode=0"
-                              class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
-                    <p class="text-[11px] text-zinc-500">
-                      Fresh bridges from
-                      <a class="text-cursed-300 hover:underline" href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">bridges.torproject.org</a> — one per line. Most users won't need this.
-                    </p>
-                  </div>
-                {/if}
-              </div>
-            </div>
-
-            <!-- ── I2P ── -->
-            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
-              <label class="flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" bind:checked={i2pEnabled}
-                       class="w-4 h-4 accent-cursed-500" />
-                <span class="text-zinc-200 text-sm font-medium">Enable I2P</span>
-                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
-                  • HTTP proxy 4444 • SOCKS 4447
-                </span>
-                <a href="/network/i2p" class="ml-auto text-[10px] px-2 py-1 rounded
-                          border border-cursed-500/40 text-cursed-300
-                          hover:bg-cursed-500/10 transition-colors font-mono">
-                  I2P config →
-                </a>
-              </label>
-
-              <div class="space-y-3 pl-7"
-                   class:opacity-40={!i2pEnabled}
-                   class:pointer-events-none={!i2pEnabled}>
-                <p class="text-[11px] text-zinc-500 leading-relaxed">
-                  I2P is always split-tunnel by design — it's a peer-to-peer
-                  overlay, not a generic transport. <code>.i2p</code>
-                  sites work in any browser pointed at the HTTP proxy;
-                  clearnet stays on whatever route the rest of the system
-                  uses (Tor / VPN / direct).
-                </p>
-
-                <!-- Over-VPN -->
-                <label class="flex items-start gap-3 cursor-pointer pt-1">
-                  <input type="checkbox" bind:checked={i2pOverVpn}
-                         disabled={!vpnEnabled || vpnProvider === 'none'}
-                         class="mt-1 w-4 h-4 accent-cursed-500" />
-                  <div class="space-y-0.5">
-                    <span class="text-zinc-300 text-sm">
-                      Nest I2P through the active VPN
-                    </span>
-                    <p class="text-[11px] text-zinc-500 leading-relaxed">
-                      i2pd's outbound TCP rides the VPN tunnel instead of
-                      going direct. Hides "uses I2P" from your ISP at the
-                      cost of one extra hop. Requires a clearnet VPN to be on
-                      ({vpnEnabled && vpnProvider !== 'none'
-                        ? `currently: ${vpnProvider}`
-                        : 'currently none — toggle locked'}).
-                    </p>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <!-- ── Tailscale ── -->
-            <!-- v80: lifted out of the VPN-provider conditional into its
-                 own toggle-gated overlay (modeled on the Tor + I2P cards
-                 above). The mesh runs ALONGSIDE any VPN; tsEnabled is the
-                 single source of truth, saved on every request. -->
-            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
-              <label class="flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" bind:checked={tsEnabled}
-                       class="w-4 h-4 accent-cursed-500" />
-                <span class="text-zinc-200 text-sm font-medium">Enable Tailscale</span>
-                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
-                  • WireGuard mesh
-                </span>
-                <a href="/agent/dash" class="ml-auto text-[10px] px-2 py-1 rounded
-                          border border-cursed-500/40 text-cursed-300
-                          hover:bg-cursed-500/10 transition-colors font-mono">
-                  Tailnet devices →
-                </a>
-              </label>
-
-              <!-- live Tailscale status — online state + tailnet IP + peers.
-                   Polls every few seconds from aeon-vpn-status. Visible
-                   whenever Tailscale is enabled (independent of the VPN). -->
-              {#if tsEnabled && tsOverlay}
-                {@const connected = tsOverlay.state === 'connected'}
-                <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-1.5">
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-xs font-mono uppercase tracking-wider
-                                 {connected ? 'text-live-300' : 'text-amber-300'}">
-                      {connected ? '● Tailscale connected' : '◐ Tailscale ' + (tsOverlay.state ?? 'starting')}
-                    </span>
-                  </div>
-                  {#if tsOverlay.summary}
-                    <p class="text-[11px] text-zinc-500 leading-snug">{tsOverlay.summary}</p>
-                  {/if}
-                </div>
-              {/if}
-
-              <div class="space-y-3 pl-7"
-                   class:opacity-40={!tsEnabled}
-                   class:pointer-events-none={!tsEnabled}>
-                <p class="text-[11px] text-zinc-500 leading-relaxed">
-                  Tailscale is a WireGuard mesh — it joins this Pi to your
-                  tailnet and stays <strong>direct</strong> (it does not ride
-                  any clearnet VPN). Runs alongside Tor / I2P / a WAN VPN in
-                  any combination.
-                </p>
-
-                <div class="space-y-1">
-                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-auth">
-                    Auth key
-                    {#if vpnState?.tailscale.has_auth_key}
-                      <span class="text-cursed-400 normal-case ml-1 text-[10px]">
-                        (one already saved — leave blank to keep it)
-                      </span>
-                    {/if}
-                  </label>
-                  <input id="ts-auth" type="password" bind:value={tsAuthKey}
-                         placeholder="tskey-auth-…"
-                         autocomplete="off"
-                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
-                  <p class="text-xs text-zinc-500">
-                    Generate from
-                    <a class="text-cursed-300 hover:underline"
-                       href="https://login.tailscale.com/admin/settings/keys"
-                       target="_blank" rel="noreferrer">login.tailscale.com</a>
-                    — Settings → Keys → Generate auth key. One-time use is
-                    fine; we run <code>tailscale up</code> once with it
-                    and the daemon keeps the resulting node key.
-                  </p>
-                </div>
-
-                <div class="space-y-1">
-                  <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-host">
-                    Hostname (optional)
-                  </label>
-                  <input id="ts-host" type="text" bind:value={tsHostname}
-                         placeholder="aeon-magick"
-                         class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
-                  <p class="text-xs text-zinc-500">
-                    Name this device shows up as in your tailnet. Defaults
-                    to the Pi's hostname.
-                  </p>
-                </div>
-
-                <label class="flex items-start gap-3 cursor-pointer">
-                  <input type="checkbox" bind:checked={tsAdvertiseExit}
-                         class="mt-1 w-4 h-4 accent-cursed-500" />
-                  <div class="space-y-1">
-                    <div class="text-zinc-200 text-sm font-medium">Advertise as exit node</div>
-                    <p class="text-xs text-zinc-500">
-                      Make this Pi available as a tailnet exit node so
-                      <em>other</em> machines on your tailnet can route their
-                      WAN through it. You'll still need to approve the
-                      offer from the Tailscale admin UI.
-                    </p>
-                  </div>
-                </label>
-
-                <!-- v80 Phase 2 (DEFAULT OFF): exit-node + LAN traffic over
-                     the VPN. Only meaningful once this Pi advertises itself
-                     as an exit node, so gate the checkbox on tsAdvertiseExit. -->
-                {#if tsAdvertiseExit}
-                  <label class="flex items-start gap-3 cursor-pointer pl-7 pt-1">
-                    <input type="checkbox" bind:checked={tsRouteExitViaVpn}
-                           class="mt-1 w-4 h-4 accent-cursed-500" />
-                    <div class="space-y-1">
-                      <div class="text-zinc-200 text-sm font-medium">
-                        Route exit-node + LAN traffic over the VPN
-                      </div>
-                      <p class="text-xs text-zinc-500 leading-relaxed">
-                        Pipes WAN-bound traffic from exit-node clients and LAN
-                        devices through the active VPN/Tor. The Tailscale mesh
-                        itself stays direct. Requires a VPN to be enabled.
-                        ⚠ Needs live leak-testing before you rely on it.
-                      </p>
-                    </div>
-                  </label>
-                {/if}
-
-                <label class="flex items-start gap-3 cursor-pointer">
-                  <input type="checkbox" bind:checked={tsExitNode}
-                         class="mt-1 w-4 h-4 accent-cursed-500" />
-                  <div class="space-y-1">
-                    <div class="text-zinc-200 text-sm font-medium">Use a tailnet exit node</div>
-                    <p class="text-xs text-zinc-500">
-                      Route <em>this</em> Pi's outbound traffic through
-                      another tailnet exit node. After saving, SSH in and
-                      run <code>tailscale set --exit-node=&lt;host&gt;</code>
-                      to pick which one.
-                    </p>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <!-- v73/v80: the overlay section owns Tor + I2P + Tailscale
-                 end-to-end, so it gets its own Save & Apply. saveVpn()
-                 persists all three overlay toggles + Tor's bridge preset/
-                 bridges/mode/exit-country (and the VPN config too — it's
-                 one atomic network save). -->
-            <div class="flex items-center gap-3 pt-3 border-t border-ink-700">
-              <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
-                {vpnSaving ? 'saving…' : 'Save & Apply'}
-              </button>
-              {#if vpnMsg}<span class="text-xs text-live-300">{vpnMsg}</span>{/if}
-            </div>
-          </section>
-        </div>
-      </details>
-
       <!-- ─── VPN ─── -->
       <details bind:open={vpnOpen}
                class="bg-ink-900 border border-ink-700 rounded-xl">
@@ -2789,6 +2322,476 @@ obfs4 …`}
                 {/each}
               </div>
             {/if}
+          </section>
+        </div>
+      </details>
+
+      <!-- ─── Tailscale ─── -->
+      <!-- v90: Tailscale is its own top-level section now (lifted out of
+           the Privacy Overlay panel). It's an independent mesh that runs
+           ALONGSIDE any VPN; tsEnabled is the single source of truth,
+           saved on every network request via saveVpn(). -->
+      <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-5">
+        <header class="space-y-1">
+          <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            Tailscale
+          </h2>
+          <p class="text-zinc-400 text-sm">
+            Zero-config WireGuard mesh for remote access. Split-tunnel —
+            only tailnet addresses go over the mesh; everything else
+            (incl. exit-node traffic) uses your normal connection and
+            inherits any VPN / DNSCrypt / Tor you've configured.
+          </p>
+        </header>
+
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" bind:checked={tsEnabled}
+                 class="w-4 h-4 accent-cursed-500" />
+          <span class="text-zinc-200 text-sm font-medium">Enable Tailscale</span>
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+            • WireGuard mesh
+          </span>
+          <a href="/agent/dash" class="ml-auto text-[10px] px-2 py-1 rounded
+                    border border-cursed-500/40 text-cursed-300
+                    hover:bg-cursed-500/10 transition-colors font-mono">
+            Tailnet devices →
+          </a>
+        </label>
+
+        <!-- live Tailscale status — online state + tailnet IP + peers.
+             Polls every few seconds from aeon-vpn-status. Visible
+             whenever Tailscale is enabled (independent of the VPN). -->
+        {#if tsEnabled && tsOverlay}
+          {@const connected = tsOverlay.state === 'connected'}
+          <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-mono uppercase tracking-wider
+                           {connected ? 'text-live-300' : 'text-amber-300'}">
+                {connected ? '● Tailscale connected' : '◐ Tailscale ' + (tsOverlay.state ?? 'starting')}
+              </span>
+            </div>
+            {#if tsOverlay.summary}
+              <p class="text-[11px] text-zinc-500 leading-snug">{tsOverlay.summary}</p>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="space-y-3 pl-7"
+             class:opacity-40={!tsEnabled}
+             class:pointer-events-none={!tsEnabled}>
+          <p class="text-[11px] text-zinc-500 leading-relaxed">
+            Tailscale is a WireGuard mesh — it joins this Pi to your
+            tailnet and stays <strong>split-tunnel</strong> (only the
+            tailnet's own 100.64.0.0/10 rides the mesh). Everything else,
+            including traffic forwarded for exit-node clients, uses the
+            Pi's normal egress and inherits any VPN / DNSCrypt / Tor.
+            Runs alongside Tor / I2P / a WAN VPN in any combination.
+          </p>
+
+          <div class="space-y-1">
+            <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-auth">
+              Auth key
+              {#if vpnState?.tailscale.has_auth_key}
+                <span class="text-cursed-400 normal-case ml-1 text-[10px]">
+                  (one already saved — leave blank to keep it)
+                </span>
+              {/if}
+            </label>
+            <input id="ts-auth" type="password" bind:value={tsAuthKey}
+                   placeholder="tskey-auth-…"
+                   autocomplete="off"
+                   class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+            <p class="text-xs text-zinc-500">
+              Generate from
+              <a class="text-cursed-300 hover:underline"
+                 href="https://login.tailscale.com/admin/settings/keys"
+                 target="_blank" rel="noreferrer">login.tailscale.com</a>
+              — Settings → Keys → Generate auth key. One-time use is
+              fine; we run <code>tailscale up</code> once with it
+              and the daemon keeps the resulting node key.
+            </p>
+          </div>
+
+          <div class="space-y-1">
+            <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ts-host">
+              Hostname (optional)
+            </label>
+            <input id="ts-host" type="text" bind:value={tsHostname}
+                   placeholder="aeon-magick"
+                   class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+            <p class="text-xs text-zinc-500">
+              Name this device shows up as in your tailnet. Defaults
+              to the Pi's hostname.
+            </p>
+          </div>
+
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="checkbox" bind:checked={tsAdvertiseExit}
+                   class="mt-1 w-4 h-4 accent-cursed-500" />
+            <div class="space-y-1">
+              <div class="text-zinc-200 text-sm font-medium">Advertise as exit node</div>
+              <p class="text-xs text-zinc-500">
+                Make this Pi available as a tailnet exit node so
+                <em>other</em> machines on your tailnet can route their
+                WAN through it. You'll still need to approve the
+                offer from the Tailscale admin UI. Exit-node traffic
+                rides your normal WAN egress (VPN / DNSCrypt / Tor if
+                configured). <span class="text-amber-300">⚠ Verify with a
+                live leak-test before relying on it.</span>
+              </p>
+            </div>
+          </label>
+
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="checkbox" bind:checked={tsExitNode}
+                   class="mt-1 w-4 h-4 accent-cursed-500" />
+            <div class="space-y-1">
+              <div class="text-zinc-200 text-sm font-medium">Use a tailnet exit node</div>
+              <p class="text-xs text-zinc-500">
+                Route <em>this</em> Pi's outbound traffic through
+                another tailnet exit node. After saving, SSH in and
+                run <code>tailscale set --exit-node=&lt;host&gt;</code>
+                to pick which one.
+              </p>
+            </div>
+          </label>
+        </div>
+
+        <!-- Tailscale shares the atomic network save (saveVpn persists
+             Tailscale + Tor + I2P + VPN config in one request). -->
+        <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+          <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
+            {vpnSaving ? 'saving…' : 'Save & Apply'}
+          </button>
+          {#if vpnMsg}<span class="text-xs text-live-300">{vpnMsg}</span>{/if}
+        </div>
+      </section>
+
+      <!-- ─── Privacy Overlay Networks (Tor + I2P) ─── -->
+      <details bind:open={overlaysOpen}
+               class="bg-ink-900 border border-ink-700 rounded-xl">
+        <summary class="cursor-pointer select-none px-6 py-4
+                        flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0 flex-wrap">
+            <span class="h-2 w-2 rounded-full flex-shrink-0
+                         {torEnabled || i2pEnabled ? 'bg-live-400 animate-pulse' : 'bg-zinc-600'}"></span>
+            <span class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+              Privacy Overlay Networks
+            </span>
+            <span class="text-xs text-zinc-500 truncate">
+              <!-- v90: Tailscale moved to its own top-level section — this
+                   panel summarises only the Tor + I2P overlays again. -->
+              {#if torEnabled || i2pEnabled}
+                {[
+                  torEnabled && `Tor (${torMode === 'split_tunnel' ? '.onion only' : 'all traffic'})`,
+                  i2pEnabled && 'I2P',
+                ].filter(Boolean).join(' + ')}
+              {:else}
+                all off
+              {/if}
+            </span>
+          </div>
+          <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex-shrink-0">
+            {overlaysOpen ? '▾ close' : '▸ expand'}
+          </span>
+        </summary>
+        <div class="border-t border-ink-700 p-6 space-y-4">
+          <section class="space-y-4">
+            <header class="space-y-1">
+              <p class="text-zinc-400 text-sm">
+                Tor and I2P are independent of the VPN — either (or both)
+                can run at the same time. <code class="text-cursed-300">.onion</code>
+                sites go through Tor, <code class="text-cursed-300">.i2p</code>
+                sites through I2P, and clearnet goes through the VPN (or
+                straight WAN if no VPN). Tor's "all traffic" mode pulls
+                clearnet in too, but I2P always stays independent so that
+                network stays reachable.
+              </p>
+              <!-- v62: browser compatibility tip (was on the user's
+                   ask list — common failure mode is "I enabled Tor
+                   but my browser can't load anything"). -->
+              <div class="mt-2 p-3 rounded border border-ink-800 bg-ink-950/40
+                          text-[11px] text-zinc-400 leading-relaxed space-y-1.5">
+                <p>
+                  <span class="text-cursed-300 font-medium">Browser tuning for Tor mode.</span>
+                  Best supported: <strong>Brave, Chrome, Firefox</strong>.
+                  Safari + iCloud Private Relay conflict with Tor exits;
+                  disable Private Relay if you must use Safari.
+                </p>
+                <ul class="ml-4 list-disc space-y-1">
+                  <li>
+                    <strong>Disable the browser's secure DNS</strong> —
+                    Brave/Chrome <code>Settings → Security → Use secure DNS = off</code>;
+                    Firefox <code>about:preferences#privacy → DNS over HTTPS = off</code>.
+                    The browser's DoH conflicts with the Pi's encrypted DNS path.
+                  </li>
+                  <li>
+                    <strong>Allow .onion in non-Tor windows</strong> —
+                    Brave <code>brave://settings/privacy → Tor windows → Allow .onion in non-Tor windows = on</code>.
+                    Firefox <code>about:config → network.dns.blockDotOnion = false</code>.
+                    Without this, .onion URLs are blocked before they reach Tor's resolver.
+                  </li>
+                  <li>
+                    Want hardened anonymity (fingerprinting, anti-tracking,
+                    safer defaults)? Use <strong>Tor Browser</strong> on top
+                    of split-tunnel mode rather than transparent Tor.
+                  </li>
+                </ul>
+              </div>
+            </header>
+
+            <!-- ── Tor ── -->
+            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" bind:checked={torEnabled}
+                       class="w-4 h-4 accent-cursed-500" />
+                <span class="text-zinc-200 text-sm font-medium">Enable Tor</span>
+                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+                  • TransPort 9040 • DNSPort 5353
+                </span>
+              </label>
+
+              <!-- v73: live Tor status — bootstrap progress bar + relay
+                   circuit listing (restored; v62 dropped this view). Stays
+                   visible (not dimmed) whenever Tor is enabled. Data polls
+                   every 4s from aeon-vpn-status (GETINFO bootstrap + circuits). -->
+              {#if torEnabled}
+                <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-2">
+                  {#if torOverlay}
+                    {@const pct = torOverlay.bootstrap_percent ?? 0}
+                    {@const circuits = torOverlay.detail?.circuits ?? []}
+                    {@const connected = torOverlay.state === 'connected' || pct >= 100}
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-xs font-mono uppercase tracking-wider
+                                   {connected ? 'text-live-300' : 'text-amber-300'}">
+                        {connected ? '● Tor connected' : '◐ Bootstrapping Tor'}
+                      </span>
+                      <span class="text-[11px] font-mono text-zinc-400">{pct}%</span>
+                    </div>
+                    <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
+                      <div class="h-full rounded-full transition-[width] duration-500
+                                  {connected ? 'bg-live-400' : 'bg-amber-400'}"
+                           style="width: {pct}%"></div>
+                    </div>
+                    {#if torOverlay.summary}
+                      <p class="text-[11px] text-zinc-500 leading-snug">{torOverlay.summary}</p>
+                    {/if}
+                    {#if circuits.length}
+                      <div class="pt-1 space-y-1">
+                        <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                          Relay circuits ({circuits.length}){#if torOverlay.public_country} · exit {torOverlay.public_country}{/if}
+                        </p>
+                        {#each circuits as c (c.id)}
+                          <div class="font-mono text-[11px] text-zinc-400 flex items-baseline gap-2">
+                            <span class="text-zinc-600 flex-shrink-0">#{c.id}</span>
+                            <span class="truncate">
+                              {#each c.hops as hop, i}<span class="{i === 0 ? 'text-cursed-300' : i === c.hops.length - 1 ? 'text-live-300' : 'text-zinc-300'}">{hop}</span>{#if i < c.hops.length - 1}<span class="text-zinc-600"> → </span>{/if}{/each}
+                            </span>
+                          </div>
+                        {/each}
+                      </div>
+                    {:else if connected}
+                      <p class="text-[11px] text-zinc-500">Connected — no circuits built yet (idle / split-tunnel).</p>
+                    {/if}
+                  {:else}
+                    <p class="text-[11px] text-zinc-500 font-mono">Starting Tor… status appears within a few seconds.</p>
+                  {/if}
+                </div>
+              {/if}
+
+              <div class="space-y-3 pl-7"
+                   class:opacity-40={!torEnabled}
+                   class:pointer-events-none={!torEnabled}>
+
+                <!-- Mode radio -->
+                <div class="space-y-2">
+                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">
+                    Routing mode
+                  </p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <label class="flex items-start gap-3 cursor-pointer p-3 rounded
+                                  border transition-colors
+                                  {torMode === 'split_tunnel'
+                                    ? 'bg-cursed-500/10 border-cursed-500/50'
+                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                      <input type="radio" bind:group={torMode} value="split_tunnel"
+                             class="mt-1 w-4 h-4 accent-cursed-500" />
+                      <div class="space-y-1 flex-1 min-w-0">
+                        <div class="text-zinc-200 text-sm">Split tunnel (.onion only)</div>
+                        <p class="text-[11px] text-zinc-500 leading-relaxed">
+                          Only TCP destined for a <code>.onion</code> address rides
+                          Tor. Clearnet keeps the default route (or the VPN if
+                          one is selected). Recommended default — Tor stays out
+                          of your normal browsing.
+                        </p>
+                      </div>
+                    </label>
+                    <label class="flex items-start gap-3 cursor-pointer p-3 rounded
+                                  border transition-colors
+                                  {torMode === 'transparent'
+                                    ? 'bg-cursed-500/10 border-cursed-500/50'
+                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                      <input type="radio" bind:group={torMode} value="transparent"
+                             class="mt-1 w-4 h-4 accent-cursed-500" />
+                      <div class="space-y-1 flex-1 min-w-0">
+                        <div class="text-zinc-200 text-sm">All traffic via Tor</div>
+                        <p class="text-[11px] text-zinc-500 leading-relaxed">
+                          Every TCP connection from the Pi + USB clients goes
+                          through Tor (except i2pd's — that always stays
+                          independent). Strongest privacy, slowest browsing,
+                          many sites break (CAPTCHA loops, geo-blocks).
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Over-VPN -->
+                <label class="flex items-start gap-3 cursor-pointer pt-2">
+                  <input type="checkbox" bind:checked={torOverVpn}
+                         disabled={!vpnEnabled || vpnProvider === 'none'}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-0.5">
+                    <span class="text-zinc-300 text-sm">
+                      Nest Tor through the active VPN
+                    </span>
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      Tor's circuit handshakes with entry guards exit through
+                      the VPN tunnel rather than the bare upstream — your ISP
+                      sees only VPN traffic. Requires a clearnet VPN to be on
+                      ({vpnEnabled && vpnProvider !== 'none'
+                        ? `currently: ${vpnProvider}`
+                        : 'currently none — toggle locked'}).
+                    </p>
+                  </div>
+                </label>
+
+                <!-- v77: Tor-over-VPN compatibility note. Hard-won across
+                     sessions: Tor only bootstraps through a STEALTH OpenVPN
+                     tunnel (AirVPN SSL/SSH). WireGuard can't reliably carry
+                     Tor, and commercial-VPN exit IPs are widely Tor-blacklisted.
+                     Amber when the active provider is a WireGuard/commercial one. -->
+                <div class="ml-7 p-2.5 rounded border text-[11px] leading-relaxed
+                            {['mullvad','ivpn','wireguard','azirevpn','tailscale'].includes(vpnProvider)
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-200/90'
+                              : 'border-cursed-500/30 bg-cursed-500/5 text-zinc-400'}">
+                  <span class="font-medium text-zinc-200">Tor-over-VPN works only over a stealth OpenVPN tunnel.</span>
+                  Use <strong>AirVPN's OpenVPN-over-SSL or -SSH</strong> (or a similar custom <code>.ovpn</code>).
+                  WireGuard fundamentally struggles to carry Tor traffic, and most commercial-VPN
+                  exit-IP ranges are blacklisted by the Tor network — so transparent Tor over
+                  WireGuard providers (Mullvad / IVPN / AirVPN-WireGuard) usually won't bootstrap
+                  (the watchdog auto-reverts it if it stalls).
+                  {#if ['mullvad','ivpn','wireguard','azirevpn','tailscale'].includes(vpnProvider)}
+                    <span class="block mt-1">⚠ Your active VPN (<code>{vpnProvider}</code>) is WireGuard / commercial-exit — Tor likely won't bootstrap. Switch to AirVPN SSL/SSH first.</span>
+                  {:else if vpnProvider === 'airvpn'}
+                    <span class="block mt-1">✓ AirVPN active — make sure it's an <strong>SSL</strong> or <strong>SSH</strong> stealth mode (not WireGuard) for Tor.</span>
+                  {/if}
+                </div>
+
+                <!-- v73: Tor bridge preset + custom bridges — moved here from
+                     the legacy VPN "Tor" provider. Tor is no longer a VPN
+                     provider, so this is the single place to configure it.
+                     Leave "direct" on open networks; obfs4/meek/snowflake help
+                     where Tor is blocked. Dimmed with the rest when Tor is off. -->
+                <div class="space-y-2 pt-3 border-t border-ink-800" role="radiogroup" aria-label="Tor bridge preset">
+                  <p class="text-[11px] uppercase tracking-wider text-zinc-500">Bridge preset</p>
+                  {#if vpnState?.tor.presets}
+                    {#each vpnState.tor.presets as p}
+                      <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="radio" bind:group={torPreset} value={p.id}
+                               class="mt-1 w-4 h-4 accent-cursed-500" />
+                        <div class="space-y-1 min-w-0">
+                          <div class="text-zinc-200 text-sm font-medium">{p.label}</div>
+                          <p class="text-[11px] text-zinc-500">{p.blurb}</p>
+                        </div>
+                      </label>
+                    {/each}
+                  {/if}
+                </div>
+                {#if torPreset === 'custom'}
+                  <div class="space-y-1 pt-2">
+                    <label class="text-[11px] uppercase tracking-wider text-zinc-500 block" for="tor-br-ov">
+                      Custom bridge lines
+                      {#if vpnState?.tor.has_bridges}
+                        <span class="text-cursed-400 normal-case ml-1 text-[10px]">(saved — paste to replace, blank keeps)</span>
+                      {/if}
+                    </label>
+                    <textarea id="tor-br-ov" bind:value={torBridges} rows="4"
+                              placeholder="obfs4 12.34.56.78:443 FINGERPRINT cert=… iat-mode=0"
+                              class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                    <p class="text-[11px] text-zinc-500">
+                      Fresh bridges from
+                      <a class="text-cursed-300 hover:underline" href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">bridges.torproject.org</a> — one per line. Most users won't need this.
+                    </p>
+                  </div>
+                {/if}
+              </div>
+            </div>
+
+            <!-- ── I2P ── -->
+            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" bind:checked={i2pEnabled}
+                       class="w-4 h-4 accent-cursed-500" />
+                <span class="text-zinc-200 text-sm font-medium">Enable I2P</span>
+                <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+                  • HTTP proxy 4444 • SOCKS 4447
+                </span>
+                <a href="/network/i2p" class="ml-auto text-[10px] px-2 py-1 rounded
+                          border border-cursed-500/40 text-cursed-300
+                          hover:bg-cursed-500/10 transition-colors font-mono">
+                  I2P config →
+                </a>
+              </label>
+
+              <div class="space-y-3 pl-7"
+                   class:opacity-40={!i2pEnabled}
+                   class:pointer-events-none={!i2pEnabled}>
+                <p class="text-[11px] text-zinc-500 leading-relaxed">
+                  I2P is always split-tunnel by design — it's a peer-to-peer
+                  overlay, not a generic transport. <code>.i2p</code>
+                  sites work in any browser pointed at the HTTP proxy;
+                  clearnet stays on whatever route the rest of the system
+                  uses (Tor / VPN / direct).
+                </p>
+
+                <!-- Over-VPN -->
+                <label class="flex items-start gap-3 cursor-pointer pt-1">
+                  <input type="checkbox" bind:checked={i2pOverVpn}
+                         disabled={!vpnEnabled || vpnProvider === 'none'}
+                         class="mt-1 w-4 h-4 accent-cursed-500" />
+                  <div class="space-y-0.5">
+                    <span class="text-zinc-300 text-sm">
+                      Nest I2P through the active VPN
+                    </span>
+                    <p class="text-[11px] text-zinc-500 leading-relaxed">
+                      i2pd's outbound TCP rides the VPN tunnel instead of
+                      going direct. Hides "uses I2P" from your ISP at the
+                      cost of one extra hop. Requires a clearnet VPN to be on
+                      ({vpnEnabled && vpnProvider !== 'none'
+                        ? `currently: ${vpnProvider}`
+                        : 'currently none — toggle locked'}).
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <!-- v90: the Tailscale config block moved OUT of this panel
+                 into its own top-level section (placed after the VPN
+                 section). This panel is Tor + I2P only again. -->
+
+            <!-- v73: the overlay section owns Tor + I2P end-to-end, so it
+                 gets its own Save & Apply. saveVpn() persists both overlay
+                 toggles + Tor's bridge preset/bridges/mode/exit-country
+                 (and the VPN + Tailscale config too — it's one atomic
+                 network save). -->
+            <div class="flex items-center gap-3 pt-3 border-t border-ink-700">
+              <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
+                {vpnSaving ? 'saving…' : 'Save & Apply'}
+              </button>
+              {#if vpnMsg}<span class="text-xs text-live-300">{vpnMsg}</span>{/if}
+            </div>
           </section>
         </div>
       </details>
