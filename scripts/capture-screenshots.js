@@ -25,8 +25,9 @@
 //
 // Redaction covers: private IPv4 + IPv6 (ULA/link-local), home-lab hostnames,
 // the Matrix homeserver domain + @user handles, aeon_tok_* tokens, OpenSSH
-// private-key blocks, and local credential paths. Adjust HOSTS/MATRIX below to
-// match your environment.
+// private-key blocks, credential paths, and absolute /home|/Users paths (the
+// unix username); it also blurs the Skills chips and the tip-jar widget. Adjust
+// HOSTS/MATRIX below to match your environment.
 // ─────────────────────────────────────────────────────────────────────────────
 const path = require('path');
 const { chromium } = require('playwright');
@@ -44,7 +45,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Serialized into the page; must be self-contained (no closure over Node vars
 // other than the three injected as args).
-function REDACT(HOSTS, MATRIX_DOMAIN) {
+function REDACT({ HOSTS, MATRIX_DOMAIN }) {
   const IP = /\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){1,3}\b/g;
   const IPV6 = /\b(?:f[cde][0-9a-f]{2})(?::[0-9a-f]{0,4}){2,}\b/gi; // ULA + link-local
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -60,6 +61,7 @@ function REDACT(HOSTS, MATRIX_DOMAIN) {
     t = t.replace(/~\/voip-[A-Za-z0-9._-]+\/\.env/g, '~/▓▓▓/.env');
     t = t.replace(/~\/\.openclaw_[A-Za-z0-9._-]+_creds\.json/g, '~/▓▓▓_creds.json');
     t = t.replace(/~\/\.openclaw\/credentials\/?/g, '~/▓▓▓/credentials/');
+    t = t.replace(/\/(home|Users)\/[A-Za-z0-9._-]+\//g, '/$1/▓▓▓/'); // absolute home paths leak the unix username
     for (const h of HOSTS) t = t.replace(new RegExp(esc(h), 'g'), '▓▓▓▓');
     t = t.replace(IP, '••••••');
     t = t.replace(IPV6, '••••••');
@@ -88,10 +90,16 @@ function REDACT(HOSTS, MATRIX_DOMAIN) {
   document.querySelectorAll('[class*="tipjar"], [class*="TipJar"], .tip-jar').forEach((e) => {
     e.style.filter = 'blur(8px)';
   });
+  // blur the Skills-section chips (they name personal tools)
+  Array.from(document.querySelectorAll('.agd-sec')).forEach((sec) => {
+    if (/^\s*skills/i.test(sec.textContent || '')) {
+      sec.querySelectorAll('.agd-chip').forEach((c) => { c.style.filter = 'blur(6px)'; });
+    }
+  });
 }
 
 async function redact(page) {
-  await page.evaluate(REDACT, HOSTS, MATRIX_DOMAIN);
+  await page.evaluate(REDACT, { HOSTS, MATRIX_DOMAIN });
   await sleep(150);
 }
 
