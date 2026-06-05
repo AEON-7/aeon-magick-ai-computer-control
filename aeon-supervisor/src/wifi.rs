@@ -143,6 +143,19 @@ pub async fn connect(
     let ssid = req.ssid.trim().to_string();
     let password = req.password.clone();
 
+    // Reject a too-short PSK up front — WPA needs >=8 chars. Without this the
+    // optimistic "switching" reply below fires, then `nmcli con add` rejects the
+    // key, leaving the user told to reconnect to a net the Orb never joined.
+    if let Some(pw) = &password {
+        if !pw.is_empty() && pw.len() < 8 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": "WiFi password must be at least 8 characters (or leave it blank for an open network)."})),
+            )
+                .into_response();
+        }
+    }
+
     // Is the setup AP the live wlan0 connection right now? If so the caller is
     // talking to us THROUGH it, and joining a client net will drop their page.
     let ap_active = tokio::task::spawn_blocking(|| {
