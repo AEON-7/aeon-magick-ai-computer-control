@@ -164,6 +164,75 @@
       error = 'Poweroff failed: ' + (e?.message ?? 'unknown');
     }
   }
+
+  // ── Configuration backup / restore ──
+  // Password-encrypted snapshot of /etc/aeon + agent-connect keys/registry +
+  // Tailscale identity. Export streams an encrypted blob to download; import
+  // base64s the file back up, the supervisor decrypts + restores, then reboot.
+  let bkExportPw = '';
+  let bkImportPw = '';
+  let bkFile: File | null = null;
+  let bkBusy: '' | 'export' | 'import' = '';
+  let bkMsg = '';
+  let bkOk = false;
+  let bkRestored = false;
+
+  function onBkFile(e: Event) {
+    const t = e.target as HTMLInputElement;
+    bkFile = t.files && t.files[0] ? t.files[0] : null;
+  }
+
+  async function doExport() {
+    bkBusy = 'export'; bkMsg = ''; bkRestored = false;
+    try {
+      const res = await fetch('/api/system/config/export', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: bkExportPw }),
+      });
+      if (!res.ok) { bkOk = false; bkMsg = `✗ export failed (${res.status})`; return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'aeon-config-backup.aeonbackup';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      bkOk = true;
+      bkMsg = `✓ backup downloaded (${(blob.size / 1024).toFixed(1)} kB) — store the file + password safely`;
+    } catch (e: any) {
+      bkOk = false; bkMsg = `✗ ${e?.message ?? 'export failed'}`;
+    } finally { bkBusy = ''; }
+  }
+
+  async function doImport() {
+    if (!bkFile) return;
+    if (!confirm(
+      'Restore configuration from this backup?\n\n' +
+      'This OVERWRITES the current device + network config, API tokens, the ' +
+      'admin password, and the connected-systems registry, then needs a reboot ' +
+      'to apply. Continue?'
+    )) return;
+    bkBusy = 'import'; bkMsg = ''; bkRestored = false;
+    try {
+      const b64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(((r.result as string).split(',')[1]) ?? '');
+        r.onerror = () => reject(new Error('read failed'));
+        r.readAsDataURL(bkFile as File);
+      });
+      const r = await fetch('/api/system/config/import', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: bkImportPw, data_b64: b64 }),
+      }).then((r) => r.json());
+      if (r.ok) { bkOk = true; bkMsg = `✓ ${r.message ?? 'restored'}`; bkRestored = true; }
+      else { bkOk = false; bkMsg = `✗ ${r.err ?? 'restore failed'}`; }
+    } catch (e: any) {
+      bkOk = false; bkMsg = `✗ ${e?.message ?? 'restore failed'}`;
+    } finally { bkBusy = ''; }
+  }
 </script>
 
 <div class="h-full flex flex-col">
@@ -344,6 +413,67 @@
           </details>
         </section>
       {/if}
+
+      <!-- ─── Configuration backup ─── -->
+      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+        <header class="space-y-1">
+          <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            Configuration backup
+          </h2>
+          <p class="text-xs text-zinc-500 leading-relaxed">
+            A <strong>password-encrypted</strong> snapshot of everything you'd want back
+            after a re-flash: device + network / VPN settings, API tokens, the admin
+            password, macros + prompts, the <strong>agent-connect SSH key + connected-systems
+            registry</strong> (so restored boxes are still trusted — no re-register), and the
+            Tailscale identity. Uploaded ISOs + staged files are excluded (re-upload those).
+            The file is AES-256 encrypted with your password —
+            <strong>store both safely; the password is the only way to decrypt it.</strong>
+          </p>
+        </header>
+
+        <!-- Export -->
+        <div class="space-y-2">
+          <div class="text-[11px] uppercase tracking-wider text-zinc-500">Export</div>
+          <div class="flex flex-wrap items-center gap-2">
+            <input type="password" bind:value={bkExportPw} placeholder="encryption password"
+                   autocomplete="new-password"
+                   class="flex-1 min-w-[180px] rounded-md border border-ink-800 bg-ink-950/40 px-3 py-2 text-sm font-mono text-zinc-200 placeholder-zinc-600" />
+            <button class="btn-primary text-sm" on:click={doExport} disabled={bkBusy !== '' || !bkExportPw}>
+              {bkBusy === 'export' ? 'encrypting…' : '↓ Export & download'}
+            </button>
+          </div>
+        </div>
+
+        <!-- Restore -->
+        <div class="space-y-2 pt-3 border-t border-ink-800">
+          <div class="text-[11px] uppercase tracking-wider text-zinc-500">Restore</div>
+          <p class="text-[11px] text-zinc-500 leading-relaxed">
+            Restoring <strong>overwrites</strong> the current config with the backup, then
+            needs a reboot. Use the same password the backup was created with.
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <input type="file" accept=".aeonbackup,application/octet-stream" on:change={onBkFile}
+                   class="text-xs text-zinc-400 file:mr-2 file:rounded file:border-0 file:bg-ink-800 file:px-3 file:py-1.5 file:text-zinc-300 file:cursor-pointer" />
+            <input type="password" bind:value={bkImportPw} placeholder="backup password"
+                   autocomplete="off"
+                   class="flex-1 min-w-[160px] rounded-md border border-ink-800 bg-ink-950/40 px-3 py-2 text-sm font-mono text-zinc-200 placeholder-zinc-600" />
+            <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
+                    on:click={doImport} disabled={bkBusy !== '' || !bkImportPw || !bkFile}>
+              {bkBusy === 'import' ? 'restoring…' : '↑ Import & restore'}
+            </button>
+          </div>
+        </div>
+
+        {#if bkMsg}
+          <p class="text-xs font-mono leading-relaxed {bkOk ? 'text-live-300' : 'text-red-300'}">{bkMsg}</p>
+        {/if}
+        {#if bkRestored}
+          <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
+                  on:click={onPiReboot}>
+            ⟳ Reboot now to apply
+          </button>
+        {/if}
+      </section>
 
       <!-- ─── Pi maintenance ─── -->
       <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">

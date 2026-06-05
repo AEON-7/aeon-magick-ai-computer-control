@@ -436,6 +436,7 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         || path == "/api/system/reboot"
         || path == "/api/system/poweroff"
         || path == "/api/system/pi-reboot"
+        || path.starts_with("/api/system/config") // config backup/restore (sensitive)
         || path == "/api/system/pi-poweroff"
         || path == "/api/target/power-tap"
         || path == "/api/target/power-hold"

@@ -404,6 +404,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/system/pi-poweroff", post(crate::system::poweroff))
         .route("/system/reboot",      post(crate::system::reboot))
         .route("/system/poweroff",    post(crate::system::poweroff))
+        .route("/system/config/export", post(crate::system::config_export))
+        .route("/system/config/import", post(crate::system::config_import))
 
         // Target (USB-connected machine) power controls. Soft tap +
         // forced hold via HID Consumer Power button; wake via WoL

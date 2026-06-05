@@ -8,8 +8,11 @@
 
 use crate::api::AppState;
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
+use base64::Engine as _;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::process::Command;
 
@@ -128,4 +131,140 @@ pub async fn info(State(_state): State<AppState>) -> Json<Value> {
         "mem_total_kb": mem_total_kb,
         "mem_available_kb": mem_avail_kb,
     }))
+}
+
+// ── Configuration backup / restore ─────────────────────────────────────
+//
+// A password-encrypted snapshot of everything you'd want back after a
+// reflash: all of /etc/aeon (configs, network/VPN, auth + API tokens, TLS
+// cert, macros, prompts, vpn-secrets) plus the agent-connect SSH keypair +
+// connected-systems registry, agent tokens, DNS subscriptions, and the
+// Tailscale node identity. Large, re-uploadable blobs (ISOs, staged files,
+// the audit log) are excluded. Encryption is openssl AES-256-CBC with a
+// PBKDF2-derived key; the password is passed via env (never argv/ps), and
+// the same password decrypts on import. Admin-scope only.
+
+/// Paths (relative to `/`) included in a config backup. Each is skipped if
+/// absent so a fresh device still produces a valid (smaller) archive.
+const BACKUP_LIST: &str = "etc/aeon var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/tailscale/tailscaled.state";
+
+#[derive(Deserialize)]
+pub struct ExportReq {
+    #[serde(default)]
+    pub password: String,
+}
+
+/// POST /api/system/config/export — returns a password-encrypted backup as a
+/// binary download. Body: `{ "password": "…" }`.
+pub async fn config_export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ExportReq>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let actor = crate::auth::identify(&state.auth, &headers)
+        .map(|id| crate::audit::actor_for(&id))
+        .unwrap_or_else(|| "anonymous".into());
+    if req.password.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, HeaderMap::new(), b"password required".to_vec());
+    }
+    let pw = req.password;
+    let script = format!(
+        "set -eo pipefail; cd /; P=\"\"; for p in {BACKUP_LIST}; do [ -e \"/$p\" ] && P=\"$P $p\"; done; \
+         [ -n \"$P\" ] || {{ echo 'nothing to back up' >&2; exit 5; }}; \
+         tar czf - $P | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 -pass env:AEON_BK_PW"
+    );
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new("bash").arg("-c").arg(script).env("AEON_BK_PW", pw).output()
+    })
+    .await;
+    let out = match out {
+        Ok(Ok(o)) => o,
+        _ => return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), b"export process failed".to_vec()),
+    };
+    if !out.status.success() {
+        crate::audit::log(&actor, "config_export", "encrypt-failed", "fail", None);
+        let msg = String::from_utf8_lossy(&out.stderr);
+        return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), format!("export failed: {msg}").into_bytes());
+    }
+    crate::audit::log(&actor, "config_export", &format!("{} bytes", out.stdout.len()), "ok", None);
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"aeon-config-backup.aeonbackup\""),
+    );
+    (StatusCode::OK, h, out.stdout)
+}
+
+#[derive(Deserialize)]
+pub struct ImportReq {
+    #[serde(default)]
+    pub password: String,
+    /// base64 of the encrypted .aeonbackup file.
+    #[serde(default)]
+    pub data_b64: String,
+}
+
+/// POST /api/system/config/import — decrypt a backup with the password and
+/// restore it in place. Returns ok + a reboot recommendation.
+pub async fn config_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ImportReq>,
+) -> Json<Value> {
+    let actor = crate::auth::identify(&state.auth, &headers)
+        .map(|id| crate::audit::actor_for(&id))
+        .unwrap_or_else(|| "anonymous".into());
+    if req.password.trim().is_empty() || req.data_b64.trim().is_empty() {
+        return Json(json!({"ok": false, "err": "password and backup file required"}));
+    }
+    let enc = match base64::engine::general_purpose::STANDARD.decode(req.data_b64.trim()) {
+        Ok(b) => b,
+        Err(_) => return Json(json!({"ok": false, "err": "invalid backup encoding"})),
+    };
+    let pw = req.password;
+    let script = format!(
+        "set -eo pipefail; TMP=$(mktemp -d); trap 'rm -rf \"$TMP\"' EXIT; \
+         openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:AEON_BK_PW -in \"$AEON_BK_IN\" | tar xzf - -C \"$TMP\"; \
+         [ -d \"$TMP/etc/aeon\" ] || {{ echo NOT_A_BACKUP >&2; exit 4; }}; \
+         for sub in {BACKUP_LIST}; do if [ -e \"$TMP/$sub\" ]; then mkdir -p \"/$(dirname \"$sub\")\"; cp -aT \"$TMP/$sub\" \"/$sub\"; fi; done; \
+         echo RESTORED"
+    );
+    let out = tokio::task::spawn_blocking(move || -> std::io::Result<std::process::Output> {
+        let tmp_in = format!("/var/lib/aeon/.import-{}.bin", std::process::id());
+        std::fs::write(&tmp_in, &enc)?;
+        let res = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("AEON_BK_PW", pw)
+            .env("AEON_BK_IN", &tmp_in)
+            .output();
+        let _ = std::fs::remove_file(&tmp_in);
+        res
+    })
+    .await;
+    let out = match out {
+        Ok(Ok(o)) => o,
+        _ => return Json(json!({"ok": false, "err": "restore process failed"})),
+    };
+    if out.status.success() {
+        crate::audit::log(&actor, "config_import", "restored", "ok", None);
+        Json(json!({
+            "ok": true,
+            "restored": true,
+            "message": "Configuration restored. Reboot the Pi to apply — services and the network stack reload their config on boot.",
+        }))
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let code = out.status.code().unwrap_or(-1);
+        crate::audit::log(&actor, "config_import", "failed", "fail", None);
+        let err = if code == 4 {
+            "That file isn't a valid AEON backup."
+        } else if stderr.contains("bad decrypt") || stderr.contains("bad magic") || stderr.to_lowercase().contains("error") {
+            "Wrong password, or the backup is corrupt."
+        } else {
+            "Restore failed."
+        };
+        Json(json!({"ok": false, "err": err, "detail": stderr.chars().take(200).collect::<String>()}))
+    }
 }
