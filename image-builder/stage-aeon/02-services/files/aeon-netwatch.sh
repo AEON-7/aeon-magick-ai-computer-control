@@ -206,12 +206,17 @@ EOF
     # responds to OS probe URLs with the right body to trigger the
     # captive popup, and redirects everything else to /setup/wifi).
     # 443 hits the supervisor's main HTTPS listener directly.
-    iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 80 \
-        -j DNAT --to-destination "$AP_GATEWAY:80" \
-        -m comment --comment "aeon-captive"
-    iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 443 \
-        -j DNAT --to-destination "$AP_GATEWAY:443" \
-        -m comment --comment "aeon-captive"
+    # -C-guarded so repeated AP activations don't STACK duplicates — we saw 11
+    # copies pile up, and a stale wlan0:443->192.168.50.1 rule blackholes HTTPS
+    # the moment the device later joins a real network on wlan0.
+    for _p in 80 443; do
+        iptables -t nat -C PREROUTING -i "$AP_IFACE" -p tcp --dport "$_p" \
+            -j DNAT --to-destination "$AP_GATEWAY:$_p" \
+            -m comment --comment "aeon-captive" 2>/dev/null \
+        || iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport "$_p" \
+            -j DNAT --to-destination "$AP_GATEWAY:$_p" \
+            -m comment --comment "aeon-captive"
+    done
 }
 
 remove_captive_portal_hijack() {
@@ -249,6 +254,40 @@ primary_active() {
 have_internet() {
     primary_active || return 1
     ping -c 1 -W 2 "$PING_TARGET" >/dev/null 2>&1
+}
+
+primary_usable() {
+    # THE AP-fallback gate. "Usable" = the device is reachable on a real
+    # network: a non-AP client link (WiFi client, Ethernet, or a VPN / tailnet
+    # tunnel) that is active AND carries an IPv4 address. We deliberately do NOT
+    # test internet reachability here. Internet can drop for a hundred reasons
+    # that leave the device perfectly reachable on its LAN — a captive-portal
+    # hotspot, an ISP outage, a VPN kill-switch eating ICMP (we watched 1.1.1.1
+    # pings fail under an active tun0 and flap the Pi to AP mode), or a
+    # deliberately OFFLINE LAN-only jump-box / orchestration deployment. In all
+    # of those the device must STAY on its network; bouncing to the setup AP
+    # would strand it off the very LAN you reach it on. Replaces have_internet()
+    # for the AP decision; have_internet() is kept for status/diagnostics only.
+    local name typ dev _rest
+    while IFS=: read -r name typ dev _rest; do
+        [[ "$name" == "$AP_CON" ]] && continue
+        case "$typ" in
+            802-11-wireless|802-3-ethernet|tun|wireguard|tailscale)
+                # The USB-gadget link (usb0) reports "active" with an IP even
+                # when nothing is plugged into the USB port — only honour it when
+                # a host is actually attached (carrier up), else it would
+                # suppress the setup AP forever on a standalone unit.
+                if [[ "$dev" == usb* ]]; then
+                    [[ "$(cat /sys/class/net/"$dev"/carrier 2>/dev/null)" == "1" ]] || continue
+                fi
+                [[ -n "$dev" ]] \
+                    && nmcli -t -f IP4.ADDRESS device show "$dev" 2>/dev/null \
+                        | grep -qE ':[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+                    && return 0
+                ;;
+        esac
+    done < <(nmcli -t -f NAME,TYPE,DEVICE con show --active 2>/dev/null)
+    return 1
 }
 
 # ── AP activation helpers (v70) ──
@@ -392,13 +431,13 @@ fi
 # redirected through Tor). No-op unless Tor is enabled and stalled.
 tor_stall_guard
 
-if have_internet; then
+if primary_usable; then
     if [[ "$down_since" != "0" ]]; then
-        log "internet restored after $((now - down_since))s"
+        log "primary link restored after $((now - down_since))s"
     fi
     echo "0" > "$STATE_FILE"
     if ap_active; then
-        log "primary online, deactivating AP"
+        log "primary link usable, deactivating setup AP"
         nmcli con down "$AP_CON" >/dev/null 2>&1 || true
         remove_captive_portal_hijack
     else
@@ -430,11 +469,11 @@ if ap_active; then
         sleep 5
         nmcli device wifi rescan >/dev/null 2>&1 || true
         sleep 8
-        if have_internet; then
-            log "back online"
+        if primary_usable; then
+            log "primary link back — staying off the setup AP"
             echo "0" > "$STATE_FILE"
         else
-            log "still offline, resuming AP"
+            log "still no usable link — resuming setup AP"
             if activate_ap; then
                 echo "$now" > "$STATE_FILE"
             fi
@@ -459,7 +498,7 @@ if [[ "$down_since" == "0" ]]; then
     echo "$now" > "$STATE_FILE"
     down_since=$now
     if (( grace > 0 )); then
-        log "no internet, starting ${grace}s grace timer (known WiFi: ${KNOWN_WIFI})"
+        log "no usable primary link, starting ${grace}s grace timer (known WiFi: ${KNOWN_WIFI})"
         exit 0
     fi
     log "no known WiFi configured — bringing up setup AP now"
