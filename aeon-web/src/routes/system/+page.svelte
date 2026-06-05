@@ -422,7 +422,7 @@
           </h2>
           <p class="text-xs text-zinc-500 leading-relaxed">
             A <strong>password-encrypted</strong> snapshot of everything you'd want back
-            after a re-flash: device + network / VPN settings, API tokens, the admin
+            after a re-flash: device + network / VPN settings, saved WiFi networks, API tokens, the admin
             password, macros + prompts, the <strong>agent-connect SSH key + connected-systems
             registry</strong> (so restored boxes are still trusted — no re-register), and the
             Tailscale identity. Uploaded ISOs + staged files are excluded (re-upload those).

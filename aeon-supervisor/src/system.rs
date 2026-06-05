@@ -137,6 +137,7 @@ pub async fn info(State(_state): State<AppState>) -> Json<Value> {
 //
 // A password-encrypted snapshot of everything you'd want back after a
 // reflash: all of /etc/aeon (configs, network/VPN, auth + API tokens, TLS
+// cert), the NetworkManager saved-WiFi profiles (system-connections),
 // cert, macros, prompts, vpn-secrets) plus the agent-connect SSH keypair +
 // connected-systems registry, agent tokens, DNS subscriptions, and the
 // Tailscale node identity. Large, re-uploadable blobs (ISOs, staged files,
@@ -146,7 +147,7 @@ pub async fn info(State(_state): State<AppState>) -> Json<Value> {
 
 /// Paths (relative to `/`) included in a config backup. Each is skipped if
 /// absent so a fresh device still produces a valid (smaller) archive.
-const BACKUP_LIST: &str = "etc/aeon var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/tailscale/tailscaled.state";
+const BACKUP_LIST: &str = "etc/aeon etc/NetworkManager/system-connections var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/tailscale/tailscaled.state";
 
 #[derive(Deserialize)]
 pub struct ExportReq {
