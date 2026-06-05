@@ -1,19 +1,24 @@
-# AEON Magick — AI Computer Control
+# 🔮 Aeon Magick Orb
 
 > ## _The Universe's Strangest Peripheral._
+> **Every Aeon master has one.** _(we also just call it the **cursed HID**.)_
 
-### Give any AI agent — or yourself — **eyes, hands, and lights-out reach** over any computer, with **zero software installed on the target.** It just looks like a USB keyboard and mouse.
+### Gaze into the Orb and you **see and command any computer — and your entire AI lab.** It hands any AI agent a **physical presence** at any machine: real eyes, real hands, **zero software on the target.** It just looks like a USB keyboard and mouse.
 
-Plug one small box between a machine and a video-capture stick. The target sees an
-ordinary **USB keyboard + mouse + trackpad** and an HDMI monitor — nothing else.
-The box sees the target's screen over HDMI and streams it to your browser, or hands
-the **see + act** loop to an AI agent: vision in, keyboard / mouse / gesture out.
-We jokingly call it the **cursed HID**. Your agent now has full **video + keyboard
-+ mouse** control of anything you plug it into — the BIOS, the FileVault prompt, a
-fresh OS install, the login wall — and you can drive the whole thing from a phone
-on the far side of the planet.
+> 🤖 **Every capability is provisioned to your AI agent over a REST API _and_ a first-class MCP endpoint** — drop-in **agentic control** for *any* model and *any* agent. No SDK, no plugin, no permission prompt.
 
-This isn't just Agentic AI. It's **_Robo_-Agentic AI.**
+One small box you can hold in a pocket, and you can:
+
+- 🖥️ **View and control your entire AI infrastructure** — every gateway, DGX Spark, and model server, from one console.
+- 🤖 **Grant your AI agent a physical presence** at any computer — vision in, keyboard / mouse / gesture out, from the **BIOS** on up.
+- 🛡️ **Secure your network traffic** — one-click VPN · Tor · I2P · encrypted **no-log DNS**, filterable by latency *and* jurisdiction.
+- 🌍 **Access it all from anywhere** — one-key Tailscale mesh; carry the Orb to any network and your whole lab comes with it.
+- 🧠 **Build up your Pantheon** of AI agent personas — each with a soul, a voice, a corpus, and a face — and summon them to act.
+- 💾 …**deploy models**, **orchestrate containers**, **install an OS lights-out**, and **back the whole config up, encrypted**. _(keep scrolling 👇)_
+
+> **All it takes:** a **Raspberry Pi 4**, any HDMI capture stick (tested with an Elgato Cam Link 4K), and a USB-C data cable. [Full hardware list ↓](#hardware-youll-need)
+
+This isn't just Agentic AI. It's **_Robo_-Agentic AI** — the disembodied, given a body.
 
 ```
         ┌──────────────────┐                          ┌──────────────────┐
@@ -34,7 +39,7 @@ physically gone.**
 
 ---
 
-## Everything it does, at a glance
+## Everything the Orb does, at a glance
 
 One box is a computer-control rig, an AI-infrastructure jump box, a persona studio,
 a privacy router, and a lights-out KVM. Tap any capability to jump to the deep dive.
@@ -61,18 +66,29 @@ a privacy router, and a lights-out KVM. Tap any capability to jump to the deep d
 
 ---
 
-## Why this is different
+## Why the Orb matters
+
+AI agents today are **trapped behind the integrations someone wired for them** — an
+API here, a browser plugin there. They can touch the handful of apps you connected,
+and nothing else. The Orb hands an agent a **universal body**: real eyes and hands on
+*any* machine, *any* OS, even *pre-OS*, with **nothing installed** and nothing to
+detect. That's the leap from *"the apps we integrated"* to **"literally any
+computer"** — the missing limb of agentic AI.
+
+And the same box is a **single pane of glass over your whole lab** — live GPU / CPU /
+RAM, per-agent token burn, model deploys, container control, terminals, audit. So it
+isn't just *reach*: it's **observability + orchestration + control**, unified in one
+thing you can carry. Because every capability is reachable over **REST + MCP**, your
+agents don't just *watch* the infrastructure — they can *run* it.
 
 Most "AI computer use" tools live *inside* the machine they drive — a browser
 extension, an accessibility shim, a screen-recorder daemon, an SDK linked into your
-app. They work, but they're **chatty**: every screen reveals its agent, every
-approach asks permission, and none of them can touch the BIOS, the FileVault unlock,
-the Windows OOBE, the firmware updater, or the login wall a fresh Linux install
-opens with.
+app. They're **chatty**: every screen reveals the agent, every approach asks
+permission, and none can touch the BIOS, the FileVault unlock, the Windows OOBE, the
+firmware updater, or the login wall a fresh Linux install opens with. The Orb drives
+the machine **itself** — vision-first, from the outside.
 
-AEON Magick drives the machine **itself** — vision-first, from the outside.
-
-| Typical agent tool | AEON Magick |
+| Typical agent tool | Aeon Magick Orb |
 |---|---|
 | Installs software / an SDK on the target | **Nothing installed.** The target sees a USB keyboard + mouse. |
 | Needs OS APIs, permissions, a logged-in session | **Works pre-OS / BIOS / lock screen** — it's just hardware. |
@@ -118,7 +134,7 @@ grant permission to.**
 
 ## The cursed HID — it just looks like a keyboard
 
-The most subversive thing about AEON Magick is how *ordinary* it looks. The target
+The most subversive thing about the Orb is how *ordinary* it looks. The target
 enumerates a **USB-HID keyboard, mouse, and trackpad** — a Logitech Unifying
 Receiver, or an Apple Magic Keyboard, depending on the persona you pick — and
 nothing else. There is no kernel module to load, no agent process to spot in a task
@@ -150,7 +166,7 @@ Open any persona and build it out, end to end:
 - 🖼️ **Profile picture** → pushed straight to the agent's **Matrix avatar.**
 - 🗣️ **A voice of its own** — see below.
 
-![A persona's editor (top) — Matrix avatar, a scoped Aeon Magick API key, a human-only SSH grant, and skills](docs/images/agent-detail.png)
+![A persona's editor (top) — Matrix avatar, a scoped Orb API key, a human-only SSH grant, and skills](docs/images/agent-detail.png)
 
 ### A real voice — designed or cloned
 
@@ -181,7 +197,7 @@ job — and they each speak in their own voice.
 
 ### Auto skill-deploy on provisioning
 
-Grant an agent an **Aeon Magick API key** and the supervisor drops a scoped access
+Grant an agent an **Orb API key** and the supervisor drops a scoped access
 file straight into that agent's gateway workspace — instant, first-class access via
 a provisioned **MCP server and/or REST API.** Add capabilities by clicking
 ready-made skill chips or uploading a `SKILL.md` / `.tar` of your own.
@@ -199,7 +215,7 @@ wake** on every box, from one console.
 
 Adding a system is a single SSH login away — and if you've meshed your lab with
 Tailscale first, the box enrolls a secure SSH key over the tailnet and keeps
-**persistent visibility and access to every machine**, even when the AEON Magick box
+**persistent visibility and access to every machine**, even when the Orb
 itself moves to a remote network.
 
 ---
@@ -502,7 +518,7 @@ A small, cheap bill of materials — most of it you may already own:
 | Part | What / why | Notes |
 |---|---|---|
 | **Raspberry Pi 4** (2 GB+) | The appliance. Its USB-C port runs **USB-OTG gadget mode** to emulate a keyboard + mouse + trackpad to the target. | Pi 4 is the tested platform. **Use a Pi 4** — the Pi 5's USB-C is power-only and can't act as the HID gadget. |
-| **microSD card** (16 GB+) | Boots the AEON Magick image. | A fast A1/A2 card helps stream latency. |
+| **microSD card** (16 GB+) | Boots the Aeon Magick Orb image. | A fast A1/A2 card helps stream latency. |
 | **HDMI video-capture device** | The "eyes" — pipes the target's HDMI into the Pi as a USB camera. | **Elgato Cam Link 4K** (rock-solid 1080p60 / 4K30) **or any ~$10 MS2109-based HDMI→USB stick**. Both auto-detected (UVC) — no drivers. |
 | **USB-C data cable** | Pi-C → target-C — carries the emulated keyboard/mouse and **powers the Pi from the target.** | Must be **data-capable**; a charge-only cable powers the Pi but enumerates no HID. |
 | **HDMI cable** | Target's HDMI-out → the capture device. | |
@@ -552,7 +568,7 @@ against your own device).
 Descended from [`cursed-hid`](https://github.com/albert/cursed-hid), an ESP32-S2 dongle
 that emulated a Logitech Unifying Receiver and accepted only **logical operations** over
 WebSocket — never raw press/release primitives that could leave a key stuck if a packet
-dropped. AEON Magick inherits that lesson. It borrows configfs USB-gadget patterns and
+dropped. The Orb inherits that lesson. It borrows configfs USB-gadget patterns and
 the ustreamer v4l2 capture loop from [PiKVM](https://github.com/pikvm/pikvm) — but we're
 not a fork; we're a sibling project with a different goal: **agent-grade computer
 control**, not remote KVM administration.
