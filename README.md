@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/orb.png" alt="Aeon Magick Orb" width="240" />
+  <img src="docs/images/banner.png" alt="Aeon Magick Orb — see and command any computer, and your entire AI lab" width="100%" />
 </p>
 
 # 🔮 Aeon Magick Orb
