@@ -26,6 +26,9 @@
 
   type Mode = 'client' | 'ap' | 'off';
   let mode: Mode = 'client';
+  // Sync the mode toggle to live state only ONCE (first load); after that it's
+  // user-driven, so the 8s poll can't yank it back to AP while you're mid-pick.
+  let modeSynced = false;
 
   // ── Live state ──
   let state: {
@@ -85,13 +88,17 @@
       known = knownRes.networks ?? [];
       ap = apRes;
 
-      // Infer current mode from the live state. The user can override
-      // (e.g. they're in client mode but want to switch to AP), but
-      // refresh()'s job is to reflect reality.
-      if (state) {
+      // Sync the toggle to the live mode ONCE, on first load. After that the
+      // toggle belongs to the USER: the poll must NOT clobber a deliberate
+      // switch to Client while the device is still hosting the setup AP — doing
+      // so snapped it straight back to 'ap' every few seconds, so you could
+      // never stay in Client long enough to pick a network and apply. The
+      // status banner still reflects live reality; this toggle is just intent.
+      if (state && !modeSynced) {
         if (!state.wifi_radio_on) mode = 'off';
         else if (state.ap_mode) mode = 'ap';
         else mode = 'client';
+        modeSynced = true;
       }
 
       // Pre-populate AP form fields from the saved profile so the user
