@@ -47,8 +47,16 @@ curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json'
 AirVPN modes: `wireguard` (a WG tunnel), `openvpn` (a VPN), **`openvpn_ssl`**
 (OpenVPN inside stunnel TLS → looks like plain HTTPS), **`openvpn_ssh`**
 (OpenVPN inside an SSH tunnel → looks like an SSH session). Valid top-level
-`provider` values: `none`, `tailscale`, `wireguard`, `openvpn`, `mullvad`,
+`provider` values: `none`, `wireguard`, `openvpn`, `mullvad`,
 `ivpn`, `azirevpn`, `airvpn`.
+
+> **Tailscale is no longer a VPN `provider`.** It's now its own decoupled
+> top-level Network feature — enroll the device via a one-time auth key to join
+> a device mesh, with an optional exit-node whose forwarded WAN traffic
+> inherits the Pi's normal VPN / DNSCrypt / Tor egress. Enabling/disabling
+> Tailscale, the **+ Add device** picker, and exit-node config are
+> **operator (human-admin) actions — not agent-callable** and not part of this
+> skill.
 
 Confirm a tunnel came up with `GET /api/network/vpn/status` (bootstrap %, peer
 list, public IP + country).

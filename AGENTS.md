@@ -524,7 +524,9 @@ curl -sk -u admin:$PW -X PUT \
 The device's outbound network can be layered: DNSCrypt-over-TCP for query
 privacy, anonymized DNSCrypt relays so the resolver never sees client IPs,
 Tor and/or I2P for transport anonymity, and a clearnet VPN (Mullvad, IVPN,
-AzireVPN, generic WireGuard/OpenVPN, or Tailscale) as the outermost wrapper.
+AzireVPN, generic WireGuard/OpenVPN, or AirVPN) as the outermost wrapper.
+(Tailscale is **no longer a VPN provider** — it's its own top-level Network
+feature now; see *Tailscale (mesh + exit node)* below.)
 
 Each layer is independently togglable; the supervisor handles policy
 routing and iptables so the layers compose cleanly. Endpoints all live
@@ -720,9 +722,11 @@ curl -sk -u admin:$PW -X PUT \
     https://aeon-magick.local/api/network
 ```
 
-Valid `provider` values: `none`, `tailscale`, `wireguard`, `openvpn`,
+Valid `provider` values: `none`, `wireguard`, `openvpn`,
 `mullvad`, `ivpn`, `azirevpn`, `airvpn`. **AirVPN is the recommended
 provider for stealth obfuscation and Tor-over-VPN** (OpenVPN-over-SSL/SSH).
+(`tailscale` is **not** a provider value — it was decoupled into its own
+top-level Network feature; see *Tailscale (mesh + exit node)* below.)
 
 ### Provider wizards
 
@@ -808,6 +812,31 @@ credential / API key into the device's wizard — never into chat**. (3) Run
 `vpn.enabled=true` with `kill_switch=true`. (5) Confirm with
 `/api/network/vpn/status` that a tunnel is up and the public IP / country
 changed.
+
+### Tailscale (mesh + exit node)
+
+Tailscale is **its own top-level Network feature** — not a VPN provider. It runs
+alongside (and independently of) whatever clearnet VPN / Tor / I2P you have set,
+giving the Pi a stable mesh identity and an optional exit-node role.
+
+- **One-key enrollment.** Paste a one-time auth key (`tskey-auth-…`) and the Pi
+  runs `tailscale up` **once**, then keeps its node key. After that there's
+  nothing to re-enter — the node is enrolled for good. (Fleets can pre-seed the
+  key in `aeon-setup.toml`'s `[tailscale]` block at first boot.)
+- **Identity persists across network moves.** The node key is durable, so the
+  Pi keeps the **same `100.x` tailnet address** whether it's on your home WiFi,
+  a hotspot, or wired — reachable over the tailnet from anywhere, not just its
+  current LAN.
+- **"+ Add device from Tailscale" device picker.** When adding a managed system
+  (see *Agent Dash* below), operators can pull machines straight off the
+  tailnet and register them by their **stable `100.x` address** instead of a
+  LAN IP — so the connection survives network changes on either end. The picker
+  is backed by `GET /api/agent/tailscale/devices` (`tailscale status --json`).
+- **Exit-node mode.** When the Pi advertises itself as a Tailscale exit node,
+  the WAN traffic it forwards rides the Pi's **normal egress** — inheriting any
+  configured clearnet VPN + DNSCrypt + Tor/I2P exactly as the Pi's own traffic
+  would. The **device-to-device mesh stays direct** (peer-to-peer), so only the
+  internet-bound hops take the privacy stack.
 
 ---
 
@@ -1022,6 +1051,28 @@ curl -sk -u admin:$PW -X DELETE \
 Token management endpoints (`/api/auth/tokens`, `/api/auth/change-password`)
 require Admin scope or a session cookie from web login.
 
+**Provisioning an agent (Read vs Full).** When you mint an agent's token from
+the Agent Dash's **"Provision API Key"** button (see *Agent Dash* below), you
+now pick the scope:
+
+- **Read** = view-only — `GET` only (snapshots / state / status). No input,
+  no mutations.
+- **Full** = interactive control — HID input (type / click / drag / scroll)
+  **plus** network configuration.
+
+Provisioning **never** grants `admin` or `macros` — it only ever issues a
+`read` or `full` token. Token management, macros, and the admin surface stay
+with the human web session.
+
+**Human-admin-only (Admin web session) — never agent-reachable.** A hard
+boundary, now **enforced in MCP too** (the handler hides these from agent
+tokens in `tools/list` and rejects the calls): minting / revoking API tokens
+(`/api/auth/tokens`), the SSH trust store (`/api/ssh/keys`), per-agent SSH
+grants (`/api/agent/systems/:id/agents/:aid/ssh`), system enrollment
+(`/api/agent/systems`), Pi power (`/api/system/*`), target power
+(`/api/target/*`), and first-boot setup all require the Admin web session and
+are not callable by a provisioned agent token.
+
 ---
 
 ## MCP (Model Context Protocol) endpoint
@@ -1036,7 +1087,13 @@ https://aeon-magick.local/api/mcp
 ```
 
 with Basic auth `admin:<password>` and TLS verification off (self-signed
-cert). The server advertises 55 tools, grouped below.
+cert). The server advertises 58 tools, grouped below.
+
+The MCP handler now **enforces per-tool scope** — an agent token sees in
+`tools/list` and can call only the tools its scope permits. Token-management
+(`issue_token` / `revoke_token` / `list_tokens`) and target/Pi power
+(`target_power_*`, `pi_reboot`) require the **Admin human web session** and are
+**not** callable by provisioned agent tokens.
 
 ### Live control + state
 
@@ -1133,7 +1190,7 @@ It also exposes stored macros + prompts as MCP **resources**
 
 ## API + MCP endpoint reference
 
-**MCP:** one endpoint, `POST /api/mcp` (JSON-RPC 2.0) — ~55 tools, tabled
+**MCP:** one endpoint, `POST /api/mcp` (JSON-RPC 2.0) — 58 tools, tabled
 above. **REST:** everything under `https://<host>/api/`, basic-auth
 `admin:<pw>` or `Authorization: Bearer <token>`. Full route map:
 
@@ -1154,6 +1211,123 @@ above. **REST:** everything under `https://<host>/api/`, basic-auth
 
 Anything an agent can do in the web UI it can do here — the UI is just a
 client of this same API. (Source of truth for routes: `aeon-supervisor/src/api.rs`.)
+
+---
+
+## Agent Dash — fleet management (operator-only)
+
+> **Admin-only. Not in MCP. Not reachable by agent tokens. By design.** The
+> entire `/api/agent/systems/*` surface requires the **Admin scope** (a human
+> web-login session cookie) and is gated off from provisioned agent tokens —
+> because it manages your **other** lab systems (DGX, gateway boxes, etc.), not
+> the controlled target. None of it is exposed as an MCP tool.
+
+The Agent Dash is the operator's console for the broader lab: a registry of
+**Connected Systems**, a web-SSH terminal into each, container/compose
+management, easy model deploys, and per-agent persona + access provisioning. It
+reaches each system over an `agent-connect` SSH key the Pi holds; the
+same-origin admin session cookie authenticates every call below.
+
+### System registry
+
+```
+GET  /api/agent/systems                  list registered systems
+POST /api/agent/systems                  add a system
+DELETE /api/agent/systems/:id            remove one
+POST /api/agent/systems/:id/register     push the Pi's agent-connect pubkey onto the box
+POST /api/agent/systems/:id/test         connectivity / auth check
+GET  /api/agent/systems/:id/metrics      host metrics (CPU/mem/GPU/etc.)
+GET  /api/agent/systems/:id/usage        resource-usage detail
+POST /api/agent/systems/:id/power        power action on that system
+GET  /api/agent/systems/:id/agents       OpenClaw agents running on that system
+GET  /api/agent/pubkey                   the Pi's agent-connect public key (to authorize by hand)
+GET  /api/agent/tailscale/devices        tailnet machines (for the "+ Add device from Tailscale" picker)
+```
+
+### Multi-pane web-SSH terminal
+
+```
+GET  /api/agent/systems/:id/terminal/ws  WebSocket upgrade → interactive PTY ⇄ SSH
+```
+
+Each pane is a real PTY shell on the target system, tunneled over the
+agent-connect SSH key.
+
+### Containers
+
+```
+GET  /api/agent/systems/:id/containers                    list containers
+POST /api/agent/systems/:id/containers/:name/action       start | stop | restart
+```
+
+There is **no container-logs endpoint** — log streaming is not part of this
+surface.
+
+### Compose
+
+```
+GET  /api/agent/systems/:id/compose         read a compose file (?path=…)
+PUT  /api/agent/systems/:id/compose         write it back (?path=…)
+POST /api/agent/systems/:id/compose/action  up | down
+```
+
+### Easy-Deploy to DGX
+
+```
+GET  /api/agent/systems/:id/deploy/catalog  curated model+container catalog + what's already on the box
+POST /api/agent/systems/:id/deploy          kick off a background pull + up
+GET  /api/agent/systems/:id/deploy/status   progress for the running deploy
+```
+
+Aimed at a DGX (or any docker + GPU box); each deploy lands in its own
+`~/aeon-deploy/<name>/`.
+
+### Persona building (per agent)
+
+```
+POST /api/agent/systems/:id/personas                       create a new persona (workspace + SOUL/IDENTITY)
+GET  /api/agent/systems/:id/agents/:aid/detail             full agent detail
+
+# Corpus (memory) files
+GET    /api/agent/systems/:id/agents/:aid/corpus           list corpus files
+GET    /api/agent/systems/:id/agents/:aid/corpus/file      read one (?path=…)
+POST   /api/agent/systems/:id/agents/:aid/corpus/file      upload / overwrite (base64 body)
+DELETE /api/agent/systems/:id/agents/:aid/corpus/file      delete (?path=…)
+
+# Voice
+GET  /api/agent/systems/:id/agents/:aid/voice              effective TTS voice
+POST /api/agent/systems/:id/agents/:aid/voice/designer     set a designer-description voice
+POST /api/agent/systems/:id/agents/:aid/voice/clone        select a named clone
+GET  /api/agent/systems/:id/agents/:aid/voice/clones       list available clone samples
+POST /api/agent/systems/:id/agents/:aid/voice/clone/upload upload a new clone .wav + select it
+
+# Persona text + avatar
+GET  /api/agent/systems/:id/agents/:aid/persona-file       read SOUL.md / IDENTITY.md (?which=soul|identity)
+PUT  /api/agent/systems/:id/agents/:aid/persona-file       write it back (?which=soul|identity)
+GET  /api/agent/systems/:id/agents/:aid/avatar             current Matrix avatar
+POST /api/agent/systems/:id/agents/:aid/avatar             set avatar (base64 image)
+```
+
+### Per-agent access provisioning (HUMAN-ADMIN ONLY)
+
+These mint or revoke an agent's real access. They live under the same admin-only
+gate as everything above — never agent-reachable.
+
+```
+# Aeon Magick API token for the agent (Read vs Full scope choice — see API tokens)
+POST   /api/agent/systems/:id/agents/:aid/provision        mint the agent's token (read | full)
+DELETE /api/agent/systems/:id/agents/:aid/provision        revoke it
+
+# Per-system SSH login — the agent's jump-box access to your connected infrastructure
+POST   /api/agent/systems/:id/agents/:aid/ssh              "Enable SSH": grant a per-system SSH login
+PATCH  /api/agent/systems/:id/agents/:aid/ssh              toggle sudo for that login
+DELETE /api/agent/systems/:id/agents/:aid/ssh              revoke it
+```
+
+**"Enable SSH"** grants the agent its own per-system SSH login — that is the
+agent's jump-box access into your connected infrastructure; `PATCH` toggles
+whether that login has sudo. Both this and `provision` are the human operator's
+to hand out, never the agent's.
 
 ---
 

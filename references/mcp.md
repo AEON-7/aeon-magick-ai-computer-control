@@ -23,6 +23,14 @@ ambiguity in audit logs.
 
 ## Tools (agent-facing, grouped)
 
+The server's full catalog is **58 tools**. You won't see all 58: the MCP
+handler enforces **per-tool scope**, so `tools/list` returns — and `tools/call`
+permits — only the tools your token's tier allows. A **read** token sees the
+read-only tools (`state`, `snapshot`, and the observability + `*_state` /
+`*_status` queries); a **full** token additionally sees the interactive surface
+(HID input + network config). The admin-only tools (see *Not exposed to agents*
+below) are in the 58 but are never listed or callable for any agent token.
+
 Each tool has the same shape as the curl endpoint in the matching reference;
 the linked file has the detail.
 
@@ -114,8 +122,17 @@ resource picker can browse them with no filesystem mount.
 
 ## Not exposed to agents
 
-Some capabilities are **human-admin-only** and are deliberately omitted from
-the agent surface — do not look for them here. SSH key management, **target**
-power (tap / hold / wake / reboot) and **Pi** power (reboot / poweroff), and
-API-token issue/revoke are operator actions done from the web UI or an admin
-session, not agent tools.
+Some capabilities are **human-admin-only** and require the web-admin session.
+This is now **enforced** by the MCP handler's per-tool scope, not merely a
+convention: no provisioned agent token — `read` or `full` — can see these in
+`tools/list` or invoke them via `tools/call`.
+
+The admin-only tools are:
+
+- **Token management:** `issue_token`, `revoke_token`, `list_tokens`.
+- **Target / Pi power:** `target_power_tap`, `target_power_hold`,
+  `target_wake`, `target_reboot`, `pi_reboot`.
+
+SSH key management is likewise operator-only and has no agent tool. All of the
+above are done from the web UI or an admin session. Don't look for them here,
+and don't tell an agent it can call target power or `pi_reboot` — it can't.

@@ -35,6 +35,13 @@ in a script):
 All endpoints below assume `https://${AEON_HOST}/`. Every command in this skill
 is a single HTTPS call and returns JSON unless noted.
 
+Your Aeon Magick API token is provisioned at one of two tiers:
+**Read** (view-only — GET snapshots / state / status) or **Full**
+(interactive — HID input + network config). That's the whole agent surface.
+Managing *other* systems (corpus / voice / personas, terminal, containers,
+compose, deploy) and all API-key / SSH-key provisioning are operator/human-only
+and are deliberately **not** part of this skill or the MCP server.
+
 ## Hardware preconditions
 
 Before any of this works:

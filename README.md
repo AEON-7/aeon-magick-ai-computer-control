@@ -407,7 +407,7 @@ first boot work for both:
 - **REST + curl** — every input op is an atomic POST under `/api/hid/*`; snapshots are
   a single GET. Scriptable from any language.
 - **MCP (Model Context Protocol)** — the supervisor speaks MCP Streamable HTTP at
-  `/api/mcp`, exposing **51 named tools**: vision (`snapshot`, `state`, recording),
+  `/api/mcp`, exposing **58 named tools** (scope-gated to the calling token): vision (`snapshot`, `state`, recording),
   input (`type_text`, `key_chord`, `click_at`, `drag`, `set_persona`), target power,
   clipboard + files, the **full network/privacy surface** (VPN / Tor / I2P / DNSCrypt /
   WiFi / firewall), ISO control, tokens, and read-only audit/security. Drop the URL
