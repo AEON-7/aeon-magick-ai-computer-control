@@ -482,11 +482,14 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
             false
         }
         TokenScope::Read => {
-            if method != Method::GET {
-                return false;
+            // GETs are fair game; MCP is also allowed — the MCP handler's
+            // per-tool scope gate then restricts a read token to read-tier tools
+            // (state, snapshot, list_*, *_status, …). Without this a read-scope
+            // agent token couldn't use MCP at all (POST /api/mcp).
+            if method == Method::GET || path == "/api/mcp" {
+                return true;
             }
-            // All GET endpoints are fair game for read-only.
-            true
+            false
         }
         TokenScope::Admin => true,
     }
