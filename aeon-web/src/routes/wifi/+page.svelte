@@ -457,16 +457,19 @@
           <div class="space-y-1.5 max-h-72 overflow-y-auto pr-1">
             {#each scanned as n}
               <button type="button" on:click={() => connectTo(n.ssid, n.security)}
-                      class="w-full text-left flex items-center gap-3 p-2 rounded
-                             border {n.in_use
-                               ? 'bg-live-500/10 border-live-500/30'
-                               : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
-                <span class="font-mono text-zinc-500 text-[11px] w-8 tabular-nums">{n.signal}</span>
+                      class="w-full text-left flex items-center gap-3 p-2 rounded border transition-colors {n.ssid === connectSsid
+                               ? 'bg-cursed-500/15 border-cursed-400/70 ring-1 ring-cursed-500/40'
+                               : n.in_use
+                                 ? 'bg-live-500/10 border-live-500/30'
+                                 : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                <span class="font-mono text-[11px] w-8 tabular-nums {n.ssid === connectSsid ? 'text-cursed-200' : 'text-zinc-500'}">{n.signal}</span>
                 <span class="font-mono text-cursed-300 text-xs w-12">{signalBars(n.signal)}</span>
-                <span class="text-zinc-200 text-sm flex-1 truncate">{n.ssid}</span>
+                <span class="text-sm flex-1 truncate {n.ssid === connectSsid ? 'text-white font-medium' : 'text-zinc-200'}">{n.ssid}</span>
                 <span class="text-[10px] font-mono text-zinc-500 uppercase">{n.security}</span>
-                {#if n.in_use}
-                  <span class="text-[10px] font-mono text-live-300">● connected</span>
+                {#if n.ssid === connectSsid}
+                  <span class="text-[10px] font-mono text-cursed-200 whitespace-nowrap">✓ selected</span>
+                {:else if n.in_use}
+                  <span class="text-[10px] font-mono text-live-300 whitespace-nowrap">● connected</span>
                 {/if}
               </button>
             {/each}
