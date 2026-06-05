@@ -119,9 +119,15 @@ pub struct ConnectReq {
     pub password: Option<String>,
 }
 
-/// POST /api/wifi/connect — provision a new WiFi connection profile
-/// and bring it up. The user posts SSID + password from the setup
-/// page; we run `nmcli con add` + `nmcli con up` and report back.
+/// POST /api/wifi/connect — provision + activate a WiFi client profile.
+///
+/// Handles the portable "coffee-shop" case: when the request arrives over the
+/// `aeon-setup` AP, joining a client network tears that AP down (one radio), so
+/// we (1) stamp `/run/aeon-wifi-switching` so aeon-netwatch HOLDS its AP
+/// fallback instead of yanking wlan0 back, (2) answer the caller FIRST (their
+/// session is about to drop with the AP), then (3) free wlan0 + bring the client
+/// up in the background. When the request arrives over Ethernet / another WiFi
+/// the caller keeps its session, so we run synchronously and report the result.
 pub async fn connect(
     State(_state): State<AppState>,
     Json(req): Json<ConnectReq>,
@@ -134,80 +140,121 @@ pub async fn connect(
             .into_response();
     }
 
-    let ssid = req.ssid.clone();
+    let ssid = req.ssid.trim().to_string();
     let password = req.password.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        // Delete any existing connection profile with this SSID name so
-        // we get a clean slate. `nmcli con delete` is a no-op if the
-        // profile doesn't exist.
-        let _ = std::process::Command::new("nmcli")
-            .args(["connection", "delete", &ssid])
-            .output();
-
-        // Create the profile
-        let mut add_args = vec![
-            "connection".to_string(),
-            "add".to_string(),
-            "type".to_string(),
-            "wifi".to_string(),
-            "con-name".to_string(),
-            ssid.clone(),
-            "ifname".to_string(),
-            "wlan0".to_string(),
-            "ssid".to_string(),
-            ssid.clone(),
-        ];
-        if let Some(pw) = &password {
-            add_args.extend([
-                "wifi-sec.key-mgmt".to_string(),
-                "wpa-psk".to_string(),
-                "wifi-sec.psk".to_string(),
-                pw.clone(),
-            ]);
-        }
-        let add_out = std::process::Command::new("nmcli")
-            .args(&add_args)
+    // Is the setup AP the live wlan0 connection right now? If so the caller is
+    // talking to us THROUGH it, and joining a client net will drop their page.
+    let ap_active = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("nmcli")
+            .args(["-t", "-f", "NAME", "connection", "show", "--active"])
             .output()
-            .map_err(|e| format!("nmcli con add spawn: {e}"))?;
-        if !add_out.status.success() {
-            return Err(format!(
-                "nmcli con add: {}",
-                String::from_utf8_lossy(&add_out.stderr).trim()
-            ));
-        }
-
-        // Activate it. Times out after 30s — nmcli will return non-zero
-        // and we surface that to the UI.
-        let up_out = std::process::Command::new("nmcli")
-            .args(["--wait", "30", "connection", "up", &ssid])
-            .output()
-            .map_err(|e| format!("nmcli con up spawn: {e}"))?;
-        if !up_out.status.success() {
-            // The profile was added — leave it for the user to retry
-            // or delete via the UI. Return the failure detail.
-            return Err(format!(
-                "nmcli con up: {}",
-                String::from_utf8_lossy(&up_out.stderr).trim()
-            ));
-        }
-
-        Ok(format!("connected to {}", ssid))
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim() == "aeon-setup")
+            })
+            .unwrap_or(false)
     })
-    .await;
+    .await
+    .unwrap_or(false);
 
-    match result {
-        Ok(Ok(msg)) => Json(json!({"ok": true, "msg": msg})).into_response(),
-        Ok(Err(err)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "err": err})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "err": format!("task join: {e}")})),
-        )
-            .into_response(),
+    // Grace-flag aeon-netwatch so it doesn't re-assert the AP mid-switch.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write("/run/aeon-wifi-switching", now.to_string());
+
+    // add-profile → free wlan0 → bring-up, on a blocking thread.
+    let switch = {
+        let ssid = ssid.clone();
+        let password = password.clone();
+        move || -> Result<String, String> {
+            // Clean slate (no-op if the profile doesn't exist).
+            let _ = std::process::Command::new("nmcli")
+                .args(["connection", "delete", &ssid])
+                .output();
+
+            let mut add_args = vec![
+                "connection".to_string(), "add".to_string(),
+                "type".to_string(), "wifi".to_string(),
+                "con-name".to_string(), ssid.clone(),
+                "ifname".to_string(), "wlan0".to_string(),
+                "ssid".to_string(), ssid.clone(),
+                // autoconnect so the network sticks across reboots.
+                "autoconnect".to_string(), "yes".to_string(),
+            ];
+            if let Some(pw) = &password {
+                if !pw.is_empty() {
+                    add_args.extend([
+                        "wifi-sec.key-mgmt".to_string(), "wpa-psk".to_string(),
+                        "wifi-sec.psk".to_string(), pw.clone(),
+                    ]);
+                }
+            }
+            let add_out = std::process::Command::new("nmcli")
+                .args(&add_args)
+                .output()
+                .map_err(|e| format!("nmcli con add spawn: {e}"))?;
+            if !add_out.status.success() {
+                return Err(format!(
+                    "nmcli con add: {}",
+                    String::from_utf8_lossy(&add_out.stderr).trim()
+                ));
+            }
+
+            // Free wlan0 from the setup AP (NM does this implicitly when bringing
+            // up another connection on the same device, but be explicit).
+            let _ = std::process::Command::new("nmcli")
+                .args(["connection", "down", "aeon-setup"])
+                .output();
+
+            let up_out = std::process::Command::new("nmcli")
+                .args(["--wait", "30", "connection", "up", &ssid])
+                .output()
+                .map_err(|e| format!("nmcli con up spawn: {e}"))?;
+            if !up_out.status.success() {
+                return Err(format!(
+                    "nmcli con up: {}",
+                    String::from_utf8_lossy(&up_out.stderr).trim()
+                ));
+            }
+            Ok(format!("connected to {ssid}"))
+        }
+    };
+
+    if ap_active {
+        // Answer first — the AP (this session's transport) is about to drop —
+        // then do the switch after a short delay so the JSON lands.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = tokio::task::spawn_blocking(switch).await;
+        });
+        Json(json!({
+            "ok": true,
+            "switching": true,
+            "msg": format!(
+                "Saving '{ssid}' and switching off the setup AP to join it. You'll \
+                 lose THIS page — reconnect your device to '{ssid}', then reach the \
+                 Orb at https://aeon-magick.local/ (or its new IP from your router)."
+            ),
+        }))
+        .into_response()
+    } else {
+        match tokio::task::spawn_blocking(switch).await {
+            Ok(Ok(msg)) => Json(json!({"ok": true, "msg": msg})).into_response(),
+            Ok(Err(err)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "err": err})),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "err": format!("task join: {e}")})),
+            )
+                .into_response(),
+        }
     }
 }
 

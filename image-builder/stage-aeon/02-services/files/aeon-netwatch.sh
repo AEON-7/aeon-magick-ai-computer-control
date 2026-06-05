@@ -411,6 +411,18 @@ fi
 
 # ── offline ──
 
+# Hold the AP fallback while a user-initiated WiFi switch is in flight. The
+# dashboard's /api/wifi/connect drops the setup AP to join a client network and
+# stamps /run/aeon-wifi-switching; without this hold we'd race it and yank wlan0
+# back to AP mode mid-connect (the "stuck in AP, can't join a network" bug).
+if [[ -f /run/aeon-wifi-switching ]]; then
+    swts=$(cat /run/aeon-wifi-switching 2>/dev/null || echo 0)
+    if (( now - swts < ${SWITCH_GRACE:-120} )); then
+        log "user wifi-switch in progress — holding AP fallback"
+        exit 0
+    fi
+fi
+
 if ap_active; then
     if (( now - down_since >= AP_RETRY_SECONDS )); then
         log "AP up for $((now - down_since))s, retrying primary"
