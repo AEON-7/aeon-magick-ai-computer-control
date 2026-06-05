@@ -107,6 +107,8 @@
     }
   }
 
+  let manualSsid = '';
+
   async function scan() {
     scanning = true;
     try {
@@ -464,6 +466,29 @@
             {#if scanned.length === 0}
               <p class="text-zinc-500 text-xs italic">no networks scanned yet — click "rescan"</p>
             {/if}
+          </div>
+
+          <!-- Manual entry: join a network the scan can't see — e.g. while the Orb
+               is hosting its own setup AP, where one radio can't scan AND host. -->
+          <div class="space-y-1.5 pt-2 border-t border-ink-800">
+            <div class="flex gap-2">
+              <input type="text" bind:value={manualSsid} autocomplete="off"
+                     placeholder="…or type a network name (SSID)"
+                     on:keydown={(e) => { if (e.key === 'Enter' && manualSsid.trim()) connectSsid = manualSsid.trim(); }}
+                     class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+              <button class="btn text-xs"
+                      on:click={() => { if (manualSsid.trim()) connectSsid = manualSsid.trim(); }}
+                      disabled={!manualSsid.trim()}>
+                enter →
+              </button>
+            </div>
+            <p class="text-[11px] text-zinc-500 leading-relaxed">
+              The scan is empty while the Orb broadcasts its own <strong>setup AP</strong>
+              (one radio can't scan + host at once). Type the nearby network's name to join
+              it — <strong>joining drops this page</strong> as the Orb switches off the AP;
+              reconnect your device to that network and find the Orb at
+              <code>aeon-magick.local</code> (or its new IP from your router).
+            </p>
           </div>
 
           <!-- Connect-with-password form (becomes visible once a network is picked) -->
