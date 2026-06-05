@@ -175,8 +175,9 @@ focused task, ring several **in parallel** for a real conversation, or tell them
 specializes around *who they are*, you always know the right one to call for the
 job — and they each speak in their own voice.
 
-> 🔧 **Self-hosted Matrix + WebRTC voice stack:** _setup guide in a separate repo —
-> link coming (drop the URL and it goes here)._
+> 🔧 **Self-hosted Matrix + WebRTC voice stack** — see [**Voice: Real-time Speech AI
+> for DGX Spark**](https://github.com/AEON-7#%EF%B8%8F-voice--real-time-speech-ai-for-dgx-spark)
+> on the AEON-7 org page (custom WebRTC server + per-agent looped virtual audio).
 
 ### Auto skill-deploy on provisioning
 
