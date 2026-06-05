@@ -134,7 +134,12 @@ persona** away. Open any persona to build it out end-to-end: profile photo →
 Matrix avatar, a **custom voice**, a **corpus**, and its **Soul** (`SOUL.md` — the
 system prompt) and **Identity** (`IDENTITY.md` — name, era, domain, emoji).
 
-![Building a persona — Matrix avatar, a scoped Aeon Magick API key, a human-only SSH grant, and skills](docs/images/agent-detail.png)
+![The pantheon — your full roster of personas at a glance; open any card to build it out, or + New persona to add one](docs/images/pantheon.png)
+
+Open any one and the top of its editor is the persona's profile + access — Matrix
+avatar, a scoped Aeon Magick API key, and a human-only SSH grant:
+
+![Plato's persona editor (top) — Matrix avatar, scoped Aeon Magick API key, human-only SSH grant, and skills](docs/images/agent-detail.png)
 
 ### Auto skill-deploy on provisioning
 
