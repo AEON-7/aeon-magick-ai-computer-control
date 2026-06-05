@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/orb.png" alt="Aeon Magick Orb" width="240" />
+</p>
+
 # 🔮 Aeon Magick Orb
 
 > ## _The Universe's Strangest Peripheral._
