@@ -134,7 +134,7 @@ persona** away. Open any persona to build it out end-to-end: profile photo →
 Matrix avatar, a **custom voice**, a **corpus**, and its **Soul** (`SOUL.md` — the
 system prompt) and **Identity** (`IDENTITY.md` — name, era, domain, emoji).
 
-![Per-agent detail — provisioning, SSH, avatar, corpus, Soul/Identity, add-skill](docs/images/agent-detail.png)
+![Building a persona — Matrix avatar, a scoped Aeon Magick API key, a human-only SSH grant, and skills](docs/images/agent-detail.png)
 
 ### Auto skill-deploy on provisioning
 
@@ -159,6 +159,8 @@ Give each persona its own voice, two ways:
 
 Both write straight to the persona's voice config on the gateway — no SSH, no
 file-shuffling, no terminal.
+
+![A persona's Voice management + Corpus — a designer descriptor or a cloned `.wav`, and a browsable knowledge vault](docs/images/persona-build.png)
 
 ### Build + browse the corpus
 
