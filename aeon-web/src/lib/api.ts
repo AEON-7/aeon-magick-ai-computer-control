@@ -449,17 +449,23 @@ export const toggleSshAdmin = (sysId: string, agentId: string, admin: boolean) =
   );
 export const revokeSsh = (sysId: string, agentId: string) =>
   req<{ ok: boolean; user?: string }>('DELETE', `/agent/systems/${sysId}/agents/${agentId}/ssh`);
-export const provisionAgent = (sysId: string, agentId: string, apiBase: string) =>
+export const provisionAgent = (
+  sysId: string,
+  agentId: string,
+  apiBase: string,
+  scope: 'read' | 'full' = 'full',
+) =>
   req<{
     ok: boolean;
     token_id?: string;
     token?: string;
+    scope?: string;
     skill?: string;
     config_change?: string;
     dropped?: string | null;
     drop_err?: string | null;
     err?: string;
-  }>('POST', `/agent/systems/${sysId}/agents/${agentId}/provision`, { api_base: apiBase });
+  }>('POST', `/agent/systems/${sysId}/agents/${agentId}/provision`, { api_base: apiBase, scope });
 export const deprovisionAgent = (sysId: string, agentId: string) =>
   req<{ ok: boolean; revoked_token?: string | null }>(
     'DELETE',

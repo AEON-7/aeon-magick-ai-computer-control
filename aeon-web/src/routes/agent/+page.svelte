@@ -21,6 +21,7 @@
   let detail: api.AgentDetail | null = null;
   let detailLoading = false;
   let provisioning = false;
+  let provisionScope: 'read' | 'full' = 'full';
   let newToken = '';
   let configChange = '';
   let dropMsg = '';
@@ -1590,7 +1591,7 @@
     if (!detailAgent) return;
     provisioning = true;
     try {
-      const r = await api.provisionAgent(detailSys, detailAgent.id, window.location.origin + '/api');
+      const r = await api.provisionAgent(detailSys, detailAgent.id, window.location.origin + '/api', provisionScope);
       if (r.ok) {
         newToken = r.token ?? '';
         configChange = r.config_change ?? '';
@@ -2442,8 +2443,15 @@
             </div>
           {:else}
             <p class="agd-dim">No token yet. Provisioning mints a scoped Aeon Magick API key and drops an access file into this agent's gateway workspace.</p>
+            <label class="agd-dim text-xs" style="display:flex;gap:.45rem;align-items:center;margin:.3rem 0 .55rem">
+              Access
+              <select bind:value={provisionScope} class="text-xs" style="background:#18181b;border:1px solid #3f3f46;border-radius:4px;padding:2px 6px;color:#e4e4e7">
+                <option value="full">Full — interactive control (type/click + network)</option>
+                <option value="read">Read — view-only (snapshots + state, no control)</option>
+              </select>
+            </label>
             <button class="btn-primary text-xs" on:click={doProvision} disabled={provisioning}>
-              {provisioning ? 'provisioning…' : 'Provision API Key'}
+              {provisioning ? 'provisioning…' : `Provision ${provisionScope === 'read' ? 'Read' : 'Full'} API Key`}
             </button>
           {/if}
           {#if newToken}

@@ -881,6 +881,10 @@ pub struct ProvisionReq {
     /// The Pi's API base URL the agent should call (the browser passes its origin).
     #[serde(default)]
     api_base: String,
+    /// Token scope to grant this agent: "read" (view-only) or "full" (interactive).
+    /// Provisioning NEVER grants admin/macros — anything other than "read" → Full.
+    #[serde(default)]
+    scope: String,
 }
 
 /// POST /agent/systems/:id/agents/:aid/provision — issue a per-agent Aeon Magick
@@ -895,8 +899,15 @@ pub async fn provision_agent(
         return Json(json!({"ok": false, "err": "no such system"}));
     };
     let safe_aid = sanitize_id(&agent_id);
+    // Provisioning grants only Read (view-only) or Full (interactive); Admin and
+    // Macros stay human-only and are never mintable through this path.
+    let scope = match req.scope.trim().to_ascii_lowercase().as_str() {
+        "read" => crate::auth::TokenScope::Read,
+        _ => crate::auth::TokenScope::Full,
+    };
+    let scope_label = scope.as_str();
     let (token_id, token_plain) =
-        match state.auth.create_token(&format!("agent:{safe_aid}"), crate::auth::TokenScope::Full) {
+        match state.auth.create_token(&format!("agent:{safe_aid}"), scope) {
             Ok(t) => t,
             Err(e) => return Json(json!({"ok": false, "err": format!("token: {e}")})),
         };
@@ -914,13 +925,14 @@ pub async fn provision_agent(
     let mut prov = load_provisioned();
     prov.entry(id.clone()).or_default().insert(
         safe_aid.clone(),
-        json!({"token_id": token_id, "at_ms": now_ms(), "skill": "aeon-magick", "dropped": drop_res.as_ref().ok()}),
+        json!({"token_id": token_id, "scope": scope_label, "at_ms": now_ms(), "skill": "aeon-magick", "dropped": drop_res.as_ref().ok()}),
     );
     save_provisioned(&prov);
     Json(json!({
         "ok": true,
         "token_id": token_id,
         "token": token_plain,
+        "scope": scope_label,
         "skill": "aeon-magick",
         "dropped": drop_res.as_ref().ok(),
         "drop_err": drop_res.as_ref().err(),

@@ -25,7 +25,7 @@ use crate::api::AppState;
 use crate::macros;
 use crate::proxy;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -1013,7 +1013,38 @@ fn read_resource_for_mcp(state: &AppState, uri: &str) -> Result<Value, String> {
 
 // ── HTTP handler ────────────────────────────────────────────────────────
 
-pub async fn handle(State(state): State<AppState>, body: String) -> impl IntoResponse {
+/// Minimum token scope required to call each MCP tool — mirrors the REST policy
+/// in `auth::scope_allows` so an MCP token can't be used to bypass it. Default is
+/// Full (the interactive-control surface); reads are Read, macro-run is Macros,
+/// and the human-only line (token management + target/Pi power) is Admin — never
+/// reachable by a provisioned agent token (agents are granted read or full).
+fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
+    use crate::auth::TokenScope::{Admin, Full, Macros, Read};
+    match name {
+        "issue_token" | "revoke_token" | "list_tokens" | "target_power_tap"
+        | "target_power_hold" | "target_wake" | "target_reboot" | "pi_reboot" => Admin,
+        "run_macro" => Macros,
+        "state" | "snapshot" | "recording_state" | "list_recordings" | "list_macros"
+        | "network_status" | "security_metrics" | "firewall_rules" | "dns_blacklist"
+        | "dns_sources" | "audit_log" | "target_info" | "get_clipboard" | "list_files"
+        | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"
+        | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
+        | "vpn_provider_state" | "blocked_log" => Read,
+        _ => Full,
+    }
+}
+
+fn scope_rank(s: &crate::auth::TokenScope) -> u8 {
+    use crate::auth::TokenScope::*;
+    match s {
+        Read => 0,
+        Macros => 1,
+        Full => 2,
+        Admin => 3,
+    }
+}
+
+pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: String) -> impl IntoResponse {
     // Reject obviously empty bodies with a JSON-RPC parse error.
     if body.trim().is_empty() {
         return (StatusCode::OK, Json(json!({
@@ -1058,17 +1089,49 @@ pub async fn handle(State(state): State<AppState>, body: String) -> impl IntoRes
             return (StatusCode::ACCEPTED, "").into_response();
         }
         "ping" => RpcResponse::ok(id, json!({})),
-        "tools/list" => RpcResponse::ok(id, tools_catalog()),
+        "tools/list" => {
+            // Only advertise tools the caller's scope can actually call.
+            let crank = crate::auth::identify(&state.auth, &headers)
+                .map(|i| scope_rank(&i.scope))
+                .unwrap_or(0);
+            let mut cat = tools_catalog();
+            if let Some(arr) = cat.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                arr.retain(|t| {
+                    t.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| scope_rank(&tool_min_scope(n)) <= crank)
+                        .unwrap_or(false)
+                });
+            }
+            RpcResponse::ok(id, cat)
+        }
         "tools/call" => {
             let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let empty = Value::Null;
             let args = req.params.get("arguments").unwrap_or(&empty);
-            match dispatch_tool(&state, name, args).await {
-                Ok(result) => RpcResponse::ok(id, result),
-                Err(e) => RpcResponse::ok(id.clone(), json!({
-                    "content": [{ "type": "text", "text": format!("error: {e}") }],
+            // Per-tool scope gate (mirrors REST auth::scope_allows). The /api/mcp
+            // route only checks that a token is Macros+, so without this a
+            // macros/full token could invoke admin-only tools (issue_token,
+            // target/Pi power) and escalate.
+            let caller = crate::auth::identify(&state.auth, &headers).map(|i| i.scope);
+            let need = tool_min_scope(name);
+            if caller.as_ref().map(scope_rank).unwrap_or(0) < scope_rank(&need) {
+                let have = caller.as_ref().map(|s| s.as_str()).unwrap_or("none");
+                RpcResponse::ok(id, json!({
+                    "content": [{ "type": "text", "text": format!(
+                        "error: tool '{name}' requires '{}' scope but this token is '{}'. \
+                         Token management and target/Pi power are human-admin only.",
+                        need.as_str(), have) }],
                     "isError": true,
-                })),
+                }))
+            } else {
+                match dispatch_tool(&state, name, args).await {
+                    Ok(result) => RpcResponse::ok(id, result),
+                    Err(e) => RpcResponse::ok(id.clone(), json!({
+                        "content": [{ "type": "text", "text": format!("error: {e}") }],
+                        "isError": true,
+                    })),
+                }
             }
         }
         "prompts/list" => RpcResponse::ok(id, list_prompts_for_mcp(&state)),
