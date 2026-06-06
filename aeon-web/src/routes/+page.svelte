@@ -16,6 +16,9 @@
       { href: '/network', label: 'Network', icon: 'globe', title: 'VPN · encrypted DNS · Tor/I2P · firewall' },
       { href: '/wifi',    label: 'WiFi',    icon: 'wifi',  title: 'WiFi mode, saved networks, setup AP' },
     ]},
+    { label: 'OrbNet', items: [
+      { href: '/orbnet', label: 'OrbNet', icon: 'orbnet', title: 'Anonymous federated mesh chat over Tor — community, groups, DMs, personas' },
+    ]},
     { label: 'Logs', items: [
       { href: '/security', label: 'Security', icon: 'shield', title: 'blocked packets, firewall + intrusion events' },
       { href: '/dns',      label: 'DNS',      icon: 'funnel', title: 'DNS query log + blacklist' },

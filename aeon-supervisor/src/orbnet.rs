@@ -1,0 +1,624 @@
+//! OrbNet — opt-in anonymous Matrix federation between Aeon Magick Orbs over Tor.
+//!
+//! The heavy infra lifting (Tor onion + Conduit homeserver + self-signed cert)
+//! lives in the `aeon-orbnet` shell script; this module is the control plane:
+//! it owns `/etc/aeon/orbnet.toml`, drives the script (enable/disable), provisions
+//! the Orb owner's Matrix account, and exposes digested endpoints the dashboard
+//! polls (status, rooms, activity, send, groups/DMs, personas, moderation).
+//!
+//! Anonymity model: the homeserver is reachable only as a `.onion` (no port
+//! forward, no exposed IP); federation egresses through a dedicated Tor SOCKS;
+//! the `.onion` authenticates peers (patched Conduit accepts self-signed certs,
+//! so there is no shared CA — fully decentralized).
+//!
+//! Talking to the local Conduit is done by shelling out to `curl -sk` (the
+//! supervisor has no reqwest; curl is on the image and `-k` accepts the
+//! throwaway self-signed cert on 127.0.0.1).
+
+use crate::api::AppState;
+use axum::extract::{Path as AxPath, State};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::process::Command;
+
+const CONFIG_TOML: &str = "/etc/aeon/orbnet.toml";
+const RUNTIME_DIR: &str = "/var/lib/aeon/orbnet";
+const OWNER_JSON: &str = "/var/lib/aeon/orbnet/owner.json";
+const SCRIPT: &str = "/usr/local/bin/aeon-orbnet";
+const CS_BASE: &str = "https://127.0.0.1:8448";
+
+// ── config ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OrbNetConfig {
+    /// Off by default. When on, the homeserver + onion run and the Orb joins
+    /// OrbNet.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The Orb owner's Matrix localpart (e.g. "aurora" → @aurora:<onion>).
+    /// Pseudonymous; defaults to a random handle so it isn't identifying.
+    #[serde(default)]
+    pub handle: String,
+    /// Friendly display name shown in chats (separate from the handle).
+    #[serde(default)]
+    pub display_name: String,
+    /// Auto-join the OrbNet community Space + interest rooms on enable.
+    #[serde(default = "default_true")]
+    pub auto_join_community: bool,
+    /// Seed directory onions used to discover other Orbs + the community.
+    #[serde(default)]
+    pub directory_seeds: Vec<String>,
+    /// Per-user moderation: messages matching any keyword/phrase are hidden in
+    /// the dashboard (case-insensitive substring match). The owner's own filter.
+    #[serde(default)]
+    pub moderation_keywords: Vec<String>,
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for OrbNetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            handle: String::new(),
+            display_name: String::new(),
+            auto_join_community: true,
+            directory_seeds: vec![],
+            moderation_keywords: vec![],
+        }
+    }
+}
+
+fn read_config() -> OrbNetConfig {
+    std::fs::read_to_string(CONFIG_TOML)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn write_config(c: &OrbNetConfig) -> std::io::Result<()> {
+    let text = toml::to_string_pretty(c)
+        .map_err(|e| std::io::Error::other(format!("serialize: {e}")))?;
+    if let Some(p) = std::path::Path::new(CONFIG_TOML).parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let tmp = format!("{CONFIG_TOML}.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, CONFIG_TOML)
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+fn rand_hex(bytes: usize) -> String {
+    std::fs::read("/dev/urandom")
+        .ok()
+        .map(|b| b.into_iter().take(bytes).map(|x| format!("{x:02x}")).collect())
+        .unwrap_or_else(|| "0".repeat(bytes * 2))
+}
+
+/// A safe pseudonymous localpart: lowercase ascii alnum + `_.-`, ≤ 40 chars.
+fn sanitize_handle(s: &str) -> String {
+    let h: String = s
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .take(40)
+        .collect();
+    if h.is_empty() {
+        format!("orb-{}", &rand_hex(3))
+    } else {
+        h
+    }
+}
+
+/// Run the `aeon-orbnet` infra script and return trimmed stdout.
+fn run_script(args: &[&str]) -> Result<String, String> {
+    let out = Command::new(SCRIPT)
+        .args(args)
+        .output()
+        .map_err(|e| format!("spawn {SCRIPT}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{SCRIPT} {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn script_status() -> Value {
+    run_script(&["status"])
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({"onion": "", "homeserver_up": false}))
+}
+
+/// Call the local Conduit client-server API. `curl -sk` accepts the self-signed
+/// localhost cert; body is JSON.
+fn cs_curl(method: &str, path: &str, token: Option<&str>, body: Option<&str>) -> Result<Value, String> {
+    let url = format!("{CS_BASE}{path}");
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sk", "--max-time", "60", "-X", method]);
+    if let Some(t) = token {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
+    }
+    if let Some(b) = body {
+        cmd.arg("-H").arg("Content-Type: application/json").arg("-d").arg(b);
+    }
+    cmd.arg(&url);
+    let out = cmd.output().map_err(|e| format!("curl: {e}"))?;
+    let raw = String::from_utf8_lossy(&out.stdout);
+    if raw.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}; raw={}", raw.chars().take(200).collect::<String>()))
+}
+
+// ── owner account ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Owner {
+    user_id: String,
+    access_token: String,
+    #[serde(default)]
+    password: String,
+}
+
+fn read_owner() -> Option<Owner> {
+    std::fs::read_to_string(OWNER_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+}
+
+fn write_owner(o: &Owner) -> std::io::Result<()> {
+    std::fs::create_dir_all(RUNTIME_DIR)?;
+    let tmp = format!("{OWNER_JSON}.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(o).unwrap_or_default())?;
+    std::fs::rename(tmp, OWNER_JSON)
+}
+
+/// The owner access token, if the account is provisioned + the token still
+/// validates against the running homeserver.
+fn valid_owner_token() -> Option<Owner> {
+    let o = read_owner()?;
+    let who = cs_curl(
+        "GET",
+        "/_matrix/client/v3/account/whoami",
+        Some(&o.access_token),
+        None,
+    )
+    .ok()?;
+    if who.get("user_id").is_some() {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Register (or re-use) the Orb owner's Matrix account on the local homeserver.
+/// Uses the registration token the infra script minted (UIA token flow).
+fn provision_owner(handle: &str) -> Result<Owner, String> {
+    if let Some(o) = valid_owner_token() {
+        return Ok(o);
+    }
+    let reg_token = run_script(&["reg-token"])?;
+    if reg_token.is_empty() {
+        return Err("no registration token (is OrbNet up?)".into());
+    }
+    let password = read_owner().map(|o| o.password).filter(|p| !p.is_empty()).unwrap_or_else(|| rand_hex(16));
+    let reg_path = "/_matrix/client/v3/register?kind=user";
+
+    // step 1 — obtain a UIA session
+    let r1 = cs_curl("POST", reg_path, None, Some(&json!({"username": handle, "password": password}).to_string()))?;
+    if let Some(tok) = r1.get("access_token").and_then(|v| v.as_str()) {
+        let o = Owner { user_id: r1["user_id"].as_str().unwrap_or_default().to_string(), access_token: tok.to_string(), password };
+        write_owner(&o).map_err(|e| e.to_string())?;
+        return Ok(o);
+    }
+    if r1.get("errcode").and_then(|v| v.as_str()) == Some("M_USER_IN_USE") {
+        // account already exists from a prior enable — log in with the stored pw
+        let login = cs_curl("POST", "/_matrix/client/v3/login", None, Some(&json!({
+            "type": "m.login.password",
+            "identifier": {"type": "m.id.user", "user": handle},
+            "password": password,
+        }).to_string()))?;
+        if let Some(tok) = login.get("access_token").and_then(|v| v.as_str()) {
+            let o = Owner { user_id: login["user_id"].as_str().unwrap_or_default().to_string(), access_token: tok.to_string(), password };
+            write_owner(&o).map_err(|e| e.to_string())?;
+            return Ok(o);
+        }
+        return Err(format!("owner exists but login failed: {login}"));
+    }
+    let session = r1.get("session").and_then(|v| v.as_str()).ok_or_else(|| format!("register: no session: {r1}"))?;
+
+    // step 2 — complete with the registration token
+    let auth = json!({"type": "m.login.registration_token", "token": reg_token, "session": session});
+    let r2 = cs_curl("POST", reg_path, None, Some(&json!({"username": handle, "password": password, "auth": auth}).to_string()))?;
+    let tok = r2.get("access_token").and_then(|v| v.as_str()).ok_or_else(|| format!("register step2: {r2}"))?;
+    let o = Owner { user_id: r2["user_id"].as_str().unwrap_or_default().to_string(), access_token: tok.to_string(), password };
+    write_owner(&o).map_err(|e| e.to_string())?;
+
+    // set the friendly display name if configured
+    let cfg = read_config();
+    if !cfg.display_name.is_empty() {
+        let _ = cs_curl(
+            "PUT",
+            &format!("/_matrix/client/v3/profile/{}/displayname", o.user_id),
+            Some(&o.access_token),
+            Some(&json!({"displayname": cfg.display_name}).to_string()),
+        );
+    }
+    Ok(o)
+}
+
+// ── handlers ─────────────────────────────────────────────────────────────────
+
+/// GET /api/orbnet/status — OrbNet on/off + onion + homeserver/owner health.
+/// Admin-gated.
+pub async fn status(State(_s): State<AppState>) -> Json<Value> {
+    let cfg = read_config();
+    let v = tokio::task::spawn_blocking(move || {
+        let st = script_status();
+        let owner = read_owner();
+        json!({
+            "ok": true,
+            "enabled": cfg.enabled,
+            "onion": st.get("onion").cloned().unwrap_or(json!("")),
+            "homeserver_up": st.get("homeserver_up").cloned().unwrap_or(json!(false)),
+            "tor": st.get("tor").cloned().unwrap_or(json!("inactive")),
+            "conduit": st.get("conduit").cloned().unwrap_or(json!("inactive")),
+            "owner": owner.as_ref().map(|o| o.user_id.clone()),
+            "display_name": cfg.display_name,
+            "handle": cfg.handle,
+            "auto_join_community": cfg.auto_join_community,
+            "moderation_keywords": cfg.moderation_keywords,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "status task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct EnableReq {
+    #[serde(default)]
+    pub handle: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
+/// POST /api/orbnet/enable — bring OrbNet up: start the onion + homeserver,
+/// provision the owner account. Admin-gated. Blocking + slow (Tor bootstrap).
+pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut cfg = read_config();
+        if !req.handle.is_empty() {
+            cfg.handle = sanitize_handle(&req.handle);
+        }
+        if cfg.handle.is_empty() {
+            cfg.handle = sanitize_handle("");
+        }
+        if !req.display_name.is_empty() {
+            cfg.display_name = req.display_name.clone();
+        }
+        cfg.enabled = true;
+        if let Err(e) = write_config(&cfg) {
+            return json!({"ok": false, "err": format!("write config: {e}")});
+        }
+        let onion = match run_script(&["up"]) {
+            Ok(o) => o,
+            Err(e) => return json!({"ok": false, "err": format!("orbnet up: {e}")}),
+        };
+        let owner = match provision_owner(&cfg.handle) {
+            Ok(o) => o,
+            Err(e) => return json!({"ok": false, "err": format!("provision owner: {e}"), "onion": onion}),
+        };
+        let community = if cfg.auto_join_community {
+            setup_community(&owner)
+        } else {
+            json!({"rooms": []})
+        };
+        json!({"ok": true, "onion": onion, "owner": owner.user_id, "community": community})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "enable task failed"}));
+    Json(v)
+}
+
+/// POST /api/orbnet/disable — take OrbNet down (homeserver + onion stop). The
+/// account + data persist for a later re-enable. Admin-gated.
+pub async fn disable(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        let mut cfg = read_config();
+        cfg.enabled = false;
+        let _ = write_config(&cfg);
+        match run_script(&["down"]) {
+            Ok(_) => json!({"ok": true}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "disable task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct ModerationReq {
+    pub moderation_keywords: Vec<String>,
+}
+
+/// PUT /api/orbnet/moderation — set the owner's per-user keyword filter.
+/// Admin-gated.
+pub async fn set_moderation(State(_s): State<AppState>, Json(req): Json<ModerationReq>) -> Json<Value> {
+    let mut cfg = read_config();
+    cfg.moderation_keywords = req
+        .moderation_keywords
+        .into_iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    match write_config(&cfg) {
+        Ok(_) => Json(json!({"ok": true, "moderation_keywords": cfg.moderation_keywords})),
+        Err(e) => Json(json!({"ok": false, "err": e.to_string()})),
+    }
+}
+
+/// GET /api/orbnet/rooms — the owner's joined rooms (community + groups + DMs)
+/// with names, member counts, and a recent-activity timestamp. Admin-gated.
+pub async fn rooms(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let sync = match cs_curl(
+            "GET",
+            "/_matrix/client/v3/sync?timeout=0",
+            Some(&o.access_token),
+            None,
+        ) {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        let mut out = vec![];
+        if let Some(join) = sync.pointer("/rooms/join").and_then(|v| v.as_object()) {
+            for (rid, room) in join {
+                let name = room
+                    .pointer("/state/events")
+                    .and_then(|v| v.as_array())
+                    .and_then(|evs| {
+                        evs.iter()
+                            .rev()
+                            .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("m.room.name"))
+                            .and_then(|e| e.pointer("/content/name"))
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| rid.clone());
+                let last_ts = room
+                    .pointer("/timeline/events")
+                    .and_then(|v| v.as_array())
+                    .and_then(|evs| evs.last())
+                    .and_then(|e| e.get("origin_server_ts"))
+                    .and_then(|t| t.as_i64())
+                    .unwrap_or(0);
+                out.push(json!({"room_id": rid, "name": name, "last_ts": last_ts}));
+            }
+        }
+        json!({"ok": true, "rooms": out})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "rooms task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct SendReq {
+    pub body: String,
+}
+
+/// POST /api/orbnet/rooms/:id/send — send a plain text message as the owner.
+/// Admin-gated.
+pub async fn send(State(_s): State<AppState>, AxPath(room_id): AxPath<String>, Json(req): Json<SendReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let txn = rand_hex(8);
+        let path = format!(
+            "/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
+            urlencode(&room_id),
+            txn
+        );
+        match cs_curl(
+            "PUT",
+            &path,
+            Some(&o.access_token),
+            Some(&json!({"msgtype": "m.text", "body": req.body}).to_string()),
+        ) {
+            Ok(r) if r.get("event_id").is_some() => json!({"ok": true, "event_id": r["event_id"]}),
+            Ok(r) => json!({"ok": false, "err": r}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "send task failed"}));
+    Json(v)
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+// ── community + groups + DMs ─────────────────────────────────────────────────
+
+/// High-level interest rooms every Orb seeds locally. Public + unencrypted so
+/// they federate cleanly and the dashboard can render activity.
+const INTEREST_ROOMS: &[(&str, &str)] = &[
+    ("general", "OrbNet · General"),
+    ("tech", "OrbNet · Technology"),
+    ("ai", "OrbNet · AI & Agents"),
+    ("makers", "OrbNet · Makers & Hardware"),
+    ("privacy", "OrbNet · Privacy & Security"),
+    ("random", "OrbNet · Random"),
+];
+
+/// Idempotently create the OrbNet interest rooms on this homeserver and ensure
+/// the owner is joined. Re-enable resolves the existing alias instead of
+/// duplicating. Best-effort per room.
+fn setup_community(owner: &Owner) -> Value {
+    let token = owner.access_token.as_str();
+    let onion = run_script(&["info"]).unwrap_or_default();
+    let mut rooms = vec![];
+    for (slug, name) in INTEREST_ROOMS {
+        let body = json!({
+            "name": name,
+            "room_alias_name": format!("orbnet-{slug}"),
+            "preset": "public_chat",
+            "visibility": "public",
+            "topic": format!("OrbNet community · {slug}"),
+        });
+        let create = cs_curl("POST", "/_matrix/client/v3/createRoom", Some(token), Some(&body.to_string()));
+        let rid: Option<String> = match &create {
+            Ok(v) if v.get("room_id").is_some() => v["room_id"].as_str().map(String::from),
+            _ => {
+                let alias = format!("#orbnet-{slug}:{onion}");
+                cs_curl(
+                    "GET",
+                    &format!("/_matrix/client/v3/directory/room/{}", urlencode(&alias)),
+                    Some(token),
+                    None,
+                )
+                .ok()
+                .and_then(|v| v.get("room_id").and_then(|x| x.as_str()).map(String::from))
+            }
+        };
+        if let Some(rid) = rid {
+            let _ = cs_curl(
+                "POST",
+                &format!("/_matrix/client/v3/rooms/{}/join", urlencode(&rid)),
+                Some(token),
+                Some("{}"),
+            );
+            rooms.push(json!({"slug": slug, "room_id": rid, "name": name}));
+        }
+    }
+    json!({"rooms": rooms})
+}
+
+#[derive(Deserialize)]
+pub struct GroupReq {
+    pub name: String,
+    /// Matrix ids to invite, e.g. ["@nova:abc…onion"].
+    #[serde(default)]
+    pub invite: Vec<String>,
+    /// Private groups can opt into E2EE (dashboard activity then shows metadata
+    /// only — that's the privacy trade).
+    #[serde(default)]
+    pub encrypted: bool,
+}
+
+/// POST /api/orbnet/group — create a private group room + invite members.
+pub async fn create_group(State(_s): State<AppState>, Json(req): Json<GroupReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let mut body = json!({"name": req.name, "preset": "private_chat", "invite": req.invite});
+        if req.encrypted {
+            body["initial_state"] = json!([{
+                "type": "m.room.encryption", "state_key": "",
+                "content": {"algorithm": "m.megolm.v1.aes-sha2"}
+            }]);
+        }
+        match cs_curl("POST", "/_matrix/client/v3/createRoom", Some(&o.access_token), Some(&body.to_string())) {
+            Ok(r) if r.get("room_id").is_some() => json!({"ok": true, "room_id": r["room_id"]}),
+            Ok(r) => json!({"ok": false, "err": r}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "group task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct DmReq {
+    pub user_id: String,
+}
+
+/// POST /api/orbnet/dm — start an E2EE direct message with another Orb user.
+pub async fn create_dm(State(_s): State<AppState>, Json(req): Json<DmReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let body = json!({
+            "preset": "trusted_private_chat",
+            "invite": [req.user_id],
+            "is_direct": true,
+            "initial_state": [{
+                "type": "m.room.encryption", "state_key": "",
+                "content": {"algorithm": "m.megolm.v1.aes-sha2"}
+            }],
+        });
+        match cs_curl("POST", "/_matrix/client/v3/createRoom", Some(&o.access_token), Some(&body.to_string())) {
+            Ok(r) if r.get("room_id").is_some() => json!({"ok": true, "room_id": r["room_id"]}),
+            Ok(r) => json!({"ok": false, "err": r}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "dm task failed"}));
+    Json(v)
+}
+
+/// GET /api/orbnet/rooms/:id/messages — recent messages (newest first), digested
+/// to sender/body/ts. The dashboard applies the owner's keyword filter
+/// client-side. Admin-gated.
+pub async fn room_messages(State(_s): State<AppState>, AxPath(room_id): AxPath<String>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let path = format!(
+            "/_matrix/client/v3/rooms/{}/messages?dir=b&limit=50",
+            urlencode(&room_id)
+        );
+        match cs_curl("GET", &path, Some(&o.access_token), None) {
+            Ok(r) => {
+                let msgs: Vec<Value> = r
+                    .get("chunk")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("m.room.message"))
+                            .map(|e| {
+                                json!({
+                                    "sender": e.get("sender"),
+                                    "body": e.pointer("/content/body"),
+                                    "ts": e.get("origin_server_ts"),
+                                    "event_id": e.get("event_id"),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                json!({"ok": true, "messages": msgs})
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "messages task failed"}));
+    Json(v)
+}

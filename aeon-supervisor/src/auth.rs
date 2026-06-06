@@ -453,6 +453,9 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         // operate via the main HID/vision/etc. API with their issued token; they
         // never reach /api/agent/* — gate it all to the admin session.
         || path.starts_with("/api/agent/")
+        // OrbNet (federation enable/disable, owner account, send, personas,
+        // moderation, lockdown) is a human-admin console like the Agent Dash.
+        || path.starts_with("/api/orbnet/")
     {
         return false;
     }

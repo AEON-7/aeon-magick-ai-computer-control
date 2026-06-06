@@ -28,6 +28,7 @@ mod i2p;
 mod macros;
 mod mcp;
 mod network;
+mod orbnet;
 mod proxy;
 mod security_metrics;
 mod clipboard;
