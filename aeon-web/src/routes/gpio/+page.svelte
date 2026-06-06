@@ -1,44 +1,27 @@
 <script lang="ts">
-  // GPIO / Hardware dashboard — a live 40-pin J8 header schematic + HAT, power,
-  // IO and bus state. When a HAT is detected and known to the bundled library
-  // (or picked from the browser), its pin usage is overlaid on the header so you
-  // can see exactly which Pi pins it claims and for what (the Pi->HAT mapping).
-  // Read-only; pin control / bus enablement / CSI camera arrive with v97.
+  // GPIO / Hardware dashboard — a live 40-pin J8 header + HAT identification, a
+  // stack planner (overlay multiple HATs, detect pin/address collisions), power,
+  // IO and bus state. Read-only; pin control / buses / CSI camera arrive with v97.
   import { onMount, onDestroy } from 'svelte';
 
   type Pin = {
-    physical: number;
-    kind: string;
-    bcm?: number;
-    name: string;
-    bus: string;
-    mode?: string;
-    direction?: string;
-    pull?: string;
-    level?: number;
-    function?: string;
-    active?: boolean;
-    consumer?: string;
+    physical: number; kind: string; bcm?: number; name: string; bus: string;
+    mode?: string; direction?: string; pull?: string; level?: number;
+    function?: string; active?: boolean; consumer?: string;
   };
   type Hat = {
-    id: string;
-    name: string;
-    manufacturer?: string;
-    type?: string[];
-    pins?: Record<string, string>;
-    i2c?: Record<string, { name?: string; device?: string }>;
-    description?: string;
-    url?: string;
+    id: string; name: string; manufacturer?: string; type?: string[];
+    pins?: Record<string, string>; i2c?: Record<string, { name?: string; device?: string }>;
+    description?: string; url?: string;
   };
   type HwState = {
-    ok: boolean;
-    model: string;
-    hat: any;
-    power: any;
-    gpio: { pins: Pin[] };
-    io: any;
-    buses: any;
-    camera: any;
+    ok: boolean; model: string; hat: any; power: any;
+    gpio: { pins: Pin[] }; io: any; buses: any; camera: any;
+  };
+  type StackCheck = {
+    verdict: string; // compatible | i2c_address_conflict | pin_conflict
+    conflicts: Array<{ type: string; physical?: number; address?: string; users: any[] }>;
+    free_gpio_pins: number[];
   };
 
   let state: HwState | null = null;
@@ -47,9 +30,10 @@
   let selected: Pin | null = null;
   let poll: ReturnType<typeof setInterval>;
 
-  // HAT library + overlay
+  // HAT library + stack planner
   let hatLibrary: Hat[] = [];
-  let overlayHat: Hat | null = null;
+  let stack: Hat[] = [];
+  let stackCheck: StackCheck | null = null;
   let matchApplied = false;
   let hatSearch = '';
   let showBrowser = false;
@@ -70,9 +54,24 @@
     try {
       const r = await fetch('/api/hardware/hats', { credentials: 'same-origin' }).then((r) => r.json());
       hatLibrary = r.hats ?? [];
-    } catch {
-      /* library optional */
+    } catch { /* optional */ }
+  }
+  async function runCheck() {
+    if (stack.length < 1) { stackCheck = null; return; }
+    const ids = stack.map((h) => h.id).join(',');
+    try {
+      stackCheck = await fetch(`/api/hardware/hats/check?ids=${encodeURIComponent(ids)}`, { credentials: 'same-origin' }).then((r) => r.json());
+    } catch { stackCheck = null; }
+  }
+  function addToStack(h: Hat) {
+    if (!stack.find((x) => x.id === h.id)) {
+      stack = [...stack, h];
+      runCheck();
     }
+  }
+  function removeFromStack(id: string) {
+    stack = stack.filter((h) => h.id !== id);
+    runCheck();
   }
   onMount(() => {
     refresh();
@@ -83,26 +82,24 @@
 
   function pinClass(p: Pin): string {
     switch (p.kind) {
-      case '5v':
-        return 'bg-red-500/15 border-red-500/40 text-red-300';
-      case '3v3':
-        return 'bg-amber-500/15 border-amber-500/40 text-amber-300';
-      case 'gnd':
-        return 'bg-zinc-600/20 border-zinc-600/50 text-zinc-400';
-      case 'id_eeprom':
-        return 'bg-sky-500/15 border-sky-500/40 text-sky-300';
+      case '5v': return 'bg-red-500/15 border-red-500/40 text-red-300';
+      case '3v3': return 'bg-amber-500/15 border-amber-500/40 text-amber-300';
+      case 'gnd': return 'bg-zinc-600/20 border-zinc-600/50 text-zinc-400';
+      case 'id_eeprom': return 'bg-sky-500/15 border-sky-500/40 text-sky-300';
       default:
         if (p.active) return 'bg-cursed-500/25 border-cursed-400/70 text-cursed-100 ring-1 ring-cursed-500/40';
         return 'bg-ink-800 border-ink-700 text-zinc-400 hover:border-ink-600';
     }
   }
   function dirGlyph(p: Pin): string {
-    if (p.direction === 'output') return '▲';
-    if (p.direction === 'alt') return '◆';
-    return '▼';
+    return p.direction === 'output' ? '▲' : p.direction === 'alt' ? '◆' : '▼';
   }
-  function hatRole(physical: number): string | null {
-    return overlayHat?.pins?.[String(physical)] ?? null;
+  function pinUsers(physical: number): Array<{ name: string; role: string }> {
+    return stack.filter((h) => h.pins?.[String(physical)]).map((h) => ({ name: h.name, role: h.pins![String(physical)] }));
+  }
+  function pinRole(physical: number): string | null {
+    const u = pinUsers(physical);
+    return u.length ? u[0].role : null;
   }
   function roleAbbr(role: string | null): string {
     if (!role) return '';
@@ -115,6 +112,12 @@
     if (r.includes('pwm')) return 'PWM';
     return r.toUpperCase().slice(0, 4);
   }
+  // overlay ring: red on a conflict, amber when a stacked HAT uses the pin
+  function pinRing(physical: number): string {
+    if (conflictPins.has(physical)) return 'ring-2 ring-red-500';
+    if (pinRole(physical)) return 'ring-2 ring-amber-400/70';
+    return '';
+  }
 
   $: pins = state?.gpio?.pins ?? [];
   $: leftPins = pins.filter((p) => p.physical % 2 === 1);
@@ -125,17 +128,13 @@
   $: buses = state?.buses ?? {};
   $: cam = state?.camera ?? {};
   $: activeCount = pins.filter((p) => p.kind === 'gpio' && p.active).length;
-  // Auto-overlay the detected HAT's pin map once, if it's in the library.
-  $: if (!matchApplied && hat?.library_match) {
-    overlayHat = hat.library_match;
-    matchApplied = true;
-  }
+  $: conflictPins = new Set((stackCheck?.conflicts ?? []).filter((c) => c.type === 'pin').map((c) => c.physical));
+  $: addrConflicts = (stackCheck?.conflicts ?? []).filter((c) => c.type === 'i2c_address');
+  // auto-add a detected+identified HAT to the stack once
+  $: if (!matchApplied && hat?.library_match) { addToStack(hat.library_match); matchApplied = true; }
   $: hatMatches = hatSearch.trim()
-    ? hatLibrary
-        .filter((h) => `${h.name} ${h.manufacturer ?? ''} ${(h.type ?? []).join(' ')}`.toLowerCase().includes(hatSearch.toLowerCase()))
-        .slice(0, 40)
+    ? hatLibrary.filter((h) => `${h.name} ${h.manufacturer ?? ''} ${(h.type ?? []).join(' ')}`.toLowerCase().includes(hatSearch.toLowerCase())).slice(0, 40)
     : [];
-  $: overlayChips = overlayHat?.i2c ? Object.entries(overlayHat.i2c) : [];
 </script>
 
 <div class="h-full flex flex-col bg-ink-950">
@@ -149,9 +148,7 @@
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-5xl mx-auto w-full space-y-6">
-      {#if error}
-        <div class="bg-red-900/20 border border-red-500/40 rounded-xl p-4 text-red-300 text-sm font-mono">{error}</div>
-      {/if}
+      {#if error}<div class="bg-red-900/20 border border-red-500/40 rounded-xl p-4 text-red-300 text-sm font-mono">{error}</div>{/if}
       {#if loading && !state}<p class="text-zinc-500 text-sm">reading hardware…</p>{/if}
 
       {#if state}
@@ -167,11 +164,8 @@
           </div>
           <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
             <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Power</div>
-            {#if pw.healthy}
-              <div class="text-lg font-mono text-live-400">● healthy</div>
-            {:else}
-              <div class="text-lg font-mono text-red-400">⚠ {pw.undervolt_now ? 'undervolt' : pw.throttled_now ? 'throttled' : 'fault'}</div>
-            {/if}
+            {#if pw.healthy}<div class="text-lg font-mono text-live-400">● healthy</div>
+            {:else}<div class="text-lg font-mono text-red-400">⚠ {pw.undervolt_now ? 'undervolt' : pw.throttled_now ? 'throttled' : 'fault'}</div>{/if}
           </div>
           <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
             <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Active GPIO</div>
@@ -179,25 +173,21 @@
           </div>
         </section>
 
-        <!-- HAT + library -->
+        <!-- HAT detection + stack planner -->
         <section class="bg-ink-900 border {hat.present ? 'border-cursed-500/30' : 'border-ink-700'} rounded-xl p-5 space-y-3">
           <div class="flex items-start justify-between gap-3">
             <div>
-              <h2 class="font-mono text-sm uppercase tracking-wider text-cursed-300">🎩 HAT</h2>
+              <h2 class="font-mono text-sm uppercase tracking-wider text-cursed-300">🎩 HAT &amp; stack planner</h2>
               {#if hat.present}
                 <div class="mt-1.5 text-zinc-200 text-sm">{hat.vendor} — <span class="font-medium">{hat.product}</span></div>
-                <div class="mt-0.5 text-[11px] font-mono text-zinc-600">{hat.uuid}</div>
-                {#if hat.library_match}
-                  <div class="mt-1 text-xs text-live-400">✓ identified as “{hat.library_match.name}” — pin map overlaid on the header ↓</div>
-                {:else}
-                  <div class="mt-1 text-xs text-zinc-500">Not in the pin library (long-tail board) — the AI can probe it. Or browse the library to overlay any board's map.</div>
-                {/if}
+                {#if hat.library_match}<div class="mt-1 text-xs text-live-400">✓ identified as “{hat.library_match.name}”</div>
+                {:else}<div class="mt-1 text-xs text-zinc-500">Not in the pin library (long-tail) — the AI can probe it. Add boards below to plan a stack.</div>{/if}
               {:else}
-                <div class="mt-1.5 text-zinc-500 text-sm">No HAT attached. Browse the library to preview any board's pin footprint.</div>
+                <div class="mt-1.5 text-zinc-500 text-sm">No HAT attached. Add boards below to plan a stack + check compatibility before you plug anything in.</div>
               {/if}
             </div>
             <button class="btn text-xs whitespace-nowrap" on:click={() => (showBrowser = !showBrowser)}>
-              {showBrowser ? 'close' : `browse library (${hatLibrary.length})`}
+              {showBrowser ? 'close' : `+ add HAT (${hatLibrary.length})`}
             </button>
           </div>
 
@@ -208,16 +198,50 @@
               {#if hatMatches.length}
                 <div class="max-h-56 overflow-y-auto space-y-1">
                   {#each hatMatches as h}
-                    <button class="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded border border-ink-800 bg-ink-950/40 hover:border-cursed-500/40"
-                            on:click={() => { overlayHat = h; showBrowser = false; }}>
+                    <button class="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded border border-ink-800 bg-ink-950/40 hover:border-cursed-500/40 disabled:opacity-40"
+                            disabled={!!stack.find((x) => x.id === h.id)} on:click={() => addToStack(h)}>
                       <span class="text-zinc-200 text-sm flex-1 truncate">{h.name}</span>
                       {#if h.manufacturer}<span class="text-[10px] font-mono text-zinc-500">{h.manufacturer}</span>{/if}
                       {#if h.i2c}<span class="text-[10px] font-mono text-amber-300/80">I2C</span>{/if}
                     </button>
                   {/each}
                 </div>
-              {:else if hatSearch.trim()}
-                <p class="text-xs text-zinc-600 italic">no match in the library</p>
+              {:else if hatSearch.trim()}<p class="text-xs text-zinc-600 italic">no match in the library</p>{/if}
+            </div>
+          {/if}
+
+          {#if stack.length}
+            <div class="pt-2 border-t border-ink-800 space-y-2">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">stack:</span>
+                {#each stack as h, i}
+                  <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 text-xs">
+                    {h.name}
+                    <button class="text-amber-400/70 hover:text-amber-200" on:click={() => removeFromStack(h.id)}>✕</button>
+                  </span>
+                {/each}
+              </div>
+
+              {#if stack.length >= 2 && stackCheck}
+                {#if stackCheck.verdict === 'compatible'}
+                  <div class="text-sm text-live-400">✓ Compatible — shared I2C/SPI buses + rails, no pin or address conflicts.</div>
+                {:else}
+                  <div class="bg-red-900/20 border border-red-500/40 rounded p-3 space-y-1.5">
+                    <div class="text-sm text-red-300 font-medium">⚠ {stackCheck.verdict === 'i2c_address_conflict' ? 'I2C address conflict' : 'Pin conflict'} — these boards can't stack as-is.</div>
+                    {#each stackCheck.conflicts as c}
+                      <div class="text-xs font-mono text-red-200/90">
+                        {#if c.type === 'i2c_address'}
+                          I2C {c.address}: {(c.users ?? []).join(' + ')} — both answer to the same address (change a jumper/strap).
+                        {:else}
+                          pin {c.physical}: {(c.users ?? []).map((u) => `${u.hat} (${u.role})`).join(' vs ')} — reroute one.
+                        {/if}
+                      </div>
+                    {/each}
+                    {#if stackCheck.free_gpio_pins?.length && stackCheck.verdict === 'pin_conflict'}
+                      <div class="text-[11px] text-amber-300/80">free GPIO pins to reroute onto: {stackCheck.free_gpio_pins.slice(0, 12).join(', ')}…</div>
+                    {/if}
+                  </div>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -232,50 +256,33 @@
               <span><span class="text-amber-300">■</span> 3V3</span>
               <span><span class="text-zinc-400">■</span> GND</span>
               <span><span class="text-cursed-300">■</span> active</span>
-              {#if overlayHat}<span><span class="text-amber-400">◯</span> HAT pin</span>{/if}
+              {#if stack.length}<span><span class="text-amber-400">◯</span> HAT</span>{/if}
+              {#if conflictPins.size}<span><span class="text-red-500">◯</span> conflict</span>{/if}
             </div>
           </div>
-
-          {#if overlayHat}
-            <div class="flex items-center justify-between gap-3 bg-amber-500/10 border border-amber-500/30 rounded px-3 py-2">
-              <span class="text-xs text-amber-200">
-                Overlaying <strong>{overlayHat.name}</strong> — ◯ ringed pins are what this HAT uses{#if overlayChips.length}; chips:
-                  {#each overlayChips as [addr, c]}<span class="font-mono text-amber-300">{c.device ?? c.name} @ {addr}</span>{' '}{/each}{/if}
-              </span>
-              <button class="text-[11px] text-amber-300/80 hover:text-amber-200 whitespace-nowrap" on:click={() => { overlayHat = null; matchApplied = true; }}>clear ✕</button>
-            </div>
-          {/if}
 
           <div class="flex justify-center">
             <div class="grid grid-cols-[1fr_auto_1fr] gap-x-2 gap-y-1.5 w-full max-w-2xl">
               {#each Array(20) as _, i}
                 {@const lp = leftPins[i]}
                 {@const rp = rightPins[i]}
-                <button
-                  class="flex items-center justify-end gap-2 px-2 py-1 rounded border text-right transition-colors {pinClass(lp)} {hatRole(lp.physical) ? 'ring-2 ring-amber-400/70' : ''} {selected?.physical === lp.physical ? 'outline outline-1 outline-cursed-300' : ''}"
-                  on:click={() => (selected = lp)}
-                >
+                <button class="flex items-center justify-end gap-2 px-2 py-1 rounded border text-right transition-colors {pinClass(lp)} {pinRing(lp.physical)} {selected?.physical === lp.physical ? 'outline outline-1 outline-cursed-300' : ''}"
+                        on:click={() => (selected = lp)}>
                   <span class="font-mono text-xs truncate">{lp.name}</span>
-                  {#if hatRole(lp.physical)}
-                    <span class="font-mono text-[9px] text-amber-300">{roleAbbr(hatRole(lp.physical))}</span>
-                  {:else if lp.bcm !== undefined && lp.active}
-                    <span class="font-mono text-[9px] opacity-80">{dirGlyph(lp)}{lp.level === 1 ? 'HI' : 'LO'}</span>
-                  {/if}
+                  {#if conflictPins.has(lp.physical)}<span class="font-mono text-[9px] text-red-400">⚠</span>
+                  {:else if pinRole(lp.physical)}<span class="font-mono text-[9px] text-amber-300">{roleAbbr(pinRole(lp.physical))}</span>
+                  {:else if lp.bcm !== undefined && lp.active}<span class="font-mono text-[9px] opacity-80">{dirGlyph(lp)}{lp.level === 1 ? 'HI' : 'LO'}</span>{/if}
                 </button>
                 <div class="flex items-center justify-center gap-1 px-1">
                   <span class="font-mono text-[10px] text-zinc-600 w-4 text-center">{lp.physical}</span>
                   <span class="w-1.5 h-1.5 rounded-full bg-ink-600"></span>
                   <span class="font-mono text-[10px] text-zinc-600 w-4 text-center">{rp.physical}</span>
                 </div>
-                <button
-                  class="flex items-center justify-start gap-2 px-2 py-1 rounded border text-left transition-colors {pinClass(rp)} {hatRole(rp.physical) ? 'ring-2 ring-amber-400/70' : ''} {selected?.physical === rp.physical ? 'outline outline-1 outline-cursed-300' : ''}"
-                  on:click={() => (selected = rp)}
-                >
-                  {#if hatRole(rp.physical)}
-                    <span class="font-mono text-[9px] text-amber-300">{roleAbbr(hatRole(rp.physical))}</span>
-                  {:else if rp.bcm !== undefined && rp.active}
-                    <span class="font-mono text-[9px] opacity-80">{dirGlyph(rp)}{rp.level === 1 ? 'HI' : 'LO'}</span>
-                  {/if}
+                <button class="flex items-center justify-start gap-2 px-2 py-1 rounded border text-left transition-colors {pinClass(rp)} {pinRing(rp.physical)} {selected?.physical === rp.physical ? 'outline outline-1 outline-cursed-300' : ''}"
+                        on:click={() => (selected = rp)}>
+                  {#if conflictPins.has(rp.physical)}<span class="font-mono text-[9px] text-red-400">⚠</span>
+                  {:else if pinRole(rp.physical)}<span class="font-mono text-[9px] text-amber-300">{roleAbbr(pinRole(rp.physical))}</span>
+                  {:else if rp.bcm !== undefined && rp.active}<span class="font-mono text-[9px] opacity-80">{dirGlyph(rp)}{rp.level === 1 ? 'HI' : 'LO'}</span>{/if}
                   <span class="font-mono text-xs truncate">{rp.name}</span>
                 </button>
               {/each}
@@ -289,14 +296,13 @@
                 <span class="text-zinc-400">BCM{selected.bcm}</span>
                 <span class="text-zinc-400">dir: <span class="text-zinc-200">{selected.direction ?? '—'}</span></span>
                 <span class="text-zinc-400">level: <span class="text-zinc-200">{selected.level === 1 ? 'HIGH' : 'LOW'}</span></span>
-                <span class="text-zinc-400">pull: <span class="text-zinc-200">{selected.pull ?? '—'}</span></span>
                 {#if selected.consumer}<span class="text-zinc-400">owner: <span class="text-cursed-200">{selected.consumer}</span></span>{/if}
               {/if}
-              {#if hatRole(selected.physical)}<span class="text-amber-300">{overlayHat?.name} uses: {hatRole(selected.physical)}</span>{/if}
+              {#each pinUsers(selected.physical) as u}<span class="{conflictPins.has(selected.physical) ? 'text-red-300' : 'text-amber-300'}">{u.name}: {u.role}</span>{/each}
               {#if selected.bus}<span class="text-zinc-500">{selected.bus}</span>{/if}
             </div>
           {:else}
-            <p class="border-t border-ink-700 pt-3 text-[11px] text-zinc-600">Click a pin for its live state + (when a HAT is overlaid) what the HAT uses it for. Pin control + I2C/SPI arrive with v97.</p>
+            <p class="border-t border-ink-700 pt-3 text-[11px] text-zinc-600">Click a pin for its live state + how each stacked HAT uses it. ⚠ = a collision. Pin control + I2C/SPI arrive with v97.</p>
           {/if}
         </section>
 
@@ -317,47 +323,24 @@
             {#if (io.usb ?? []).length}
               <div class="pt-2 border-t border-ink-800">
                 <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mb-1">USB</div>
-                {#each io.usb as u}
-                  <div class="text-xs text-zinc-400 truncate"><span class="text-zinc-600 font-mono">{u.id}</span> {u.name}</div>
-                {/each}
+                {#each io.usb as u}<div class="text-xs text-zinc-400 truncate"><span class="text-zinc-600 font-mono">{u.id}</span> {u.name}</div>{/each}
               </div>
-            {/if}
-            {#if (io.serial ?? []).length}
-              <div class="text-[11px] font-mono text-zinc-500">serial: {(io.serial ?? []).join(', ')}</div>
             {/if}
           </section>
 
           <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Buses &amp; camera</h2>
             <div class="space-y-1.5 text-xs font-mono">
-              <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full {buses.i2c?.enabled ? 'bg-live-400' : 'bg-zinc-600'}"></span>
-                <span class="text-zinc-300 w-12">I2C</span>
-                <span class="text-zinc-500">{buses.i2c?.enabled ? (buses.i2c.devices ?? []).join(', ') : 'disabled (enable in v97 — needs reboot)'}</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full {buses.spi?.enabled ? 'bg-live-400' : 'bg-zinc-600'}"></span>
-                <span class="text-zinc-300 w-12">SPI</span>
-                <span class="text-zinc-500">{buses.spi?.enabled ? (buses.spi.devices ?? []).join(', ') : 'disabled (enable in v97 — needs reboot)'}</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full {buses.uart ? 'bg-live-400' : 'bg-zinc-600'}"></span>
-                <span class="text-zinc-300 w-12">UART</span>
-                <span class="text-zinc-500">{buses.uart ? 'serial console' : 'off'}</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full {cam.csi?.detected ? 'bg-live-400' : 'bg-zinc-600'}"></span>
-                <span class="text-zinc-300 w-12">CSI cam</span>
-                <span class="text-zinc-500">{cam.csi?.detected ? 'camera attached' : cam.csi?.supported ? 'supported, none attached' : 'none (add a Pi camera + v97)'}</span>
-              </div>
+              <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {buses.i2c?.enabled ? 'bg-live-400' : 'bg-zinc-600'}"></span><span class="text-zinc-300 w-12">I2C</span><span class="text-zinc-500">{buses.i2c?.enabled ? (buses.i2c.devices ?? []).join(', ') : 'disabled (v97 — needs reboot)'}</span></div>
+              <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {buses.spi?.enabled ? 'bg-live-400' : 'bg-zinc-600'}"></span><span class="text-zinc-300 w-12">SPI</span><span class="text-zinc-500">{buses.spi?.enabled ? (buses.spi.devices ?? []).join(', ') : 'disabled (v97 — needs reboot)'}</span></div>
+              <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {buses.uart ? 'bg-live-400' : 'bg-zinc-600'}"></span><span class="text-zinc-300 w-12">UART</span><span class="text-zinc-500">{buses.uart ? 'serial console' : 'off'}</span></div>
+              <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {cam.csi?.detected ? 'bg-live-400' : 'bg-zinc-600'}"></span><span class="text-zinc-300 w-12">CSI cam</span><span class="text-zinc-500">{cam.csi?.detected ? 'attached' : cam.csi?.supported ? 'supported, none attached' : 'none (add a Pi camera + v97)'}</span></div>
             </div>
-            <p class="text-[11px] text-zinc-600 pt-1 border-t border-ink-800">The live feed runs over the USB HDMI-capture device (Cam Link) — tune it on the streamer. CSI is for an optional ribbon camera module.</p>
+            <p class="text-[11px] text-zinc-600 pt-1 border-t border-ink-800">Live feed runs over the USB HDMI-capture device — tune it on the streamer. CSI is for an optional ribbon camera.</p>
           </section>
         </div>
 
-        <p class="text-[11px] text-zinc-600 text-center">
-          Read-only snapshot, refreshing every 4s. HAT data distilled from <span class="text-zinc-500">pinout.xyz (CC BY-SA 4.0)</span>. Pin control, PWM, I2C/SPI, remapping + the CSI camera land with v97.
-        </p>
+        <p class="text-[11px] text-zinc-600 text-center">Read-only, refreshing every 4s. HAT data distilled from <span class="text-zinc-500">pinout.xyz (CC BY-SA 4.0)</span>. Control + I2C/SPI + CSI camera land with v97.</p>
       {/if}
     </div>
   </main>
