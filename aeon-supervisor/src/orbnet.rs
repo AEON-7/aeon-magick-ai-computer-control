@@ -320,7 +320,12 @@ pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> J
         } else {
             json!({"rooms": []})
         };
-        json!({"ok": true, "onion": onion, "owner": owner.user_id, "community": community})
+        // Auto-peer any configured directory seeds (mesh with other Orbs).
+        let mut peered = 0;
+        for seed in &cfg.directory_seeds {
+            peered += peer_seed(&owner, seed);
+        }
+        json!({"ok": true, "onion": onion, "owner": owner.user_id, "community": community, "peered_rooms": peered})
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "enable task failed"}));
@@ -620,5 +625,62 @@ pub async fn room_messages(State(_s): State<AppState>, AxPath(room_id): AxPath<S
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "messages task failed"}));
+    Json(v)
+}
+
+// ── mesh / directory ─────────────────────────────────────────────────────────
+
+/// Join a peer Orb's interest rooms by alias (federates over Tor). Best-effort;
+/// returns how many rooms were joined. This is the mesh: peering with another
+/// Orb's onion pulls its community rooms into the shared federation.
+fn peer_seed(owner: &Owner, onion: &str) -> usize {
+    let mut n = 0;
+    for (slug, _name) in INTEREST_ROOMS {
+        let alias = format!("#orbnet-{slug}:{onion}");
+        let r = cs_curl(
+            "POST",
+            &format!("/_matrix/client/v3/join/{}", urlencode(&alias)),
+            Some(&owner.access_token),
+            Some("{}"),
+        );
+        if r.map(|v| v.get("room_id").is_some()).unwrap_or(false) {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[derive(Deserialize)]
+pub struct PeerReq {
+    pub onion: String,
+}
+
+/// POST /api/orbnet/peer — federate with another Orb: join its community rooms
+/// over Tor + remember it as a directory seed for future enables. Admin-gated.
+pub async fn peer(State(_s): State<AppState>, Json(req): Json<PeerReq>) -> Json<Value> {
+    let onion = req
+        .onion
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/')
+        .to_string();
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        if !onion.ends_with(".onion") {
+            return json!({"ok": false, "err": "expected a .onion address"});
+        }
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let joined = peer_seed(&o, &onion);
+        let mut cfg = read_config();
+        if !cfg.directory_seeds.contains(&onion) {
+            cfg.directory_seeds.push(onion.clone());
+            let _ = write_config(&cfg);
+        }
+        json!({"ok": true, "onion": onion, "joined_rooms": joined})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "peer task failed"}));
     Json(v)
 }

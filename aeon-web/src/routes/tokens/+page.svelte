@@ -6,6 +6,7 @@
   import { onMount } from 'svelte';
   import * as api from '$lib/api';
   import TipJar from '$lib/components/TipJar.svelte';
+  import LockdownPanel from '$lib/components/LockdownPanel.svelte';
 
   let tokens: api.Token[] = [];
   let loading = true;
@@ -107,6 +108,7 @@
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-4xl mx-auto w-full space-y-6">
+      <LockdownPanel />
     <!-- New token creation -->
     <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
       <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">

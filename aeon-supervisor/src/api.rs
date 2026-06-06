@@ -416,6 +416,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/orbnet/rooms/:id/messages", get(crate::orbnet::room_messages))
         .route("/orbnet/group",           post(crate::orbnet::create_group))
         .route("/orbnet/dm",              post(crate::orbnet::create_dm))
+        .route("/orbnet/peer",            post(crate::orbnet::peer))
+        .route("/lockdown",               get(crate::lockdown::get_lockdown).post(crate::lockdown::set_lockdown))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))
         .route("/system/reboot",      post(crate::system::reboot))

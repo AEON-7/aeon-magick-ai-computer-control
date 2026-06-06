@@ -10,6 +10,14 @@
   const PUBLIC_ROUTES = ['/setup', '/setup/wifi', '/login'];
 
   let bootstrapping = true;
+  let lockedDown = false;
+
+  async function checkLockdown() {
+    try {
+      const r = await fetch('/api/lockdown', { credentials: 'same-origin' });
+      if (r.ok) { const d = await r.json(); lockedDown = !!d.enabled; }
+    } catch { /* admin-only; non-admin/unauth just won't see the banner */ }
+  }
 
   onMount(async () => {
     try {
@@ -31,17 +39,26 @@
     } finally {
       bootstrapping = false;
     }
+    checkLockdown();
+    setInterval(checkLockdown, 8000);
   });
 </script>
 
-<div class="h-full bg-ink-950 text-zinc-200">
-  {#if bootstrapping}
-    <div class="h-full flex items-center justify-center">
-      <span class="font-mono text-xs text-zinc-500 tracking-widest">
-        AEON MAGICK · loading…
-      </span>
+<div class="h-full flex flex-col bg-ink-950 text-zinc-200">
+  {#if lockedDown}
+    <div class="bg-red-700 text-white text-center text-[11px] font-mono py-1 tracking-widest animate-pulse shrink-0">
+      🔒 LOCKDOWN MODE — all external API + MCP disabled · admin session only
     </div>
-  {:else}
-    <slot />
   {/if}
+  <div class="flex-1 min-h-0">
+    {#if bootstrapping}
+      <div class="h-full flex items-center justify-center">
+        <span class="font-mono text-xs text-zinc-500 tracking-widest">
+          AEON MAGICK · loading…
+        </span>
+      </div>
+    {:else}
+      <slot />
+    {/if}
+  </div>
 </div>

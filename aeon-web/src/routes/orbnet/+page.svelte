@@ -127,6 +127,18 @@
     if (r.ok) await loadRooms();
     else alert('Could not start DM: ' + JSON.stringify(r.err));
   }
+  async function peerOrb() {
+    const onion = prompt('Connect another Orb — paste its OrbNet onion (xxxxx.onion). You both federate + join each other’s community rooms.');
+    if (!onion) return;
+    busy = 'Peering over Tor…';
+    const r = await api('/peer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ onion }),
+    });
+    busy = '';
+    if (r.ok) { await loadRooms(); alert(`Peered — joined ${r.joined_rooms} of its rooms.`); }
+    else alert('Peer failed: ' + JSON.stringify(r.err));
+  }
 
   // moderation: hide messages whose body matches any keyword (case-insensitive)
   function filtered(m: Msg): boolean {
@@ -217,6 +229,7 @@
           <div class="ml-auto flex items-center gap-2">
             <button class="btn text-xs" on:click={createGroup}>+ group</button>
             <button class="btn text-xs" on:click={startDm}>+ DM</button>
+            <button class="btn text-xs" on:click={peerOrb}>+ peer Orb</button>
             <button class="btn text-xs" class:active={showMod} on:click={() => (showMod = !showMod)}>moderation</button>
           </div>
         </section>

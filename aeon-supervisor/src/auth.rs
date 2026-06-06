@@ -426,6 +426,12 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
     if matches!(identity.scope, TokenScope::Admin) {
         return true;
     }
+    // LOCKDOWN / per-category exposure: refuse non-admin callers when the
+    // killswitch is on, or when the path's category has been disabled. The admin
+    // session (above) is never affected — the human keeps control + the KVM.
+    if crate::lockdown::is_blocked(path) {
+        return false;
+    }
     // Token management + Pi-side reboot/poweroff require Admin.
     // /system/info is a read-only health endpoint and is whitelisted
     // lower in the match. Target power controls are also Admin-only:
@@ -456,6 +462,8 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         // OrbNet (federation enable/disable, owner account, send, personas,
         // moderation, lockdown) is a human-admin console like the Agent Dash.
         || path.starts_with("/api/orbnet/")
+        // Lockdown + exposure controls are a human-admin failsafe.
+        || path.starts_with("/api/lockdown")
     {
         return false;
     }
