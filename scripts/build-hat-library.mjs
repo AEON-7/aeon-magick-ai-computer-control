@@ -86,13 +86,42 @@ for (const f of files) {
 
 hats.sort((a, b) => a.id.localeCompare(b.id));
 
+// I2C chip reference (technoblogy/i2c-detective) — chip -> address range +
+// category + optional ID register/value. Turns an i2cdetect hit into a
+// candidate chip: the EEPROM-less / loose-breakout identification path the AI
+// needs when someone just plugs sensors onto the header.
+function parseChips(inoPath) {
+  if (!fs.existsSync(inoPath)) return [];
+  const txt = fs.readFileSync(inoPath, 'utf8');
+  const re = /\{\s*"([^"]+)"\s*,\s*(\w+)\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*\}/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(txt))) {
+    const [, name, cat, lo, hi, reg, val] = m;
+    const rec = {
+      chip: name,
+      category: cat.replace(/([a-z])([A-Z])/g, '$1 $2'),
+      addr_low: lo.toLowerCase(),
+      addr_high: hi.toLowerCase(),
+    };
+    if (reg !== '0x00' || val !== '0x00') {
+      rec.id_reg = reg.toLowerCase();
+      rec.id_val = val.toLowerCase();
+    }
+    out.push(rec);
+  }
+  out.sort((a, b) => a.chip.localeCompare(b.chip));
+  return out;
+}
+const chips = parseChips(process.argv[4] || '/tmp/i2c-detective/I2CDetective.ino');
+
 const lib = {
-  schema: 1,
-  source: 'pinout.xyz',
-  license: 'CC BY-SA 4.0',
-  attribution: 'Raspberry Pi HAT pin data from https://pinout.xyz (CC BY-SA 4.0)',
+  schema: 2,
+  sources: ['pinout.xyz (CC BY-SA 4.0)', 'technoblogy/i2c-detective (I2C chip address reference)'],
   count: hats.length,
   hats,
+  chip_count: chips.length,
+  chips,
 };
 
 const json = JSON.stringify(lib);
@@ -104,6 +133,7 @@ fs.writeFileSync(`${OUT}.gz`, gz);
 const withI2c = hats.filter((h) => h.i2c).length;
 console.log(`parsed ${hats.length} HATs (${skipped} skipped) from ${files.length} files`);
 console.log(`  ${withI2c} carry I2C chip data`);
+console.log(`  + ${chips.length} I2C chips in the address reference`);
 console.log(`raw json : ${(json.length / 1024).toFixed(1)} KB  -> ${OUT}`);
 console.log(`gzipped  : ${(gz.length / 1024).toFixed(1)} KB  -> ${OUT}.gz`);
 for (const id of ['adafruit-motor-hat', 'adafruit-servo-hat', 'ab-rtc-pi']) {

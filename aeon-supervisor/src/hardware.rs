@@ -647,3 +647,76 @@ pub async fn hardware_stack_check(
         .collect();
     Json(check_stack(&ids))
 }
+
+#[derive(Deserialize)]
+pub struct ChipQuery {
+    #[serde(default)]
+    pub addr: String,
+}
+
+/// GET /api/hardware/chips[?addr=0x48] — the I2C chip address reference (chip ->
+/// category + address range + ID register). With ?addr it returns the chips that
+/// could answer at that address — how the AI turns an i2cdetect hit into a part
+/// (the loose-breakout / EEPROM-less identification path). Read-scope.
+pub async fn hardware_chips(State(_state): State<AppState>, Query(q): Query<ChipQuery>) -> Json<Value> {
+    let chips = library().get("chips").cloned().unwrap_or_else(|| json!([]));
+    let target = q.addr.trim();
+    if target.is_empty() {
+        return Json(json!({ "count": chips.as_array().map(|a| a.len()).unwrap_or(0), "chips": chips }));
+    }
+    let hex = |v: &Value, k: &str| -> Option<u8> {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+    };
+    let t = u8::from_str_radix(target.trim_start_matches("0x"), 16).ok();
+    let candidates: Vec<Value> = chips
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| match (t, hex(c, "addr_low"), hex(c, "addr_high")) {
+                    (Some(t), Some(lo), Some(hi)) => t >= lo && t <= hi,
+                    _ => false,
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(json!({ "addr": target, "candidates": candidates }))
+}
+
+/// GET /api/hardware/overlays — the device-tree overlay catalog parsed LIVE from
+/// the on-device kernel README (~389 entries: what Linux can auto-configure +
+/// how to enable it via dtoverlay). Always current with the running kernel,
+/// nothing bundled. Read-scope. (Relevant to v97 control — loading a HAT's
+/// overlay is how the bus/driver comes up.)
+pub async fn hardware_overlays(State(_state): State<AppState>) -> Json<Value> {
+    let text = std::fs::read_to_string("/boot/firmware/overlays/README")
+        .or_else(|_| std::fs::read_to_string("/boot/overlays/README"))
+        .unwrap_or_default();
+    let mut overlays = vec![];
+    let mut name: Option<String> = None;
+    let mut info = String::new();
+    for line in text.lines() {
+        let l = line.trim_start();
+        if let Some(n) = l.strip_prefix("Name:") {
+            if let Some(prev) = name.take() {
+                overlays.push(json!({ "name": prev, "info": info.trim() }));
+            }
+            name = Some(n.trim().to_string());
+            info.clear();
+        } else if let Some(i) = l.strip_prefix("Info:") {
+            if name.is_some() && info.is_empty() {
+                info = i.trim().to_string();
+            }
+        }
+    }
+    if let Some(prev) = name.take() {
+        overlays.push(json!({ "name": prev, "info": info.trim() }));
+    }
+    Json(json!({
+        "source": "kernel device-tree overlays README",
+        "count": overlays.len(),
+        "overlays": overlays,
+    }))
+}
