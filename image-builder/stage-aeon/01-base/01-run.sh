@@ -25,6 +25,12 @@ for b in aeon-streamer aeon-hid aeon-supervisor; do
     install -m 0755 "${BIN_DIR}/${b}" "${ROOTFS_DIR}/usr/local/bin/${b}"
 done
 
+# OrbNet homeserver (patched Conduit) — staged by scripts/build-conduit.sh. OrbNet
+# is off by default, so this just places the binary for when the admin enables it.
+if [ -f "${BIN_DIR}/aeon-conduit" ]; then
+    install -m 0755 "${BIN_DIR}/aeon-conduit" "${ROOTFS_DIR}/usr/local/bin/aeon-conduit"
+fi
+
 cp -R "${WEB_DIR}/." "${ROOTFS_DIR}/usr/share/aeon/web/"
 
 # Shipped, read-only macros + prompts. aeon-supervisor uses /etc/aeon/<dir>/
