@@ -387,6 +387,13 @@ pub async fn rooms(State(_s): State<AppState>) -> Json<Value> {
             Err(e) => return json!({"ok": false, "err": e}),
         };
         let mut out = vec![];
+        let mut members = std::collections::HashSet::new();
+        let mut active = std::collections::HashSet::new();
+        let mut activity: Vec<Value> = vec![];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         if let Some(join) = sync.pointer("/rooms/join").and_then(|v| v.as_object()) {
             for (rid, room) in join {
                 let name = room
@@ -401,17 +408,51 @@ pub async fn rooms(State(_s): State<AppState>) -> Json<Value> {
                             .map(|s| s.to_string())
                     })
                     .unwrap_or_else(|| rid.clone());
-                let last_ts = room
-                    .pointer("/timeline/events")
-                    .and_then(|v| v.as_array())
-                    .and_then(|evs| evs.last())
-                    .and_then(|e| e.get("origin_server_ts"))
-                    .and_then(|t| t.as_i64())
+                let member_count = room
+                    .pointer("/summary/m.joined_member_count")
+                    .and_then(|v| v.as_i64())
                     .unwrap_or(0);
-                out.push(json!({"room_id": rid, "name": name, "last_ts": last_ts}));
+                // unique community members across rooms (from join state events)
+                if let Some(evs) = room.pointer("/state/events").and_then(|v| v.as_array()) {
+                    for e in evs {
+                        if e.get("type").and_then(|t| t.as_str()) == Some("m.room.member")
+                            && e.pointer("/content/membership").and_then(|m| m.as_str()) == Some("join")
+                        {
+                            if let Some(sk) = e.get("state_key").and_then(|s| s.as_str()) {
+                                members.insert(sk.to_string());
+                            }
+                        }
+                    }
+                }
+                let mut last_sender = String::new();
+                let mut last_body = String::new();
+                let mut last_ts = 0i64;
+                if let Some(evs) = room.pointer("/timeline/events").and_then(|v| v.as_array()) {
+                    for e in evs {
+                        if e.get("type").and_then(|t| t.as_str()) != Some("m.room.message") {
+                            continue;
+                        }
+                        let ts = e.get("origin_server_ts").and_then(|t| t.as_i64()).unwrap_or(0);
+                        let sender = e.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                        let body = e.pointer("/content/body").and_then(|b| b.as_str()).unwrap_or("").to_string();
+                        // "active now" = posted in the last hour (presence over Tor
+                        // federation is unreliable, so we proxy it with activity).
+                        if now - ts < 3_600_000 && !sender.is_empty() {
+                            active.insert(sender.clone());
+                        }
+                        activity.push(json!({"room": name, "sender": sender, "body": body, "ts": ts}));
+                        last_sender = sender;
+                        last_body = body;
+                        last_ts = ts;
+                    }
+                }
+                out.push(json!({"room_id": rid, "name": name, "last_ts": last_ts, "members": member_count, "last_sender": last_sender, "last_body": last_body}));
             }
         }
-        json!({"ok": true, "rooms": out})
+        activity.sort_by(|a, b| b["ts"].as_i64().unwrap_or(0).cmp(&a["ts"].as_i64().unwrap_or(0)));
+        activity.truncate(15);
+        let rooms_count = out.len();
+        json!({"ok": true, "rooms": out, "stats": {"rooms": rooms_count, "members": members.len(), "active": active.len()}, "activity": activity})
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "rooms task failed"}));

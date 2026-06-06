@@ -11,13 +11,14 @@
     display_name: string; handle: string; auto_join_community: boolean;
     moderation_keywords: string[];
   };
-  type Room = { room_id: string; name: string; last_ts: number };
+  type Room = { room_id: string; name: string; last_ts: number; members?: number; last_sender?: string; last_body?: string };
   type Msg = { sender: string; body: string; ts: number; event_id: string };
 
   let status: Status | null = null;
   let rooms: Room[] = [];
   let selected: Room | null = null;
   let messages: Msg[] = [];
+  let stats: { rooms: number; members: number; active: number } | null = null;
   let draft = '';
   let err = '';
   let busy = '';
@@ -50,6 +51,7 @@
       const r = await api('/rooms');
       if (r.ok) {
         rooms = (r.rooms ?? []).sort((a: Room, b: Room) => b.last_ts - a.last_ts);
+        stats = r.stats ?? null;
         if (!selected && rooms.length) selectRoom(rooms[0]);
       }
     } catch { /* */ }
@@ -157,9 +159,12 @@
 
   // moderation: hide messages whose body matches any keyword (case-insensitive)
   function filtered(m: Msg): boolean {
+    return bodyFiltered(m.body);
+  }
+  function bodyFiltered(body?: string): boolean {
     const kws = status?.moderation_keywords ?? [];
-    if (!kws.length || !m.body) return false;
-    const b = m.body.toLowerCase();
+    if (!kws.length || !body) return false;
+    const b = body.toLowerCase();
     return kws.some((k) => b.includes(k.toLowerCase()));
   }
   const shortOnion = (o: string) => (o ? o.slice(0, 8) + '…' + o.slice(-10) : '');
@@ -241,6 +246,7 @@
           <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {dotCls(status.conduit)}"></span><span class="text-zinc-400">Homeserver</span></div>
           <div class="font-mono text-[11px] text-cursed-300" title={status.onion}>{shortOnion(status.onion)}</div>
           {#if status.owner}<div class="font-mono text-[11px] text-zinc-400">you: {shortUser(status.owner)}</div>{/if}
+          {#if stats}<div class="text-[11px] text-zinc-400" title="active = posted in the last hour (presence over Tor is unreliable)">{stats.members} member{stats.members === 1 ? '' : 's'} · {stats.active} active · {stats.rooms} rooms</div>{/if}
           <div class="ml-auto flex items-center gap-2">
             <button class="btn text-xs" on:click={createGroup}>+ group</button>
             <button class="btn text-xs" on:click={startDm}>+ DM</button>
@@ -264,10 +270,14 @@
           <section class="bg-ink-900 border border-ink-700 rounded-xl p-2 space-y-1 h-[60vh] overflow-y-auto">
             <div class="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-zinc-500">Rooms ({rooms.length})</div>
             {#each rooms as r (r.room_id)}
-              <button class="w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 {selected?.room_id === r.room_id ? 'bg-cursed-500/20 text-cursed-100' : 'text-zinc-300 hover:bg-ink-800'}"
+              <button class="w-full text-left px-2 py-1.5 rounded text-sm {selected?.room_id === r.room_id ? 'bg-cursed-500/20 text-cursed-100' : 'text-zinc-300 hover:bg-ink-800'}"
                       on:click={() => selectRoom(r)}>
-                <span class="flex-1 truncate">{r.name}</span>
-                {#if r.last_ts}<span class="text-[10px] text-zinc-600">{fmtTime(r.last_ts)}</span>{/if}
+                <div class="flex items-center gap-2">
+                  <span class="flex-1 truncate">{r.name}</span>
+                  {#if r.members}<span class="text-[9px] text-zinc-600">{r.members}👤</span>{/if}
+                  {#if r.last_ts}<span class="text-[10px] text-zinc-600">{fmtTime(r.last_ts)}</span>{/if}
+                </div>
+                {#if r.last_body}<div class="text-[10px] text-zinc-600 truncate">{bodyFiltered(r.last_body) ? '⊘ hidden' : r.last_body}</div>{/if}
               </button>
             {:else}
               <p class="px-2 py-3 text-xs text-zinc-600">No rooms yet — the community is being set up.</p>
