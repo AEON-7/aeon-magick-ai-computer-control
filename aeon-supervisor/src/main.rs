@@ -106,6 +106,8 @@ async fn main() -> Result<()> {
     // accumulate per-agent token usage locally, so the dashboard can show
     // 30-day / 90-day / 1-year history beyond the gateway's short window.
     tokio::spawn(agent_connect::token_sampler_loop());
+    // OrbNet persona responder: placed persona bots reply via their LLM.
+    tokio::spawn(orbnet::persona_responder_loop());
     // Ensure the AEON_DROP iptables chain exists at startup so every
     // DROP rule we apply (user or system) gets logged on the way down.
     // This is what populates the "Blocked traffic" panel.

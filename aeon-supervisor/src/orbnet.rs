@@ -684,3 +684,263 @@ pub async fn peer(State(_s): State<AppState>, Json(req): Json<PeerReq>) -> Json<
     .unwrap_or_else(|_| json!({"ok": false, "err": "peer task failed"}));
     Json(v)
 }
+
+// ── personas (human-placed LLM bots) ─────────────────────────────────────────
+//
+// A persona is an LLM-backed Matrix bot with its own account on this homeserver.
+// It is ONLY ever added to a room by an explicit human action (the admin-gated
+// endpoint below) — never automatically. A background responder syncs each
+// persona's rooms and replies to non-persona messages via the configured LLM.
+
+const PERSONAS_JSON: &str = "/var/lib/aeon/orbnet/personas.json";
+const SINCE_DIR: &str = "/var/lib/aeon/orbnet/persona-since";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Persona {
+    name: String,
+    handle: String,
+    user_id: String,
+    access_token: String,
+    #[serde(default)]
+    system_prompt: String,
+    #[serde(default)]
+    llm_url: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    rooms: Vec<String>,
+}
+
+fn read_personas() -> Vec<Persona> {
+    std::fs::read_to_string(PERSONAS_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+fn write_personas(p: &[Persona]) -> std::io::Result<()> {
+    std::fs::create_dir_all(RUNTIME_DIR)?;
+    let tmp = format!("{PERSONAS_JSON}.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(p).unwrap_or_default())?;
+    std::fs::rename(tmp, PERSONAS_JSON)
+}
+fn read_since(handle: &str) -> String {
+    std::fs::read_to_string(format!("{SINCE_DIR}/{handle}")).unwrap_or_default().trim().to_string()
+}
+fn write_since(handle: &str, since: &str) {
+    let _ = std::fs::create_dir_all(SINCE_DIR);
+    let _ = std::fs::write(format!("{SINCE_DIR}/{handle}"), since);
+}
+
+/// Register a fresh Matrix account on the local homeserver (UIA token flow).
+fn register_account(handle: &str, password: &str) -> Result<(String, String), String> {
+    let reg_token = run_script(&["reg-token"])?;
+    if reg_token.is_empty() {
+        return Err("no registration token".into());
+    }
+    let path = "/_matrix/client/v3/register?kind=user";
+    let r1 = cs_curl("POST", path, None, Some(&json!({"username": handle, "password": password}).to_string()))?;
+    if let Some(t) = r1.get("access_token").and_then(|v| v.as_str()) {
+        return Ok((r1["user_id"].as_str().unwrap_or_default().to_string(), t.to_string()));
+    }
+    let session = r1.get("session").and_then(|v| v.as_str()).ok_or_else(|| format!("register: {r1}"))?;
+    let auth = json!({"type": "m.login.registration_token", "token": reg_token, "session": session});
+    let r2 = cs_curl("POST", path, None, Some(&json!({"username": handle, "password": password, "auth": auth}).to_string()))?;
+    let t = r2.get("access_token").and_then(|v| v.as_str()).ok_or_else(|| format!("register2: {r2}"))?;
+    Ok((r2["user_id"].as_str().unwrap_or_default().to_string(), t.to_string()))
+}
+
+/// Ask the persona's LLM (OpenAI-compatible chat completions) for a reply.
+fn llm_reply(p: &Persona, context: &[(String, String)]) -> Option<String> {
+    if p.llm_url.is_empty() {
+        return None;
+    }
+    let mut messages = vec![json!({"role": "system", "content": p.system_prompt})];
+    for (sender, body) in context {
+        let role = if sender == &p.user_id { "assistant" } else { "user" };
+        messages.push(json!({"role": role, "content": body}));
+    }
+    let payload = json!({"model": p.model, "messages": messages, "max_tokens": 400, "temperature": 0.8});
+    let mut cmd = Command::new("curl");
+    cmd.args(["-s", "--max-time", "90", "-X", "POST", &p.llm_url, "-H", "Content-Type: application/json"]);
+    if !p.api_key.is_empty() {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {}", p.api_key));
+    }
+    cmd.arg("-d").arg(payload.to_string());
+    let out = cmd.output().ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.pointer("/choices/0/message/content").and_then(|c| c.as_str()).map(|s| s.trim().to_string())
+}
+
+/// One sync+reply pass for a persona. First sync records position (no replies to
+/// history); later syncs reply to new non-persona messages.
+fn respond_for_persona(p: &Persona, persona_ids: &[String]) {
+    let since = read_since(&p.handle);
+    let path = if since.is_empty() {
+        "/_matrix/client/v3/sync?timeout=0".to_string()
+    } else {
+        format!("/_matrix/client/v3/sync?since={}&timeout=0", urlencode(&since))
+    };
+    let Ok(sync) = cs_curl("GET", &path, Some(&p.access_token), None) else {
+        return;
+    };
+    if let Some(nb) = sync.get("next_batch").and_then(|v| v.as_str()) {
+        write_since(&p.handle, nb);
+    }
+    if since.is_empty() {
+        return; // first pass: just set the cursor
+    }
+    let Some(join) = sync.pointer("/rooms/join").and_then(|v| v.as_object()) else {
+        return;
+    };
+    for (rid, room) in join {
+        let Some(events) = room.pointer("/timeline/events").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let mut context: Vec<(String, String)> = vec![];
+        let mut has_user_msg = false;
+        for e in events {
+            if e.get("type").and_then(|t| t.as_str()) != Some("m.room.message") {
+                continue;
+            }
+            let sender = e.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let body = e.pointer("/content/body").and_then(|b| b.as_str()).unwrap_or("").to_string();
+            if body.is_empty() {
+                continue;
+            }
+            if sender != p.user_id && !persona_ids.contains(&sender) {
+                has_user_msg = true;
+            }
+            context.push((sender, body));
+        }
+        if !has_user_msg {
+            continue;
+        }
+        let ctx: Vec<(String, String)> = context.into_iter().rev().take(8).rev().collect();
+        if let Some(reply) = llm_reply(p, &ctx) {
+            if !reply.is_empty() {
+                let txn = rand_hex(8);
+                let _ = cs_curl(
+                    "PUT",
+                    &format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{}", urlencode(rid), txn),
+                    Some(&p.access_token),
+                    Some(&json!({"msgtype": "m.text", "body": reply}).to_string()),
+                );
+            }
+        }
+    }
+}
+
+/// Background loop: every few seconds, give each placed persona a sync+reply pass.
+/// Spawned once from main().
+pub async fn persona_responder_loop() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        let personas = tokio::task::spawn_blocking(read_personas).await.unwrap_or_default();
+        if personas.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = personas.iter().map(|p| p.user_id.clone()).collect();
+        for p in personas {
+            let ids = ids.clone();
+            let _ = tokio::task::spawn_blocking(move || respond_for_persona(&p, &ids)).await;
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PersonaReq {
+    pub name: String,
+    pub room_id: String,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub llm_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+/// POST /api/orbnet/persona — HUMAN-DIRECTED: place a persona bot into a room.
+/// Registers (or re-uses) the bot account, invites + joins it, records its
+/// config for the responder. Admin-gated — never automatic. Admin-gated.
+pub async fn place_persona(State(_s): State<AppState>, Json(req): Json<PersonaReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(owner) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let handle = format!("persona-{}", sanitize_handle(&req.name));
+        let mut personas = read_personas();
+        // re-use an existing persona account with the same handle, else register
+        let (user_id, token) = if let Some(ex) = personas.iter().find(|p| p.handle == handle) {
+            (ex.user_id.clone(), ex.access_token.clone())
+        } else {
+            match register_account(&handle, &rand_hex(16)) {
+                Ok(pair) => {
+                    let _ = cs_curl(
+                        "PUT",
+                        &format!("/_matrix/client/v3/profile/{}/displayname", urlencode(&pair.0)),
+                        Some(&pair.1),
+                        Some(&json!({"displayname": format!("🎭 {}", req.name)}).to_string()),
+                    );
+                    pair
+                }
+                Err(e) => return json!({"ok": false, "err": format!("register persona: {e}")}),
+            }
+        };
+        // owner invites the bot, bot joins
+        let _ = cs_curl(
+            "POST",
+            &format!("/_matrix/client/v3/rooms/{}/invite", urlencode(&req.room_id)),
+            Some(&owner.access_token),
+            Some(&json!({"user_id": user_id}).to_string()),
+        );
+        let join = cs_curl(
+            "POST",
+            &format!("/_matrix/client/v3/join/{}", urlencode(&req.room_id)),
+            Some(&token),
+            Some("{}"),
+        );
+        if join.map(|v| v.get("room_id").is_none()).unwrap_or(true) {
+            return json!({"ok": false, "err": "persona could not join the room"});
+        }
+        // record / update
+        if let Some(p) = personas.iter_mut().find(|p| p.handle == handle) {
+            if !p.rooms.contains(&req.room_id) {
+                p.rooms.push(req.room_id.clone());
+            }
+            if !req.system_prompt.is_empty() { p.system_prompt = req.system_prompt.clone(); }
+            if !req.llm_url.is_empty() { p.llm_url = req.llm_url.clone(); }
+            if !req.model.is_empty() { p.model = req.model.clone(); }
+            if !req.api_key.is_empty() { p.api_key = req.api_key.clone(); }
+        } else {
+            personas.push(Persona {
+                name: req.name.clone(),
+                handle: handle.clone(),
+                user_id: user_id.clone(),
+                access_token: token,
+                system_prompt: req.system_prompt,
+                llm_url: req.llm_url,
+                model: req.model,
+                api_key: req.api_key,
+                rooms: vec![req.room_id.clone()],
+            });
+        }
+        let _ = write_personas(&personas);
+        json!({"ok": true, "user_id": user_id, "room_id": req.room_id})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "persona task failed"}));
+    Json(v)
+}
+
+/// GET /api/orbnet/personas — list placed personas (name + rooms, no secrets).
+pub async fn personas(State(_s): State<AppState>) -> Json<Value> {
+    let list: Vec<Value> = read_personas()
+        .iter()
+        .map(|p| json!({"name": p.name, "user_id": p.user_id, "rooms": p.rooms, "has_llm": !p.llm_url.is_empty()}))
+        .collect();
+    Json(json!({"ok": true, "personas": list}))
+}

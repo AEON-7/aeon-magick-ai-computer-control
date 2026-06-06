@@ -140,6 +140,21 @@
     else alert('Peer failed: ' + JSON.stringify(r.err));
   }
 
+  // personas — human-placed only
+  let showPersona = false;
+  let pName = '', pPrompt = '', pLlm = '', pModel = '';
+  async function placePersona() {
+    if (!selected || !pName.trim()) return;
+    busy = 'Placing persona…';
+    const r = await api('/persona', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: pName.trim(), room_id: selected.room_id, system_prompt: pPrompt, llm_url: pLlm, model: pModel }),
+    });
+    busy = '';
+    if (r.ok) { showPersona = false; pName = pPrompt = pLlm = pModel = ''; alert('Persona placed in ' + selected.name); }
+    else alert('Could not place persona: ' + JSON.stringify(r.err));
+  }
+
   // moderation: hide messages whose body matches any keyword (case-insensitive)
   function filtered(m: Msg): boolean {
     const kws = status?.moderation_keywords ?? [];
@@ -262,7 +277,22 @@
           <!-- chat -->
           <section class="bg-ink-900 border border-ink-700 rounded-xl flex flex-col h-[60vh]">
             {#if selected}
-              <div class="px-4 py-2 border-b border-ink-800 text-sm text-zinc-200 font-mono truncate">{selected.name}</div>
+              <div class="px-4 py-2 border-b border-ink-800 flex items-center gap-2">
+                <span class="text-sm text-zinc-200 font-mono truncate flex-1">{selected.name}</span>
+                <button class="btn text-[11px]" class:active={showPersona} on:click={() => (showPersona = !showPersona)}>🎭 + persona</button>
+              </div>
+              {#if showPersona}
+                <div class="p-3 border-b border-ink-800 bg-ink-950/40 space-y-2">
+                  <p class="text-[11px] text-zinc-500">Place an LLM persona into <b class="text-cursed-200">{selected.name}</b>. It replies to messages here via your LLM endpoint. <b>You place it — never automatic.</b></p>
+                  <input bind:value={pName} placeholder="persona name (e.g. Thoth)" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200" />
+                  <textarea bind:value={pPrompt} rows="2" placeholder="system prompt / personality" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200"></textarea>
+                  <div class="flex gap-2">
+                    <input bind:value={pLlm} placeholder="LLM URL (…/v1/chat/completions)" class="flex-1 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono" />
+                    <input bind:value={pModel} placeholder="model" class="w-28 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono" />
+                  </div>
+                  <button class="btn text-xs" disabled={!!busy} on:click={placePersona}>place persona</button>
+                </div>
+              {/if}
               <div class="flex-1 overflow-y-auto p-3 space-y-2">
                 {#each messages as m (m.event_id)}
                   {#if filtered(m)}
