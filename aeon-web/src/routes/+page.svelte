@@ -32,6 +32,9 @@
     { label: 'Agents', items: [
       { href: '/agent', label: 'Agent Dash', icon: 'braces', title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
     ]},
+    { label: 'Hardware', items: [
+      { href: '/gpio', label: 'GPIO', icon: 'chip', title: 'GPIO pins, HATs, power + IO — live hardware state' },
+    ]},
     { label: 'System', items: [
       { href: '/system', label: 'Pi', icon: 'cpu', title: 'Pi health + reboot/poweroff + stream tuning' },
     ]},
