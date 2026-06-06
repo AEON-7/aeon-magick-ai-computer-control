@@ -30,6 +30,10 @@
   let clientPw = '';
   let pwBusy = false;
   let pwMsg = '';
+  let tailscale: any = null;
+  let tsBusy = false;
+  let tsMsg = '';
+  let tsAdminUrl = '';
   let poll: ReturnType<typeof setInterval>;
 
   // activate form
@@ -216,6 +220,28 @@
       return qr.createSvgTag({ cellSize: 4, margin: 2 });
     } catch { return ''; }
   }
+  async function loadTailscale() {
+    try { tailscale = await api('/tailscale'); } catch { tailscale = null; }
+  }
+  async function enableTailscale() {
+    tsBusy = true; tsMsg = ''; tsAdminUrl = '';
+    try {
+      const r = await api('/tailscale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enable: true }) });
+      if (r.ok) { await loadTailscale(); }
+      else { tsMsg = typeof r.err === 'string' ? r.err.split('\n')[0] : 'Could not enable.'; tsAdminUrl = r.admin_url || ''; }
+    } catch (e: any) { tsMsg = e?.message ?? 'failed'; }
+    finally { tsBusy = false; }
+  }
+  async function disableTailscale() {
+    try {
+      await api('/tailscale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enable: false }) });
+      await loadTailscale();
+    } catch { /* */ }
+  }
+  function toggleConnect() {
+    showConnect = !showConnect;
+    if (showConnect && !tailscale) loadTailscale();
+  }
   async function setClientPassword() {
     if (clientPw.length < 8) { pwMsg = 'Use at least 8 characters.'; return; }
     pwBusy = true; pwMsg = '';
@@ -316,7 +342,7 @@
             <button class="btn text-xs" on:click={createGroup}>+ group</button>
             <button class="btn text-xs" on:click={startDm}>+ DM</button>
             <button class="btn text-xs" on:click={peerOrb}>+ peer Orb</button>
-            <button class="btn text-xs" class:active={showConnect} on:click={() => (showConnect = !showConnect)}>📱 connect</button>
+            <button class="btn text-xs" class:active={showConnect} on:click={toggleConnect}>📱 connect</button>
             <button class="btn text-xs" class:active={showMod} on:click={() => (showMod = !showMod)}>moderation</button>
           </div>
         </section>
@@ -327,6 +353,38 @@
               <div class="text-xs font-mono uppercase tracking-wider text-cursed-300">📱 Connect a client (Element)</div>
               <button class="text-zinc-500 hover:text-zinc-300 text-xs" on:click={() => (showConnect = false)}>close ✕</button>
             </div>
+            {#if tailscale?.available}
+              <div class="rounded-lg border border-sky-500/30 bg-sky-600/5 p-3 space-y-2.5">
+                <div class="flex items-center justify-between">
+                  <div class="text-[12px] font-semibold text-sky-200">⚡ Tailscale — easiest, for your own devices</div>
+                  {#if tailscale.serve_active}<span class="text-[11px] text-live-300">● active</span>{/if}
+                </div>
+                {#if tailscale.serve_active}
+                  <div class="flex flex-wrap items-start gap-4">
+                    <div class="bg-white p-2 rounded inline-block shrink-0">{@html qrSvg(tailscale.url)}</div>
+                    <div class="space-y-2 text-[12px] min-w-[220px]">
+                      <div>
+                        <div class="text-zinc-500">Homeserver URL <span class="text-live-400/80">· valid cert, no install</span></div>
+                        <button class="font-mono text-sky-200 hover:text-sky-100 break-all text-left" on:click={() => copy(tailscale.url)}>{tailscale.url}<span class="text-zinc-500 ml-1">{copied === tailscale.url ? '✓' : '⧉'}</span></button>
+                      </div>
+                      <ol class="list-decimal ml-4 space-y-0.5 text-zinc-400">
+                        <li>Install the <b class="text-zinc-200">Tailscale</b> app on the phone + sign into this tailnet.</li>
+                        <li>Set a login password (below).</li>
+                        <li>Element → Sign in → custom server → this URL → your Matrix ID + password. No cert, no Tor.</li>
+                      </ol>
+                    </div>
+                  </div>
+                  <button class="text-[11px] text-zinc-500 hover:text-zinc-300 underline" on:click={disableTailscale}>turn off Tailscale access</button>
+                {:else}
+                  <p class="text-[12px] text-zinc-400">Expose your Matrix server on your tailnet with a <b class="text-zinc-300">valid certificate</b> — Element connects with no cert install and no Tor (the phone just needs the Tailscale app).</p>
+                  <button class="btn text-sm" disabled={tsBusy} on:click={enableTailscale}>{tsBusy ? 'enabling…' : '⚡ Enable Tailscale access'}</button>
+                  {#if tsMsg}
+                    <div class="text-[12px] text-amber-300">{tsMsg}{#if tsAdminUrl} — <a class="underline text-sky-300" href={tsAdminUrl} target="_blank" rel="noopener noreferrer">enable Serve in your Tailscale admin →</a>{/if}</div>
+                  {/if}
+                {/if}
+              </div>
+              <div class="text-[11px] text-zinc-600 text-center">— or, anonymously from anywhere, over Tor —</div>
+            {/if}
             <div class="flex flex-wrap items-start gap-5">
               <div class="bg-white p-2 rounded inline-block shrink-0">{@html qrSvg(homeserver)}</div>
               <div class="space-y-2.5 text-[12px] min-w-[240px]">
