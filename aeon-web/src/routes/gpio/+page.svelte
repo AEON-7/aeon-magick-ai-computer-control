@@ -39,6 +39,17 @@
   let hatSearch = '';
   let showBrowser = false;
 
+  // I2C-detected hardware — EEPROM-less HAT detection via the live bus scan.
+  type I2cAddr = { addr: string; chips: Array<{ chip: string; category?: string }> };
+  type I2cDetect = {
+    available: boolean;
+    buses: Array<{ bus: number; device: string; header: boolean; addresses: I2cAddr[] }>;
+    detected_hats: Array<{ id: string; name: string; manufacturer?: string; confidence: string; matched_addrs: string[]; total_addrs: number }>;
+    fixtures: Array<{ match: string; name: string; note: string }>;
+  };
+  let i2c: I2cDetect | null = null;
+  let i2cLoading = false;
+
   async function refresh() {
     try {
       const r = await fetch('/api/hardware/state', { credentials: 'same-origin' }).then((r) => r.json());
@@ -56,6 +67,21 @@
       const r = await fetch('/api/hardware/hats', { credentials: 'same-origin' }).then((r) => r.json());
       hatLibrary = r.hats ?? [];
     } catch { /* optional */ }
+  }
+  async function loadI2c() {
+    i2cLoading = true;
+    try {
+      i2c = await fetch('/api/hardware/i2c', { credentials: 'same-origin' }).then((r) => r.json());
+      // auto-overlay high-confidence detections so their pins land on the schematic
+      for (const d of i2c?.detected_hats ?? []) {
+        if (d.confidence === 'high') {
+          const lib = hatLibrary.find((h) => h.id === d.id);
+          if (lib && !stack.find((x) => x.id === lib.id)) addToStack(lib);
+        }
+      }
+    } catch { /* optional */ } finally {
+      i2cLoading = false;
+    }
   }
   async function runCheck() {
     if (stack.length < 1) { stackCheck = null; return; }
@@ -76,7 +102,7 @@
   }
   onMount(() => {
     refresh();
-    loadHats();
+    loadHats().then(() => loadI2c());
     poll = setInterval(refresh, 4000);
   });
   onDestroy(() => clearInterval(poll));
@@ -207,13 +233,49 @@
                 {#if hat.library_match}<div class="mt-1 text-xs text-live-400">✓ identified as “{hat.library_match.name}”</div>
                 {:else}<div class="mt-1 text-xs text-zinc-500">Not in the pin library (long-tail) — the AI can probe it. Add boards below to plan a stack.</div>{/if}
               {:else}
-                <div class="mt-1.5 text-zinc-500 text-sm">No HAT attached. Add boards below to plan a stack + check compatibility before you plug anything in.</div>
+                <div class="mt-1.5 text-zinc-500 text-sm">No HAT ID EEPROM — detection falls back to the I²C bus scan below. You can also add boards to plan a stack + check compatibility before plugging anything in.</div>
               {/if}
             </div>
             <button class="btn text-xs whitespace-nowrap" on:click={() => (showBrowser = !showBrowser)}>
               {showBrowser ? 'close' : `+ add HAT (${hatLibrary.length})`}
             </button>
           </div>
+
+          {#if i2c?.available}
+            <div class="pt-2 border-t border-ink-800 space-y-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Detected on I²C</span>
+                <button class="text-[10px] font-mono text-cursed-300 hover:text-cursed-200 disabled:opacity-50" on:click={loadI2c} disabled={i2cLoading}>{i2cLoading ? 'scanning…' : '⟳ rescan'}</button>
+              </div>
+              {#each i2c.detected_hats ?? [] as d}
+                <div class="flex items-center gap-2 flex-wrap text-sm">
+                  <span class="text-live-400">✓ {d.name}</span>
+                  <span class="text-[10px] font-mono {d.confidence === 'high' ? 'text-live-400/80' : 'text-amber-300/80'}">{d.confidence} · {d.matched_addrs.length}/{d.total_addrs} chips on bus</span>
+                  {#if stack.find((x) => x.id === d.id)}
+                    <span class="text-[10px] text-zinc-600">pins overlaid ↓</span>
+                  {:else}
+                    <button class="text-[10px] font-mono text-cursed-300 hover:text-cursed-200" on:click={() => { const h = hatLibrary.find((x) => x.id === d.id); if (h) addToStack(h); }}>+ overlay pins</button>
+                  {/if}
+                </div>
+              {/each}
+              {#each i2c.fixtures ?? [] as f}
+                <div class="text-xs text-zinc-400"><span class="font-mono text-amber-300">{f.match}</span> · {f.name}<span class="text-zinc-600 cursor-help" title={f.note}> ⓘ</span></div>
+              {/each}
+              {#each (i2c.buses ?? []).filter((b) => b.addresses.length) as b}
+                <div class="text-[11px] font-mono text-zinc-500 flex flex-wrap gap-x-1.5 gap-y-0.5">
+                  <span class="text-zinc-600">bus {b.bus}{b.header ? ' (header)' : ''}:</span>
+                  {#each b.addresses as a}
+                    <span class="text-zinc-300 cursor-help" title={(a.chips ?? []).map((c) => c.chip).join(', ') || 'unknown — probe to identify'}>{a.addr}</span>
+                  {/each}
+                </div>
+              {/each}
+              {#if !(i2c.detected_hats ?? []).length && !(i2c.buses ?? []).some((b) => b.addresses.length)}
+                <div class="text-xs text-zinc-600">No I²C devices responding on the header.</div>
+              {/if}
+            </div>
+          {:else if i2c}
+            <div class="pt-2 border-t border-ink-800 text-xs text-zinc-600">I²C bus unavailable — needs <code class="text-zinc-500">dtparam=i2c_arm=on</code> + the <code class="text-zinc-500">i2c-dev</code> module.</div>
+          {/if}
 
           {#if showBrowser}
             <div class="space-y-2 pt-2 border-t border-ink-800">

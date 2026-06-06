@@ -471,6 +471,181 @@ fn buses_section() -> Value {
     })
 }
 
+// ── I2C device + HAT detection (EEPROM-less) ─────────────────────────────────
+//
+// Most cases (Argon) and budget HATs (and even the Sense HAT here) ship no HAT+
+// ID EEPROM, so `/proc/device-tree/hat` is empty and the EEPROM path finds
+// nothing. The fallback is to scan the header I2C bus and reason about what's
+// answering: map each address to candidate chips, and infer a library HAT when
+// enough of its declared addresses are live at once (a multi-chip signature
+// like the Sense HAT's 5 chips is a reliable fingerprint; a lone address is
+// ambiguous and left to the per-address candidates).
+
+fn i2cdetect_bin() -> &'static str {
+    for p in ["/usr/sbin/i2cdetect", "/usr/bin/i2cdetect"] {
+        if std::path::Path::new(p).exists() {
+            return p;
+        }
+    }
+    "i2cdetect"
+}
+
+/// Present 7-bit addresses on a bus, by parsing `i2cdetect -y <bus>`. Includes
+/// driver-bound ("UU") cells — a bound address is still a real device.
+fn i2c_scan(bus: u8) -> Vec<String> {
+    let b = bus.to_string();
+    let out = run(i2cdetect_bin(), &["-y", b.as_str()]);
+    let mut addrs = vec![];
+    for line in out.lines() {
+        let Some((lbl, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(base) = u8::from_str_radix(lbl.trim(), 16) else {
+            continue;
+        };
+        for (i, cell) in rest.split_whitespace().enumerate() {
+            if i > 15 || cell == "--" {
+                continue;
+            }
+            addrs.push(format!("0x{:02x}", base.wrapping_add(i as u8)));
+        }
+    }
+    addrs
+}
+
+/// Chip-DB candidates that could answer at an I2C address.
+fn chips_for_addr(addr: &str) -> Vec<Value> {
+    let Ok(t) = u8::from_str_radix(addr.trim_start_matches("0x"), 16) else {
+        return vec![];
+    };
+    let hex = |v: &Value, k: &str| -> Option<u8> {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+    };
+    library()
+        .get("chips")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| match (hex(c, "addr_low"), hex(c, "addr_high")) {
+                    (Some(lo), Some(hi)) => t >= lo && t <= hi,
+                    _ => false,
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Infer library HATs from the set of live addresses. Requires >=2 of a board's
+/// declared I2C addresses present (a single overlap is too ambiguous — many
+/// chips share an address); ranks by match count then coverage.
+fn detect_i2c_hats(present: &std::collections::HashSet<String>) -> Vec<Value> {
+    let Some(hats) = library().get("hats").and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    let mut scored: Vec<(usize, f64, Value)> = vec![];
+    for h in hats {
+        let Some(i2c) = h.get("i2c").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        if i2c.is_empty() {
+            continue;
+        }
+        let total = i2c.len();
+        let matched: Vec<String> = i2c
+            .keys()
+            .filter(|a| present.contains(a.as_str()))
+            .cloned()
+            .collect();
+        if matched.len() < 2 {
+            continue;
+        }
+        let frac = matched.len() as f64 / total as f64;
+        let confidence = if matched.len() >= 3 || frac >= 0.6 {
+            "high"
+        } else {
+            "medium"
+        };
+        scored.push((
+            matched.len(),
+            frac,
+            json!({
+                "id": h.get("id"),
+                "name": h.get("name"),
+                "manufacturer": h.get("manufacturer"),
+                "confidence": confidence,
+                "matched_addrs": matched,
+                "total_addrs": total,
+            }),
+        ));
+    }
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    scored.into_iter().map(|(_, _, v)| v).collect()
+}
+
+/// Curated hints for common non-spec boards (no EEPROM, not in pinout.xyz) with
+/// a recognisable I2C footprint — e.g. the Argon cases.
+fn known_fixtures(present: &std::collections::HashSet<String>) -> Vec<Value> {
+    let mut out = vec![];
+    if present.contains("0x1a") {
+        out.push(json!({
+            "match": "0x1a",
+            "name": "Argon case fan/power controller (likely)",
+            "note": "0x1a is the Argon ONE/M.2/NEO fan+power MCU (also some audio codecs / MCP9808). Not a spec HAT, so it only shows via this address — driven by the argonone daemon.",
+        }));
+    }
+    out
+}
+
+/// Scan the header I2C bus(es) and assemble the EEPROM-less detection: per-
+/// address chip candidates, inferred library HATs, and curated fixtures.
+fn i2c_detect_section() -> Value {
+    let devs = glob_dev("i2c-");
+    let mut bus_scans = vec![];
+    let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for dev in &devs {
+        // Header buses only (1..=9). Skip the Pi's internal mux buses (i2c-20/21
+        // on Pi 4 are HDMI/CSI) and the ID-EEPROM bus (0).
+        let Some(n) = dev.rsplit('-').next().and_then(|s| s.parse::<u8>().ok()) else {
+            continue;
+        };
+        if !(1..=9).contains(&n) {
+            continue;
+        }
+        let addrs = i2c_scan(n);
+        for a in &addrs {
+            present.insert(a.clone());
+        }
+        let addresses: Vec<Value> = addrs
+            .iter()
+            .map(|a| json!({ "addr": a, "chips": chips_for_addr(a) }))
+            .collect();
+        bus_scans.push(json!({ "bus": n, "device": dev, "header": n == 1, "addresses": addresses }));
+    }
+    json!({
+        "available": !devs.is_empty(),
+        "buses": bus_scans,
+        "detected_hats": detect_i2c_hats(&present),
+        "fixtures": known_fixtures(&present),
+    })
+}
+
+/// GET /api/hardware/i2c — live I2C bus scan with chip candidates, inferred
+/// library HATs (by address signature), and curated fixtures. The EEPROM-less
+/// path the dashboard uses to name attached boards (Sense HAT, Argon, …).
+/// Read-scope (GET).
+pub async fn hardware_i2c(State(_state): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(i2c_detect_section)
+        .await
+        .unwrap_or_else(|_| json!({ "available": false, "err": "i2c scan task failed" }));
+    Json(v)
+}
+
 // ── camera ──────────────────────────────────────────────────────────────────
 
 fn camera_section() -> Value {

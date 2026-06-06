@@ -98,6 +98,11 @@ dwc2
 libcomposite
 # UVC for HDMI capture devices like Elgato Cam Link 4K
 uvcvideo
+# I2C userspace char device (/dev/i2c-N) for HAT detection + i2cdetect.
+# dtparam=i2c_arm=on (config.txt) enables the controller but does NOT create
+# /dev/i2c-N — i2c-dev does. Without this the bus scan + HAT auto-detect (the
+# EEPROM-less path used by /api/hardware/i2c) see nothing.
+i2c-dev
 EOF
 
 # Blacklist Bluetooth modules — we already disabled the hardware via
