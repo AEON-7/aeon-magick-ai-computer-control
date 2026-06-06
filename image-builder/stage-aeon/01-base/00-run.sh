@@ -16,6 +16,7 @@ apt-get install -y --no-install-recommends \
     wpasupplicant \
     usbutils \
     pciutils \
+    i2c-tools \
     ethtool \
     ca-certificates \
     curl \

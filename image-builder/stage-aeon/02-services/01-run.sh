@@ -17,6 +17,20 @@ dtoverlay=dwc2,dr_mode=peripheral
 EOF
     fi
 
+    # ── GPIO / HAT buses ──
+    # Enable I2C + SPI on the 40-pin header so HATs + I2C/SPI breakouts work and
+    # the hardware dashboard can scan (i2cdetect) + drive them. camera_auto_detect
+    # is already on in stock Pi OS config.txt, so a CSI camera auto-detects.
+    if ! grep -q "^# aeon-magick gpio buses" "${CONFIG_TXT}"; then
+        cat >> "${CONFIG_TXT}" <<'EOF'
+
+# aeon-magick gpio buses
+[all]
+dtparam=i2c_arm=on
+dtparam=spi=on
+EOF
+    fi
+
     # ── Power-draw optimization ──
     # The device's job is: capture HDMI via Cam Link USB-3, serve frames
     # over the network, emulate USB HID. It NEVER needs Pi's own HDMI
