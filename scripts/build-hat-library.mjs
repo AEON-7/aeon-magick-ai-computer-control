@@ -113,7 +113,44 @@ function parseChips(inoPath) {
   out.sort((a, b) => a.chip.localeCompare(b.chip));
   return out;
 }
-const chips = parseChips(process.argv[4] || '/tmp/i2c-detective/I2CDetective.ino');
+// Curated chip -> address list WITH product/guide links (adafruit/I2C_Addresses).
+// The guide URL is the AI's "how to program this chip" entry point (the Adafruit
+// learn guide carries the CircuitPython driver + register usage).
+function parseAdafruitI2c(dir) {
+  if (!dir || !fs.existsSync(dir)) return [];
+  const out = [];
+  for (const f of fs.readdirSync(dir).filter((f) => /^0x.*\.md$/.test(f))) {
+    for (const line of fs.readFileSync(path.join(dir, f), 'utf8').split('\n')) {
+      const m = line.match(/^\s*-\s*\[([^\]]+)\]\(([^)]+)\)\s*(?:\(([^)]*)\))?/);
+      if (!m) continue;
+      const label = m[1].trim();
+      const chip = (label.split(/[\s,(]/)[0] || '').replace(/[^\w./-]/g, '');
+      if (!chip) continue;
+      out.push({ chip, label, guide: m[2].trim(), addr_note: (m[3] || '').trim() });
+    }
+  }
+  return out;
+}
+
+// Merge the two chip sources by normalized name. i2c-detective gives category +
+// address range + ID register; adafruit adds a guide link + address variants.
+const normChip = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+const chipMap = new Map();
+for (const c of parseChips(process.argv[4] || '/tmp/i2c-detective/I2CDetective.ino')) {
+  chipMap.set(normChip(c.chip), { ...c, sources: ['i2c-detective'] });
+}
+for (const c of parseAdafruitI2c(process.argv[5] || '/tmp/i2c-addresses')) {
+  const k = normChip(c.chip);
+  const ex = chipMap.get(k);
+  if (ex) {
+    if (c.guide && !ex.guide) ex.guide = c.guide;
+    if (c.label && !ex.label) ex.label = c.label;
+    if (!ex.sources.includes('adafruit')) ex.sources.push('adafruit');
+  } else {
+    chipMap.set(k, { chip: c.chip, label: c.label, guide: c.guide, addr_note: c.addr_note, sources: ['adafruit'] });
+  }
+}
+const chips = [...chipMap.values()].sort((a, b) => a.chip.localeCompare(b.chip));
 
 const lib = {
   schema: 2,
