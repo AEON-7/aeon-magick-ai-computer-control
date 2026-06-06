@@ -205,13 +205,15 @@
 
   /** Open a new terminal pane for a system and switch to the Terminal tab. */
   async function openTerminal(sysId: string) {
+    // `local` is the Orb itself — a local login shell, not a registered system.
+    const isLocal = sysId === 'local';
     const sys = systems.find((s) => s.id === sysId);
-    if (!sys) return;
+    if (!isLocal && !sys) return;
     tab = 'terminal';
     const pane: Pane = {
       key: paneSeq++,
       sysId,
-      label: sys.label,
+      label: isLocal ? 'Magick Orb' : sys!.label,
       el: null,
       term: null,
       fit: null,
@@ -1679,8 +1681,13 @@
       return 'bg-red-900/30 text-red-300 border border-red-500/40';
     return 'bg-ink-800 text-zinc-400 border border-ink-700';
   }
-  function tabCls(t: string): string {
-    return tab === t
+  // `cur` (the active tab) is passed in so it's a tracked dependency of the
+  // template expression. If we read `tab` from the closure instead, Svelte
+  // doesn't see it referenced in `{tabCls(tab, 'overview')}` and never re-runs the
+  // class — the highlight freezes on whatever was active at first render
+  // (i.e. Overview) even as the content switches.
+  function tabCls(cur: string, t: string): string {
+    return cur === t
       ? 'bg-ink-900 text-cursed-300 border-x border-t border-ink-700'
       : 'text-zinc-500 hover:text-zinc-300 border border-transparent';
   }
@@ -1695,14 +1702,14 @@
   </header>
 
   <div class="flex gap-1 px-5 pt-2 border-b border-ink-800 bg-ink-900/40">
-    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('overview')}"
+    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls(tab, 'overview')}"
             on:click={() => { tab = 'overview'; loadMetrics(); }}>Overview</button>
-    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('containers')}"
+    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls(tab, 'containers')}"
             on:click={() => { tab = 'containers'; if (!cSys && systems.length) selectSystem(systems[0].id); else if (cSys) loadContainers(); }}>Containers</button>
-    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('terminal')}"
+    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls(tab, 'terminal')}"
             on:click={() => { tab = 'terminal'; refitAll(); }}>
       Terminal{#if panes.length}<span class="tab-count">{panes.length}</span>{/if}</button>
-    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls('systems')}"
+    <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls(tab, 'systems')}"
             on:click={() => (tab = 'systems')}>Connected Systems</button>
   </div>
 
@@ -2213,6 +2220,12 @@
         <!-- toolbar: open a pane for any registered system -->
         <div class="term-toolbar">
           <span class="term-tb-label">Open shell:</span>
+          <!-- The Orb itself: a local login shell (admin) on this device. Always
+               available, even with no remote systems registered. -->
+          <button class="term-open-btn term-open-orb" on:click={() => openTerminal('local')}
+                  title="Add a terminal — local login shell on the Magick Orb itself (admin)">
+            <span class="term-plus">+</span><span>🔮</span> Magick Orb
+          </button>
           {#if systems.length}
             {#each systems as s (s.id)}
               <button class="term-open-btn" on:click={() => openTerminal(s.id)}
@@ -2221,7 +2234,7 @@
               </button>
             {/each}
           {:else}
-            <span class="text-zinc-500 text-xs">No systems yet — add them in the
+            <span class="text-zinc-500 text-xs">No remote systems yet — add them in the
               <button class="underline text-cursed-300" on:click={() => (tab = 'systems')}>Connected Systems</button> tab.</span>
           {/if}
           {#if panes.length}
@@ -2233,7 +2246,7 @@
           <div class="term-empty">
             <div class="term-empty-glyph">&gt;_</div>
             <p>No terminals open.</p>
-            <p class="term-empty-sub">Pick a system above (or hit the <code>&gt;_</code> button on a system card) to open an interactive SSH shell. Open as many as you like — they tile into a grid.</p>
+            <p class="term-empty-sub">Pick <span class="text-amber-300">🔮 Magick Orb</span> above for a shell on this device, or a connected system (or hit the <code>&gt;_</code> button on a system card), to open an interactive shell. Open as many as you like — they tile into a grid.</p>
           </div>
         {:else}
           <div class="term-grid" style="--cols:{paneGridCols(panes.length)}">
@@ -3526,6 +3539,9 @@
     transition: border-color 0.12s, color 0.12s, background 0.12s;
   }
   .term-open-btn:hover { color: #ddd6fe; border-color: rgba(167, 139, 250, 0.55); background: rgba(167, 139, 250, 0.1); }
+  /* The Orb's own shell — a cursed-amber accent sets it apart from remote systems. */
+  .term-open-orb { border-color: rgba(217, 119, 6, 0.5); background: rgba(217, 119, 6, 0.08); color: #fcd34d; }
+  .term-open-orb:hover { border-color: rgba(245, 158, 11, 0.7); background: rgba(217, 119, 6, 0.16); color: #fde68a; }
   .term-closeall {
     margin-left: auto; font-size: 0.68rem; font-family: ui-monospace, monospace;
     color: #fca5a5; background: rgba(248, 113, 113, 0.08);

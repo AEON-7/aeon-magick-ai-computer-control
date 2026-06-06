@@ -8,7 +8,9 @@
 //! like the streamer's H.264 WebSocket).
 //!
 //! On connect we look up the registered system, then spawn the agent-connect
-//! `ssh` inside a real PTY (portable-pty) so full-screen TUIs (vim/htop),
+//! `ssh` inside a real PTY (portable-pty) — or, for the special id `local`, a
+//! login shell on the Orb itself (`su -l admin`, no ssh) — so full-screen
+//! TUIs (vim/htop),
 //! 256-colour, window resize and ctrl-keys all work end-to-end:
 //!
 //!   ssh -i <agent-connect key> -tt -o BatchMode=yes \
@@ -51,19 +53,27 @@ struct ResizeMsg {
 }
 
 async fn bridge(mut socket: WebSocket, id: String) {
-    // Resolve the system → SSH params. If it's gone, tell the client and close.
-    let Some(t) = crate::agent_connect::ssh_target(&id) else {
-        let _ = socket
-            .send(Message::Text(format!(
-                "\r\n\x1b[31maeon: no such system '{id}'\x1b[0m\r\n"
-            )))
-            .await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
+    // Resolve the target. The special id `local` is the Orb itself — no system
+    // lookup, a local login shell instead of ssh. Otherwise look up the
+    // registered system's SSH params; if it's gone, tell the client and close.
+    let target = if id == "local" {
+        None
+    } else {
+        match crate::agent_connect::ssh_target(&id) {
+            Some(t) => Some(t),
+            None => {
+                let _ = socket
+                    .send(Message::Text(format!(
+                        "\r\n\x1b[31maeon: no such system '{id}'\x1b[0m\r\n"
+                    )))
+                    .await;
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+        }
     };
-    let key = crate::agent_connect::agent_key_path();
 
-    // ── Open a PTY and spawn ssh inside it ──────────────────────────────
+    // ── Open a PTY and spawn the shell inside it ────────────────────────
     let pty_system = NativePtySystem::default();
     let pair = match pty_system.openpty(PtySize {
         rows: 30,
@@ -81,33 +91,50 @@ async fn bridge(mut socket: WebSocket, id: String) {
         }
     };
 
-    let mut cmd = CommandBuilder::new("ssh");
-    cmd.arg("-i");
-    cmd.arg(&key);
-    cmd.args([
-        "-tt",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "PreferredAuthentications=publickey",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=4",
-        "-p",
-        &t.port.to_string(),
-    ]);
-    cmd.arg(format!("{}@{}", t.ssh_user, t.address));
-    // A sensible TERM so colour + curses apps behave on the far side.
+    let mut cmd = match target {
+        // Remote system: agent-connect ssh in a PTY.
+        Some(t) => {
+            let key = crate::agent_connect::agent_key_path();
+            let mut c = CommandBuilder::new("ssh");
+            c.arg("-i");
+            c.arg(&key);
+            c.args([
+                "-tt",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "PreferredAuthentications=publickey",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=4",
+                "-p",
+                &t.port.to_string(),
+            ]);
+            c.arg(format!("{}@{}", t.ssh_user, t.address));
+            c
+        }
+        // The Orb itself: a local login shell as the admin user. The supervisor
+        // runs as root, so `su -l admin` drops to admin without a password and
+        // gives the same shell + environment the admin gets over SSH — no ssh,
+        // no key, no network hop. Still admin-gated: the whole /api/agent/*
+        // surface is Admin-scope only, never reachable by an agent token/MCP.
+        None => {
+            let mut c = CommandBuilder::new("su");
+            c.args(["-l", "admin"]);
+            c
+        }
+    };
+    // A sensible TERM so colour + curses apps behave either way.
     cmd.env("TERM", "xterm-256color");
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(e) => {
             let _ = socket
-                .send(Message::Text(format!("\r\n\x1b[31maeon: ssh spawn failed: {e}\x1b[0m\r\n")))
+                .send(Message::Text(format!("\r\n\x1b[31maeon: shell spawn failed: {e}\x1b[0m\r\n")))
                 .await;
             let _ = socket.send(Message::Close(None)).await;
             return;
