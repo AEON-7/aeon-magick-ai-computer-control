@@ -6,41 +6,38 @@
   import TargetPowerMenu from '$lib/components/TargetPowerMenu.svelte';
   import SpecialKeys from '$lib/components/SpecialKeys.svelte';
 
-  // v74: launcher information-architecture — group the flat 10-button nav into
-  // iconed clusters so humans scan by category instead of reading 10 identical
-  // pills. Pages/routes are unchanged (agents + deep links unaffected); this is
-  // purely the human presentation layer. One source drives BOTH the desktop
-  // toolbar and the mobile menu (kills the previously-duplicated link lists).
-  const NAV_GROUPS: { label: string; items: { href: string; label: string; icon: string; title?: string }[] }[] = [
-    { label: 'Network', items: [
-      { href: '/network', label: 'Network', icon: 'globe', title: 'VPN · encrypted DNS · Tor/I2P · firewall' },
-      { href: '/wifi',    label: 'WiFi',    icon: 'wifi',  title: 'WiFi mode, saved networks, setup AP' },
-    ]},
-    { label: 'OrbNet', items: [
-      { href: '/orbnet', label: 'OrbNet', icon: 'orbnet', title: 'Anonymous federated mesh chat over Tor — community, groups, DMs, personas' },
-    ]},
-    { label: 'Logs', items: [
-      { href: '/security', label: 'Security', icon: 'shield', title: 'blocked packets, firewall + intrusion events' },
-      { href: '/dns',      label: 'DNS',      icon: 'funnel', title: 'DNS query log + blacklist' },
-      { href: '/audit',    label: 'Audit',    icon: 'list',   title: 'access + privileged-action audit log' },
-    ]},
-    { label: 'Storage & Files', items: [
-      { href: '/files',   label: 'Files', icon: 'folder', title: 'file transfer + clipboard bridge' },
-      { href: '/storage', label: 'Disk',  icon: 'disc',   title: 'USB CD / disk-drive emulation (mount ISOs)' },
-    ]},
-    { label: 'Access', items: [
-      { href: '/ssh-keys', label: 'SSH', icon: 'key',    title: 'SSH authorized keys' },
-      { href: '/tokens',   label: 'API', icon: 'braces', title: 'API tokens for agents / REST / MCP' },
-    ]},
-    { label: 'Agents', items: [
-      { href: '/agent', label: 'Agent Dash', icon: 'braces', title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
-    ]},
-    { label: 'Hardware', items: [
-      { href: '/gpio', label: 'GPIO', icon: 'chip', title: 'GPIO pins, HATs, power + IO — live hardware state' },
-    ]},
-    { label: 'System', items: [
-      { href: '/system', label: 'Pi', icon: 'cpu', title: 'Pi health + reboot/poweroff + stream tuning' },
-    ]},
+  // v99: launcher IA v2 — three "super apps" (OrbNet, Agent Dash, GPIO) stand
+  // alone as color-coded buttons; everything else collapses into two dropdowns:
+  // Settings (configuration) and Monitor (logs + read-only monitoring). KVM
+  // controls stay inline. One source drives the desktop toolbar + mobile menu.
+  type NavItem = { href: string; label: string; icon: string; title?: string };
+  const SUPER_APPS: (NavItem & { color: 'cursed' | 'sky' | 'amber' })[] = [
+    { href: '/orbnet', label: 'OrbNet',     icon: 'orbnet', color: 'cursed', title: 'Anonymous federated mesh chat over Tor — community, groups, DMs, personas' },
+    { href: '/agent',  label: 'Agent Dash', icon: 'braces', color: 'sky',    title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
+    { href: '/gpio',   label: 'GPIO',       icon: 'chip',   color: 'amber',  title: 'GPIO pins, HATs, power + IO — live hardware state' },
+  ];
+  // Static class strings (Tailwind scans source text — keep them literal).
+  const APP_BTN: Record<string, string> = {
+    cursed: 'border-cursed-500/50 bg-cursed-600/15 text-cursed-100 hover:bg-cursed-600/25',
+    sky:    'border-sky-500/50 bg-sky-600/15 text-sky-100 hover:bg-sky-600/25',
+    amber:  'border-amber-500/50 bg-amber-600/15 text-amber-100 hover:bg-amber-600/25',
+  };
+  const APP_ICON: Record<string, string> = {
+    cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300',
+  };
+  const SETTINGS_ITEMS: NavItem[] = [
+    { href: '/network',  label: 'Network',    icon: 'globe',  title: 'VPN · encrypted DNS · Tor/I2P · firewall' },
+    { href: '/wifi',     label: 'WiFi',       icon: 'wifi',   title: 'WiFi mode, saved networks, setup AP' },
+    { href: '/tokens',   label: 'API tokens', icon: 'braces', title: 'API tokens for agents / REST / MCP + lockdown' },
+    { href: '/ssh-keys', label: 'SSH keys',   icon: 'key',    title: 'SSH authorized keys' },
+    { href: '/files',    label: 'Files',      icon: 'folder', title: 'file transfer + clipboard bridge' },
+    { href: '/storage',  label: 'Disk',       icon: 'disc',   title: 'USB CD / disk-drive emulation (mount ISOs)' },
+    { href: '/system',   label: 'System',     icon: 'cpu',    title: 'Pi health + reboot/poweroff + stream tuning' },
+  ];
+  const MONITOR_ITEMS: NavItem[] = [
+    { href: '/security', label: 'Security', icon: 'shield', title: 'blocked packets, firewall + intrusion events' },
+    { href: '/dns',      label: 'DNS',      icon: 'funnel', title: 'DNS query log + blacklist' },
+    { href: '/audit',    label: 'Audit',    icon: 'list',   title: 'access + privileged-action audit log' },
   ];
 
   let stream_url = '';
@@ -105,6 +102,10 @@
   // Hamburger menu open state — only relevant on small screens.
   let menuOpen = false;
   function closeMenu() { menuOpen = false; }
+  // Desktop nav dropdowns (Settings / Monitor); a fixed backdrop closes them.
+  let settingsOpen = false;
+  let monitorOpen = false;
+  function closeDropdowns() { settingsOpen = false; monitorOpen = false; }
 
   let canvas: HTMLDivElement;
   let dragging = false;
@@ -925,20 +926,46 @@
       </div>
       <!-- divider -->
       <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
-      <!-- Group B: nav — grouped + iconed (v74). Clusters split by thin
-           dividers; icon + short label makes each category scannable. Driven
-           from NAV_GROUPS (same source as the mobile menu). -->
+      <!-- Group B (v99): three color-coded "super apps" + Settings/Monitor
+           dropdowns. Configuration and monitoring collapse into the dropdowns;
+           OrbNet / Agent Dash / GPIO stand alone. -->
       <div class="flex items-center gap-2 px-3">
-        {#each NAV_GROUPS as g, gi}
-          {#each g.items as it}
-            <a href={it.href} class="btn text-xs inline-flex items-center gap-1.5" title={it.title}>
-              <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/80" />{it.label}
-            </a>
-          {/each}
-          {#if gi < NAV_GROUPS.length - 1}
-            <span class="h-5 w-px bg-ink-800" aria-hidden="true"></span>
-          {/if}
+        {#each SUPER_APPS as app}
+          <a href={app.href} class="text-xs inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border font-medium {APP_BTN[app.color]}" title={app.title}>
+            <Icon name={app.icon} class="w-4 h-4 {APP_ICON[app.color]}" />{app.label}
+          </a>
         {/each}
+        <span class="h-5 w-px bg-ink-800 mx-1" aria-hidden="true"></span>
+        <div class="relative">
+          <button class="btn text-xs inline-flex items-center gap-1.5" class:active={settingsOpen}
+                  on:click={() => { settingsOpen = !settingsOpen; monitorOpen = false; }}>
+            <Icon name="cpu" class="w-3.5 h-3.5 text-zinc-400" />Settings <span class="text-zinc-500">▾</span>
+          </button>
+          {#if settingsOpen}
+            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5">
+              {#each SETTINGS_ITEMS as it}
+                <a href={it.href} class="flex items-center gap-2 px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-ink-800" title={it.title}>
+                  <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/70" />{it.label}
+                </a>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <div class="relative">
+          <button class="btn text-xs inline-flex items-center gap-1.5" class:active={monitorOpen}
+                  on:click={() => { monitorOpen = !monitorOpen; settingsOpen = false; }}>
+            <Icon name="list" class="w-3.5 h-3.5 text-zinc-400" />Monitor <span class="text-zinc-500">▾</span>
+          </button>
+          {#if monitorOpen}
+            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5">
+              {#each MONITOR_ITEMS as it}
+                <a href={it.href} class="flex items-center gap-2 px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-ink-800" title={it.title}>
+                  <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/70" />{it.label}
+                </a>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
       <!-- divider -->
       <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
@@ -1013,6 +1040,13 @@
     </div>
   </header>
 
+  <!-- Backdrop that closes the desktop Settings/Monitor dropdowns on outside click. -->
+  {#if settingsOpen || monitorOpen}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="fixed inset-0 z-40" on:click={closeDropdowns} role="presentation"></div>
+  {/if}
+
   <!-- Mobile dropdown menu (lg:hidden). Closes when any item is tapped. -->
   {#if menuOpen}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -1055,21 +1089,36 @@
           </a>
         {/if}
       </div>
-      <!-- Nav — grouped with category headers + icons (v74), two columns
-           for thumb reach. Driven from NAV_GROUPS (same as desktop). -->
-      <div class="space-y-2 pt-1 border-t border-ink-800">
-        {#each NAV_GROUPS as g}
-          <div class="space-y-1">
-            <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-600">{g.label}</p>
-            <div class="grid grid-cols-2 gap-2">
-              {#each g.items as it}
-                <a href={it.href} class="btn text-xs inline-flex items-center gap-1.5" title={it.title}>
-                  <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/80" />{it.label}
-                </a>
-              {/each}
-            </div>
+      <!-- Nav (v99): super-apps as color-coded tiles, then Settings + Monitor
+           sections. Same source as the desktop toolbar. -->
+      <div class="space-y-3 pt-1 border-t border-ink-800">
+        <div class="grid grid-cols-3 gap-2">
+          {#each SUPER_APPS as app}
+            <a href={app.href} class="flex flex-col items-center gap-1 px-2 py-2.5 rounded-lg border font-medium text-xs {APP_BTN[app.color]}" title={app.title}>
+              <Icon name={app.icon} class="w-5 h-5 {APP_ICON[app.color]}" />{app.label}
+            </a>
+          {/each}
+        </div>
+        <div class="space-y-1">
+          <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-600">Settings</p>
+          <div class="grid grid-cols-2 gap-2">
+            {#each SETTINGS_ITEMS as it}
+              <a href={it.href} class="btn text-xs inline-flex items-center gap-1.5" title={it.title}>
+                <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/80" />{it.label}
+              </a>
+            {/each}
           </div>
-        {/each}
+        </div>
+        <div class="space-y-1">
+          <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-600">Monitor</p>
+          <div class="grid grid-cols-2 gap-2">
+            {#each MONITOR_ITEMS as it}
+              <a href={it.href} class="btn text-xs inline-flex items-center gap-1.5" title={it.title}>
+                <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/80" />{it.label}
+              </a>
+            {/each}
+          </div>
+        </div>
       </div>
       <div class="space-y-2 pt-1 border-t border-ink-800">
         <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-600">Session &amp; target</p>
