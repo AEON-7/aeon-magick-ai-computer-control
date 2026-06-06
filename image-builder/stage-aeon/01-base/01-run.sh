@@ -35,3 +35,10 @@ fi
 if [ -d "${SHARE_DIR}/prompts" ]; then
     cp -R "${SHARE_DIR}/prompts/." "${ROOTFS_DIR}/usr/share/aeon/prompts/"
 fi
+
+# Bundled HAT knowledge base (distilled pinout.xyz data, CC BY-SA 4.0) — the
+# supervisor loads this to identify a detected HAT, map its Pi pin usage, flag
+# pin collisions, and hand the AI each board's chip/control facts.
+if [ -f "${SHARE_DIR}/hat-library.json" ]; then
+    cp "${SHARE_DIR}/hat-library.json" "${ROOTFS_DIR}/usr/share/aeon/hat-library.json"
+fi

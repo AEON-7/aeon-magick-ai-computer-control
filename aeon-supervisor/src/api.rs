@@ -401,6 +401,7 @@ pub fn build_router(cfg: Config) -> Router {
         // The old paths stay as aliases for any external scripts that hit them.
         .route("/system/info",        get(crate::system::info))
         .route("/hardware/state",     get(crate::hardware::hardware_state))
+        .route("/hardware/hats",      get(crate::hardware::hardware_hats))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))
         .route("/system/reboot",      post(crate::system::reboot))

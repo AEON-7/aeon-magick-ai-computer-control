@@ -1,0 +1,10 @@
+{
+  "name": "aeon-build-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Build-time tooling for the Aeon Magick Orb image (run on the host, not the Pi).",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

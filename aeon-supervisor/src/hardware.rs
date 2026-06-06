@@ -16,6 +16,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::OnceLock;
 
 // ── The Raspberry Pi 40-pin (J8) header, in physical order ──────────────────
 
@@ -298,17 +299,89 @@ fn power_section() -> Value {
 
 // ── HAT ─────────────────────────────────────────────────────────────────────
 
+// ── bundled HAT library (distilled pinout.xyz knowledge base) ────────────────
+
+static HAT_LIB: OnceLock<Value> = OnceLock::new();
+
+/// The bundled HAT knowledge base (distilled pinout.xyz, CC BY-SA 4.0), loaded
+/// once from /usr/share/aeon/hat-library.json.
+fn library() -> &'static Value {
+    HAT_LIB.get_or_init(|| {
+        std::fs::read_to_string("/usr/share/aeon/hat-library.json")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({ "schema": 1, "count": 0, "hats": [] }))
+    })
+}
+
+const HAT_STOP: &[&str] = &[
+    "hat", "phat", "pi", "for", "the", "raspberry", "board", "rev", "plus", "kit",
+    "module", "addon", "and", "with",
+];
+
+fn hat_tokens(s: &str) -> std::collections::HashSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 1 && !HAT_STOP.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Best-effort match a detected HAT to the bundled library by token overlap of
+/// its EEPROM product/vendor vs each board's name + manufacturer. Requires >=2
+/// shared significant tokens covering >=50% of the candidate's name (so a
+/// generic one-word hit can't false-match). Returns the matched record (with
+/// its pin map + chips) or None — None just means "not in the library, the AI
+/// can probe it" (e.g. EEPROM-less or long-tail boards).
+fn match_library(product: &str, vendor: &str) -> Option<Value> {
+    let mut needle = hat_tokens(product);
+    needle.extend(hat_tokens(vendor));
+    if needle.is_empty() {
+        return None;
+    }
+    let hats = library().get("hats")?.as_array()?;
+    let mut best: Option<(f64, &Value)> = None;
+    for h in hats {
+        let name = h.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let mfr = h.get("manufacturer").and_then(|v| v.as_str()).unwrap_or("");
+        let mut hay = hat_tokens(name);
+        hay.extend(hat_tokens(mfr));
+        if hay.is_empty() {
+            continue;
+        }
+        let shared = needle.intersection(&hay).count();
+        if shared < 2 {
+            continue;
+        }
+        let coverage = shared as f64 / hay.len() as f64;
+        if coverage < 0.5 {
+            continue;
+        }
+        let score = shared as f64 + coverage;
+        if best.as_ref().map_or(true, |&(s, _)| score > s) {
+            best = Some((score, h));
+        }
+    }
+    best.map(|(_, h)| h.clone())
+}
+
 fn hat_section() -> Value {
     if !std::path::Path::new("/proc/device-tree/hat").exists() {
         return json!({ "present": false });
     }
+    let product = dt_string("/proc/device-tree/hat/product").unwrap_or_default();
+    let vendor = dt_string("/proc/device-tree/hat/vendor").unwrap_or_default();
+    let library_match = match_library(&product, &vendor);
     json!({
         "present": true,
-        "vendor": dt_string("/proc/device-tree/hat/vendor"),
-        "product": dt_string("/proc/device-tree/hat/product"),
+        "vendor": vendor,
+        "product": product,
         "product_id": dt_string("/proc/device-tree/hat/product_id"),
         "product_ver": dt_string("/proc/device-tree/hat/product_ver"),
         "uuid": dt_string("/proc/device-tree/hat/uuid"),
+        // The matched library record (pins + chips) when the board is known, else
+        // null — the dashboard draws the Pi->HAT pin map from this.
+        "library_match": library_match,
     })
 }
 
@@ -441,4 +514,12 @@ pub async fn hardware_state(State(_state): State<AppState>) -> Json<Value> {
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "introspection task failed"}));
     Json(v)
+}
+
+/// GET /api/hardware/hats — the bundled HAT knowledge base (~220 boards: id,
+/// name, manufacturer, the physical pins each occupies, and its I2C chips +
+/// addresses). Powers the dashboard's HAT browser + gives the AI a lookup table
+/// for any board it meets. Read-scope. Source: pinout.xyz (CC BY-SA 4.0).
+pub async fn hardware_hats(State(_state): State<AppState>) -> Json<Value> {
+    Json(library().clone())
 }
