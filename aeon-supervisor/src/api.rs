@@ -400,6 +400,7 @@ pub fn build_router(cfg: Config) -> Router {
         // from /api/target/* (which controls the USB-connected target machine).
         // The old paths stay as aliases for any external scripts that hit them.
         .route("/system/info",        get(crate::system::info))
+        .route("/hardware/state",     get(crate::hardware::hardware_state))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))
         .route("/system/reboot",      post(crate::system::reboot))
