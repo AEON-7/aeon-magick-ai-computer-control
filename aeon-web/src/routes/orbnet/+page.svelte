@@ -4,6 +4,7 @@
   // spin off groups + DMs, set your own moderation filter. Talks to the
   // supervisor's admin-only /api/orbnet/* surface.
   import { onMount, onDestroy } from 'svelte';
+  import qrcode from 'qrcode-generator';
 
   type Status = {
     ok: boolean; enabled: boolean; onion: string; homeserver_up: boolean;
@@ -24,6 +25,11 @@
   let busy = '';
   let enabling = false;
   let enablingTries = 0;
+  let copied = '';
+  let showConnect = false;
+  let clientPw = '';
+  let pwBusy = false;
+  let pwMsg = '';
   let poll: ReturnType<typeof setInterval>;
 
   // activate form
@@ -187,6 +193,45 @@
     return kws.some((k) => b.includes(k.toLowerCase()));
   }
   const shortOnion = (o: string) => (o ? o.slice(0, 8) + '…' + o.slice(-10) : '');
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // fallback for non-secure contexts / blocked clipboard API
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      try { document.execCommand('copy'); } catch { /* */ }
+      document.body.removeChild(ta);
+    }
+    copied = text;
+    setTimeout(() => { if (copied === text) copied = ''; }, 1500);
+  }
+  function qrSvg(text: string): string {
+    if (!text) return '';
+    try {
+      const qr = qrcode(0, 'M');
+      qr.addData(text);
+      qr.make();
+      return qr.createSvgTag({ cellSize: 4, margin: 2 });
+    } catch { return ''; }
+  }
+  async function setClientPassword() {
+    if (clientPw.length < 8) { pwMsg = 'Use at least 8 characters.'; return; }
+    pwBusy = true; pwMsg = '';
+    try {
+      const r = await api('/client-password', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: clientPw }),
+      });
+      if (r.ok) { pwMsg = '✓ Password set — sign in to Element with your Matrix ID + this password.'; clientPw = ''; }
+      else { pwMsg = 'Failed: ' + (typeof r.err === 'string' ? r.err : JSON.stringify(r.err)); }
+    } catch (e: any) {
+      pwMsg = e?.message ?? 'failed';
+    } finally {
+      pwBusy = false;
+    }
+  }
   const shortUser = (u: string) => (u || '').replace(/:.*onion$/, ':…');
   const fmtTime = (ts: number) => (ts ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
 
@@ -199,6 +244,7 @@
   onDestroy(() => clearInterval(poll));
 
   $: dotCls = (s: string) => (s === 'active' ? 'bg-live-400' : 'bg-red-500');
+  $: homeserver = status?.onion ? 'https://' + status.onion + ':8448' : '';
 </script>
 
 <div class="h-full flex flex-col">
@@ -263,16 +309,59 @@
         <section class="bg-ink-900 border border-ink-700 rounded-xl p-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {dotCls(status.tor)}"></span><span class="text-zinc-400">Tor</span></div>
           <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {dotCls(status.conduit)}"></span><span class="text-zinc-400">Homeserver</span></div>
-          <div class="font-mono text-[11px] text-cursed-300" title={status.onion}>{shortOnion(status.onion)}</div>
-          {#if status.owner}<div class="font-mono text-[11px] text-zinc-400">you: {shortUser(status.owner)}</div>{/if}
+          <button class="font-mono text-[11px] text-cursed-300 hover:text-cursed-200 inline-flex items-center gap-1.5" title="Copy full address: {status.onion}" on:click={() => copy(status.onion)}>{shortOnion(status.onion)}<span class="text-zinc-500">{copied === status.onion ? '✓' : '⧉'}</span></button>
+          {#if status.owner}<button class="font-mono text-[11px] text-zinc-400 hover:text-zinc-200 inline-flex items-center gap-1.5" title="Copy your Matrix ID: {status.owner}" on:click={() => copy(status.owner)}>you: {shortUser(status.owner)}<span class="text-zinc-600">{copied === status.owner ? '✓' : '⧉'}</span></button>{/if}
           {#if stats}<div class="text-[11px] text-zinc-400" title="active = posted in the last hour (presence over Tor is unreliable)">{stats.members} member{stats.members === 1 ? '' : 's'} · {stats.active} active · {stats.rooms} rooms</div>{/if}
           <div class="ml-auto flex items-center gap-2">
             <button class="btn text-xs" on:click={createGroup}>+ group</button>
             <button class="btn text-xs" on:click={startDm}>+ DM</button>
             <button class="btn text-xs" on:click={peerOrb}>+ peer Orb</button>
+            <button class="btn text-xs" class:active={showConnect} on:click={() => (showConnect = !showConnect)}>📱 connect</button>
             <button class="btn text-xs" class:active={showMod} on:click={() => (showMod = !showMod)}>moderation</button>
           </div>
         </section>
+
+        {#if showConnect}
+          <section class="bg-ink-900 border border-cursed-500/30 rounded-xl p-4 space-y-4">
+            <div class="flex items-center justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-cursed-300">📱 Connect a client (Element)</div>
+              <button class="text-zinc-500 hover:text-zinc-300 text-xs" on:click={() => (showConnect = false)}>close ✕</button>
+            </div>
+            <div class="flex flex-wrap items-start gap-5">
+              <div class="bg-white p-2 rounded inline-block shrink-0">{@html qrSvg(homeserver)}</div>
+              <div class="space-y-2.5 text-[12px] min-w-[240px]">
+                <div>
+                  <div class="text-zinc-500">Homeserver URL</div>
+                  <button class="font-mono text-cursed-200 hover:text-cursed-100 break-all text-left" on:click={() => copy(homeserver)}>{homeserver}<span class="text-zinc-500 ml-1">{copied === homeserver ? '✓' : '⧉'}</span></button>
+                </div>
+                <div>
+                  <div class="text-zinc-500">Your Matrix ID</div>
+                  <button class="font-mono text-zinc-300 hover:text-zinc-100 break-all text-left" on:click={() => copy(status.owner)}>{status.owner}<span class="text-zinc-500 ml-1">{copied === status.owner ? '✓' : '⧉'}</span></button>
+                </div>
+                <a class="inline-flex items-center gap-1 text-cursed-300 hover:text-cursed-200 underline" href="/api/orbnet/cert" download>⬇ Download this Orb's certificate</a>
+              </div>
+            </div>
+            <div class="space-y-1.5">
+              <div class="text-zinc-500 text-[12px]">Set a login password <span class="text-zinc-600">(your account's original password is random — choose one you'll type into Element)</span></div>
+              <div class="flex gap-2 max-w-md">
+                <input class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200" type="password" autocomplete="new-password" placeholder="new password (8+ chars)" bind:value={clientPw} on:keydown={(e) => e.key === 'Enter' && setClientPassword()} />
+                <button class="btn text-sm" disabled={pwBusy} on:click={setClientPassword}>{pwBusy ? 'setting…' : 'set password'}</button>
+              </div>
+              {#if pwMsg}<div class="text-[12px] {pwMsg.startsWith('✓') ? 'text-live-300' : 'text-amber-300'}">{pwMsg}</div>{/if}
+            </div>
+            <details class="text-[12px] text-zinc-400">
+              <summary class="cursor-pointer text-zinc-300 hover:text-zinc-100 select-none">How to connect (Tor required) ▾</summary>
+              <ol class="list-decimal ml-5 mt-2 space-y-1.5">
+                <li>On the phone, install <b class="text-zinc-200">Orbot</b> and enable VPN mode so apps can reach <code class="text-cursed-200">.onion</code> addresses.</li>
+                <li><b class="text-zinc-200">Install the certificate</b> (button above). iOS: open the file → Install, then Settings ▸ General ▸ About ▸ Certificate Trust Settings ▸ turn it on. Android: Settings ▸ Security ▸ Install a certificate ▸ CA certificate.</li>
+                <li><b class="text-zinc-200">Set a login password</b> above.</li>
+                <li>Open <b class="text-zinc-200">Element</b> → Sign in → tap <i>Edit</i> / “Other homeserver” → paste the <b>Homeserver URL</b>.</li>
+                <li>Sign in with your <b>Matrix ID</b> and the password you set.</li>
+              </ol>
+              <p class="mt-2 text-zinc-500">The cert lets Element trust your Orb's self-signed TLS (its SAN = your onion) — most reliable on iOS. If Android Element ignores user certs, use Element Web in Tor Browser instead: open the Homeserver URL once to accept the certificate, then sign in.</p>
+            </details>
+          </section>
+        {/if}
 
         {#if showMod}
           <section class="bg-ink-900 border border-amber-500/30 rounded-xl p-4 space-y-2">

@@ -17,6 +17,7 @@
 
 use crate::api::AppState;
 use axum::extract::{Path as AxPath, State};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -403,6 +404,90 @@ pub async fn set_moderation(State(_s): State<AppState>, Json(req): Json<Moderati
     match write_config(&cfg) {
         Ok(_) => Json(json!({"ok": true, "moderation_keywords": cfg.moderation_keywords})),
         Err(e) => Json(json!({"ok": false, "err": e.to_string()})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ClientPasswordReq {
+    pub password: String,
+}
+
+/// POST /api/orbnet/client-password — set a memorable login password on the
+/// owner account so the operator can sign into a Matrix client (Element). The
+/// account's original password was auto-generated, so this is the only way in.
+/// Runs the UIA password-change flow (authed with the stored password), then
+/// re-logs-in to refresh the token, and persists both to owner.json so the
+/// supervisor's own login fallback stays valid. Admin-gated.
+pub async fn set_client_password(State(_s): State<AppState>, Json(req): Json<ClientPasswordReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        if req.password.chars().count() < 8 {
+            return json!({"ok": false, "err": "password must be at least 8 characters"});
+        }
+        let Some(mut owner) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let pw_path = "/_matrix/client/v3/account/password";
+        // UIA step 1 — obtain a session
+        let r1 = match cs_curl("POST", pw_path, Some(&owner.access_token),
+            Some(&json!({"new_password": req.password, "logout_devices": false}).to_string())) {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        if let Some(session) = r1.get("session").and_then(|v| v.as_str()) {
+            let auth = json!({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": owner.user_id},
+                "password": owner.password,
+                "session": session,
+            });
+            let r2 = match cs_curl("POST", pw_path, Some(&owner.access_token),
+                Some(&json!({"new_password": req.password, "logout_devices": false, "auth": auth}).to_string())) {
+                Ok(v) => v,
+                Err(e) => return json!({"ok": false, "err": e}),
+            };
+            if let Some(ec) = r2.get("errcode").and_then(|v| v.as_str()) {
+                let msg = r2.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                return json!({"ok": false, "err": format!("{ec}: {msg}")});
+            }
+        } else if r1.get("errcode").is_some() {
+            return json!({"ok": false, "err": format!("password change rejected: {r1}")});
+        }
+        // Re-login with the new password to guarantee a fresh, valid token.
+        if let Ok(login) = cs_curl("POST", "/_matrix/client/v3/login", None, Some(&json!({
+            "type": "m.login.password",
+            "identifier": {"type": "m.id.user", "user": owner.user_id},
+            "password": req.password,
+        }).to_string())) {
+            if let Some(tok) = login.get("access_token").and_then(|v| v.as_str()) {
+                owner.access_token = tok.to_string();
+            }
+        }
+        owner.password = req.password.clone();
+        if let Err(e) = write_owner(&owner) {
+            return json!({"ok": false, "err": format!("password set but owner.json update failed: {e}")});
+        }
+        json!({"ok": true})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "client-password task failed"}));
+    Json(v)
+}
+
+/// GET /api/orbnet/cert — the Orb's self-signed homeserver cert (PEM, public —
+/// NEVER the key) to install + trust on a phone so native Element validates the
+/// onion's TLS (the cert's SAN = the .onion). Admin-gated.
+pub async fn cert() -> impl IntoResponse {
+    use axum::http::{header, StatusCode};
+    match std::fs::read_to_string(format!("{RUNTIME_DIR}/tls/cert.pem")) {
+        Ok(pem) => (
+            [
+                (header::CONTENT_TYPE, "application/x-pem-file"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=\"orbnet-orb-cert.pem\""),
+            ],
+            pem,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "cert not found (is OrbNet up?)").into_response(),
     }
 }
 
