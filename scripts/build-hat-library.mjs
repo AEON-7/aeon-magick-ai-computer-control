@@ -86,6 +86,20 @@ for (const f of files) {
 
 hats.sort((a, b) => a.id.localeCompare(b.id));
 
+// ── Curated augmentations ──
+// Some pinout.xyz entries predate a board's hardware revision. Merge in known-
+// missing chips here, keyed by id. The Raspberry Pi Sense HAT gained a TCS3400
+// colour + brightness sensor at 0x39 that the upstream (original) entry lacks —
+// without this a real Sense HAT colour sensor reads as a stray loose device on
+// the live bus scan (confirmed on hardware: 0x39 ID reg = 0x90 = TCS3400).
+const HAT_OVERRIDES = {
+  'sense-hat': { i2c: { '0x39': { name: 'Colour/Brightness', device: 'tcs3400' } } },
+};
+for (const h of hats) {
+  const ov = HAT_OVERRIDES[h.id];
+  if (ov?.i2c) h.i2c = { ...(h.i2c || {}), ...ov.i2c };
+}
+
 // I2C chip reference (technoblogy/i2c-detective) — chip -> address range +
 // category + optional ID register/value. Turns an i2cdetect hit into a
 // candidate chip: the EEPROM-less / loose-breakout identification path the AI
