@@ -34,6 +34,7 @@
   let hatLibrary: Hat[] = [];
   let stack: Hat[] = [];
   let stackCheck: StackCheck | null = null;
+  let detailHat: Hat | null = null;
   let matchApplied = false;
   let hatSearch = '';
   let showBrowser = false;
@@ -112,6 +113,26 @@
     if (r.includes('pwm')) return 'PWM';
     return r.toUpperCase().slice(0, 4);
   }
+  function connDesc(role: string, physical: number): string {
+    const r = (role || '').toLowerCase();
+    if (r === 'power') return physical === 1 || physical === 17 ? '3.3 V supply rail' : '5 V supply rail';
+    if (r === 'ground') return 'Ground return';
+    if (r.includes('i2c')) return physical === 3 ? 'I2C data (SDA) — commands + data to the on-board chips' : physical === 5 ? 'I2C clock (SCL)' : 'I2C bus line';
+    if (r.includes('spi')) return 'SPI bus (data / clock / chip-select)';
+    if (r.includes('uart')) return 'Serial line (TX / RX)';
+    if (r.includes('pwm')) return 'PWM output';
+    return "GPIO — the HAT's control / interrupt line";
+  }
+  function hatConnections(h: Hat): Array<{ physical: number; name: string; role: string; desc: string }> {
+    if (!h?.pins) return [];
+    return Object.entries(h.pins)
+      .map(([phys, role]) => {
+        const p = pins.find((pp) => pp.physical === Number(phys));
+        const name = p?.name ?? (role === 'power' ? 'PWR' : role === 'ground' ? 'GND' : `pin ${phys}`);
+        return { physical: Number(phys), name, role: String(role), desc: connDesc(String(role), Number(phys)) };
+      })
+      .sort((a, b) => a.physical - b.physical);
+  }
   // overlay ring: red on a conflict, amber when a stacked HAT uses the pin
   function pinRing(physical: number): string {
     if (conflictPins.has(physical)) return 'ring-2 ring-red-500';
@@ -132,9 +153,12 @@
   $: addrConflicts = (stackCheck?.conflicts ?? []).filter((c) => c.type === 'i2c_address');
   // auto-add a detected+identified HAT to the stack once
   $: if (!matchApplied && hat?.library_match) { addToStack(hat.library_match); matchApplied = true; }
+  // Browse-all when the search is empty (scroll container caps the view), filter when typing.
   $: hatMatches = hatSearch.trim()
-    ? hatLibrary.filter((h) => `${h.name} ${h.manufacturer ?? ''} ${(h.type ?? []).join(' ')}`.toLowerCase().includes(hatSearch.toLowerCase())).slice(0, 40)
-    : [];
+    ? hatLibrary.filter((h) => `${h.name} ${h.manufacturer ?? ''} ${(h.type ?? []).join(' ')}`.toLowerCase().includes(hatSearch.toLowerCase()))
+    : hatLibrary;
+  // Drop the connection-detail focus if its HAT leaves the stack.
+  $: if (detailHat && !stack.find((h) => h.id === detailHat.id)) detailHat = null;
 </script>
 
 <div class="h-full flex flex-col bg-ink-950">
@@ -214,13 +238,33 @@
             <div class="pt-2 border-t border-ink-800 space-y-2">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">stack:</span>
-                {#each stack as h, i}
-                  <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 text-xs">
-                    {h.name}
+                {#each stack as h}
+                  <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border {detailHat?.id === h.id ? 'border-amber-300 bg-amber-500/20' : 'border-amber-500/40 bg-amber-500/10'} text-amber-200 text-xs">
+                    <button class="hover:text-amber-100" on:click={() => (detailHat = detailHat?.id === h.id ? null : h)} title="show pin connections">{h.name}</button>
                     <button class="text-amber-400/70 hover:text-amber-200" on:click={() => removeFromStack(h.id)}>✕</button>
                   </span>
                 {/each}
+                {#if stack.length && !detailHat}<span class="text-[10px] text-zinc-600">← tap a board for its pin connections</span>{/if}
               </div>
+
+              {#if detailHat}
+                <div class="pt-2 border-t border-ink-800 space-y-1">
+                  <div class="flex items-center justify-between gap-2 flex-wrap">
+                    <span class="text-[11px] font-mono text-amber-200">{detailHat.name} — pin connections</span>
+                    {#if detailHat.i2c}<span class="text-[10px] font-mono text-amber-300/70">chips: {Object.entries(detailHat.i2c).map(([a, c]) => `${c.device ?? c.name} @ ${a}`).join(', ')}</span>{/if}
+                  </div>
+                  <div class="space-y-0.5 max-h-44 overflow-y-auto pr-1">
+                    {#each hatConnections(detailHat) as c}
+                      <div class="flex items-baseline gap-2 text-[11px] font-mono">
+                        <span class="text-zinc-600 w-9">#{c.physical}</span>
+                        <span class="text-zinc-300 w-16 truncate">{c.name}</span>
+                        <span class="text-amber-300 w-9">{roleAbbr(c.role)}</span>
+                        <span class="text-zinc-400 flex-1">{c.desc}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
 
               {#if stack.length >= 2 && stackCheck}
                 {#if stackCheck.verdict === 'compatible'}
