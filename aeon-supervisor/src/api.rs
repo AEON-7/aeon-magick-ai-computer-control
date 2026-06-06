@@ -402,6 +402,7 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/system/info",        get(crate::system::info))
         .route("/hardware/state",     get(crate::hardware::hardware_state))
         .route("/hardware/hats",      get(crate::hardware::hardware_hats))
+        .route("/hardware/hats/check", get(crate::hardware::hardware_stack_check))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))
         .route("/system/reboot",      post(crate::system::reboot))

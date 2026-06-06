@@ -11,8 +11,9 @@
 //! is purely observational.
 
 use crate::api::AppState;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
@@ -522,4 +523,127 @@ pub async fn hardware_state(State(_state): State<AppState>) -> Json<Value> {
 /// for any board it meets. Read-scope. Source: pinout.xyz (CC BY-SA 4.0).
 pub async fn hardware_hats(State(_state): State<AppState>) -> Json<Value> {
     Json(library().clone())
+}
+
+// ── stack collision detection ────────────────────────────────────────────────
+
+fn find_hat(id: &str) -> Option<Value> {
+    library()
+        .get("hats")?
+        .as_array()?
+        .iter()
+        .find(|h| h.get("id").and_then(|v| v.as_str()) == Some(id))
+        .cloned()
+}
+
+/// A header pin is freely shareable for a role only when it's a true bus or
+/// rail: the power/ground rails, the I2C bus pins (phys 3/5), or the SPI
+/// data/clock pins (phys 19/21/23). Everything else — a dedicated GPIO, an SPI
+/// chip-enable line, UART, PWM — is exclusive, so a second claimant collides.
+fn pin_shareable(role: &str, physical: u8) -> bool {
+    matches!(role, "power" | "ground")
+        || (role.contains("i2c") && (physical == 3 || physical == 5))
+        || (role.contains("spi") && (physical == 19 || physical == 21 || physical == 23))
+}
+
+/// Collision + compatibility analysis for a stack of HATs (by library id).
+fn check_stack(ids: &[String]) -> Value {
+    let hats: Vec<(String, Value)> = ids
+        .iter()
+        .filter_map(|id| find_hat(id).map(|h| (id.clone(), h)))
+        .collect();
+
+    let mut pin_use: HashMap<u8, Vec<(String, String)>> = HashMap::new();
+    let mut addr_use: HashMap<String, Vec<String>> = HashMap::new();
+    for (_, h) in &hats {
+        let name = h.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        if let Some(pins) = h.get("pins").and_then(|v| v.as_object()) {
+            for (pin, role) in pins {
+                if let Ok(p) = pin.parse::<u8>() {
+                    pin_use
+                        .entry(p)
+                        .or_default()
+                        .push((name.clone(), role.as_str().unwrap_or("").to_string()));
+                }
+            }
+        }
+        if let Some(i2c) = h.get("i2c").and_then(|v| v.as_object()) {
+            for addr in i2c.keys() {
+                addr_use.entry(addr.clone()).or_default().push(name.clone());
+            }
+        }
+    }
+
+    let mut conflicts = vec![];
+    for (pin, uses) in &pin_use {
+        if uses.len() < 2 {
+            continue;
+        }
+        // OK only when every claimant shares the same shareable bus/rail role.
+        let role0 = &uses[0].1;
+        let ok = uses.iter().all(|(_, r)| r == role0 && pin_shareable(r, *pin));
+        if ok {
+            continue;
+        }
+        conflicts.push(json!({
+            "type": "pin",
+            "physical": pin,
+            "users": uses.iter().map(|(n, r)| json!({ "hat": n, "role": r })).collect::<Vec<_>>(),
+        }));
+    }
+    for (addr, users) in &addr_use {
+        if users.len() >= 2 {
+            conflicts.push(json!({ "type": "i2c_address", "address": addr, "users": users }));
+        }
+    }
+
+    let pin_conflicts = conflicts.iter().filter(|c| c["type"] == "pin").count();
+    let verdict = if conflicts.is_empty() {
+        "compatible"
+    } else if pin_conflicts == 0 {
+        "i2c_address_conflict"
+    } else {
+        "pin_conflict"
+    };
+
+    // GPIO pins free for rerouting a clashing signal.
+    let used: std::collections::HashSet<u8> = pin_use.keys().copied().collect();
+    let free_gpio: Vec<u8> = HEADER
+        .iter()
+        .filter(|hp| matches!(hp.kind, PinKind::Gpio) && !used.contains(&hp.physical))
+        .map(|hp| hp.physical)
+        .collect();
+
+    json!({
+        "ok": true,
+        "hats": hats.iter().map(|(id, h)| json!({ "id": id, "name": h.get("name") })).collect::<Vec<_>>(),
+        "verdict": verdict,
+        "conflicts": conflicts,
+        "free_gpio_pins": free_gpio,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct StackCheckQuery {
+    /// comma-separated library ids
+    #[serde(default)]
+    pub ids: String,
+}
+
+/// GET /api/hardware/hats/check?ids=a,b,c — collision + compatibility analysis
+/// for a set of stacked HATs. Power/ground/I2C-bus/SPI-bus pins are shareable;
+/// dedicated-GPIO/CE/UART/PWM clashes and duplicate I2C addresses are flagged,
+/// with free GPIO pins suggested for rerouting. The AI can vet a stack before
+/// anything is plugged in, and a human sees what to reroute. Read-scope (GET).
+pub async fn hardware_stack_check(
+    State(_state): State<AppState>,
+    Query(q): Query<StackCheckQuery>,
+) -> Json<Value> {
+    let ids: Vec<String> = q
+        .ids
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Json(check_stack(&ids))
 }
