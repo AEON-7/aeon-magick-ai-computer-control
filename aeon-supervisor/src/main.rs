@@ -108,6 +108,9 @@ async fn main() -> Result<()> {
     tokio::spawn(agent_connect::token_sampler_loop());
     // OrbNet persona responder: placed persona bots reply via their LLM.
     tokio::spawn(orbnet::persona_responder_loop());
+    // OrbNet self-heal: if activation was interrupted while enabled (e.g. an
+    // OOM-restart mid-bootstrap), finish provisioning the owner + community.
+    tokio::spawn(orbnet::reconcile_on_boot());
     // Ensure the AEON_DROP iptables chain exists at startup so every
     // DROP rule we apply (user or system) gets logged on the way down.
     // This is what populates the "Blocked traffic" panel.

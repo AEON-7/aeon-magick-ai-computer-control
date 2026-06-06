@@ -22,6 +22,8 @@
   let draft = '';
   let err = '';
   let busy = '';
+  let enabling = false;
+  let enablingTries = 0;
   let poll: ReturnType<typeof setInterval>;
 
   // activate form
@@ -41,6 +43,16 @@
       status = await api('/status');
       if (status?.moderation_keywords) modText = status.moderation_keywords.join('\n');
       err = '';
+      // Provisioning runs in the background after activate(); clear the banner
+      // once the owner account appears, or give up after ~6 min of polling.
+      if (enabling) {
+        if (status?.owner) {
+          enabling = false; busy = ''; enablingTries = 0;
+        } else if (++enablingTries > 60) {
+          enabling = false; busy = '';
+          err = 'Bring-up is taking unusually long — Tor may be struggling to bootstrap. It keeps trying in the background; reload in a few minutes.';
+        }
+      }
       if (status?.enabled && status?.homeserver_up) await loadRooms();
     } catch (e: any) {
       err = e?.message ?? 'failed to load';
@@ -78,20 +90,27 @@
     await loadMessages();
   }
   async function activate() {
-    busy = 'Activating OrbNet — bootstrapping Tor + the homeserver (~1–2 min)…';
     err = '';
+    enabling = true;
+    enablingTries = 0;
+    busy = 'Activating OrbNet — bringing up Tor + the homeserver in the background. This can take 1–2 min (longer on a cold start); the page updates automatically when it’s ready.';
     try {
       const r = await api('/enable', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ handle, display_name: displayName }),
       });
-      if (!r.ok) err = typeof r.err === 'string' ? r.err : JSON.stringify(r.err);
+      // enable now returns immediately ({ ok, started }); only a config-write
+      // failure reports ok:false. The slow bring-up runs server-side and the
+      // poll below (loadStatus) clears the banner once the owner appears.
+      if (r && r.ok === false) {
+        err = typeof r.err === 'string' ? r.err : JSON.stringify(r.err);
+        enabling = false; busy = '';
+      }
     } catch (e: any) {
-      err = e?.message ?? 'activation failed';
-    } finally {
-      busy = '';
-      await loadStatus();
+      // The request itself shouldn't block now, but even if it drops the
+      // bring-up continues server-side — keep polling rather than erroring.
     }
+    await loadStatus();
   }
   async function deactivate() {
     if (!confirm('Take OrbNet offline? Your account + rooms persist for re-enable.')) return;
@@ -174,7 +193,7 @@
   onMount(() => {
     loadStatus();
     poll = setInterval(() => {
-      if (status?.enabled) { loadStatus(); if (selected) loadMessages(); }
+      if (status?.enabled || enabling) { loadStatus(); if (selected) loadMessages(); }
     }, 6000);
   });
   onDestroy(() => clearInterval(poll));

@@ -751,6 +751,9 @@ pub async fn refresh_one(id: &str) -> Result<(u64, String), String> {
                 "-fsSL",                  // fail on 4xx/5xx, follow redirects, silent
                 "--retry", "2",
                 "--max-time", "60",
+                "--max-filesize", "268435456", // 256MB hard cap (blacklists are <50MB) — a
+                                               // streaming/oversized URL would otherwise read
+                                               // unbounded into memory and OOM the supervisor
                 "--compressed",            // accept gzip
                 "-A", "aeon-magick/0.1",  // some hosts (GitHub) require UA
                 &url,
@@ -767,6 +770,13 @@ pub async fn refresh_one(id: &str) -> Result<(u64, String), String> {
         Ok(Err(e)) => return record_failure(id, format!("curl spawn: {e}")),
         Err(e) => return record_failure(id, format!("task join: {e}")),
     };
+
+    // Guard the streaming / no-Content-Length case that --max-filesize can't
+    // catch mid-download: refuse to parse an oversized blob rather than let it
+    // (and from_utf8_lossy's copy) balloon the supervisor's heap.
+    if output.stdout.len() > 256 * 1024 * 1024 {
+        return record_failure(id, format!("blacklist too large: {} bytes", output.stdout.len()));
+    }
 
     // Parse format → set of normalized domains.
     let text = String::from_utf8_lossy(&output.stdout);

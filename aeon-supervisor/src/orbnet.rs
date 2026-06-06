@@ -289,10 +289,47 @@ pub struct EnableReq {
     pub display_name: String,
 }
 
-/// POST /api/orbnet/enable — bring OrbNet up: start the onion + homeserver,
-/// provision the owner account. Admin-gated. Blocking + slow (Tor bootstrap).
+/// The heavy OrbNet bring-up: start the onion + homeserver, provision the owner
+/// account, set up the community, and peer any configured seeds. Idempotent and
+/// safe to re-run — `provision_owner` reuses an existing account and
+/// `setup_community` rejoins existing rooms. Runs on the blocking pool, off the
+/// request path (the Tor bootstrap can take minutes).
+fn reconcile() -> Value {
+    let cfg = read_config();
+    let onion = match run_script(&["up"]) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("orbnet reconcile: up failed: {e}");
+            return json!({"ok": false, "err": format!("orbnet up: {e}")});
+        }
+    };
+    let owner = match provision_owner(&cfg.handle) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("orbnet reconcile: provision owner failed: {e}");
+            return json!({"ok": false, "err": format!("provision owner: {e}"), "onion": onion});
+        }
+    };
+    let community = if cfg.auto_join_community {
+        setup_community(&owner)
+    } else {
+        json!({"rooms": []})
+    };
+    // Auto-peer any configured directory seeds (mesh with other Orbs).
+    let mut peered = 0;
+    for seed in &cfg.directory_seeds {
+        peered += peer_seed(&owner, seed);
+    }
+    json!({"ok": true, "onion": onion, "owner": owner.user_id, "community": community, "peered_rooms": peered})
+}
+
+/// POST /api/orbnet/enable — bring OrbNet up. Persists config synchronously
+/// (fast) then runs the bring-up in the BACKGROUND and returns immediately, so
+/// the request never blocks on the Tor bootstrap — which would otherwise blow
+/// past the browser's request timeout (the "Load failed" the operator saw).
+/// The dashboard polls /status until the owner account appears. Admin-gated.
 pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> Json<Value> {
-    let v = tokio::task::spawn_blocking(move || -> Value {
+    let saved = tokio::task::spawn_blocking(move || -> Value {
         let mut cfg = read_config();
         if !req.handle.is_empty() {
             cfg.handle = sanitize_handle(&req.handle);
@@ -304,32 +341,31 @@ pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> J
             cfg.display_name = req.display_name.clone();
         }
         cfg.enabled = true;
-        if let Err(e) = write_config(&cfg) {
-            return json!({"ok": false, "err": format!("write config: {e}")});
+        match write_config(&cfg) {
+            Ok(_) => json!({"ok": true}),
+            Err(e) => json!({"ok": false, "err": format!("write config: {e}")}),
         }
-        let onion = match run_script(&["up"]) {
-            Ok(o) => o,
-            Err(e) => return json!({"ok": false, "err": format!("orbnet up: {e}")}),
-        };
-        let owner = match provision_owner(&cfg.handle) {
-            Ok(o) => o,
-            Err(e) => return json!({"ok": false, "err": format!("provision owner: {e}"), "onion": onion}),
-        };
-        let community = if cfg.auto_join_community {
-            setup_community(&owner)
-        } else {
-            json!({"rooms": []})
-        };
-        // Auto-peer any configured directory seeds (mesh with other Orbs).
-        let mut peered = 0;
-        for seed in &cfg.directory_seeds {
-            peered += peer_seed(&owner, seed);
-        }
-        json!({"ok": true, "onion": onion, "owner": owner.user_id, "community": community, "peered_rooms": peered})
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "enable task failed"}));
-    Json(v)
+    if saved.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+        // Fire-and-forget the slow bring-up; the dashboard polls /status.
+        tokio::task::spawn_blocking(reconcile);
+        return Json(json!({"ok": true, "started": true}));
+    }
+    Json(saved)
+}
+
+/// On boot, if OrbNet is enabled but the owner account was never provisioned
+/// (e.g., a crash/OOM-restart interrupted activation), finish the bring-up.
+/// Idempotent — a no-op once the owner exists.
+pub async fn reconcile_on_boot() {
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    let cfg = read_config();
+    if cfg.enabled && read_owner().is_none() {
+        eprintln!("orbnet: enabled but owner missing on boot — reconciling");
+        let _ = tokio::task::spawn_blocking(reconcile).await;
+    }
 }
 
 /// POST /api/orbnet/disable — take OrbNet down (homeserver + onion stop). The
