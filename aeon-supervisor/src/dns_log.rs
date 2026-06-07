@@ -745,41 +745,64 @@ pub async fn refresh_one(id: &str) -> Result<(u64, String), String> {
     // and is already on the image. Spawn on blocking pool so the axum
     // worker isn't tied up while we download.
     let url = s.url.clone();
-    let raw_result = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("curl")
+    // Stream curl through a HARD in-process byte cap. A source that streams
+    // without a Content-Length (so curl's own --max-filesize can't stop it
+    // mid-download) would otherwise read UNBOUNDED into the supervisor's heap and
+    // OOM it — this is the v100 fresh-flash hang (3.6 GB anon-rss from the
+    // oversized ubuntu101 hosts list). `.take(CAP+1)` bounds the read no matter
+    // how much the server sends; we kill curl the instant we've read enough.
+    const CAP: u64 = 256 * 1024 * 1024; // real blacklists are <50 MB
+    let raw_result = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, bool), String> {
+        use std::io::Read;
+        let mut child = std::process::Command::new("curl")
             .args([
                 "-fsSL",                  // fail on 4xx/5xx, follow redirects, silent
                 "--retry", "2",
                 "--max-time", "60",
-                "--max-filesize", "268435456", // 256MB hard cap (blacklists are <50MB) — a
-                                               // streaming/oversized URL would otherwise read
-                                               // unbounded into memory and OOM the supervisor
+                "--max-filesize", "268435456", // early-out when a Content-Length IS sent
                 "--compressed",            // accept gzip
                 "-A", "aeon-magick/0.1",  // some hosts (GitHub) require UA
-                &url,
+                "--", &url,
             ])
-            .output()
-    }).await;
-
-    let output = match raw_result {
-        Ok(Ok(o)) if o.status.success() => o,
-        Ok(Ok(o)) => {
-            let err = String::from_utf8_lossy(&o.stderr).to_string();
-            return record_failure(id, format!("curl exit {:?}: {err}", o.status.code()));
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("curl spawn: {e}"))?;
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut buf = Vec::new();
+        stdout
+            .by_ref()
+            .take(CAP + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read: {e}"))?;
+        let over = buf.len() as u64 > CAP;
+        let _ = child.kill(); // stop curl whether it finished or we hit the cap
+        let status = child.wait().map_err(|e| format!("curl wait: {e}"))?;
+        if over {
+            return Ok((buf, true));
         }
-        Ok(Err(e)) => return record_failure(id, format!("curl spawn: {e}")),
+        if !status.success() {
+            let mut err = String::new();
+            if let Some(mut se) = child.stderr.take() {
+                let _ = se.read_to_string(&mut err);
+            }
+            return Err(format!("curl exit {:?}: {}", status.code(), err.trim()));
+        }
+        Ok((buf, false))
+    })
+    .await;
+
+    let (stdout_bytes, over) = match raw_result {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return record_failure(id, e),
         Err(e) => return record_failure(id, format!("task join: {e}")),
     };
-
-    // Guard the streaming / no-Content-Length case that --max-filesize can't
-    // catch mid-download: refuse to parse an oversized blob rather than let it
-    // (and from_utf8_lossy's copy) balloon the supervisor's heap.
-    if output.stdout.len() > 256 * 1024 * 1024 {
-        return record_failure(id, format!("blacklist too large: {} bytes", output.stdout.len()));
+    if over {
+        return record_failure(id, format!("blacklist exceeds {CAP}-byte cap — refusing to parse"));
     }
 
     // Parse format → set of normalized domains.
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = String::from_utf8_lossy(&stdout_bytes);
     let domains = parse_list(&text, &s.format);
 
     // Compute sha256 of the canonical (sorted-dedup) joined output.

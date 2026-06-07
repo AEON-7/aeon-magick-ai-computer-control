@@ -15,4 +15,14 @@ on_chroot << 'EOF'
 id aeon-orbnet >/dev/null 2>&1 || \
     useradd -r -s /usr/sbin/nologin -d /var/lib/aeon/orbnet -M aeon-orbnet
 install -d -m 0700 -o aeon-orbnet -g aeon-orbnet /var/lib/aeon/orbnet
+# Belt-and-suspenders: OrbNet ships OFF, and every device MUST mint its own onion
+# keys / Conduit DB / reg-token on first `up` (no two flashes may share keys).
+# Scrub any OrbNet state that leaked into the build rootfs from a prior
+# incremental build — an early bake-wiring once left /etc/aeon/orbnet.toml
+# (enabled=true) + provisioned keys here, which shipped in v100 and auto-started
+# Tor on every flash with SHARED keys + OOM-looped the supervisor.
+rm -f /etc/aeon/orbnet.toml
+rm -rf /var/lib/aeon/orbnet/db /var/lib/aeon/orbnet/tls /var/lib/aeon/orbnet/tor \
+       /var/lib/aeon/orbnet/reg-token /var/lib/aeon/orbnet/conduit.toml \
+       /var/lib/aeon/orbnet/owner.json /var/lib/aeon/orbnet/personas.json
 EOF

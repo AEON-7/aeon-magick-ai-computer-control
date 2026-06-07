@@ -101,6 +101,15 @@ if [ -f "${CMDLINE_TXT}" ]; then
         # cmdline.txt must be a SINGLE line — append in place, no newline.
         sed -i 's/$/ usbcore.autosuspend=-1/' "${CMDLINE_TXT}"
     fi
+    # Enable the cgroup-v2 MEMORY controller. Pi OS ships it OFF by default —
+    # cgroup.controllers lists only "cpuset cpu io pids", no "memory" — which
+    # SILENTLY no-ops every systemd MemoryMax=/MemoryHigh= limit. Without this,
+    # a runaway in any service (e.g. an oversized blacklist fetch) global-OOMs
+    # the whole Pi instead of being cgroup-killed + restarted. This switches it
+    # on so aeon-supervisor's MemoryMax=1G actually contains a leak.
+    if ! grep -q "cgroup_enable=memory" "${CMDLINE_TXT}"; then
+        sed -i 's/$/ cgroup_enable=memory cgroup_memory=1/' "${CMDLINE_TXT}"
+    fi
 fi
 
 # Make sure required modules are loaded on every boot.
