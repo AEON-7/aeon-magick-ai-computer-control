@@ -504,14 +504,14 @@ pub async fn tailscale_status(State(_s): State<AppState>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| -> Value {
         let mut dns = String::new();
         let mut running = false;
-        if let Ok(o) = Command::new("timeout").arg("8").arg("tailscale").args(["status", "--json"]).output() {
+        if let Ok(o) = Command::new("tailscale").args(["status", "--json"]).output() {
             if o.status.success() {
                 let j: Value = serde_json::from_slice(&o.stdout).unwrap_or(json!({}));
                 dns = j.pointer("/Self/DNSName").and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('.').to_string();
                 running = j.get("BackendState").and_then(|v| v.as_str()) == Some("Running");
             }
         }
-        let serve_active = Command::new("timeout").arg("8").arg("tailscale").args(["serve", "status"]).output()
+        let serve_active = Command::new("tailscale").args(["serve", "status"]).output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(":8448"))
             .unwrap_or(false);
         let url = if dns.is_empty() { String::new() } else { format!("https://{dns}:8448") };
@@ -533,26 +533,14 @@ pub async fn set_tailscale(State(_s): State<AppState>, Json(req): Json<Tailscale
         } else {
             vec!["serve", "--https=8448", "off"]
         };
-        // Hard 20s timeout: `tailscale serve --bg` HANGS indefinitely when the
-        // tailnet hasn't enabled HTTPS/Serve, which previously wedged this
-        // request (the operator saw a freeze). `timeout` kills it (exit 124) so
-        // we always return promptly with a useful message.
-        match Command::new("timeout").arg("20").arg("tailscale").args(&args).output() {
+        match Command::new("tailscale").args(&args).output() {
             Ok(o) if o.status.success() => json!({"ok": true, "enabled": req.enable}),
             Ok(o) => {
-                let timed_out = o.status.code() == Some(124);
                 let msg = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
                 let admin_url = msg.split_whitespace()
                     .find(|w| w.starts_with("https://") && w.contains("tailscale"))
                     .map(|s| s.trim().to_string());
-                let err = if timed_out {
-                    "Tailscale didn't respond — HTTPS/Serve probably isn't enabled on your tailnet yet. Enable it in your Tailscale admin console, then retry.".to_string()
-                } else if msg.trim().is_empty() {
-                    "tailscale serve failed".to_string()
-                } else {
-                    msg.trim().to_string()
-                };
-                json!({"ok": false, "err": err, "admin_url": admin_url})
+                json!({"ok": false, "err": msg.trim(), "admin_url": admin_url})
             }
             Err(e) => json!({"ok": false, "err": format!("tailscale: {e}")}),
         }
