@@ -214,6 +214,67 @@
   // personas — human-placed only
   let showPersona = false;
   let pName = '', pPrompt = '', pLlm = '', pModel = '';
+  let templates: any[] = [];      // pantheon agents (start-from-template)
+  let llmSources: any[] = [];     // models running/cached across connected systems
+  let pTemplate = '';
+  let pModelSel = '';
+  // persona edit (manage panel)
+  let editingUser = '';
+  let eModelSel = '', ePrompt = '';
+
+  async function loadLlmSources() {
+    try { const r = await api('/llm-sources'); llmSources = r.sources ?? []; } catch { llmSources = []; }
+  }
+  async function loadTemplates() {
+    try {
+      const sys = await fetch('/api/agent/systems', { credentials: 'same-origin' }).then(j);
+      const systems = (sys.systems ?? sys ?? []).filter((s: any) => (s.roles ?? []).includes('openclaw'));
+      const all: any[] = [];
+      for (const s of systems) {
+        try {
+          const a = await fetch(`/api/agent/systems/${s.id}/agents`, { credentials: 'same-origin' }).then(j);
+          for (const ag of (a.agents ?? [])) all.push({ key: `${s.id}::${ag.id}`, system_id: s.id, agent_id: ag.id, name: ag.name ?? ag.id, model: ag.model });
+        } catch { /* */ }
+      }
+      templates = all;
+    } catch { templates = []; }
+  }
+  function openPersona() {
+    showPersona = !showPersona;
+    if (showPersona) { loadLlmSources(); loadTemplates(); }
+  }
+  function modelOf(sel: string) { return llmSources.find((s: any) => `${s.system_id}::${s.model}` === sel); }
+  function applyModel() {
+    const m = modelOf(pModelSel);
+    if (m) { pModel = m.model; pLlm = m.running ? m.endpoint : ''; }
+  }
+  async function applyTemplate() {
+    const t = templates.find((x: any) => x.key === pTemplate);
+    if (!t) return;
+    pName = t.name || '';
+    try {
+      const soul = await fetch(`/api/agent/systems/${t.system_id}/agents/${encodeURIComponent(t.agent_id)}/persona-file?which=soul`, { credentials: 'same-origin' }).then(j);
+      const ident = await fetch(`/api/agent/systems/${t.system_id}/agents/${encodeURIComponent(t.agent_id)}/persona-file?which=identity`, { credentials: 'same-origin' }).then(j);
+      pPrompt = [soul?.content, ident?.content].filter(Boolean).join('\n\n');
+    } catch { /* */ }
+    if (t.model) {
+      const m = llmSources.find((s: any) => s.model === t.model && s.running);
+      if (m) { pModelSel = `${m.system_id}::${m.model}`; applyModel(); }
+    }
+  }
+  function startEdit(p: any) {
+    if (editingUser === p.user_id) { editingUser = ''; return; }
+    editingUser = p.user_id; eModelSel = ''; ePrompt = '';
+    loadLlmSources();
+  }
+  async function saveEdit(user_id: string) {
+    const body: any = { user_id };
+    if (ePrompt.trim()) body.system_prompt = ePrompt;
+    const m = modelOf(eModelSel);
+    if (m && m.running) { body.llm_url = m.endpoint; body.model = m.model; }
+    const r = await api('/persona/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.ok) { editingUser = ''; await loadManage(); } else alert('Update failed: ' + JSON.stringify(r.err));
+  }
   async function placePersona() {
     if (!selected || !pName.trim()) return;
     busy = 'Placing persona…';
@@ -222,7 +283,7 @@
       body: JSON.stringify({ name: pName.trim(), room_id: selected.room_id, system_prompt: pPrompt, llm_url: pLlm, model: pModel }),
     });
     busy = '';
-    if (r.ok) { showPersona = false; pName = pPrompt = pLlm = pModel = ''; alert('Persona placed in ' + selected.name); }
+    if (r.ok) { showPersona = false; pName = pPrompt = pLlm = pModel = pTemplate = pModelSel = ''; alert('Persona placed in ' + selected.name); }
     else alert('Could not place persona: ' + JSON.stringify(r.err));
   }
 
@@ -433,9 +494,22 @@
                 <p class="text-[12px] text-zinc-600">No personas placed. Open a room → <b class="text-zinc-400">🎭 + persona</b>.</p>
               {:else}
                 {#each personasList as p}
-                  <div class="flex items-center gap-2 text-[12px]">
-                    <span class="text-cursed-200 flex-1 truncate">🎭 {p.name} <span class="text-zinc-600">· {p.rooms.length} room{p.rooms.length === 1 ? '' : 's'}{p.has_llm ? '' : ' · ⚠ no LLM endpoint'}</span></span>
-                    <button class="text-red-400/80 hover:text-red-300 shrink-0" on:click={() => removePersona(p.user_id, p.name)}>retire ✕</button>
+                  <div class="text-[12px] space-y-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-cursed-200 flex-1 truncate">🎭 {p.name} <span class="text-zinc-600">· {p.rooms.length} room{p.rooms.length === 1 ? '' : 's'}{p.has_llm ? '' : ' · ⚠ no model'}</span></span>
+                      <button class="text-zinc-400 hover:text-zinc-200 shrink-0" on:click={() => startEdit(p)}>{editingUser === p.user_id ? 'cancel' : 'edit'}</button>
+                      <button class="text-red-400/80 hover:text-red-300 shrink-0" on:click={() => removePersona(p.user_id, p.name)}>retire ✕</button>
+                    </div>
+                    {#if editingUser === p.user_id}
+                      <div class="space-y-1.5 pl-2 border-l-2 border-cursed-500/30">
+                        <select bind:value={eModelSel} class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-[11px] text-zinc-200 font-mono">
+                          <option value="">— keep current model —</option>
+                          {#each llmSources as s}<option value={`${s.system_id}::${s.model}`} disabled={!s.running}>{s.running ? '🟢' : '⚪'} {s.model} · {s.system}{s.running ? '' : ' (needs deploy)'}</option>{/each}
+                        </select>
+                        <textarea bind:value={ePrompt} rows="3" placeholder="new soul / system prompt (blank = unchanged)" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-[11px] text-zinc-200"></textarea>
+                        <button class="btn text-[11px]" on:click={() => saveEdit(p.user_id)}>save</button>
+                      </div>
+                    {/if}
                   </div>
                 {/each}
               {/if}
@@ -479,18 +553,22 @@
                 <span class="text-sm text-zinc-200 font-mono truncate flex-1">{selected.name}</span>
                 <button class="btn text-[11px]" on:click={kickMember} title="Remove a member (kick or ban)">⛔ kick</button>
                 <button class="btn text-[11px]" on:click={leaveRoom} title="Leave this room">⏏ leave</button>
-                <button class="btn text-[11px]" class:active={showPersona} on:click={() => (showPersona = !showPersona)}>🎭 + persona</button>
+                <button class="btn text-[11px]" class:active={showPersona} on:click={openPersona}>🎭 + persona</button>
               </div>
               {#if showPersona}
                 <div class="p-3 border-b border-ink-800 bg-ink-950/40 space-y-2">
-                  <p class="text-[11px] text-zinc-500">Place an LLM persona into <b class="text-cursed-200">{selected.name}</b>. It replies to messages here via your LLM endpoint. <b>You place it — never automatic.</b></p>
-                  <input bind:value={pName} placeholder="persona name (e.g. Thoth)" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200" />
-                  <textarea bind:value={pPrompt} rows="2" placeholder="system prompt / personality" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200"></textarea>
-                  <div class="flex gap-2">
-                    <input bind:value={pLlm} placeholder="LLM URL (…/v1/chat/completions)" class="flex-1 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono" />
-                    <input bind:value={pModel} placeholder="model" class="w-28 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono" />
-                  </div>
-                  <button class="btn text-xs" disabled={!!busy} on:click={placePersona}>place persona</button>
+                  <p class="text-[11px] text-zinc-500">Place a persona into <b class="text-cursed-200">{selected.name}</b> — start from a pantheon member + pick a running model. <b>You place it — never automatic.</b></p>
+                  <select bind:value={pTemplate} on:change={applyTemplate} class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200">
+                    <option value="">— Blank / from scratch —</option>
+                    {#each templates as t}<option value={t.key}>🎭 {t.name}{t.model ? ` · ${t.model}` : ''}</option>{/each}
+                  </select>
+                  <input bind:value={pName} placeholder="persona name" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200" />
+                  <textarea bind:value={pPrompt} rows="3" placeholder="soul / personality (system prompt)" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200"></textarea>
+                  <select bind:value={pModelSel} on:change={applyModel} class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono">
+                    <option value="">— pick a model —</option>
+                    {#each llmSources as s}<option value={`${s.system_id}::${s.model}`} disabled={!s.running}>{s.running ? '🟢' : '⚪'} {s.model} · {s.system}{s.running ? '' : ' (needs deploy)'}</option>{/each}
+                  </select>
+                  <button class="btn text-xs" disabled={!!busy || !pName || !pLlm} on:click={placePersona}>place persona</button>
                 </div>
               {/if}
               <div class="flex-1 overflow-y-auto p-3 space-y-2">
