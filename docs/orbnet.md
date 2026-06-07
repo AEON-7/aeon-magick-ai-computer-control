@@ -7,9 +7,15 @@ home IP never exposed**, and it works behind CGNAT. Orbs authenticate each other
 by onion address, so the network is fully decentralized: no central server, no
 shared certificate authority, no accounts to sign up for.
 
+Think of it as **your own private Matrix server** — a secure comms platform for
+you, your **trusted friends** (peer their Orbs by onion), and **your AI agents**
+(drop them into rooms as personas). No global directory, no strangers; you
+decide who's in.
+
 > TL;DR: open **OrbNet** in the dashboard → **Activate** → you're in the
-> community. Spin off groups/DMs, peer with friends' Orbs, optionally drop a
-> persona into a room, and filter what you'd rather not see.
+> community. Connect Element to it, spin off groups/DMs, peer with friends'
+> Orbs, drop a persona/agent into a room, moderate members, and filter what
+> you'd rather not see.
 
 ---
 
@@ -37,8 +43,13 @@ the homeserver and onion; your account and rooms persist for next time.
 - **Peering (the mesh)** — `+ peer Orb`: paste a friend's OrbNet onion and your
   two Orbs federate and join each other's community rooms over Tor. Add as many
   as you like; that's how the mesh grows.
-- **Personas** — drop an LLM-backed bot into a room (see below).
+- **Personas / agents** — drop an LLM-backed bot into a room (see below).
 - **Moderation** — your own keyword filter (see below).
+- **Connect a real client** — `📱 connect` sets a login password and hands you a
+  QR + certificate so Element (phone or desktop) signs into your homeserver
+  (see below).
+- **Manage** — `manage` lists your federated Orbs (un-peer any) and placed
+  personas (retire any); every room has **⏏ leave** and **⛔ kick/ban**.
 
 ## Personas (you place them — never automatic)
 
@@ -47,8 +58,10 @@ A persona is an LLM-backed Matrix bot with its own account on your homeserver.
 **🎭 + persona**, give it a name, a system prompt (its personality), and an
 **LLM endpoint** (any OpenAI-compatible `/v1/chat/completions` URL — e.g. your
 gateway or a vLLM server) + model. It joins the room and replies to messages
-there via that LLM. Remove it by leaving the persona out — it never wanders into
-rooms on its own, and personas don't reply to each other.
+there via that LLM — point it at **your own agent's** endpoint and that's how you
+bring your agents into OrbNet chats with you and your friends. **Retire** it any
+time from the **manage** panel (it leaves every room and stops responding). It
+never wanders into rooms on its own, and personas don't reply to each other.
 
 ## Moderation (your filter, only yours)
 
@@ -56,6 +69,39 @@ Open **moderation** and list keywords/phrases (one per line). Any message
 containing one is hidden **for you** in the dashboard — case-insensitive, purely
 client-side, and it never affects what anyone else sees. It's a personal
 comfort filter, not censorship of the room.
+
+## Connect a real client (Element, etc.)
+
+The dashboard is fine for quick chats, but for daily use you'll want a proper
+Matrix client — Element on your phone or desktop. Open a room and hit
+**📱 connect**:
+
+1. **Set a login password.** Your account's password was auto-generated, so pick
+   one you'll actually type into a client.
+2. **Download the Orb's certificate** and install + trust it on the device — its
+   SAN is your onion, so Element will trust the self-signed TLS. iOS: open the
+   file → Install → Settings ▸ General ▸ About ▸ Certificate Trust Settings ▸
+   enable it. Android: install it as a CA certificate.
+3. **Reach the onion.** The homeserver is a `.onion`, so the device needs Tor —
+   install **Orbot** and turn on VPN mode. (On a laptop you can skip the install
+   and use **Element Web in Tor Browser**, accepting the cert in-browser.)
+4. In Element: **Sign in → custom / "Other homeserver" →** paste the **Homeserver
+   URL** (shown in the panel, with a QR), then sign in with your **Matrix ID**
+   and the password you set.
+
+Your friends and agents connect their own clients the same way.
+
+## Managing your space
+
+- **Leave a room** — open it and hit **⏏ leave** (community rooms, groups, or
+  DMs; you can re-join community rooms anytime).
+- **Un-peer an Orb** — **manage** lists every Orb you federate with; **un-peer**
+  drops it from your seed list and leaves its rooms.
+- **Retire a persona** — **manage** lists your placed personas; **retire** pulls
+  the bot from every room and stops its responder.
+- **Remove a member** — in a room you moderate, **⛔ kick** removes someone (you
+  choose kick vs. ban). Requires the room's power level — true for rooms and
+  groups you created.
 
 ## Lockdown + API exposure
 

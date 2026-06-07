@@ -1106,3 +1106,123 @@ pub async fn personas(State(_s): State<AppState>) -> Json<Value> {
         .collect();
     Json(json!({"ok": true, "personas": list}))
 }
+
+// ── membership + federation management ────────────────────────────────────────
+
+/// POST /api/orbnet/rooms/:id/leave — leave (and forget) a room, group, or DM.
+pub async fn leave_room(State(_s): State<AppState>, AxPath(id): AxPath<String>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        match cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/leave", urlencode(&id)), Some(&o.access_token), Some("{}")) {
+            Ok(v) if v.get("errcode").is_none() => {
+                let _ = cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/forget", urlencode(&id)), Some(&o.access_token), Some("{}"));
+                json!({"ok": true})
+            }
+            Ok(v) => json!({"ok": false, "err": v}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "leave task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct KickReq {
+    pub user_id: String,
+    #[serde(default)]
+    pub reason: String,
+    /// true = ban (also blocks rejoin); false = kick.
+    #[serde(default)]
+    pub ban: bool,
+}
+
+/// POST /api/orbnet/rooms/:id/kick — remove (kick) or ban a member from a room
+/// the owner moderates. Requires the owner to hold the needed power level (true
+/// for rooms/groups it created). Admin-gated.
+pub async fn kick_member(State(_s): State<AppState>, AxPath(id): AxPath<String>, Json(req): Json<KickReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let Some(o) = read_owner() else {
+            return json!({"ok": false, "err": "owner not provisioned"});
+        };
+        let action = if req.ban { "ban" } else { "kick" };
+        let body = json!({"user_id": req.user_id, "reason": req.reason});
+        match cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/{}", urlencode(&id), action), Some(&o.access_token), Some(&body.to_string())) {
+            Ok(v) if v.get("errcode").is_none() => json!({"ok": true, "action": action}),
+            Ok(v) => json!({"ok": false, "err": v}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "kick task failed"}));
+    Json(v)
+}
+
+/// GET /api/orbnet/peers — the onions this Orb federates with (its directory
+/// seeds). Admin-gated.
+pub async fn peers(State(_s): State<AppState>) -> Json<Value> {
+    let cfg = read_config();
+    Json(json!({"ok": true, "peers": cfg.directory_seeds}))
+}
+
+/// POST /api/orbnet/peer/remove — stop federating with an onion: drop it from
+/// the seed list (so it isn't re-peered on enable) and leave its rooms the owner
+/// is currently in. Admin-gated.
+pub async fn unpeer(State(_s): State<AppState>, Json(req): Json<PeerReq>) -> Json<Value> {
+    let onion = req.onion.trim().trim_end_matches('/').to_string();
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut cfg = read_config();
+        let before = cfg.directory_seeds.len();
+        cfg.directory_seeds.retain(|s| s != &onion);
+        let removed = cfg.directory_seeds.len() != before;
+        let _ = write_config(&cfg);
+        // Leave any currently-joined rooms hosted on that onion (room_id ends
+        // with ":<onion>"). Uses a local sync — no flaky remote alias lookups.
+        let mut left = 0;
+        if let Some(o) = read_owner() {
+            if let Ok(sync) = cs_curl("GET", "/_matrix/client/v3/sync?timeout=0", Some(&o.access_token), None) {
+                if let Some(join) = sync.pointer("/rooms/join").and_then(|v| v.as_object()) {
+                    let suffix = format!(":{onion}");
+                    for rid in join.keys().filter(|r| r.ends_with(&suffix)) {
+                        let _ = cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/leave", urlencode(rid)), Some(&o.access_token), Some("{}"));
+                        let _ = cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/forget", urlencode(rid)), Some(&o.access_token), Some("{}"));
+                        left += 1;
+                    }
+                }
+            }
+        }
+        json!({"ok": true, "removed": removed, "left_rooms": left})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "unpeer task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct PersonaRemoveReq {
+    pub user_id: String,
+}
+
+/// POST /api/orbnet/persona/remove — retire a persona: stop the responder for it,
+/// have its bot account leave every room, and drop its record + sync cursor.
+/// Admin-gated.
+pub async fn remove_persona(State(_s): State<AppState>, Json(req): Json<PersonaRemoveReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut personas = read_personas();
+        let Some(idx) = personas.iter().position(|p| p.user_id == req.user_id) else {
+            return json!({"ok": false, "err": "no such persona"});
+        };
+        let p = personas.remove(idx);
+        for rid in &p.rooms {
+            let _ = cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/leave", urlencode(rid)), Some(&p.access_token), Some("{}"));
+        }
+        let _ = write_personas(&personas);
+        let _ = std::fs::remove_file(format!("{SINCE_DIR}/{}", p.handle));
+        json!({"ok": true, "removed": p.name})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "remove persona task failed"}));
+    Json(v)
+}
