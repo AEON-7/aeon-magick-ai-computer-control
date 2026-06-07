@@ -149,6 +149,56 @@
   let deployResult: api.DeployResult | null = null;
   let deployErr = '';
   let deployCatLoading = false;
+
+  // E5b: catalog grouping + filtering. We keep deployEntries as the index source
+  // (pickEntry/deploySel are index-based) and build view-groups that carry each
+  // entry's ORIGINAL index, so selection survives regrouping.
+  const CATEGORIES = ['Models', 'Media Creation', 'Utilities', 'Containers'];
+  let fCategory = '', fArch = '', fQuant = '';
+  let fMin: number | null = null, fMax: number | null = null;
+  let collapsed = new Set<string>();
+  function toggleCat(c: string) { collapsed.has(c) ? collapsed.delete(c) : collapsed.add(c); collapsed = collapsed; }
+  function clearFilters() { fCategory = fArch = fQuant = ''; fMin = fMax = null; }
+  function paramNum(p: string): number { const m = (p || '').match(/([\d.]+)/); return m ? parseFloat(m[1]) : 0; }
+  function passesFilter(e: any): boolean {
+    if (fCategory && e.category !== fCategory) return false;
+    if (fArch && e.arch !== fArch) return false;
+    if (fQuant && e.quant !== fQuant) return false;
+    const p = paramNum(e.params);
+    if (fMax != null && p && p > fMax) return false;
+    if (fMin != null && p && p < fMin) return false;
+    return true;
+  }
+  function buildGroups(entries: any[], _c: string, _a: string, _q: string, _mn: number | null, _mx: number | null) {
+    const indexed = entries.map((e, idx) => ({ e, idx })).filter(({ e }) => passesFilter(e));
+    const byCat: Record<string, any[]> = {};
+    for (const it of indexed) (byCat[it.e.category || 'Utilities'] ??= []).push(it);
+    const out: any[] = [];
+    for (const cat of CATEGORIES) {
+      const items = byCat[cat];
+      if (!items?.length) continue;
+      let sections: any[] = [];
+      if (cat === 'Models') {
+        const byBrand: Record<string, any[]> = {};
+        for (const it of items) (byBrand[it.e.brand || 'Other'] ??= []).push(it);
+        for (const brand of Object.keys(byBrand).sort()) {
+          const bySize: Record<string, any[]> = {};
+          for (const it of byBrand[brand]) (bySize[it.e.params || '—'] ??= []).push(it);
+          for (const params of Object.keys(bySize).sort((a, b) => paramNum(b) - paramNum(a))) {
+            sections.push({ header: `${brand} · ${params}`, items: bySize[params].sort((a: any, b: any) => (a.e.quant || '').localeCompare(b.e.quant || '')) });
+          }
+        }
+      } else {
+        sections = [{ header: '', items: items.sort((a: any, b: any) => (a.e.model || '').localeCompare(b.e.model || '')) }];
+      }
+      out.push({ category: cat, count: items.length, sections });
+    }
+    return out;
+  }
+  function slugCat(c: string): string { return c.toLowerCase().replace(/[^a-z]+/g, '-'); }
+  $: availArchs = [...new Set(deployEntries.map((e: any) => e.arch).filter(Boolean))].sort();
+  $: availQuants = [...new Set(deployEntries.map((e: any) => e.quant).filter(Boolean))].sort();
+  $: deployGroups = buildGroups(deployEntries, fCategory, fArch, fQuant, fMin, fMax);
   // install progress (polled after a deploy kicks off)
   let depStatus: api.DeployStatus | null = null;
   let depPolling = false;
@@ -2090,27 +2140,59 @@
                   </div>
                 {/if}
 
-                <!-- catalog cards: model + paired container + kind -->
+                <!-- catalog: filter bar + collapsible, color-coded groups -->
                 <div class="dep-sub">Deploy a model</div>
-                <div class="dep-cards">
-                  {#each deployEntries as e, i (e.id)}
-                    <button
-                      class="dep-card"
-                      class:active={deploySel === i}
-                      on:click={() => pickEntry(i)}
-                    >
-                      <div class="dep-card-top">
-                        <span class="dep-kind-badge {e.kind}">{kindLabel(e.kind)}</span>
-                        {#if entryInstalled(e)}<span class="dep-inst-tag">on box</span>{/if}
-                      </div>
-                      <div class="dep-card-model">{e.model}</div>
-                      <div class="dep-card-img" title={e.container_image}>
-                        <span class="dep-img-chip">{imageChip(e.container_image)}</span>
-                      </div>
-                      <div class="dep-card-desc">{e.description}</div>
-                    </button>
-                  {/each}
+                <div class="dep-filters">
+                  <select bind:value={fCategory} class="dep-filter" title="Type">
+                    <option value="">All types</option>
+                    {#each CATEGORIES as c}<option value={c}>{c}</option>{/each}
+                  </select>
+                  <select bind:value={fArch} class="dep-filter" title="Architecture">
+                    <option value="">Any arch</option>
+                    {#each availArchs as a}<option value={a}>{a}</option>{/each}
+                  </select>
+                  <select bind:value={fQuant} class="dep-filter" title="Quant type">
+                    <option value="">Any quant</option>
+                    {#each availQuants as q}<option value={q}>{q}</option>{/each}
+                  </select>
+                  <input type="number" min="0" bind:value={fMin} placeholder="min B" class="dep-filter-num" title="Min params (B)" />
+                  <input type="number" min="0" bind:value={fMax} placeholder="max B" class="dep-filter-num" title="Max params (B)" />
+                  {#if fCategory || fArch || fQuant || fMin != null || fMax != null}
+                    <button type="button" class="dep-filter-clear" on:click={clearFilters}>clear ✕</button>
+                  {/if}
                 </div>
+
+                {#each deployGroups as g (g.category)}
+                  <div class="dep-group dep-cat-{slugCat(g.category)}">
+                    <button type="button" class="dep-group-head" on:click={() => toggleCat(g.category)}>
+                      <span class="dep-cat-dot"></span>
+                      <span class="dep-cat-name">{g.category}</span>
+                      <span class="dep-cat-count">{g.count}</span>
+                      <span class="dep-cat-caret">{collapsed.has(g.category) ? '▸' : '▾'}</span>
+                    </button>
+                    {#if !collapsed.has(g.category)}
+                      {#each g.sections as sec}
+                        {#if sec.header}<div class="dep-section-head">{sec.header}</div>{/if}
+                        <div class="dep-cards">
+                          {#each sec.items as { e, idx } (e.id)}
+                            <button class="dep-card" class:active={deploySel === idx} on:click={() => pickEntry(idx)}>
+                              <div class="dep-card-top">
+                                <span class="dep-kind-badge {e.kind}">{kindLabel(e.kind)}</span>
+                                {#if e.quant}<span class="dep-quant-tag">{e.quant}</span>{/if}
+                                {#if entryInstalled(e)}<span class="dep-inst-tag">on box</span>{/if}
+                              </div>
+                              <div class="dep-card-model">{e.model}</div>
+                              <div class="dep-card-img" title={e.container_image}>
+                                <span class="dep-img-chip">{imageChip(e.container_image)}</span>
+                              </div>
+                              <div class="dep-card-desc">{e.description}</div>
+                            </button>
+                          {/each}
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                {/each}
 
                 <!-- selected-entry editor: name + highlighted flags + advanced -->
                 {#if deploySel >= 0 && deployEntries[deploySel]}
@@ -3137,6 +3219,26 @@
 
   /* catalog cards */
   .dep-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.55rem; }
+  /* E5b: filter bar + grouped catalog */
+  .dep-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin: 0.35rem 0 0.6rem; }
+  .dep-filter, .dep-filter-num { background: #14141c; border: 1px solid #2a2a38; border-radius: 0.35rem; color: #d4d4d8; font-size: 0.72rem; padding: 0.22rem 0.4rem; }
+  .dep-filter-num { width: 4.6rem; }
+  .dep-filter-clear { color: #a78bfa; font-size: 0.72rem; padding: 0 0.3rem; }
+  .dep-group { margin-bottom: 0.55rem; border-left: 2px solid #2a2a38; padding-left: 0.55rem; }
+  .dep-group-head { display: flex; align-items: center; gap: 0.45rem; width: 100%; padding: 0.32rem 0; font-size: 0.82rem; color: #e4e4e7; }
+  .dep-cat-dot { width: 0.6rem; height: 0.6rem; border-radius: 999px; flex-shrink: 0; background: #71717a; }
+  .dep-cat-count { color: #71717a; font-size: 0.7rem; }
+  .dep-cat-caret { margin-left: auto; color: #71717a; }
+  .dep-section-head { font-size: 0.68rem; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.05em; margin: 0.4rem 0 0.28rem; }
+  .dep-quant-tag { font-size: 0.6rem; background: #2a2a38; color: #c4b5fd; border-radius: 0.25rem; padding: 0 0.3rem; }
+  .dep-cat-models { border-left-color: rgba(129, 140, 248, 0.5); }
+  .dep-cat-models .dep-cat-dot { background: #818cf8; }
+  .dep-cat-media-creation { border-left-color: rgba(232, 121, 249, 0.5); }
+  .dep-cat-media-creation .dep-cat-dot { background: #e879f9; }
+  .dep-cat-utilities { border-left-color: rgba(251, 191, 36, 0.5); }
+  .dep-cat-utilities .dep-cat-dot { background: #fbbf24; }
+  .dep-cat-containers { border-left-color: rgba(45, 212, 191, 0.5); }
+  .dep-cat-containers .dep-cat-dot { background: #2dd4bf; }
   .dep-card {
     text-align: left; display: flex; flex-direction: column; gap: 0.3rem; padding: 0.6rem 0.7rem;
     border: 1px solid #23232f; border-radius: 0.6rem; background: rgba(12, 12, 20, 0.5); cursor: pointer; transition: border-color 0.15s, background 0.15s;
