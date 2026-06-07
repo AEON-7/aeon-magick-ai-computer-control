@@ -15,7 +15,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -493,10 +493,23 @@ pub fn build_router(cfg: Config) -> Router {
     let web_root = cfg.web_root.clone();
     let app_assets = web_root.join("_app");
 
-    Router::new()
+    let mut app = Router::new()
         .nest("/api", api)
         // SvelteKit's hashed JS/CSS bundles — real files on disk.
-        .nest_service("/_app", ServeDir::new(&app_assets))
+        .nest_service("/_app", ServeDir::new(&app_assets));
+    // Root-level static assets (favicon set + web manifest). Without explicit
+    // routes these hit the SPA fallback below and serve index.html with the
+    // wrong MIME — so the browser-tab icon and PWA manifest never loaded.
+    for f in [
+        "favicon.png", "favicon-16.png", "favicon-32.png", "apple-touch-icon.png",
+        "icon-192.png", "icon-512.png", "site.webmanifest", "robots.txt",
+    ] {
+        let p = web_root.join(f);
+        if p.exists() {
+            app = app.route_service(&format!("/{f}"), ServeFile::new(p));
+        }
+    }
+    app
         // Always-200 fallback for all SPA routes.
         .fallback(spa_fallback)
         .layer(TraceLayer::new_for_http())
