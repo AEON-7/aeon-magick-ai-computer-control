@@ -21,6 +21,11 @@ RestartSec=5
 User=root
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+# Blast-radius cap: a runaway in any subsystem (e.g. an oversized blacklist
+# fetch) gets the supervisor cgroup-killed + restarted instead of OOMing the
+# whole Pi (which once took down dnscrypt + everything during an OrbNet bring-up).
+MemoryHigh=768M
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target

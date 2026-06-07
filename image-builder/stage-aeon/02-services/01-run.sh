@@ -31,6 +31,19 @@ dtparam=spi=on
 EOF
     fi
 
+    # ── Sense HAT LED matrix ──
+    # The rpi-sense overlay registers the 8x8 RGB framebuffer (+ joystick) so the
+    # "alive" heartbeat glow (aeon-orb-glow.service) can drive it. Harmless if no
+    # Sense HAT is attached — the overlay simply doesn't probe.
+    if ! grep -q "^dtoverlay=rpi-sense$" "${CONFIG_TXT}"; then
+        cat >> "${CONFIG_TXT}" <<'EOF'
+
+# aeon-magick: Sense HAT LED matrix (heartbeat glow)
+[all]
+dtoverlay=rpi-sense
+EOF
+    fi
+
     # ── Power-draw optimization ──
     # The device's job is: capture HDMI via Cam Link USB-3, serve frames
     # over the network, emulate USB HID. It NEVER needs Pi's own HDMI

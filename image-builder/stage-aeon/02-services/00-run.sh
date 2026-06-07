@@ -18,6 +18,7 @@ for u in \
     aeon-net-services.service \
     aeon-undervolt-watchdog.service \
     aeon-undervolt-watchdog.timer \
+    aeon-orb-glow.service \
     dnscrypt-proxy.service; do
     install -m 0644 "${THIS_DIR}/files/${u}" "${ROOTFS_DIR}/etc/systemd/system/${u}"
 done
@@ -61,6 +62,9 @@ install -m 0755 "${THIS_DIR}/files/aeon-netwatch.sh"          "${ROOTFS_DIR}/usr
 install -m 0755 "${THIS_DIR}/files/aeon-undervolt-watchdog.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-undervolt-watchdog"
 install -m 0755 "${THIS_DIR}/files/aeon-vpn-status.py"        "${ROOTFS_DIR}/usr/local/bin/aeon-vpn-status"
 install -m 0755 "${THIS_DIR}/files/aeon-vpn-rotate.py"        "${ROOTFS_DIR}/usr/local/bin/aeon-vpn-rotate"
+# Sense HAT "alive" heartbeat glow (drives the 8x8 LED matrix via the rpi-sense
+# framebuffer; no-op if no Sense HAT / framebuffer is present).
+install -m 0755 "${THIS_DIR}/files/aeon-orb-heartbeat.py"    "${ROOTFS_DIR}/usr/local/bin/aeon-orb-heartbeat.py"
 
 on_chroot << EOF
 useradd -r -s /usr/sbin/nologin -G video,plugdev aeon || true
@@ -75,5 +79,6 @@ systemctl enable aeon-netwatch.timer
 systemctl enable aeon-usb-net.service
 systemctl enable aeon-net-services.service
 systemctl enable aeon-undervolt-watchdog.timer
+systemctl enable aeon-orb-glow.service
 # aeon-wifi-unblock.service is created by 01-run.sh and enabled there.
 EOF
