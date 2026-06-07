@@ -3515,6 +3515,9 @@ fn deploy_catalog_merged() -> (Vec<serde_json::Value>, Option<String>) {
         (None, Some(b)) => Some(b),
         (None, None) => None,
     };
+    for e in entries.iter_mut() {
+        enrich_entry(e);
+    }
     (entries, note)
 }
 
@@ -3523,6 +3526,110 @@ fn deploy_catalog_merged() -> (Vec<serde_json::Value>, Option<String>) {
 /// containers).
 fn curated_deploy_catalog() -> serde_json::Value {
     serde_json::Value::Array(deploy_catalog_merged().0)
+}
+
+/// True if the model name carries an MoE active-params marker (e.g. `…-a3b`,
+/// `…a22b`): an `a` immediately followed by digits then `b`.
+fn is_moe_marker(model: &str) -> bool {
+    let b: Vec<char> = model.to_lowercase().chars().collect();
+    for i in 0..b.len() {
+        if b[i] == 'a' && b.get(i + 1).is_some_and(|c| c.is_ascii_digit()) {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if b.get(j) == Some(&'b') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Enrich a catalog entry IN PLACE with structured facets the UI groups + filters
+/// on: `brand`, `params`, `quant`, `arch`, `category`. Derived from the model id
+/// / container image / description (only `kind` was structured before). Purely
+/// additive — the deploy path reads id/model/kind/template_flags, untouched.
+fn enrich_entry(e: &mut serde_json::Value) {
+    let model = e.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let image = e.get("container_image").and_then(|x| x.as_str()).unwrap_or("");
+    let kind = e.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let desc = e.get("description").and_then(|x| x.as_str()).unwrap_or("");
+    let hay = format!("{model} {image} {desc}").to_lowercase();
+
+    // brand / family (first match wins)
+    let mut brand = "Other";
+    for (k, v) in [
+        ("gemma", "Gemma"), ("qwen", "Qwen"), ("llama", "Llama"), ("mixtral", "Mixtral"),
+        ("mistral", "Mistral"), ("deepseek", "DeepSeek"), ("nemotron", "Nemotron"), ("phi", "Phi"),
+        ("glm", "GLM"), ("command", "Command-R"), ("granite", "Granite"), ("falcon", "Falcon"),
+        ("flux", "FLUX"), ("comfyui", "ComfyUI"), ("sdxl", "Stable Diffusion"), ("stable-diffusion", "Stable Diffusion"),
+        ("whisper", "Whisper"), ("kokoro", "Kokoro"), ("orpheus", "Orpheus"), ("parakeet", "Parakeet"),
+    ] {
+        if hay.contains(k) {
+            brand = v;
+            break;
+        }
+    }
+
+    // parameter size: first `<digits>b` token in the MODEL id (e.g. 27B, 4B)
+    let mut params = String::new();
+    let mb: Vec<char> = model.to_lowercase().chars().collect();
+    let mut i = 0;
+    while i < mb.len() {
+        if mb[i].is_ascii_digit() {
+            let start = i;
+            while i < mb.len() && (mb[i].is_ascii_digit() || mb[i] == '.') {
+                i += 1;
+            }
+            if mb.get(i) == Some(&'b') && mb.get(i + 1).map_or(true, |c| !c.is_ascii_alphanumeric()) {
+                params = format!("{}B", mb[start..i].iter().collect::<String>());
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // quant type
+    let quant = if hay.contains("nvfp4") { "NVFP4" }
+        else if hay.contains("mlxfp4") || hay.contains("mlx-fp4") { "MLXFP4" }
+        else if hay.contains("mxfp4") { "MXFP4" }
+        else if hay.contains("mlx-8bit") || hay.contains("mlx8") || hay.contains("mlx_8bit") { "MLX-8bit" }
+        else if hay.contains("nvfp8") { "NVFP8" }
+        else if hay.contains("fp8") { "FP8" }
+        else if hay.contains("awq") { "AWQ" }
+        else if hay.contains("gptq") { "GPTQ" }
+        else if hay.contains("gguf") { "GGUF" }
+        else if hay.contains("int4") { "INT4" }
+        else if hay.contains("int8") { "INT8" }
+        else if hay.contains("fp4") { "FP4" }
+        else if hay.contains("bf16") || hay.contains("bfloat16") { "BF16" }
+        else if matches!(kind.as_str(), "llm" | "llm-gguf") { "BF16" }
+        else { "" };
+
+    // architecture
+    let arch = if hay.contains("mixture-of-experts") || hay.contains("moe") || is_moe_marker(&model) { "MoE" }
+        else if hay.contains("omni") || hay.contains("unified") || hay.contains("any-to-any") { "Unified" }
+        else if matches!(kind.as_str(), "llm" | "llm-gguf") { "Dense" }
+        else { "" };
+
+    // top-level category
+    let category = match kind.as_str() {
+        "llm" | "llm-gguf" => "Models",
+        "imagegen" | "tts" | "asr" => "Media Creation",
+        "embedding" => "Utilities",
+        "service" => "Containers",
+        _ => "Utilities",
+    };
+
+    if let Some(o) = e.as_object_mut() {
+        o.insert("brand".into(), json!(brand));
+        o.insert("params".into(), json!(params));
+        o.insert("quant".into(), json!(quant));
+        o.insert("arch".into(), json!(arch));
+        o.insert("category".into(), json!(category));
+    }
 }
 
 /// Shell snippet (no quoting hazards) that prints what's already on the box: a
