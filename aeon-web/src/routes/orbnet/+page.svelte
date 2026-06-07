@@ -39,6 +39,9 @@
   // moderation
   let modText = '';
   let showMod = false;
+  let showManage = false;
+  let peers: string[] = [];
+  let personasList: any[] = [];
 
   const j = (r: Response) => r.json();
   const api = (path: string, opts: RequestInit = {}) =>
@@ -165,6 +168,47 @@
     busy = '';
     if (r.ok) { await loadRooms(); alert(`Peered — joined ${r.joined_rooms} of its rooms.`); }
     else alert('Peer failed: ' + JSON.stringify(r.err));
+  }
+
+  // ── manage: federation peers + personas ──
+  async function loadManage() {
+    try {
+      const [p, pr] = await Promise.all([api('/peers'), api('/personas')]);
+      peers = p.peers ?? [];
+      personasList = pr.personas ?? [];
+    } catch { /* */ }
+  }
+  function toggleManage() {
+    showManage = !showManage;
+    if (showManage) loadManage();
+  }
+  async function unpeerOrb(onion: string) {
+    if (!confirm(`Stop federating with ${onion.slice(0, 14)}… ? You'll leave its rooms.`)) return;
+    const r = await api('/peer/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ onion }) });
+    if (r.ok) { await loadManage(); await loadRooms(); }
+    else alert('Could not un-peer: ' + JSON.stringify(r.err));
+  }
+  async function removePersona(user_id: string, name: string) {
+    if (!confirm(`Retire persona "${name}"? It leaves all its rooms and stops responding.`)) return;
+    const r = await api('/persona/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id }) });
+    if (r.ok) { await loadManage(); await loadRooms(); }
+    else alert('Could not retire: ' + JSON.stringify(r.err));
+  }
+  async function leaveRoom() {
+    if (!selected) return;
+    if (!confirm(`Leave "${selected.name}"?`)) return;
+    const r = await api(`/rooms/${encodeURIComponent(selected.room_id)}/leave`, { method: 'POST' });
+    if (r.ok) { selected = null; messages = []; await loadRooms(); }
+    else alert('Could not leave: ' + JSON.stringify(r.err));
+  }
+  async function kickMember() {
+    if (!selected) return;
+    const uid = prompt('Remove which member? Paste their Matrix ID (e.g. @nova:abc…onion).');
+    if (!uid) return;
+    const ban = confirm('OK = ban (blocks rejoin).  Cancel = kick (can rejoin).');
+    const r = await api(`/rooms/${encodeURIComponent(selected.room_id)}/kick`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: uid.trim(), ban }) });
+    if (r.ok) alert(`${ban ? 'Banned' : 'Kicked'} ${uid}`);
+    else alert('Could not remove member (do you have the power level?): ' + JSON.stringify(r.err));
   }
 
   // personas — human-placed only
@@ -318,6 +362,7 @@
             <button class="btn text-xs" on:click={peerOrb}>+ peer Orb</button>
             <button class="btn text-xs" class:active={showConnect} on:click={() => (showConnect = !showConnect)}>📱 connect</button>
             <button class="btn text-xs" class:active={showMod} on:click={() => (showMod = !showMod)}>moderation</button>
+            <button class="btn text-xs" class:active={showManage} on:click={toggleManage}>manage</button>
           </div>
         </section>
 
@@ -363,6 +408,41 @@
           </section>
         {/if}
 
+        {#if showManage}
+          <section class="bg-ink-900 border border-cursed-500/30 rounded-xl p-4 space-y-4">
+            <div class="flex items-center justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-cursed-300">⚙ Manage — peers &amp; personas</div>
+              <button class="text-zinc-500 hover:text-zinc-300 text-xs" on:click={() => (showManage = false)}>close ✕</button>
+            </div>
+            <div class="space-y-1.5">
+              <div class="text-[11px] uppercase tracking-wide text-zinc-500">Federated Orbs ({peers.length})</div>
+              {#if peers.length === 0}
+                <p class="text-[12px] text-zinc-600">No peers. Use <b class="text-zinc-400">+ peer Orb</b> to federate with a friend's Orb by its onion.</p>
+              {:else}
+                {#each peers as onion}
+                  <div class="flex items-center gap-2 text-[12px]">
+                    <span class="font-mono text-zinc-300 break-all flex-1" title={onion}>{shortOnion(onion)}</span>
+                    <button class="text-red-400/80 hover:text-red-300 shrink-0" on:click={() => unpeerOrb(onion)}>un-peer ✕</button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+            <div class="space-y-1.5 border-t border-ink-800 pt-3">
+              <div class="text-[11px] uppercase tracking-wide text-zinc-500">Placed personas ({personasList.length})</div>
+              {#if personasList.length === 0}
+                <p class="text-[12px] text-zinc-600">No personas placed. Open a room → <b class="text-zinc-400">🎭 + persona</b>.</p>
+              {:else}
+                {#each personasList as p}
+                  <div class="flex items-center gap-2 text-[12px]">
+                    <span class="text-cursed-200 flex-1 truncate">🎭 {p.name} <span class="text-zinc-600">· {p.rooms.length} room{p.rooms.length === 1 ? '' : 's'}{p.has_llm ? '' : ' · ⚠ no LLM endpoint'}</span></span>
+                    <button class="text-red-400/80 hover:text-red-300 shrink-0" on:click={() => removePersona(p.user_id, p.name)}>retire ✕</button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </section>
+        {/if}
+
         {#if showMod}
           <section class="bg-ink-900 border border-amber-500/30 rounded-xl p-4 space-y-2">
             <div class="text-xs font-mono uppercase tracking-wider text-amber-300">Your moderation filter</div>
@@ -397,6 +477,8 @@
             {#if selected}
               <div class="px-4 py-2 border-b border-ink-800 flex items-center gap-2">
                 <span class="text-sm text-zinc-200 font-mono truncate flex-1">{selected.name}</span>
+                <button class="btn text-[11px]" on:click={kickMember} title="Remove a member (kick or ban)">⛔ kick</button>
+                <button class="btn text-[11px]" on:click={leaveRoom} title="Leave this room">⏏ leave</button>
                 <button class="btn text-[11px]" class:active={showPersona} on:click={() => (showPersona = !showPersona)}>🎭 + persona</button>
               </div>
               {#if showPersona}
