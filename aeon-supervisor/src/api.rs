@@ -421,7 +421,6 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/orbnet/personas",        get(crate::orbnet::personas))
         .route("/orbnet/client-password", post(crate::orbnet::set_client_password))
         .route("/orbnet/cert",            get(crate::orbnet::cert))
-        .route("/orbnet/tailscale",       get(crate::orbnet::tailscale_status).post(crate::orbnet::set_tailscale))
         .route("/lockdown",               get(crate::lockdown::get_lockdown).post(crate::lockdown::set_lockdown))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))

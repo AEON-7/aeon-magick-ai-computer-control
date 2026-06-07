@@ -491,65 +491,6 @@ pub async fn cert() -> impl IntoResponse {
     }
 }
 
-#[derive(Deserialize)]
-pub struct TailscaleReq {
-    pub enable: bool,
-}
-
-/// GET /api/orbnet/tailscale — Tailscale identity + whether the Matrix C-S API
-/// is exposed on the tailnet via `tailscale serve`. Serve gives a VALID ts.net
-/// cert, so a client already on the tailnet connects with NO cert install and
-/// NO Tor — the easiest path for the operator's own devices. Admin-gated.
-pub async fn tailscale_status(State(_s): State<AppState>) -> Json<Value> {
-    let v = tokio::task::spawn_blocking(|| -> Value {
-        let mut dns = String::new();
-        let mut running = false;
-        if let Ok(o) = Command::new("tailscale").args(["status", "--json"]).output() {
-            if o.status.success() {
-                let j: Value = serde_json::from_slice(&o.stdout).unwrap_or(json!({}));
-                dns = j.pointer("/Self/DNSName").and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('.').to_string();
-                running = j.get("BackendState").and_then(|v| v.as_str()) == Some("Running");
-            }
-        }
-        let serve_active = Command::new("tailscale").args(["serve", "status"]).output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(":8448"))
-            .unwrap_or(false);
-        let url = if dns.is_empty() { String::new() } else { format!("https://{dns}:8448") };
-        json!({"ok": true, "available": running && !dns.is_empty(), "dns_name": dns, "serve_active": serve_active, "url": url})
-    })
-    .await
-    .unwrap_or_else(|_| json!({"ok": false, "err": "tailscale task failed"}));
-    Json(v)
-}
-
-/// POST /api/orbnet/tailscale — expose (enable=true) or stop exposing the Matrix
-/// C-S API on the tailnet through `tailscale serve`. If the tailnet hasn't
-/// enabled the Serve/HTTPS feature, Tailscale returns an admin URL to turn it on
-/// (a one-time human step on the operator's own account). Admin-gated.
-pub async fn set_tailscale(State(_s): State<AppState>, Json(req): Json<TailscaleReq>) -> Json<Value> {
-    let v = tokio::task::spawn_blocking(move || -> Value {
-        let args: Vec<&str> = if req.enable {
-            vec!["serve", "--bg", "--https=8448", "https+insecure://127.0.0.1:8448"]
-        } else {
-            vec!["serve", "--https=8448", "off"]
-        };
-        match Command::new("tailscale").args(&args).output() {
-            Ok(o) if o.status.success() => json!({"ok": true, "enabled": req.enable}),
-            Ok(o) => {
-                let msg = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-                let admin_url = msg.split_whitespace()
-                    .find(|w| w.starts_with("https://") && w.contains("tailscale"))
-                    .map(|s| s.trim().to_string());
-                json!({"ok": false, "err": msg.trim(), "admin_url": admin_url})
-            }
-            Err(e) => json!({"ok": false, "err": format!("tailscale: {e}")}),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| json!({"ok": false, "err": "tailscale task failed"}));
-    Json(v)
-}
-
 /// GET /api/orbnet/rooms — the owner's joined rooms (community + groups + DMs)
 /// with names, member counts, and a recent-activity timestamp. Admin-gated.
 pub async fn rooms(State(_s): State<AppState>) -> Json<Value> {
