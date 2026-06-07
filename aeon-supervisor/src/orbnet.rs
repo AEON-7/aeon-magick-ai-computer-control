@@ -1226,3 +1226,53 @@ pub async fn remove_persona(State(_s): State<AppState>, Json(req): Json<PersonaR
     .unwrap_or_else(|_| json!({"ok": false, "err": "remove persona task failed"}));
     Json(v)
 }
+
+#[derive(Deserialize)]
+pub struct PersonaUpdateReq {
+    pub user_id: String,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub llm_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// POST /api/orbnet/persona/update — edit a placed persona's brain config after
+/// the fact: model + endpoint, soul (system_prompt), optional display name. Any
+/// omitted field is left unchanged. Admin-gated.
+pub async fn update_persona(State(_s): State<AppState>, Json(req): Json<PersonaUpdateReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut personas = read_personas();
+        let Some(idx) = personas.iter().position(|p| p.user_id == req.user_id) else {
+            return json!({"ok": false, "err": "no such persona"});
+        };
+        if let Some(s) = req.system_prompt { personas[idx].system_prompt = s; }
+        if let Some(u) = req.llm_url { personas[idx].llm_url = u; }
+        if let Some(m) = req.model { personas[idx].model = m; }
+        if let Some(k) = req.api_key { personas[idx].api_key = k; }
+        let token = personas[idx].access_token.clone();
+        let uid = personas[idx].user_id.clone();
+        if let Err(e) = write_personas(&personas) {
+            return json!({"ok": false, "err": format!("save: {e}")});
+        }
+        if let Some(dn) = req.display_name {
+            if !dn.is_empty() {
+                let _ = cs_curl(
+                    "PUT",
+                    &format!("/_matrix/client/v3/profile/{}/displayname", urlencode(&uid)),
+                    Some(&token),
+                    Some(&json!({"displayname": dn}).to_string()),
+                );
+            }
+        }
+        json!({"ok": true})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "update persona task failed"}));
+    Json(v)
+}

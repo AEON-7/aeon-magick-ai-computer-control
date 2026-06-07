@@ -3583,6 +3583,69 @@ fn gather_installed(sys: &System) -> (Vec<serde_json::Value>, Vec<String>) {
     (containers, models.into_iter().collect())
 }
 
+/// Probe for the OrbNet persona model picker: RUNNING vLLM servers (as
+/// `model|port`, so we can build a live endpoint) and CACHED-but-stopped models
+/// (name only → "needs deploy"). Mirrors INSTALLED_PROBE's markers + cmdline parse.
+const LLM_SOURCES_PROBE: &str = r#"echo '@@RUNNING@@'
+for p in $(pgrep -f vllm 2>/dev/null); do
+  cl=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null)
+  name=$(printf '%s\n' "$cl" | grep -A1 -- '--served-model-name' | tail -n1)
+  [ -z "$name" ] && name=$(printf '%s\n' "$cl" | grep -A1 -- '--model' | tail -n1)
+  port=$(printf '%s\n' "$cl" | grep -A1 -- '--port' | tail -n1)
+  [ -z "$port" ] && port=8000
+  [ -n "$name" ] && echo "$name|$port"
+done
+echo '@@CACHED@@'
+for base in "$HOME/.cache/huggingface/hub" /root/.cache/huggingface/hub; do
+  [ -d "$base" ] && ls -1 "$base" 2>/dev/null | sed -n 's#^models--##p' | sed 's#--#/#g'
+done
+for d in "$HOME/models" /models /opt/models /raid/models /srv/models; do
+  [ -d "$d" ] && find "$d" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null
+done
+echo '@@END@@'
+"#;
+
+/// GET /api/orbnet/llm-sources — models available across the connected systems,
+/// for the persona model picker. Running vLLM servers carry a live `endpoint`;
+/// cached-but-stopped models come back `running:false` (needs deploy, no
+/// endpoint). Best-effort per box; unreachable systems are skipped. Admin-gated.
+pub async fn llm_sources() -> impl IntoResponse {
+    let v = tokio::task::spawn_blocking(|| -> serde_json::Value {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for sys in load_systems() {
+            let Ok(text) = ssh_capture(&sys, LLM_SOURCES_PROBE) else { continue };
+            let mut section = "";
+            for line in text.lines() {
+                match line.trim() {
+                    "@@RUNNING@@" => { section = "run"; continue; }
+                    "@@CACHED@@" => { section = "cache"; continue; }
+                    "@@END@@" => { section = ""; continue; }
+                    _ => {}
+                }
+                let l = line.trim();
+                if l.is_empty() { continue; }
+                if section == "run" {
+                    if let Some((name, port)) = l.split_once('|') {
+                        if seen.insert(format!("{}::{name}", sys.id)) {
+                            out.push(json!({
+                                "system": sys.label, "system_id": sys.id, "model": name, "running": true,
+                                "endpoint": format!("http://{}:{}/v1/chat/completions", sys.address, port.trim()),
+                            }));
+                        }
+                    }
+                } else if section == "cache" && l.len() <= 200 && !l.starts_with('/') && !l.starts_with('-') && seen.insert(format!("{}::{l}", sys.id)) {
+                    out.push(json!({"system": sys.label, "system_id": sys.id, "model": l, "running": false, "endpoint": serde_json::Value::Null}));
+                }
+            }
+        }
+        json!({"ok": true, "sources": out})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "llm-sources task failed"}));
+    Json(v)
+}
+
 /// True if this system may use Easy Deploy: the `dgx` role, OR it reports docker
 /// AND an NVIDIA GPU (probed live, bounded by ssh_capture's timeout).
 fn deploy_allowed(sys: &System) -> (bool, String) {

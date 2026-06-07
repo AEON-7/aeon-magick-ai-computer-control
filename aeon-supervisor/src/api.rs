@@ -426,6 +426,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/orbnet/peers",           get(crate::orbnet::peers))
         .route("/orbnet/peer/remove",     post(crate::orbnet::unpeer))
         .route("/orbnet/persona/remove",  post(crate::orbnet::remove_persona))
+        .route("/orbnet/persona/update",  post(crate::orbnet::update_persona))
+        .route("/orbnet/llm-sources",     get(crate::agent_connect::llm_sources))
         .route("/lockdown",               get(crate::lockdown::get_lockdown).post(crate::lockdown::set_lockdown))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))
