@@ -11,6 +11,7 @@ THIS_DIR="$(dirname "$0")"
 
 install -m 0755 "${THIS_DIR}/files/aeon-orbnet.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-orbnet"
 install -m 0755 "${THIS_DIR}/files/aeon-onions.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-onions"
+install -m 0755 "${THIS_DIR}/files/aeon-ipfs.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs"
 
 on_chroot << 'EOF'
 id aeon-orbnet >/dev/null 2>&1 || \

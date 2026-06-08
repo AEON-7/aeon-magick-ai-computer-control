@@ -86,7 +86,7 @@ cmd_down() {
 
 cmd_status() {
   local tor n
-  tor=$(systemctl is-active aeon-onions-tor.service 2>/dev/null || echo inactive)
+  tor=$(systemctl is-active aeon-onions-tor.service 2>/dev/null); tor=${tor:-inactive}
   n=$(ls -1 "$CONFD"/*.conf 2>/dev/null | wc -l | tr -d ' ')
   printf '{"tor":"%s","count":%d}\n' "$tor" "${n:-0}"
 }
