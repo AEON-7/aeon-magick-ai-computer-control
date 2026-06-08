@@ -196,6 +196,16 @@ fn tools_catalog() -> Value {
                  "Retire a hosted hidden service by its id (from hidden_service_list), dropping its .onion key + mapping.",
                  json!({"type":"object","required":["id"],
                         "properties":{"id":{"type":"string"}}})),
+            // ── IPFS (decentralized hosting) ──
+            tool("ipfs_status",
+                 "Read-only: IPFS node + gateway state (installed, daemon, peers, repo size, storage cap, gateway port).",
+                 json!({"type":"object","properties":{}})),
+            tool("ipfs_pin",
+                 "Pin an IPFS CID so this Orb hosts + keeps it available on the decentralized web.",
+                 json!({"type":"object","required":["cid"],"properties":{"cid":{"type":"string"}}})),
+            tool("ipfs_add",
+                 "Add a local file or directory (by absolute path on the Orb) to IPFS and return its root CID — e.g. to publish a site/app you built here. Reachable at the local gateway and any public IPFS gateway.",
+                 json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Absolute path on the Orb to a file or directory."}}})),
             // NOTE: SSH key management is intentionally NOT exposed over MCP.
             // Granting/listing SSH access to the device is a human-admin-only
             // action (web UI + admin session). Agents must never manage SSH.
@@ -571,6 +581,28 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             let v = crate::onions::remove(
                 axum::extract::State(state.clone()),
                 axum::Json(crate::onions::RemoveReq { id }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "ipfs_status" => {
+            let v = crate::ipfs::status(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "ipfs_pin" => {
+            let cid = args.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let v = crate::ipfs::pin(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::ipfs::CidReq { cid }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "ipfs_add" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let v = crate::ipfs::add_path(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::ipfs::AddReq { path }),
             )
             .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
@@ -1068,7 +1100,7 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         | "dns_sources" | "audit_log" | "target_info" | "get_clipboard" | "list_files"
         | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"
         | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
-        | "vpn_provider_state" | "blocked_log" | "hidden_service_list" => Read,
+        | "vpn_provider_state" | "blocked_log" | "hidden_service_list" | "ipfs_status" => Read,
         _ => Full,
     }
 }

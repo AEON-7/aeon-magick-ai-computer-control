@@ -2,12 +2,15 @@
   import { onMount, onDestroy } from 'svelte';
 
   let onions: { enabled: boolean; count: number } | null = null;
+  let ipfs: { enabled: boolean; daemon: string; peers: number } | null = null;
   let poll: ReturnType<typeof setInterval>;
 
+  const get = (p: string) =>
+    fetch(p, { credentials: 'same-origin' }).then((r) => r.json()).catch(() => null);
+
   const load = async () => {
-    onions = await fetch('/api/onions/status', { credentials: 'same-origin' })
-      .then((r) => r.json())
-      .catch(() => null);
+    onions = await get('/api/onions/status');
+    ipfs = await get('/api/ipfs/status');
   };
 
   onMount(() => {
@@ -23,9 +26,9 @@
       status: onions ? (onions.enabled ? `on · ${onions.count} hosted` : 'off') : '…',
     },
     {
-      key: 'ipfs', icon: '📦', name: 'IPFS', href: '/orbnet/ipfs', ready: false,
+      key: 'ipfs', icon: '📦', name: 'IPFS', href: '/orbnet/ipfs', ready: true,
       tagline: 'Decentralized file & site hosting + a gateway for all your devices.',
-      status: 'coming soon',
+      status: ipfs ? (ipfs.enabled ? (ipfs.daemon === 'active' ? `on · ${ipfs.peers} peers` : 'starting…') : 'off') : '…',
     },
     {
       key: 'mysterium', icon: '🌐', name: 'Mysterium', href: '/orbnet/mysterium', ready: false,

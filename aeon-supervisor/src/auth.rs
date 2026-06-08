@@ -465,6 +465,9 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         // Hidden-services hosting (mint/retire onions) is a human-admin console
         // over REST; agents reach it only via the gated hidden_service_* MCP tools.
         || path.starts_with("/api/onions/")
+        // IPFS node/gateway/pin management is a human-admin console over REST;
+        // agents pin/add via the gated ipfs_* MCP tools.
+        || path.starts_with("/api/ipfs/")
         // Lockdown + exposure controls are a human-admin failsafe.
         || path.starts_with("/api/lockdown")
     {
