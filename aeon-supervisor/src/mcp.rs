@@ -181,6 +181,21 @@ fn tools_catalog() -> Value {
             tool("dns_sources",
                  "List subscription blacklist sources (StevenBlack / OISD / Ultimate Hosts / etc.) and the curated presets the user can subscribe to. Includes per-source fetch status + entry count.",
                  json!({"type":"object","properties":{}})),
+            // ── Hidden services (Tor v3 onions) ──
+            tool("hidden_service_list",
+                 "Read-only: list the Tor v3 hidden services this Orb hosts (nickname, .onion address, virtual + local port).",
+                 json!({"type":"object","properties":{}})),
+            tool("hidden_service_create",
+                 "Host a Tor v3 hidden service: mints a fresh .onion that forwards <virt_port> (default 80) to 127.0.0.1:<local_port>, so a site/app you run locally becomes reachable at the returned .onion. Returns the address. Auto-enables the feature.",
+                 json!({"type":"object","required":["local_port"],
+                        "properties":{
+                            "nickname":{"type":"string","description":"A friendly label for this onion."},
+                            "local_port":{"type":"integer","description":"The local 127.0.0.1 port the app/site listens on."},
+                            "virt_port":{"type":"integer","default":80,"description":"The port visitors use on the .onion (default 80)."}}})),
+            tool("hidden_service_remove",
+                 "Retire a hosted hidden service by its id (from hidden_service_list), dropping its .onion key + mapping.",
+                 json!({"type":"object","required":["id"],
+                        "properties":{"id":{"type":"string"}}})),
             // NOTE: SSH key management is intentionally NOT exposed over MCP.
             // Granting/listing SSH access to the device is a human-admin-only
             // action (web UI + admin session). Agents must never manage SSH.
@@ -535,6 +550,30 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 "vpn": vpn.0,
             });
             Ok(text_result(&serde_json::to_string_pretty(&combined).unwrap_or_default()))
+        }
+        "hidden_service_list" => {
+            let v = crate::onions::status(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "hidden_service_create" => {
+            let nickname = args.get("nickname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let local_port = args.get("local_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let virt_port = args.get("virt_port").and_then(|v| v.as_u64()).map(|n| n as u16);
+            let v = crate::onions::create(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::onions::CreateReq { nickname, local_port, virt_port }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "hidden_service_remove" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let v = crate::onions::remove(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::onions::RemoveReq { id }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
         "security_metrics" => {
             let m = crate::security_metrics::get_metrics(axum::extract::State(state.clone())).await;
@@ -1029,7 +1068,7 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         | "dns_sources" | "audit_log" | "target_info" | "get_clipboard" | "list_files"
         | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"
         | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
-        | "vpn_provider_state" | "blocked_log" => Read,
+        | "vpn_provider_state" | "blocked_log" | "hidden_service_list" => Read,
         _ => Full,
     }
 }
