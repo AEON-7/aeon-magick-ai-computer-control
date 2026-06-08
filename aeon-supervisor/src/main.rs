@@ -29,6 +29,7 @@ mod lockdown;
 mod macros;
 mod mcp;
 mod network;
+mod onions;
 mod orbnet;
 mod proxy;
 mod security_metrics;

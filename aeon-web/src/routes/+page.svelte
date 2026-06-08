@@ -12,7 +12,7 @@
   // controls stay inline. One source drives the desktop toolbar + mobile menu.
   type NavItem = { href: string; label: string; icon: string; title?: string };
   const SUPER_APPS: (NavItem & { color: 'cursed' | 'sky' | 'amber' })[] = [
-    { href: '/orbnet', label: 'OrbNet',     icon: 'orbnet', color: 'cursed', title: 'Anonymous federated mesh chat over Tor — community, groups, DMs, personas' },
+    { href: '/orbnet', label: 'OrbNet',     icon: 'orbnet', color: 'cursed', title: 'Decentralized services hub — Tor hidden services, IPFS, Mysterium dVPN, private chat' },
     { href: '/agent',  label: 'Agent Dash', icon: 'braces', color: 'sky',    title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
     { href: '/gpio',   label: 'GPIO',       icon: 'chip',   color: 'amber',  title: 'GPIO pins, HATs, power + IO — live hardware state' },
   ];
