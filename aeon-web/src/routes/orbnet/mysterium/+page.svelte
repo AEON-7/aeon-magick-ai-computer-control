@@ -25,6 +25,10 @@
   let svcDraft: Services | null = null;
   let svcBusy = '';
   let uiHost = '';
+  let benDraft = '';
+  let benBusy = false;
+  let benErr = '';
+  let benOk = false;
   let poll: ReturnType<typeof setInterval>;
 
   const api = (path: string, opts: RequestInit = {}) =>
@@ -56,6 +60,15 @@
     try { await api('/register', { method: 'POST' }); } catch {}
     // on-chain confirmation takes ~1-2 min; the status poll flips it to Registered
     setTimeout(() => { registering = false; load(); }, 5000);
+  }
+
+  async function setBeneficiary() {
+    benErr = ''; benOk = false; benBusy = true;
+    try {
+      const r = await api('/beneficiary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address: benDraft.trim() }) });
+      if (r.ok) { benOk = true; benDraft = ''; } else { benErr = r.err || 'Update failed.'; }
+    } catch { benErr = 'Update failed.'; }
+    benBusy = false;
   }
 
   async function loadServices() {
@@ -92,6 +105,7 @@
   $: running = status?.daemon === 'active';
   $: mmn_linked = status?.mmn_linked === true;
   $: noPayout = !status?.beneficiary || /^0x0+$/.test(status.beneficiary);
+  $: benValid = /^0x[0-9a-fA-F]{40}$/.test(benDraft.trim());
   $: svcChanged = !!(svc && svcDraft && (svc.vpn !== svcDraft.vpn || svc.scraping !== svcDraft.scraping || svc.data_transfer !== svcDraft.data_transfer || svc.public !== svcDraft.public));
   $: if (running && svc === null && !svcBusy) loadServices();
 
@@ -228,19 +242,23 @@
             {#if status.identity}<button class="text-ink-400 hover:text-cursed-300 shrink-0 text-xs" on:click={() => copy(status.identity || '', 'nid')}>{copied === 'nid' ? '✓' : 'copy'}</button>{/if}
           </div>
         </div>
-        <div class="space-y-1 pt-3 border-t border-ink-800">
-          <div class="flex items-center justify-between">
-            <span class="text-ink-400 text-xs uppercase tracking-wider">Beneficiary (payout wallet)</span>
-            <a href="https://my.mystnodes.com/me" target="_blank" rel="noreferrer" class="text-xs text-cursed-300 hover:text-cursed-200">{noPayout ? 'Set it here →' : 'manage →'}</a>
-          </div>
+        <div class="space-y-2 pt-3 border-t border-ink-800">
+          <span class="text-ink-400 text-xs uppercase tracking-wider">Beneficiary (payout wallet)</span>
           {#if noPayout}
-            <div class="text-amber-300 text-xs">Not set — set your payout wallet on mystnodes.com to receive earnings.</div>
+            <div class="text-amber-300 text-xs">Not set — earnings accrue to the node's channel until you set this.</div>
           {:else}
             <div class="flex items-center gap-2">
               <code class="text-cursed-300 text-xs break-all">{status.beneficiary}</code>
               <button class="text-ink-400 hover:text-cursed-300 shrink-0 text-xs" on:click={() => copy(status.beneficiary || '', 'ben')}>{copied === 'ben' ? '✓' : 'copy'}</button>
             </div>
           {/if}
+          <div class="flex gap-2">
+            <input type="text" autocomplete="off" spellcheck="false" bind:value={benDraft} placeholder="0x… Polygon (MATIC) wallet" class="flex-1 bg-ink-950 border border-ink-700 rounded px-2 py-1.5 font-mono text-xs text-ink-100 focus:border-cursed-600 focus:outline-none" />
+            <button class="px-3 py-1.5 rounded bg-cursed-700 text-ink-50 text-xs font-mono hover:bg-cursed-600 disabled:opacity-40" on:click={setBeneficiary} disabled={benBusy || !benValid}>{benBusy ? 'Saving…' : 'Update'}</button>
+          </div>
+          {#if benErr}<div class="text-xs text-red-400">{benErr}</div>{/if}
+          {#if benOk}<div class="text-xs text-emerald-300">Queued ✓ — applies on the node's next settlement (it needs some earnings to cover the fee first).</div>{/if}
+          <p class="text-[11px] text-ink-500 leading-relaxed">Must be a Polygon (MATIC / ERC-20-on-Polygon) wallet — an incompatible address loses funds. Changes apply when the node next settles earnings.</p>
         </div>
         {#if status.ui_port && uiHost}
           <div class="space-y-1 pt-3 border-t border-ink-800">

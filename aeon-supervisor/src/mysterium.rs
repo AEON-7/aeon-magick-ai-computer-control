@@ -423,3 +423,46 @@ pub async fn register(State(_s): State<AppState>) -> Json<Value> {
     .unwrap_or_else(|_| json!({"ok": false, "err": "register task failed"}));
     Json(v)
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BeneficiaryReq {
+    pub address: String,
+}
+
+/// POST /api/mysterium/beneficiary — set the on-chain payout (beneficiary) address
+/// (CLI: `identities beneficiary-set`). We validate the format FIRST because the
+/// node's TequilAPI accepts any string with a 202 and no validation. The change is
+/// async — it applies on the node's next settlement, which needs some earnings to
+/// cover the fee. Must be a Polygon-compatible (ERC-20 on Polygon) wallet.
+/// Admin-gated.
+pub async fn beneficiary(State(_s): State<AppState>, Json(req): Json<BeneficiaryReq>) -> Json<Value> {
+    let addr = req.address.trim().to_string();
+    let valid = addr.len() == 42
+        && addr.starts_with("0x")
+        && addr[2..].chars().all(|c| c.is_ascii_hexdigit());
+    if !valid {
+        return Json(json!({
+            "ok": false,
+            "err": "Not a valid address — must be 0x followed by 40 hex characters."
+        }));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let id = match tq("/identities")
+            .and_then(|v| v.pointer("/identities/0/id").and_then(|x| x.as_str()).map(String::from))
+        {
+            Some(i) => i,
+            None => return json!({"ok": false, "err": "node has no identity yet"}),
+        };
+        let body = json!({ "address": addr }).to_string();
+        match tq_send("POST", &format!("/identities/{id}/beneficiary"), Some(&body)) {
+            Ok((code, _)) if (200..300).contains(&code) => json!({"ok": true, "queued": true}),
+            Ok((code, resp)) => {
+                json!({"ok": false, "status": code, "err": resp.chars().take(160).collect::<String>()})
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "beneficiary task failed"}));
+    Json(v)
+}

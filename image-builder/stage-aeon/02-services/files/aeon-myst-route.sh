@@ -22,9 +22,11 @@ TAG=aeon-myst-wan
 UI_PORT=4449
 TQ_PORT=4050
 UI_ALLOWED_IFACES="lo wlan0 eth0 tailscale0"
-# Loopback/LAN/link-local/CGNAT must stay on the main table — critically the
-# dnscrypt resolver lives on 127.0.2.1, so marked DNS must NOT be flung out the WAN.
-LOCAL_NETS="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10"
+# Loopback/LAN/link-local/CGNAT/multicast must stay on the main table — the
+# dnscrypt resolver lives on 127.0.2.1 (marked DNS must NOT be flung out the WAN),
+# and myst's UPnP discovery is multicast to 239.255.255.250 which must reach the
+# LAN router (not table 400) so it can open ports for inbound reachability.
+LOCAL_NETS="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 224.0.0.0/4"
 
 # Physical WAN gateway+dev. OpenVPN's redirect uses a 0.0.0.0/1 + 128.0.0.0/1
 # split (not a real default), so the DHCP-assigned `default` route survives and
