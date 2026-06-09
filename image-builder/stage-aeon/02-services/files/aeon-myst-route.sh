@@ -1,31 +1,31 @@
 #!/bin/bash
-# aeon-myst-route — split-tunnel the Mysterium node OUT THE WAN, bypassing any
-# Orb-wide VPN/Tor tunnel. A Mysterium PROVIDER must reach the network + be
-# reachable on the real circuit; nesting it inside a commercial VPN breaks NAT
-# traversal and violates the VPN's ToS. Mirrors the existing tor/i2p over_vpn
-# fwmark machinery in aeon-net-services.sh, but routes the OTHER way (to WAN).
+# aeon-myst-route — give the Mysterium node clean WAN egress while the rest of the
+# Orb stays on its VPN, WITHOUT the double-NAT that makes a provider unreachable.
 #
-#   mark mysterium-node (uid) OUTPUT packets 0x400 -> ip rule -> table 400
-#   table 400 default = the physical WAN gateway (not tun0)
-#   + kill-switch ACCEPT for the mark, + loose rp_filter for asymmetric replies
+# Approach: policy-route the mysterium-node UID via a dedicated table at CONNECT
+# time (`ip rule uidrange`) — NOT by marking packets after the socket has already
+# chosen a source. The kernel therefore selects the WAN interface's address as the
+# source from the start, so NO MASQUERADE is needed -> single NAT (the home router
+# only) -> the node can be reached (hole-punching / port-forward work). The earlier
+# mark+MASQUERADE design made the node look symmetric-NAT'd ("Monitoring failed").
+# Local nets stay on the main table (dnscrypt resolver is 127.0.2.1; LAN replies;
+# UPnP multicast 239.255.255.250).
+#
+# Also firewalls the NodeUI (:4449) to LAN/tailnet only; TequilAPI (:4050) loopback.
 #
 # Subcommands: apply | clear | show | test
 set -u
 
-MARK=0x400
 TABLE=400
 PRIO=5100
 SVCUSER=mysterium-node
+SVCUID=$(id -u "$SVCUSER" 2>/dev/null || echo 989)
 TAG=aeon-myst-wan
-# NodeUI / TequilAPI exposure (see ui_guard): the UI binds 0.0.0.0 (set via
-# DAEMON_OPTS by aeon-mysterium) and these rules decide who may reach it.
+MARK=0x400   # legacy — referenced only to clean up the pre-uidrange mark/MASQUERADE design
 UI_PORT=4449
 TQ_PORT=4050
 UI_ALLOWED_IFACES="lo wlan0 eth0 tailscale0"
-# Loopback/LAN/link-local/CGNAT/multicast must stay on the main table — the
-# dnscrypt resolver lives on 127.0.2.1 (marked DNS must NOT be flung out the WAN),
-# and myst's UPnP discovery is multicast to 239.255.255.250 which must reach the
-# LAN router (not table 400) so it can open ports for inbound reachability.
+# Loopback/LAN/link-local/CGNAT/multicast stay on the main table (see header).
 LOCAL_NETS="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 224.0.0.0/4"
 
 # Physical WAN gateway+dev. OpenVPN's redirect uses a 0.0.0.0/1 + 128.0.0.0/1
@@ -38,40 +38,44 @@ detect_wan() {
   echo "$out"
 }
 
-apply() {
-  local gw dev
-  read -r gw dev <<<"$(detect_wan)"
-  [ -z "${gw:-}" ] && { echo "aeon-myst-route: no physical WAN gateway found" >&2; return 1; }
-  echo "aeon-myst-route: WAN egress via $gw dev $dev (mark $MARK table $TABLE)"
-  ip route replace default via "$gw" dev "$dev" table "$TABLE"
-  # Marked traffic to local destinations resolves via the main table (DNS = 127.0.2.1!),
-  # consulted BEFORE the WAN catch-all below.
-  local p=5090 net
-  for net in $LOCAL_NETS; do
-    ip rule del fwmark "$MARK/$MARK" to "$net" table main 2>/dev/null || true
-    ip rule add fwmark "$MARK/$MARK" to "$net" table main priority "$p"
-    p=$((p + 1))
-  done
-  # Everything else marked -> WAN.
+# Remove the node's policy-routing + kill-switch rules (current uidrange design AND
+# the legacy fwmark/mangle/MASQUERADE design, for clean in-place migration).
+clear_routing() {
+  local net d dev
+  for net in $LOCAL_NETS; do ip rule del uidrange "$SVCUID-$SVCUID" to "$net" table main 2>/dev/null || true; done
+  ip rule del uidrange "$SVCUID-$SVCUID" table "$TABLE" 2>/dev/null || true
+  while iptables -D OUTPUT -m owner --uid-owner "$SVCUSER" -j ACCEPT -m comment --comment "$TAG" 2>/dev/null; do :; done
+  # --- legacy mark-based design cleanup ---
+  for net in $LOCAL_NETS; do ip rule del fwmark "$MARK/$MARK" to "$net" table main 2>/dev/null || true; done
   ip rule del fwmark "$MARK/$MARK" table "$TABLE" 2>/dev/null || true
-  ip rule add fwmark "$MARK/$MARK" table "$TABLE" priority "$PRIO"
-  # Rebuild the mangle OUTPUT marking in order: RETURN (skip) for loopback/LAN/
-  # CGNAT so those route normally — the DNS resolver is 127.0.2.1, and myst runs
-  # as this uid so its NodeUI replies to LAN clients must NOT be marked+masqueraded
-  # (that rewrites the reply's source port and kills inbound :4449 connections).
-  # Then MARK everything else for WAN egress.
   iptables -t mangle -D OUTPUT -m owner --uid-owner "$SVCUSER" -j MARK --set-mark "$MARK" 2>/dev/null || true
   for net in $LOCAL_NETS; do iptables -t mangle -D OUTPUT -m owner --uid-owner "$SVCUSER" -d "$net" -j RETURN 2>/dev/null || true; done
-  for net in $LOCAL_NETS; do iptables -t mangle -A OUTPUT -m owner --uid-owner "$SVCUSER" -d "$net" -j RETURN; done
-  iptables -t mangle -A OUTPUT -m owner --uid-owner "$SVCUSER" -j MARK --set-mark "$MARK"
-  iptables -C OUTPUT -m mark --mark "$MARK/$MARK" -j ACCEPT -m comment --comment "$TAG" 2>/dev/null \
-    || iptables -I OUTPUT 1 -m mark --mark "$MARK/$MARK" -j ACCEPT -m comment --comment "$TAG"
-  # Locally-generated sockets pick their source from the UNMARKED route (tun0's
-  # 10.77.9.x) at connect() — before the packet mark lands — so a marked packet
-  # would leave $dev with a tun0 source and get dropped upstream. MASQUERADE
-  # rewrites it to the WAN interface's address as it egresses.
-  iptables -t nat -C POSTROUTING -m mark --mark "$MARK/$MARK" -o "$dev" -j MASQUERADE 2>/dev/null \
-    || iptables -t nat -A POSTROUTING -m mark --mark "$MARK/$MARK" -o "$dev" -j MASQUERADE
+  while iptables -D OUTPUT -m mark --mark "$MARK/$MARK" -j ACCEPT -m comment --comment "$TAG" 2>/dev/null; do :; done
+  read -r _ dev <<<"$(detect_wan)"
+  for d in $dev wlan0 eth0; do
+    while iptables -t nat -D POSTROUTING -m mark --mark "$MARK/$MARK" -o "$d" -j MASQUERADE 2>/dev/null; do :; done
+  done
+}
+
+apply() {
+  local gw dev net p
+  read -r gw dev <<<"$(detect_wan)"
+  [ -z "${gw:-}" ] && { echo "aeon-myst-route: no physical WAN gateway found" >&2; return 1; }
+  echo "aeon-myst-route: WAN egress for uid $SVCUID ($SVCUSER) via $gw dev $dev (table $TABLE, no NAT)"
+  ip route replace default via "$gw" dev "$dev" table "$TABLE"
+  clear_routing
+  # Route the node's UID via the WAN table at connect() time — local nets first
+  # (DNS=127.0.2.1, LAN replies, UPnP multicast), then the WAN catch-all. Because
+  # this routes BEFORE source selection, the source is the WAN iface IP and no NAT
+  # is required.
+  p=5090
+  for net in $LOCAL_NETS; do
+    ip rule add uidrange "$SVCUID-$SVCUID" to "$net" table main priority "$p"
+    p=$((p + 1))
+  done
+  ip rule add uidrange "$SVCUID-$SVCUID" table "$TABLE" priority "$PRIO"
+  # Kill-switch exception: the node egresses the WAN by design.
+  iptables -I OUTPUT 1 -m owner --uid-owner "$SVCUSER" -j ACCEPT -m comment --comment "$TAG"
   # Replies arrive on the WAN dev while the main table's reverse path points at
   # tun0 (asymmetric) — strict rp_filter would drop them. Loosen it (max(all,dev)).
   sysctl -q -w "net.ipv4.conf.$dev.rp_filter=2" 2>/dev/null || true
@@ -117,25 +121,16 @@ clear_ui_guard() {
 }
 
 clear_all() {
-  clear_ui_guard
-  local net dev d
-  read -r _ dev <<<"$(detect_wan)"
-  for net in $LOCAL_NETS; do ip rule del fwmark "$MARK/$MARK" to "$net" table main 2>/dev/null || true; done
-  ip rule del fwmark "$MARK/$MARK" table "$TABLE" 2>/dev/null || true
+  clear_routing
   ip route flush table "$TABLE" 2>/dev/null || true
-  iptables -t mangle -D OUTPUT -m owner --uid-owner "$SVCUSER" -j MARK --set-mark "$MARK" 2>/dev/null || true
-  for net in $LOCAL_NETS; do iptables -t mangle -D OUTPUT -m owner --uid-owner "$SVCUSER" -d "$net" -j RETURN 2>/dev/null || true; done
-  while iptables -D OUTPUT -m mark --mark "$MARK/$MARK" -j ACCEPT -m comment --comment "$TAG" 2>/dev/null; do :; done
-  for d in $dev wlan0 eth0; do
-    while iptables -t nat -D POSTROUTING -m mark --mark "$MARK/$MARK" -o "$d" -j MASQUERADE 2>/dev/null; do :; done
-  done
+  clear_ui_guard
   echo "aeon-myst-route: cleared"
 }
 
 show() {
-  echo "--- ip rule ---"; ip rule | grep -E "$TABLE|fwmark" || true
+  echo "--- ip rule (uid $SVCUID) ---"; ip rule | grep -E "$TABLE|uidrange" || true
   echo "--- table $TABLE ---"; ip route show table "$TABLE" 2>/dev/null || true
-  echo "--- mangle mark ---"; iptables -t mangle -S OUTPUT | grep -E "$SVCUSER|0x400" || true
+  echo "--- kill-switch accept ---"; iptables -S OUTPUT | grep -- "$TAG\$" || true
   echo "--- ui guard ---"; iptables -S INPUT | grep -- "$TAG-ui" || echo "(none)"
 }
 
@@ -149,6 +144,6 @@ case "${1:-show}" in
   apply) apply ;;
   clear) clear_all ;;
   show)  show ;;
-  test)  echo "BEFORE (mysterium-node egress): $(ipinfo)"; apply || exit 1; echo "AFTER  (mysterium-node egress): $(ipinfo)"; show ;;
+  test)  apply || exit 1; echo "mysterium-node egress: $(ipinfo)"; show ;;
   *) echo "usage: aeon-myst-route {apply|clear|show|test}" >&2; exit 1 ;;
 esac
