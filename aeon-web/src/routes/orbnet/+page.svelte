@@ -3,6 +3,7 @@
 
   let onions: { enabled: boolean; count: number } | null = null;
   let ipfs: { enabled: boolean; daemon: string; peers: number } | null = null;
+  let myst: { enabled: boolean; daemon: string; registration: string } | null = null;
   let poll: ReturnType<typeof setInterval>;
 
   const get = (p: string) =>
@@ -11,6 +12,7 @@
   const load = async () => {
     onions = await get('/api/onions/status');
     ipfs = await get('/api/ipfs/status');
+    myst = await get('/api/mysterium/status');
   };
 
   onMount(() => {
@@ -31,9 +33,15 @@
       status: ipfs ? (ipfs.enabled ? (ipfs.daemon === 'active' ? `on · ${ipfs.peers} peers` : 'starting…') : 'off') : '…',
     },
     {
-      key: 'mysterium', icon: '🌐', name: 'Mysterium', href: '/orbnet/mysterium', ready: false,
+      key: 'mysterium', icon: '🌐', name: 'Mysterium', href: '/orbnet/mysterium', ready: true,
       tagline: 'Earn by sharing your bandwidth and helping decentralize internet access.',
-      status: 'coming soon',
+      status: myst
+        ? myst.enabled
+          ? myst.daemon === 'active'
+            ? myst.registration === 'Registered' ? 'on · earning' : 'on · unclaimed'
+            : 'starting…'
+          : 'off'
+        : '…',
     },
     {
       key: 'chat', icon: '💬', name: 'Matrix Chat', href: '/orbnet/chat', ready: true,

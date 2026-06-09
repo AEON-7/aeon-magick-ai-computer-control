@@ -468,6 +468,8 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         // IPFS node/gateway/pin management is a human-admin console over REST;
         // agents pin/add via the gated ipfs_* MCP tools.
         || path.starts_with("/api/ipfs/")
+        // Mysterium node management (earnings + wallet-adjacent) is human-admin only.
+        || path.starts_with("/api/mysterium/")
         // Lockdown + exposure controls are a human-admin failsafe.
         || path.starts_with("/api/lockdown")
     {
