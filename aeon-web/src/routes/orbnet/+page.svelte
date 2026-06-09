@@ -3,7 +3,7 @@
 
   let onions: { enabled: boolean; count: number } | null = null;
   let ipfs: { enabled: boolean; daemon: string; peers: number } | null = null;
-  let myst: { enabled: boolean; daemon: string; registration: string } | null = null;
+  let myst: { enabled: boolean; daemon: string; registration: string; mmn_linked: boolean } | null = null;
   let poll: ReturnType<typeof setInterval>;
 
   const get = (p: string) =>
@@ -38,7 +38,7 @@
       status: myst
         ? myst.enabled
           ? myst.daemon === 'active'
-            ? myst.registration === 'Registered' ? 'on · earning' : 'on · unclaimed'
+            ? myst.registration === 'Registered' ? 'on · earning' : myst.mmn_linked ? 'on · linked' : 'on · setup'
             : 'starting…'
           : 'off'
         : '…',
