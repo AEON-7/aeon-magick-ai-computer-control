@@ -18,6 +18,7 @@
   let apiKey = '';
   let claimErr = '';
   let claiming = false;
+  let registering = false;
   type Services = { vpn: boolean; scraping: boolean; data_transfer: boolean; public: boolean };
   let svc: Services | null = null;
   let svcDraft: Services | null = null;
@@ -47,6 +48,13 @@
   }
 
   async function unclaim() { try { await api('/unclaim', { method: 'POST' }); } catch {} await load(); }
+
+  async function register() {
+    registering = true;
+    try { await api('/register', { method: 'POST' }); } catch {}
+    // on-chain confirmation takes ~1-2 min; the status poll flips it to Registered
+    setTimeout(() => { registering = false; load(); }, 5000);
+  }
 
   async function loadServices() {
     try {
@@ -176,7 +184,10 @@
       {:else}
         <div class="rounded-lg border border-emerald-700/50 bg-emerald-950/20 p-4 flex items-center justify-between gap-3">
           <div class="text-sm text-emerald-300">✓ Linked to your MystNodes account{registered ? ' · registered & earning' : ' · not registered yet'}</div>
-          <button class="text-xs text-ink-400 hover:text-ink-200 shrink-0" on:click={unclaim}>Unlink</button>
+          <div class="flex items-center gap-3 shrink-0">
+            {#if !registered}<button class="text-xs text-cursed-300 hover:text-cursed-200" on:click={register} disabled={registering}>{registering ? 'Registering…' : 'Register'}</button>{/if}
+            <button class="text-xs text-ink-400 hover:text-ink-200" on:click={unclaim}>Unlink</button>
+          </div>
         </div>
       {/if}
 

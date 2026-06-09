@@ -231,7 +231,18 @@ pub async fn claim(State(_s): State<AppState>, Json(req): Json<ClaimReq>) -> Jso
     let v = tokio::task::spawn_blocking(move || -> Value {
         let body = json!({ "api_key": key }).to_string();
         match tq_send("POST", "/mmn/api-key", Some(&body)) {
-            Ok((code, _)) if (200..300).contains(&code) => json!({"ok": true, "linked": true}),
+            Ok((code, _)) if (200..300).contains(&code) => {
+                // The api-key LINKS the node to the account but does NOT register it
+                // on-chain — without this the node sits forever as "not registered"
+                // and never comes online. Trigger the free (sponsored-for-claimed-
+                // nodes) registration. Best-effort; harmless if already registered.
+                if let Some(id) = tq("/identities")
+                    .and_then(|v| v.pointer("/identities/0/id").and_then(|x| x.as_str()).map(String::from))
+                {
+                    let _ = tq_send("POST", &format!("/identities/{id}/register"), Some("{}"));
+                }
+                json!({"ok": true, "linked": true})
+            }
             Ok((code, resp)) => {
                 // The node persists the key even when MMN registration fails (a bad
                 // key still gets written), which would leave the node looking
@@ -369,5 +380,29 @@ pub async fn services_set(State(_s): State<AppState>, Json(req): Json<ServicesRe
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "services task failed"}));
+    Json(v)
+}
+
+/// POST /api/mysterium/register — trigger on-chain registration (free/sponsored
+/// for a claimed node). Manual fallback if auto-registration on claim didn't take
+/// (e.g. a node claimed before this existed). On-chain confirmation takes ~1-2 min;
+/// the dashboard polls /status until it flips to Registered. Admin-gated.
+pub async fn register(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        let id = tq("/identities")
+            .and_then(|v| v.pointer("/identities/0/id").and_then(|x| x.as_str()).map(String::from));
+        let Some(id) = id else {
+            return json!({"ok": false, "err": "node has no identity yet"});
+        };
+        match tq_send("POST", &format!("/identities/{id}/register"), Some("{}")) {
+            Ok((code, _)) if (200..300).contains(&code) => json!({"ok": true, "registering": true}),
+            Ok((code, resp)) => {
+                json!({"ok": false, "status": code, "err": resp.chars().take(160).collect::<String>()})
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "register task failed"}));
     Json(v)
 }
