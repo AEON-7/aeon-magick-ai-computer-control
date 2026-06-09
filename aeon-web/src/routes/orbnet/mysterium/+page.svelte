@@ -10,6 +10,7 @@
     earnings_myst?: string; earnings_total_myst?: string; balance_myst?: string;
     beneficiary?: string; country?: string; region?: string; city?: string; ip?: string;
     data_bytes_30d?: number; sessions_30d?: number; consumers_30d?: number;
+    ui_port?: number; ui_password?: string;
   };
 
   let status: Status | null = null;
@@ -23,6 +24,7 @@
   let svc: Services | null = null;
   let svcDraft: Services | null = null;
   let svcBusy = '';
+  let uiHost = '';
   let poll: ReturnType<typeof setInterval>;
 
   const api = (path: string, opts: RequestInit = {}) =>
@@ -93,7 +95,7 @@
   $: svcChanged = !!(svc && svcDraft && (svc.vpn !== svcDraft.vpn || svc.scraping !== svcDraft.scraping || svc.data_transfer !== svcDraft.data_transfer || svc.public !== svcDraft.public));
   $: if (running && svc === null && !svcBusy) loadServices();
 
-  onMount(() => { load(); poll = setInterval(load, 8000); });
+  onMount(() => { uiHost = window.location.hostname; load(); poll = setInterval(load, 8000); });
   onDestroy(() => clearInterval(poll));
 </script>
 
@@ -240,6 +242,21 @@
             </div>
           {/if}
         </div>
+        {#if status.ui_port && uiHost}
+          <div class="space-y-1 pt-3 border-t border-ink-800">
+            <div class="flex items-center justify-between">
+              <span class="text-ink-400 text-xs uppercase tracking-wider">Node UI (advanced)</span>
+              <a href={`http://${uiHost}:${status.ui_port}`} target="_blank" rel="noreferrer" class="text-xs text-cursed-300 hover:text-cursed-200">open →</a>
+            </div>
+            <div class="text-xs text-ink-400">
+              Settlements, withdrawals &amp; node internals. Reachable from your LAN / Tailscale only.
+              Sign in as <code class="text-ink-300">myst</code>
+              {#if status.ui_password}
+                · <button class="text-cursed-300 hover:text-cursed-200" on:click={() => copy(status.ui_password || '', 'uipw')}>{copied === 'uipw' ? '✓ password copied' : 'copy password'}</button>
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
 
       {#if svcDraft}
