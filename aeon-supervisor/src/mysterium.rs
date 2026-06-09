@@ -286,3 +286,88 @@ pub async fn unclaim(State(_s): State<AppState>) -> Json<Value> {
     .unwrap_or_else(|_| json!({"ok": false, "err": "unclaim task failed"}));
     Json(v)
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ServicesReq {
+    #[serde(default)]
+    pub vpn: bool,
+    #[serde(default)]
+    pub scraping: bool,
+    #[serde(default)]
+    pub data_transfer: bool,
+    #[serde(default)]
+    pub public: bool,
+}
+
+/// GET /api/mysterium/services — the four traffic toggles, read from the node's
+/// active-services (service types) + access-policy.list (B2B allowlist vs open).
+/// Admin-gated.
+pub async fn services_get(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        let cfg = tq("/config/user");
+        let active = cfg
+            .as_ref()
+            .and_then(|v| v.pointer("/data/active-services"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let has = |t: &str| active.split(',').any(|s| s.trim() == t);
+        // Empty access-policy list = no allowlist = open to the whole network
+        // (Public). An unset list defaults to NOT public (conservative).
+        let public = cfg
+            .as_ref()
+            .and_then(|v| v.pointer("/data/access-policy/list"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.is_empty())
+            .unwrap_or(false);
+        json!({
+            "ok": true,
+            "vpn": has("dvpn"),
+            "scraping": has("scraping"),
+            "data_transfer": has("data_transfer"),
+            "public": public,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "services task failed"}));
+    Json(v)
+}
+
+/// POST /api/mysterium/services — set the traffic toggles. Writes active-services
+/// (the enabled types + always-on `monitoring`) and access-policy.list ("mysterium"
+/// B2B allowlist unless Public is on), then restarts the node so the change takes
+/// effect. The WAN split-tunnel survives the restart (it's iptables/ip-rule state).
+/// Admin-gated.
+pub async fn services_set(State(_s): State<AppState>, Json(req): Json<ServicesReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut types = vec!["monitoring".to_string()];
+        if req.vpn {
+            types.push("dvpn".into());
+        }
+        if req.scraping {
+            types.push("scraping".into());
+        }
+        if req.data_transfer {
+            types.push("data_transfer".into());
+        }
+        let active = types.join(",");
+        let list = if req.public { "" } else { "mysterium" };
+        let body = json!({"data": {"active-services": active, "access-policy": {"list": list}}})
+            .to_string();
+        match tq_send("POST", "/config/user", Some(&body)) {
+            Ok((code, _)) if (200..300).contains(&code) => {
+                let _ = Command::new("systemctl")
+                    .args(["restart", "mysterium-node.service"])
+                    .status();
+                json!({"ok": true, "restarting": true})
+            }
+            Ok((code, resp)) => {
+                json!({"ok": false, "status": code, "err": resp.chars().take(160).collect::<String>()})
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "services task failed"}));
+    Json(v)
+}
