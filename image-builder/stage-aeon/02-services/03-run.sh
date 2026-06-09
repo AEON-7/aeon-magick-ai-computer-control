@@ -13,6 +13,7 @@ install -m 0755 "${THIS_DIR}/files/aeon-orbnet.sh" "${ROOTFS_DIR}/usr/local/bin/
 install -m 0755 "${THIS_DIR}/files/aeon-onions.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-onions"
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs"
 install -m 0755 "${THIS_DIR}/files/aeon-mysterium.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-mysterium"
+install -m 0755 "${THIS_DIR}/files/aeon-myst-route.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-myst-route"
 
 on_chroot << 'EOF'
 id aeon-orbnet >/dev/null 2>&1 || \

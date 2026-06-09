@@ -44,10 +44,17 @@ harden_logging() {
 cmd_up() {
   ensure_install || return 1
   harden_logging
+  # Split-tunnel the node out the WAN BEFORE it starts — Mysterium can't serve
+  # over the Orb's VPN/Tor (NAT-traversal + ToS), so its traffic egresses the
+  # real circuit. No-op if no VPN is active (table 400 == the WAN default anyway).
+  [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route apply || true
   systemctl enable --now "$SERVICE" 2>/dev/null || true
 }
 
-cmd_down() { systemctl disable --now "$SERVICE" 2>/dev/null || true; }
+cmd_down() {
+  [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route clear || true
+  systemctl disable --now "$SERVICE" 2>/dev/null || true
+}
 
 cmd_status() {
   local installed daemon

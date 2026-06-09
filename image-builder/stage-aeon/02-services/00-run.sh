@@ -80,5 +80,14 @@ systemctl enable aeon-usb-net.service
 systemctl enable aeon-net-services.service
 systemctl enable aeon-undervolt-watchdog.timer
 systemctl enable aeon-orb-glow.service
+
+# Pin system DNS to the local dnscrypt-proxy (127.0.2.1) via resolvconf's 'head'
+# file. NetworkManager normally registers this, but /etc/resolv.conf was observed
+# coming up EMPTY (regenerated before NM's record landed) -> box-wide DNS failure
+# (the node could resolve nothing). 'head' is prepended to every generated
+# resolv.conf, so resolution is guaranteed regardless of NM/resolvconf timing.
+mkdir -p /etc/resolvconf/resolv.conf.d
+if ! grep -q '127.0.2.1' /etc/resolvconf/resolv.conf.d/head 2>/dev/null; then echo 'nameserver 127.0.2.1' >> /etc/resolvconf/resolv.conf.d/head; fi
+
 # aeon-wifi-unblock.service is created by 01-run.sh and enabled there.
 EOF
