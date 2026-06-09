@@ -29,6 +29,7 @@ mod ipfs;
 mod lockdown;
 mod macros;
 mod mcp;
+mod mysterium;
 mod network;
 mod onions;
 mod orbnet;
