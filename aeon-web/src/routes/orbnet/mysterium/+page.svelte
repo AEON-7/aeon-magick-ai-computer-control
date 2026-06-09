@@ -108,7 +108,7 @@
             ? 'bg-emerald-900/50 text-emerald-300'
             : 'bg-amber-900/50 text-amber-300'
           : 'bg-ink-800 text-ink-400'}"
-      >{running ? (registered ? 'earning' : 'running · unclaimed') : status?.enabled ? 'starting' : 'off'}</span>
+      >{running ? (registered ? 'earning' : mmn_linked ? 'running · linked' : 'running · unclaimed') : status?.enabled ? 'starting' : 'off'}</span>
       {#if running && status?.version}
         <span class="text-ink-400 text-xs">myst {status.version}{status.country ? ` · ${status.city || status.region || status.country}` : ''}</span>
       {/if}
@@ -175,7 +175,7 @@
         </div>
       {:else}
         <div class="rounded-lg border border-emerald-700/50 bg-emerald-950/20 p-4 flex items-center justify-between gap-3">
-          <div class="text-sm text-emerald-300">✓ Linked to your MystNodes account{registered ? ' · registered & earning' : ' · finishing registration…'}</div>
+          <div class="text-sm text-emerald-300">✓ Linked to your MystNodes account{registered ? ' · registered & earning' : ' · not registered yet'}</div>
           <button class="text-xs text-ink-400 hover:text-ink-200 shrink-0" on:click={unclaim}>Unlink</button>
         </div>
       {/if}
