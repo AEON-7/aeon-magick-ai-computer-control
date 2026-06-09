@@ -447,6 +447,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/mysterium/status",  get(crate::mysterium::status))
         .route("/mysterium/enable",  post(crate::mysterium::enable))
         .route("/mysterium/disable", post(crate::mysterium::disable))
+        .route("/mysterium/claim",   post(crate::mysterium::claim))
+        .route("/mysterium/unclaim", post(crate::mysterium::unclaim))
         .route("/lockdown",               get(crate::lockdown::get_lockdown).post(crate::lockdown::set_lockdown))
         .route("/system/pi-reboot",   post(crate::system::reboot))
         .route("/system/pi-poweroff", post(crate::system::poweroff))

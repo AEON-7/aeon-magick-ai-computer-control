@@ -72,6 +72,38 @@ fn tq(path: &str) -> Option<Value> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
+/// Send a POST/DELETE to the TequilAPI. The (optional) JSON body is streamed via
+/// the child's stdin — NEVER argv — so a secret (e.g. the MystNodes API key)
+/// never lands in the process table or any log. Returns (http_code, body).
+fn tq_send(method: &str, path: &str, body: Option<&str>) -> Result<(u16, String), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let url = format!("http://127.0.0.1:4050{path}");
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-sS", "-u", "myst:mystberry", "--max-time", "20", "-X", method, "-w", "\n%{http_code}",
+    ]);
+    if body.is_some() {
+        cmd.args(["-H", "Content-Type: application/json", "--data", "@-"]);
+    }
+    cmd.arg("--").arg(&url);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("spawn curl: {e}"))?;
+    match body {
+        Some(b) => child
+            .stdin
+            .take()
+            .ok_or("no stdin")?
+            .write_all(b.as_bytes())
+            .map_err(|e| format!("write body: {e}"))?,
+        None => drop(child.stdin.take()),
+    }
+    let out = child.wait_with_output().map_err(|e| format!("wait curl: {e}"))?;
+    let s = String::from_utf8_lossy(&out.stdout).to_string();
+    let (b, code) = s.rsplit_once('\n').unwrap_or(("", s.as_str()));
+    Ok((code.trim().parse().unwrap_or(0), b.to_string()))
+}
+
 fn ptr_str(o: &Option<Value>, p: &str) -> String {
     o.as_ref()
         .and_then(|v| v.pointer(p))
@@ -107,6 +139,12 @@ pub async fn status(State(_s): State<AppState>) -> Json<Value> {
         let data = tq("/node/provider/transferred-data?range=30d");
         let sess = tq("/node/provider/sessions-count?range=30d");
         let cons = tq("/node/provider/consumers-count?range=30d");
+        let mmn_linked = tq("/mmn/api-key")
+            .as_ref()
+            .and_then(|v| v.pointer("/api_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
         json!({
             "ok": true,
             "enabled": cfg.enabled,
@@ -115,6 +153,7 @@ pub async fn status(State(_s): State<AppState>) -> Json<Value> {
             "version": ptr_str(&hc, "/version"),
             "uptime": ptr_str(&hc, "/uptime"),
             "identity": id.clone().unwrap_or_default(),
+            "mmn_linked": mmn_linked,
             "registration": ptr_str(&info, "/registration_status"),
             "earnings_myst": ptr_str(&info, "/earnings_tokens/human"),
             "earnings_total_myst": ptr_str(&info, "/earnings_total_tokens/human"),
@@ -167,5 +206,83 @@ pub async fn disable(State(_s): State<AppState>) -> Json<Value> {
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "disable task failed"}));
+    Json(v)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClaimReq {
+    pub api_key: String,
+}
+
+/// POST /api/mysterium/claim — link this node to an existing MystNodes account
+/// using the account API key from https://my.mystnodes.com/me. The key is
+/// streamed to the node's TequilAPI (POST /mmn/api-key) via stdin and persisted
+/// in the node's own config (that's how Mysterium keeps the link); the supervisor
+/// never stores or logs it. This is an account-management token, NOT a wallet key
+/// — funds/payout stay non-custodial on mystnodes.co. Admin-gated.
+pub async fn claim(State(_s): State<AppState>, Json(req): Json<ClaimReq>) -> Json<Value> {
+    let key = req.api_key.trim().to_string();
+    if key.len() < 40 {
+        return Json(json!({
+            "ok": false,
+            "err": "That key looks too short — copy the full API key (40+ chars) from my.mystnodes.com/me."
+        }));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let body = json!({ "api_key": key }).to_string();
+        match tq_send("POST", "/mmn/api-key", Some(&body)) {
+            Ok((code, _)) if (200..300).contains(&code) => json!({"ok": true, "linked": true}),
+            Ok((code, resp)) => {
+                // The node persists the key even when MMN registration fails (a bad
+                // key still gets written), which would leave the node looking
+                // "linked". Roll it back so key-presence stays an accurate signal.
+                let _ = tq_send("DELETE", "/mmn/api-key", None);
+                let parsed = serde_json::from_str::<Value>(&resp).ok();
+                let err_code = parsed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/error/code"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let msg = if err_code == "err_mmn_registration" {
+                    "Couldn't link with that key — double-check you copied the correct \
+                     API key from my.mystnodes.com/me."
+                        .to_string()
+                } else {
+                    parsed
+                        .as_ref()
+                        .and_then(|v| {
+                            v.pointer("/error/detail")
+                                .or_else(|| v.pointer("/error/message"))
+                                .and_then(|x| x.as_str())
+                                .map(String::from)
+                        })
+                        .unwrap_or_else(|| format!("node rejected the key (HTTP {code})"))
+                };
+                json!({"ok": false, "status": code, "err": msg})
+            }
+            Err(e) => {
+                let _ = tq_send("DELETE", "/mmn/api-key", None);
+                json!({"ok": false, "err": e})
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "claim task failed"}));
+    Json(v)
+}
+
+/// POST /api/mysterium/unclaim — clear the stored MystNodes API key from the node
+/// (DELETE /mmn/api-key). Unlinks the node from the account; does not touch the
+/// wallet/payout. Admin-gated.
+pub async fn unclaim(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        match tq_send("DELETE", "/mmn/api-key", None) {
+            Ok((code, _)) if (200..300).contains(&code) => json!({"ok": true, "linked": false}),
+            Ok((code, _)) => json!({"ok": false, "status": code}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "unclaim task failed"}));
     Json(v)
 }

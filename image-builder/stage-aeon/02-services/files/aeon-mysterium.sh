@@ -30,8 +30,20 @@ ensure_install() {
   command -v myst >/dev/null 2>&1
 }
 
+# The myst daemon defaults to --log-level=debug, which writes the MMN account API
+# key (set when a user claims their node) to the node log in PLAINTEXT. Drop it to
+# info so secrets never hit disk. Idempotent; restarts only if already running.
+harden_logging() {
+  local f=/etc/default/mysterium-node
+  [ -f "$f" ] || return 0
+  grep -q -- '--log-level' "$f" && return 0
+  sed -i 's/^DAEMON_OPTS="\(.*\)"/DAEMON_OPTS="\1 --log-level=info"/' "$f"
+  systemctl is-active --quiet "$SERVICE" && systemctl restart "$SERVICE" || true
+}
+
 cmd_up() {
   ensure_install || return 1
+  harden_logging
   systemctl enable --now "$SERVICE" 2>/dev/null || true
 }
 
