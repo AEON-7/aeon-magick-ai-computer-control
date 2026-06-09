@@ -59,11 +59,22 @@ fn script_status() -> Value {
         .unwrap_or_else(|| json!({"installed": false, "daemon": "inactive"}))
 }
 
-/// Query the node's local TequilAPI (default Basic auth myst:mystberry).
+/// TequilAPI/NodeUI password: rotated off the default to a per-device secret by
+/// `aeon-mysterium up` (stored root-only). Fallback covers a not-yet-rotated node.
+fn tq_pass() -> String {
+    std::fs::read_to_string("/etc/aeon/mysterium-ui.pass")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "mystberry".to_string())
+}
+
+/// Query the node's local TequilAPI (Basic auth, per-device password).
 fn tq(path: &str) -> Option<Value> {
     let url = format!("http://127.0.0.1:4050{path}");
+    let auth = format!("myst:{}", tq_pass());
     let out = Command::new("curl")
-        .args(["-fsS", "-u", "myst:mystberry", "--max-time", "6", "--", &url])
+        .args(["-fsS", "-u", &auth, "--max-time", "6", "--", &url])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -79,9 +90,10 @@ fn tq_send(method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)
     use std::io::Write;
     use std::process::Stdio;
     let url = format!("http://127.0.0.1:4050{path}");
+    let auth = format!("myst:{}", tq_pass());
     let mut cmd = Command::new("curl");
     cmd.args([
-        "-sS", "-u", "myst:mystberry", "--max-time", "20", "-X", method, "-w", "\n%{http_code}",
+        "-sS", "-u", &auth, "--max-time", "20", "-X", method, "-w", "\n%{http_code}",
     ]);
     if body.is_some() {
         cmd.args(["-H", "Content-Type: application/json", "--data", "@-"]);
@@ -166,6 +178,11 @@ pub async fn status(State(_s): State<AppState>) -> Json<Value> {
             "data_bytes_30d": ptr_u64(&data, "/transferred_data_bytes"),
             "sessions_30d": ptr_u64(&sess, "/count"),
             "consumers_30d": ptr_u64(&cons, "/count"),
+            // NodeUI access (UI firewalled to LAN/tailnet by aeon-myst-route).
+            // Admin-gated like everything here — this is how the user gets the
+            // per-device password without it ever leaving the Orb.
+            "ui_port": 4449,
+            "ui_password": tq_pass(),
         })
     })
     .await

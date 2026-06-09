@@ -30,25 +30,91 @@ ensure_install() {
   command -v myst >/dev/null 2>&1
 }
 
-# The myst daemon defaults to --log-level=debug, which writes the MMN account API
-# key (set when a user claims their node) to the node log in PLAINTEXT. Drop it to
-# info so secrets never hit disk. Idempotent; restarts only if already running.
-harden_logging() {
-  local f=/etc/default/mysterium-node
+# Harden the daemon flags (idempotent; restarts only if already running):
+#  --log-level=info  — the default debug level writes the MMN account API key
+#    (set when a user claims their node) to the node log in PLAINTEXT.
+#  --ui.address=0.0.0.0 — myst's auto-bind picks "127.0.0.1 + local LAN IP",
+#    and with the Orb's VPN up the "LAN IP" it picks is the VPN tun address —
+#    i.e. the UI faces the VPN provider's client subnet and NOT the user's LAN.
+#    Bind everywhere and let aeon-myst-route's ui_guard decide who gets in
+#    (LAN + tailnet only; tun/usb/v6 dropped).
+harden_opts() {
+  local f=/etc/default/mysterium-node changed=0
   [ -f "$f" ] || return 0
-  grep -q -- '--log-level' "$f" && return 0
-  sed -i 's/^DAEMON_OPTS="\(.*\)"/DAEMON_OPTS="\1 --log-level=info"/' "$f"
-  systemctl is-active --quiet "$SERVICE" && systemctl restart "$SERVICE" || true
+  if ! grep -q -- '--log-level' "$f"; then
+    sed -i 's/^DAEMON_OPTS="\(.*\)"/DAEMON_OPTS="\1 --log-level=info"/' "$f"; changed=1
+  fi
+  if ! grep -q -- '--ui.address' "$f"; then
+    sed -i 's/^DAEMON_OPTS="\(.*\)"/DAEMON_OPTS="\1 --ui.address=0.0.0.0"/' "$f"; changed=1
+  fi
+  [ "$changed" = 1 ] && systemctl is-active --quiet "$SERVICE" && systemctl restart "$SERVICE" || true
+}
+
+# The WAN split-tunnel + UI firewall are runtime ip-rule/iptables state — without
+# this drop-in they'd vanish on reboot while the node auto-starts, silently
+# pushing provider traffic back into the Orb's VPN and unguarding the UI.
+ensure_dropin() {
+  local d=/etc/systemd/system/mysterium-node.service.d
+  [ -f "$d/aeon.conf" ] && return 0
+  mkdir -p "$d"
+  cat > "$d/aeon.conf" <<'EOF'
+# Managed by aeon-mysterium: network plumbing must be in place before every
+# node start (including boot) — WAN split-tunnel + NodeUI firewall.
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=+/usr/local/bin/aeon-myst-route apply
+EOF
+  systemctl daemon-reload
+}
+
+PASSFILE=/etc/aeon/mysterium-ui.pass
+TQ=http://127.0.0.1:4050
+
+# Rotate the NodeUI/TequilAPI password off the well-known default (mystberry) to
+# a per-device secret, stored root-only in $PASSFILE. The supervisor reads the
+# file for its API calls and shows it (admin-gated) in the dashboard so the user
+# can sign in to the NodeUI. If the node was reinstalled (password reset to
+# default) the stored one is re-applied.
+ensure_ui_password() {
+  local pass code i
+  for i in $(seq 1 30); do
+    curl -s -o /dev/null --max-time 2 "$TQ/healthcheck" && break
+    sleep 2
+  done
+  if [ -f "$PASSFILE" ]; then
+    pass=$(cat "$PASSFILE")
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' \
+      --data "{\"username\":\"myst\",\"password\":\"$pass\"}" "$TQ/auth/login")
+    [ "$code" = "200" ] && return 0
+    curl -s -o /dev/null --max-time 5 -u myst:mystberry -X PUT -H 'Content-Type: application/json' \
+      --data "{\"username\":\"myst\",\"old_password\":\"mystberry\",\"new_password\":\"$pass\"}" "$TQ/auth/password" || true
+    log "NodeUI password re-applied from $PASSFILE"
+    return 0
+  fi
+  pass=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -u myst:mystberry -X PUT -H 'Content-Type: application/json' \
+    --data "{\"username\":\"myst\",\"old_password\":\"mystberry\",\"new_password\":\"$pass\"}" "$TQ/auth/password")
+  if [ "$code" = "200" ]; then
+    ( umask 077; printf '%s' "$pass" > "$PASSFILE" )
+    log "NodeUI password rotated (stored in $PASSFILE)"
+  else
+    log "NodeUI password rotation skipped (http $code)"
+  fi
 }
 
 cmd_up() {
   ensure_install || return 1
-  harden_logging
+  harden_opts
+  ensure_dropin
   # Split-tunnel the node out the WAN BEFORE it starts — Mysterium can't serve
   # over the Orb's VPN/Tor (NAT-traversal + ToS), so its traffic egresses the
   # real circuit. No-op if no VPN is active (table 400 == the WAN default anyway).
   [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route apply || true
   systemctl enable --now "$SERVICE" 2>/dev/null || true
+  ensure_ui_password
 }
 
 cmd_down() {
