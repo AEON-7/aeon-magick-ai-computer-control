@@ -47,6 +47,12 @@ harden_opts() {
   if ! grep -q -- '--ui.address' "$f"; then
     sed -i 's/^DAEMON_OPTS="\(.*\)"/DAEMON_OPTS="\1 --ui.address=0.0.0.0"/' "$f"; changed=1
   fi
+  # Pin the provider's UDP session ports to a SMALL fixed range (default is the
+  # huge 10000:60000) so the operator can forward just that range on their router
+  # — the secure alternative to UPnP for nodes behind a NAT that won't hole-punch.
+  if ! grep -q -- '--udp.ports' "$f"; then
+    sed -i 's/^DAEMON_OPTS="\(.*\)"/DAEMON_OPTS="\1 --udp.ports=10000:10100"/' "$f"; changed=1
+  fi
   [ "$changed" = 1 ] && systemctl is-active --quiet "$SERVICE" && systemctl restart "$SERVICE" || true
 }
 
