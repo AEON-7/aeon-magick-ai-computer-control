@@ -207,16 +207,28 @@
         </div>
       </div>
 
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-2 text-sm">
-        <div class="flex items-center justify-between">
-          <span class="text-ink-400 text-xs uppercase tracking-wider">Payout address</span>
-          <a href={REFERRAL} target="_blank" rel="noreferrer" class="text-xs text-cursed-300 hover:text-cursed-200">manage on mystnodes.co →</a>
+      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3 text-sm">
+        <div class="space-y-1">
+          <span class="text-ink-400 text-xs uppercase tracking-wider">Node ID</span>
+          <div class="flex items-center gap-2">
+            <code class="text-cursed-300 text-xs break-all">{status.identity || '—'}</code>
+            {#if status.identity}<button class="text-ink-400 hover:text-cursed-300 shrink-0 text-xs" on:click={() => copy(status.identity || '', 'nid')}>{copied === 'nid' ? '✓' : 'copy'}</button>{/if}
+          </div>
         </div>
-        {#if noPayout}
-          <div class="text-amber-300 text-xs">Not set — connect your wallet on mystnodes.co to receive earnings.</div>
-        {:else}
-          <code class="text-cursed-300 text-xs break-all">{status.beneficiary}</code>
-        {/if}
+        <div class="space-y-1 pt-3 border-t border-ink-800">
+          <div class="flex items-center justify-between">
+            <span class="text-ink-400 text-xs uppercase tracking-wider">Beneficiary (payout wallet)</span>
+            <a href="https://my.mystnodes.com/me" target="_blank" rel="noreferrer" class="text-xs text-cursed-300 hover:text-cursed-200">{noPayout ? 'Set it here →' : 'manage →'}</a>
+          </div>
+          {#if noPayout}
+            <div class="text-amber-300 text-xs">Not set — set your payout wallet on mystnodes.com to receive earnings.</div>
+          {:else}
+            <div class="flex items-center gap-2">
+              <code class="text-cursed-300 text-xs break-all">{status.beneficiary}</code>
+              <button class="text-ink-400 hover:text-cursed-300 shrink-0 text-xs" on:click={() => copy(status.beneficiary || '', 'ben')}>{copied === 'ben' ? '✓' : 'copy'}</button>
+            </div>
+          {/if}
+        </div>
       </div>
 
       {#if svcDraft}
