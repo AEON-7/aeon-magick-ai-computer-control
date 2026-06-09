@@ -18,6 +18,10 @@
   let apiKey = '';
   let claimErr = '';
   let claiming = false;
+  type Services = { vpn: boolean; scraping: boolean; data_transfer: boolean; public: boolean };
+  let svc: Services | null = null;
+  let svcDraft: Services | null = null;
+  let svcBusy = '';
   let poll: ReturnType<typeof setInterval>;
 
   const api = (path: string, opts: RequestInit = {}) =>
@@ -44,6 +48,24 @@
 
   async function unclaim() { try { await api('/unclaim', { method: 'POST' }); } catch {} await load(); }
 
+  async function loadServices() {
+    try {
+      const r = await api('/services');
+      if (r.ok) {
+        svc = { vpn: !!r.vpn, scraping: !!r.scraping, data_transfer: !!r.data_transfer, public: !!r.public };
+        svcDraft = { ...svc };
+      }
+    } catch {}
+  }
+  async function applyServices() {
+    if (!svcDraft) return;
+    svcBusy = 'Applying… (restarting node)';
+    try {
+      await api('/services', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(svcDraft) });
+    } catch {}
+    setTimeout(async () => { svc = null; await loadServices(); await load(); svcBusy = ''; }, 7000);
+  }
+
   async function copy(t: string, id: string) {
     try { await navigator.clipboard.writeText(t); copied = id; setTimeout(() => (copied = ''), 1200); } catch {}
   }
@@ -60,6 +82,8 @@
   $: running = status?.daemon === 'active';
   $: mmn_linked = status?.mmn_linked === true;
   $: noPayout = !status?.beneficiary || /^0x0+$/.test(status.beneficiary);
+  $: svcChanged = !!(svc && svcDraft && (svc.vpn !== svcDraft.vpn || svc.scraping !== svcDraft.scraping || svc.data_transfer !== svcDraft.data_transfer || svc.public !== svcDraft.public));
+  $: if (running && svc === null && !svcBusy) loadServices();
 
   onMount(() => { load(); poll = setInterval(load, 8000); });
   onDestroy(() => clearInterval(poll));
@@ -194,6 +218,35 @@
           <code class="text-cursed-300 text-xs break-all">{status.beneficiary}</code>
         {/if}
       </div>
+
+      {#if svcDraft}
+        <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="font-mono text-cursed-300 text-sm">Traffic you share</h2>
+            <a href="https://my.mystnodes.com/me" target="_blank" rel="noreferrer" class="text-xs text-ink-400 hover:text-cursed-300">manage on mystnodes.com →</a>
+          </div>
+          <label class="flex items-center justify-between gap-3 cursor-pointer">
+            <span><span class="text-ink-200 text-sm">VPN</span><span class="block text-xs text-ink-500">Encrypted internet access for consumers</span></span>
+            <input type="checkbox" bind:checked={svcDraft.vpn} class="accent-cursed-500 w-4 h-4 shrink-0" />
+          </label>
+          <label class="flex items-center justify-between gap-3 cursor-pointer">
+            <span><span class="text-ink-200 text-sm">Data scraping</span><span class="block text-xs text-ink-500">Residential proxy for B2B data scraping</span></span>
+            <input type="checkbox" bind:checked={svcDraft.scraping} class="accent-cursed-500 w-4 h-4 shrink-0" />
+          </label>
+          <label class="flex items-center justify-between gap-3 cursor-pointer">
+            <span><span class="text-ink-200 text-sm">Data transfer</span><span class="block text-xs text-ink-500">Streaming & data transfer for B2B clients</span></span>
+            <input type="checkbox" bind:checked={svcDraft.data_transfer} class="accent-cursed-500 w-4 h-4 shrink-0" />
+          </label>
+          <label class="flex items-center justify-between gap-3 cursor-pointer pt-2 border-t border-ink-800">
+            <span><span class="text-amber-300 text-sm">Public</span><span class="block text-xs text-ink-500">Open to the whole network — not just vetted B2B clients. Higher exposure of your home IP.</span></span>
+            <input type="checkbox" bind:checked={svcDraft.public} class="accent-amber-500 w-4 h-4 shrink-0" />
+          </label>
+          <div class="flex items-center justify-end gap-3 pt-1">
+            {#if svcBusy}<span class="text-xs text-cursed-300">{svcBusy}</span>{/if}
+            <button class="px-3 py-1.5 rounded bg-cursed-700 text-ink-50 text-xs font-mono hover:bg-cursed-600 disabled:opacity-40" on:click={applyServices} disabled={!svcChanged || !!svcBusy}>Apply</button>
+          </div>
+        </div>
+      {/if}
     {/if}
   </main>
 </div>
