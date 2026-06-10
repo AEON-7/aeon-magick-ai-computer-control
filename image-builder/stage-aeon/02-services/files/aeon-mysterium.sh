@@ -111,6 +111,62 @@ ensure_ui_password() {
   fi
 }
 
+# A SECOND dnscrypt instance dedicated to the NODE'S DNS only (listens on
+# 127.0.2.2), running as the mysterium-node user — whose uid aeon-myst-route
+# policy-routes out the physical WAN. So the node resolves Mysterium infra
+# (quality/hermes3/broker) over a fast, reliable, still-encrypted path that does
+# NOT depend on the box's VPN tunnel, while the rest of the box keeps using the
+# VPN-routed resolver on 127.0.2.1. Why this matters: the VPN here is AirVPN in
+# openvpn-ssl stealth mode (OpenVPN-over-TCP); tunnelling DoH (also TCP) through
+# it is TCP-over-TCP, which stalls under latency and made the node intermittently
+# fail to reach quality.mysterium.network (monitoring/quality never completed).
+ensure_wan_dns() {
+  local bin main=/etc/dnscrypt-proxy/dnscrypt-proxy.toml drop=/etc/systemd/system/mysterium-node.service.d/dns.conf changed=0
+  bin=$(command -v dnscrypt-proxy 2>/dev/null) || return 0
+  [ -f "$main" ] || return 0            # no box resolver to base ours on
+  install -d -m755 /etc/dnscrypt-proxy-wan /etc/aeon /var/cache/dnscrypt-proxy-wan
+  chown mysterium-node:mysterium-node /var/cache/dnscrypt-proxy-wan 2>/dev/null || true
+  # WAN config = the box's resolver config, but bound only to 127.0.2.2 + own cache.
+  sed -e "s|^listen_addresses =.*|listen_addresses = ['127.0.2.2:53']|" \
+      -e "s|/var/cache/dnscrypt-proxy/|/var/cache/dnscrypt-proxy-wan/|g" \
+      "$main" > /etc/dnscrypt-proxy-wan/dnscrypt-proxy.toml
+  cat > /etc/systemd/system/dnscrypt-proxy-wan.service <<UNIT
+[Unit]
+Description=dnscrypt-proxy (WAN egress) for Mysterium node DNS
+After=network-online.target ${SERVICE}
+Wants=network-online.target
+[Service]
+User=mysterium-node
+Group=mysterium-node
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CacheDirectory=dnscrypt-proxy-wan
+RuntimeDirectory=dnscrypt-proxy-wan
+ExecStart=${bin} -config /etc/dnscrypt-proxy-wan/dnscrypt-proxy.toml
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+UNIT
+  cat > /etc/aeon/mysterium-resolv.conf <<'RES'
+# Mysterium node's private resolver: dedicated WAN-egress dnscrypt (127.0.2.2) so
+# resolving Mysterium infra doesn't depend on the VPN tunnel; falls back to the
+# box's VPN-routed dnscrypt (127.0.2.1) if the WAN instance is down.
+nameserver 127.0.2.2
+nameserver 127.0.2.1
+options edns0 trust-ad
+RES
+  mkdir -p /etc/systemd/system/mysterium-node.service.d
+  if ! grep -qs 'mysterium-resolv.conf' "$drop" 2>/dev/null; then
+    printf '[Service]\nBindReadOnlyPaths=/etc/aeon/mysterium-resolv.conf:/etc/resolv.conf\n' > "$drop"
+    changed=1
+  fi
+  systemctl daemon-reload
+  systemctl enable --now dnscrypt-proxy-wan.service 2>/dev/null || true
+  # If the resolver bind-mount is newly added and the node is already running,
+  # restart it so the private resolv.conf takes effect.
+  [ "$changed" = 1 ] && systemctl is-active --quiet "$SERVICE" && systemctl restart "$SERVICE" || true
+}
+
 cmd_up() {
   ensure_install || return 1
   harden_opts
@@ -119,12 +175,14 @@ cmd_up() {
   # over the Orb's VPN/Tor (NAT-traversal + ToS), so its traffic egresses the
   # real circuit. No-op if no VPN is active (table 400 == the WAN default anyway).
   [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route apply || true
+  ensure_wan_dns   # dedicated WAN-egress resolver for the node (after the route is up)
   systemctl enable --now "$SERVICE" 2>/dev/null || true
   ensure_ui_password
 }
 
 cmd_down() {
   [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route clear || true
+  systemctl disable --now dnscrypt-proxy-wan.service 2>/dev/null || true
   systemctl disable --now "$SERVICE" 2>/dev/null || true
 }
 
