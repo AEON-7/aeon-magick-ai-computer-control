@@ -81,6 +81,7 @@ apply() {
   sysctl -q -w "net.ipv4.conf.$dev.rp_filter=2" 2>/dev/null || true
   sysctl -q -w net.ipv4.conf.all.rp_filter=2 2>/dev/null || true
   ui_guard
+  v6_block
 }
 
 # Gate the NodeUI to operator-side interfaces ONLY (LAN + tailnet + loopback).
@@ -120,10 +121,32 @@ clear_ui_guard() {
   fi
 }
 
+# Force the node IPv4-ONLY by dropping its UID's IPv6 egress (loopback allowed).
+# Why: this home WAN has NO ISP-delegated IPv6 (only ULA fd.. + Tailscale fd7a..),
+# so the node's v6 can ONLY escape via the Orb's VPN tunnel — it then advertises a
+# VPN-datacenter v6 (e.g. 2a0d:5600::/29, EU) that contradicts its real US
+# residential IPv4, and the Mysterium monitor flags "invalid_location". The home
+# line is v4-only anyway, so v4-only is strictly correct here. (If the ISP ever
+# provides native IPv6, split-tunnel it out the WAN like the v4 uidrange instead.)
+v6_block() {
+  command -v ip6tables >/dev/null 2>&1 || return 0
+  ip6tables -C OUTPUT -m owner --uid-owner "$SVCUSER" -j DROP -m comment --comment "$TAG-v6" 2>/dev/null \
+    || ip6tables -I OUTPUT 1 -m owner --uid-owner "$SVCUSER" -j DROP -m comment --comment "$TAG-v6"
+  ip6tables -C OUTPUT -m owner --uid-owner "$SVCUSER" -o lo -j ACCEPT -m comment --comment "$TAG-v6" 2>/dev/null \
+    || ip6tables -I OUTPUT 1 -m owner --uid-owner "$SVCUSER" -o lo -j ACCEPT -m comment --comment "$TAG-v6"
+}
+
+clear_v6_block() {
+  command -v ip6tables >/dev/null 2>&1 || return 0
+  while ip6tables -D OUTPUT -m owner --uid-owner "$SVCUSER" -o lo -j ACCEPT -m comment --comment "$TAG-v6" 2>/dev/null; do :; done
+  while ip6tables -D OUTPUT -m owner --uid-owner "$SVCUSER" -j DROP -m comment --comment "$TAG-v6" 2>/dev/null; do :; done
+}
+
 clear_all() {
   clear_routing
   ip route flush table "$TABLE" 2>/dev/null || true
   clear_ui_guard
+  clear_v6_block
   echo "aeon-myst-route: cleared"
 }
 
@@ -132,6 +155,7 @@ show() {
   echo "--- table $TABLE ---"; ip route show table "$TABLE" 2>/dev/null || true
   echo "--- kill-switch accept ---"; iptables -S OUTPUT | grep -- "$TAG\$" || true
   echo "--- ui guard ---"; iptables -S INPUT | grep -- "$TAG-ui" || echo "(none)"
+  echo "--- v6 egress block (node = IPv4-only) ---"; ip6tables -S OUTPUT 2>/dev/null | grep -- "$TAG-v6" || echo "(none)"
 }
 
 ipinfo() {
