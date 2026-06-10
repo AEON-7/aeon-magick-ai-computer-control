@@ -169,6 +169,71 @@ RES
   [ "$changed" = 1 ] && systemctl is-active --quiet "$SERVICE" && systemctl restart "$SERVICE" || true
 }
 
+# Self-healing guard. A reboot OR the box's periodic VPN/dnscrypt reactivation
+# (NetworkManager bounces) FLUSHES routing table 400 — dropping the node off the
+# WAN carve-out onto the VPN tunnel (unreachable + wrong location) — and can leave
+# the node's /etc/resolv.conf showing the HOST resolver (127.0.2.1, VPN-routed ->
+# stalled quality lookups -> monitoring=failed) instead of the bind-mounted WAN
+# one. A 60s systemd timer re-asserts BOTH, but only when actually broken (so it's
+# near-zero churn in steady state). This is what makes the fix survive reboots.
+ensure_guard() {
+  cat > /usr/local/bin/aeon-myst-guard <<'GUARD'
+#!/bin/bash
+# aeon-myst-guard — re-assert the Mysterium node's WAN carve-out + private WAN-DNS
+# after boot or the box's network churn. Acts ONLY when broken. (Managed by
+# aeon-mysterium; runs from aeon-myst-guard.timer.)
+set -u
+U=$(id -u mysterium-node 2>/dev/null || echo 989)
+log(){ logger -t aeon-myst-guard -- "$*"; }
+# 1) Carve-out: uid must NOT egress a tunnel, and table 400 must have its default.
+eg=$(ip route get 1.1.1.1 uid "$U" 2>/dev/null)
+case "$eg" in
+  *dev\ tun*|*dev\ wg*|*dev\ aeon*)
+    log "uid $U egress via tunnel ($eg) — re-applying aeon-myst-route"
+    /usr/local/bin/aeon-myst-route apply >/dev/null 2>&1 ;;
+esac
+if ! ip -4 route show table 400 2>/dev/null | grep -q '^default'; then
+  log "table 400 lost its default — re-applying aeon-myst-route"
+  /usr/local/bin/aeon-myst-route apply >/dev/null 2>&1
+fi
+# 2) DNS: the node's resolv must point ONLY at the WAN resolver 127.0.2.2, never
+#    the VPN-routed 127.0.2.1. Heal in-place via the mount namespace (no restart).
+pid=$(pgrep -x myst | head -1)
+if [ -n "${pid:-}" ] && [ -f /etc/aeon/mysterium-resolv.conf ]; then
+  rc=$(nsenter -t "$pid" -m -- cat /etc/resolv.conf 2>/dev/null)
+  if printf '%s' "$rc" | grep -q '127\.0\.2\.1' || ! printf '%s' "$rc" | grep -q '127\.0\.2\.2'; then
+    log "node resolv wrong (127.0.2.1 present or 127.0.2.2 missing) — re-binding"
+    if nsenter -t "$pid" -m -- mount --bind /etc/aeon/mysterium-resolv.conf /etc/resolv.conf 2>/dev/null; then
+      log "re-bound node /etc/resolv.conf -> 127.0.2.2"
+    else
+      log "re-bind failed — restarting node"; systemctl restart mysterium-node.service
+    fi
+  fi
+fi
+GUARD
+  chmod 755 /usr/local/bin/aeon-myst-guard
+  cat > /etc/systemd/system/aeon-myst-guard.service <<'SVC'
+[Unit]
+Description=Self-heal Mysterium node WAN carve-out + private DNS
+After=mysterium-node.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aeon-myst-guard
+SVC
+  cat > /etc/systemd/system/aeon-myst-guard.timer <<'TMR'
+[Unit]
+Description=Periodically re-assert Mysterium node networking (self-heal)
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+AccuracySec=10
+[Install]
+WantedBy=timers.target
+TMR
+  systemctl daemon-reload
+  systemctl enable --now aeon-myst-guard.timer 2>/dev/null || true
+}
+
 cmd_up() {
   ensure_install || return 1
   harden_opts
@@ -178,11 +243,13 @@ cmd_up() {
   # real circuit. No-op if no VPN is active (table 400 == the WAN default anyway).
   [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route apply || true
   ensure_wan_dns   # dedicated WAN-egress resolver for the node (after the route is up)
+  ensure_guard     # 60s self-heal timer: keeps the carve-out + DNS up across reboots/churn
   systemctl enable --now "$SERVICE" 2>/dev/null || true
   ensure_ui_password
 }
 
 cmd_down() {
+  systemctl disable --now aeon-myst-guard.timer 2>/dev/null || true
   [ -x /usr/local/bin/aeon-myst-route ] && /usr/local/bin/aeon-myst-route clear || true
   systemctl disable --now dnscrypt-proxy-wan.service 2>/dev/null || true
   systemctl disable --now "$SERVICE" 2>/dev/null || true
