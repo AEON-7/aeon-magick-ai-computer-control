@@ -148,11 +148,13 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
   cat > /etc/aeon/mysterium-resolv.conf <<'RES'
-# Mysterium node's private resolver: dedicated WAN-egress dnscrypt (127.0.2.2) so
-# resolving Mysterium infra doesn't depend on the VPN tunnel; falls back to the
-# box's VPN-routed dnscrypt (127.0.2.1) if the WAN instance is down.
+# Mysterium node's private resolver: dedicated WAN-egress dnscrypt (127.0.2.2),
+# running as uid mysterium-node (WAN-routed). SINGLE nameserver ON PURPOSE — a
+# 127.0.2.1 fallback is VPN-routed and stalls (TCP-over-TCP through AirVPN); Go's
+# resolver falls through to it on any hiccup, the stalled lookup is canceled, and
+# that aborts the node's signed quality-metrics POST -> monitoring-status=failed.
+# dnscrypt-proxy-wan has Restart=on-failure, so WAN-only is the safe failure mode.
 nameserver 127.0.2.2
-nameserver 127.0.2.1
 options edns0 trust-ad
 RES
   mkdir -p /etc/systemd/system/mysterium-node.service.d
