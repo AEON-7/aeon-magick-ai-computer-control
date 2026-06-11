@@ -140,14 +140,22 @@ pub async fn info(State(_state): State<AppState>) -> Json<Value> {
 // cert, macros, prompts, vpn-secrets), the NetworkManager saved-WiFi profiles
 // (system-connections), the admin user's SSH authorized_keys (~/.ssh), the
 // agent-connect SSH keypair + connected-systems registry, agent tokens, DNS
-// subscriptions, and the Tailscale node identity. Large, re-uploadable blobs (ISOs, staged files,
-// the audit log) are excluded. Encryption is openssl AES-256-CBC with a
-// PBKDF2-derived key; the password is passed via env (never argv/ps), and
-// the same password decrypts on import. Admin-scope only.
+// subscriptions, the Tailscale node identity, AND the OrbNet service IDENTITIES
+// — the registered Mysterium node keystore + MMN key, the OrbNet .onion secret +
+// Matrix (Conduit) homeserver DB + owner/persona creds, user hidden-service
+// keys, and the IPFS PeerID config. WITHOUT those last items a reflash mints
+// brand-new identities (the bake scrubs + re-keys on first boot), PERMANENTLY
+// losing the registered node, every .onion address, and the PeerID — so they
+// are included here. Large, re-fetchable blobs (the IPFS blockstore, Tor
+// consensus caches, the Mysterium chain cache, ISOs, staged files, the audit
+// log) are excluded. Encryption is openssl AES-256-CBC with a PBKDF2-derived
+// key; the password is passed via env (never argv/ps), and the same password
+// decrypts on import. Admin-scope only. (See `aeon-orbnet-backup` for an
+// OrbNet-scoped CLI with a perms-correct, service-bouncing restore.)
 
 /// Paths (relative to `/`) included in a config backup. Each is skipped if
 /// absent so a fresh device still produces a valid (smaller) archive.
-const BACKUP_LIST: &str = "etc/aeon etc/NetworkManager/system-connections home/admin/.ssh var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/tailscale/tailscaled.state";
+const BACKUP_LIST: &str = "etc/aeon etc/NetworkManager/system-connections home/admin/.ssh var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/tailscale/tailscaled.state var/lib/mysterium-node/keystore var/lib/mysterium-node/nodeui-pass etc/mysterium-node var/lib/aeon/orbnet/tor/hs var/lib/aeon/orbnet/tls var/lib/aeon/orbnet/db var/lib/aeon/orbnet/owner.json var/lib/aeon/orbnet/personas.json var/lib/aeon/orbnet/persona-since var/lib/aeon/orbnet/reg-token var/lib/aeon/orbnet/conduit.toml var/lib/aeon/onions/hs var/lib/aeon/onions/services.d var/lib/aeon/ipfs/config var/lib/aeon/ipfs/keystore var/lib/aeon/ipfs/datastore_spec";
 
 #[derive(Deserialize)]
 pub struct ExportReq {
