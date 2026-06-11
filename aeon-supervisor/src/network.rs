@@ -446,6 +446,13 @@ fn write_state(nf: &NetFile) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(NETWORK_TOML, text)?;
+    // network.toml persists the Tailscale auth_key + VPN provider creds, so it
+    // must NOT be world-readable — keep it root-only (0600). (Earlier images
+    // shipped/wrote it 0644, leaking the auth key to any local reader.)
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(NETWORK_TOML, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
