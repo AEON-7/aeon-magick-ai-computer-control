@@ -148,12 +148,14 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
   cat > /etc/aeon/mysterium-resolv.conf <<'RES'
-# Mysterium node's private resolver: dedicated WAN-egress dnscrypt (127.0.2.2),
-# running as uid mysterium-node (WAN-routed). SINGLE nameserver ON PURPOSE — a
-# 127.0.2.1 fallback is VPN-routed and stalls (TCP-over-TCP through AirVPN); Go's
-# resolver falls through to it on any hiccup, the stalled lookup is canceled, and
-# that aborts the node's signed quality-metrics POST -> monitoring-status=failed.
-# dnscrypt-proxy-wan has Restart=on-failure, so WAN-only is the safe failure mode.
+# Mysterium node's private resolver: the dedicated WAN-egress dnscrypt on
+# 127.0.2.2 (runs as uid mysterium-node, WAN-routed). SINGLE nameserver ON
+# PURPOSE — the box's other resolver is VPN-routed and stalls (TCP-over-TCP
+# through AirVPN); Go would fall through to it on any hiccup, the stalled lookup
+# is canceled, and that aborts the node's signed quality-metrics POST ->
+# monitoring-status=failed. dnscrypt-proxy-wan has Restart=on-failure, so
+# WAN-only is the safe failure mode. (No literal fallback IP here on purpose, so
+# the self-heal guard's nameserver check can't match a comment.)
 nameserver 127.0.2.2
 options edns0 trust-ad
 RES
@@ -200,9 +202,11 @@ fi
 #    the VPN-routed 127.0.2.1. Heal in-place via the mount namespace (no restart).
 pid=$(pgrep -x myst | head -1)
 if [ -n "${pid:-}" ] && [ -f /etc/aeon/mysterium-resolv.conf ]; then
-  rc=$(nsenter -t "$pid" -m -- cat /etc/resolv.conf 2>/dev/null)
-  if printf '%s' "$rc" | grep -q '127\.0\.2\.1' || ! printf '%s' "$rc" | grep -q '127\.0\.2\.2'; then
-    log "node resolv wrong (127.0.2.1 present or 127.0.2.2 missing) — re-binding"
+  # Inspect ONLY nameserver directives, never comments (a comment that merely
+  # mentions the bad resolver IP must not trip this check).
+  rc=$(nsenter -t "$pid" -m -- grep -E '^[[:space:]]*nameserver' /etc/resolv.conf 2>/dev/null)
+  if [ -n "$rc" ] && { printf '%s' "$rc" | grep -q '127\.0\.2\.1' || ! printf '%s' "$rc" | grep -q '127\.0\.2\.2'; }; then
+    log "node resolv wrong (VPN-routed nameserver present or WAN one missing) — re-binding"
     if nsenter -t "$pid" -m -- mount --bind /etc/aeon/mysterium-resolv.conf /etc/resolv.conf 2>/dev/null; then
       log "re-bound node /etc/resolv.conf -> 127.0.2.2"
     else
