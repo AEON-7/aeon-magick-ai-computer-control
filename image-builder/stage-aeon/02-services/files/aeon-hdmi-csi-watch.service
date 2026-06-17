@@ -1,0 +1,18 @@
+[Unit]
+Description=Aeon Magick — re-establish X1301 (TC358743) HDMI capture on signal change (Pi 5)
+After=aeon-hdmi-csi.service
+Wants=aeon-hdmi-csi.service
+# Long-running companion to the one-shot aeon-hdmi-csi.service: that does the
+# initial setup, this keeps it working when the HDMI source is plugged in /
+# unplugged / changes resolution after boot. No-op on a Pi 4 / no-X1301 rig
+# (the script idles when /run/aeon/hdmi-subdev is absent).
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aeon-hdmi-csi-watch
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

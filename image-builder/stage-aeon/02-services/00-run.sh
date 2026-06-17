@@ -29,6 +29,7 @@ for u in \
     aeon-undervolt-watchdog.timer \
     aeon-orb-glow.service \
     aeon-hdmi-csi.service \
+    aeon-hdmi-csi-watch.service \
     aeon-ups.service \
     aeon-uvc.service \
     aeon-vision.service \
@@ -59,6 +60,7 @@ install -m 0755 "${THIS_DIR}/files/aeon-uvc.sh"       "${ROOTFS_DIR}/usr/local/b
 # to the HDMI source + the boot-time pipeline-setup script. No-op on Pi 4.
 install -m 0644 "${THIS_DIR}/files/hdmi-edid.txt"      "${ROOTFS_DIR}/etc/aeon/hdmi-edid.txt"
 install -m 0755 "${THIS_DIR}/files/aeon-hdmi-csi.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-hdmi-csi"
+install -m 0755 "${THIS_DIR}/files/aeon-hdmi-csi-watch.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-hdmi-csi-watch"
 # Waveshare UPS HAT (E) battery monitor + low-battery safe-shutdown daemon.
 # No-op (idles) on a Pi without the HAT (probes I2C 0x2D, finds nothing).
 install -m 0755 "${THIS_DIR}/files/aeon-ups.py"        "${ROOTFS_DIR}/usr/local/bin/aeon-ups"
@@ -179,6 +181,7 @@ systemctl enable aeon-undervolt-watchdog.timer
 systemctl enable aeon-orb-glow.service
 # Pi 5 HDMI-to-CSI bridge setup (oneshot; self-skips on Pi 4 / no X1301).
 systemctl enable aeon-hdmi-csi.service
+systemctl enable aeon-hdmi-csi-watch.service
 # USB webcam feeder (self-skips when uvc.toml disabled / no camera / no feeder binary).
 systemctl enable aeon-uvc.service
 # UPS HAT (E) battery monitor + safe-shutdown (idles cleanly if no HAT).
