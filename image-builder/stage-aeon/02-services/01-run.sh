@@ -103,6 +103,14 @@ dtoverlay=imx708,cam0
 dtparam=pciex1
 dtparam=pciex1_gen=3
 
+# BrainCraft HAT WM8960 codec (mic + speaker). Our wm8960-mic overlay replaces
+# the stock wm8960-soundcard: it adds the MICB DAPM routes that mainline
+# wm8960.c omits, so the codec's mic-bias supply actually powers during capture
+# (the stock overlay leaves MICB unrouted -> electret mics record digital
+# silence). Speaker/headphone routing + the "wm8960soundcard" ALSA id are
+# unchanged. See files/wm8960-mic.dts (installed by 00-run.sh).
+dtoverlay=wm8960-mic
+
 # Restore the default filter so any later config lines apply to all models.
 [all]
 EOF

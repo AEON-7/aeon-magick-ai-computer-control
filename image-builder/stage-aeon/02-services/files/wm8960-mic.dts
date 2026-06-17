@@ -1,0 +1,100 @@
+/dts-v1/;
+/plugin/;
+
+/* wm8960-mic — drop-in replacement for the stock `wm8960-soundcard` overlay
+ * that ALSO powers the WM8960's mic-bias supply during capture.
+ *
+ * WHY: mainline sound/soc/codecs/wm8960.c declares the MICB DAPM supply
+ *   (SND_SOC_DAPM_SUPPLY("MICB", WM8960_POWER1, 1, 0, NULL, 0)) but ships ZERO
+ *   dapm routes referencing "MICB", so DAPM never powers it — R25/0x19 bit1
+ *   stays 0 during capture and an electret mic (e.g. the Adafruit BrainCraft
+ *   onboard mic) records pure digital silence even though the ADC + analog
+ *   inputs power up. The two extra "<Boost Mixer>" <- "MICB" routes below are
+ *   byte-for-byte what the HinTak/seeed wm8960 fork hardcodes in C; adding them
+ *   from device tree fixes the mic with the IN-TREE driver — no DKMS.
+ *
+ * Everything else is identical to the stock wm8960-soundcard overlay (same card
+ * name "wm8960-soundcard" -> ALSA id "wm8960soundcard", same controls, same
+ * speaker/headphone routing), so the working output path and all userspace that
+ * selects the card (aeon-voice, aeon-braincraft, supervisor audio.rs) keep
+ * working unchanged. To revert: comment `dtoverlay=wm8960-mic` and restore
+ * `dtoverlay=wm8960-soundcard` in config.txt, then reboot.
+ */
+
+/ {
+    compatible = "brcm,bcm2835";
+
+    /* Enable the RP1 I2S clock-producer interface (Pi 5). */
+    fragment@0 {
+        target = <&i2s_clk_producer>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
+
+    /* 12.288 MHz master clock feeding the WM8960. */
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            wm8960_mclk: wm8960_mclk {
+                compatible = "fixed-clock";
+                #clock-cells = <0>;
+                clock-frequency = <12288000>;
+            };
+        };
+    };
+
+    /* The WM8960 codec on i2c1 @ 0x1a. */
+    fragment@2 {
+        target = <&i2c1>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+            wm8960: wm8960@1a {
+                compatible = "wlf,wm8960";
+                reg = <0x1a>;
+                #sound-dai-cells = <0>;
+                AVDD-supply = <&vdd_5v0_reg>;
+                DVDD-supply = <&vdd_3v3_reg>;
+                clocks = <&wm8960_mclk>;
+                clock-names = "mclk";
+            };
+        };
+    };
+
+    /* The ASoC simple-audio-card. Identical to stock + the two MICB routes. */
+    fragment@3 {
+        target = <&sound>;
+        __overlay__ {
+            compatible = "simple-audio-card";
+            simple-audio-card,format = "i2s";
+            simple-audio-card,name = "wm8960-soundcard";
+            status = "okay";
+            simple-audio-card,widgets =
+                "Microphone", "Mic Jack",
+                "Line", "Line In",
+                "Line", "Line Out",
+                "Speaker", "Speaker",
+                "Headphone", "Headphone Jack";
+            simple-audio-card,routing =
+                "Headphone Jack", "HP_L",
+                "Headphone Jack", "HP_R",
+                "Speaker", "SPK_LP",
+                "Speaker", "SPK_LN",
+                "LINPUT1", "Mic Jack",
+                "LINPUT3", "Mic Jack",
+                "RINPUT1", "Mic Jack",
+                "RINPUT2", "Mic Jack",
+                "Left Boost Mixer", "MICB",
+                "Right Boost Mixer", "MICB";
+
+            simple-audio-card,cpu {
+                sound-dai = <&i2s_clk_producer>;
+            };
+            simple-audio-card,codec {
+                sound-dai = <&wm8960>;
+            };
+        };
+    };
+};

@@ -80,6 +80,12 @@ install -m 0755 "${THIS_DIR}/files/aeon-vision-vlm"    "${ROOTFS_DIR}/usr/local/
 # /api/braincraft/voice/install, exactly like the Hailo runtime). Works on BOTH
 # tracks (no AEON_TARGET gate). OFF by default; self-idles without the HAT.
 install -m 0755 "${THIS_DIR}/files/aeon-braincraft"    "${ROOTFS_DIR}/usr/local/bin/aeon-braincraft"
+
+# WM8960 MICBIAS overlay for the BrainCraft codec — enabled by 01-run.sh's
+# `dtoverlay=wm8960-mic` ([pi5]); it adds the MICB DAPM routes mainline wm8960.c
+# omits so the mic-bias powers during capture. (.dts kept beside it for source.)
+install -d "${ROOTFS_DIR}/boot/firmware/overlays"
+install -m 0644 "${THIS_DIR}/files/wm8960-mic.dtbo" "${ROOTFS_DIR}/boot/firmware/overlays/wm8960-mic.dtbo"
 install -m 0755 "${THIS_DIR}/files/aeon-voice"         "${ROOTFS_DIR}/usr/local/bin/aeon-voice"
 install -m 0644 "${THIS_DIR}/files/braincraft.toml"    "${ROOTFS_DIR}/etc/aeon/braincraft.toml"
 # Hailo-10H AI accelerator (Pi AI HAT+ 2). The supervisor's hailo.rs shells out
