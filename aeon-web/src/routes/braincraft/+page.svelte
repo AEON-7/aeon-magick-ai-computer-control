@@ -64,9 +64,35 @@
   }
   let editorSeeded = false;
 
+  // Audio in/out volume (WM8960). null until first fetch / no codec fitted.
+  let audioVol: api.AudioVolume | null = null;
+  let outVol = 80;
+  let inVol = 80;
+  let micMuted = false;
+  let audioBusy = false;
+
+  async function refreshAudio() {
+    try {
+      const a = await api.getAudioVolume();
+      audioVol = a;
+      if (!audioBusy && a.present) {
+        if (a.playback) outVol = a.playback.percent;
+        if (a.capture) { inVol = a.capture.percent; micMuted = a.capture.muted; }
+      }
+    } catch {
+      audioVol = null;
+    }
+  }
+  async function saveAudio(p: { playback?: number; capture?: number; capture_muted?: boolean }) {
+    audioBusy = true;
+    try { audioVol = await api.setAudioVolume(p); } catch { /* best-effort */ }
+    finally { audioBusy = false; }
+  }
+
   onMount(() => {
     refresh();
-    poll = setInterval(refresh, 5000);
+    refreshAudio();
+    poll = setInterval(() => { refresh(); refreshAudio(); }, 5000);
   });
   onDestroy(() => {
     clearInterval(poll);
@@ -445,6 +471,42 @@
                 <button class="btn text-sm border-violet-500/40 text-violet-200 hover:bg-violet-500/10" on:click={say} disabled={!sayText.trim()}>Speak</button>
               </div>
               <p class="text-[11px] text-ink-500">On the HAT, <span class="text-ink-400">Button&nbsp;A</span> is push-to-talk.</p>
+
+              <!-- Audio levels: WM8960 in/out volume via /api/audio/volume -->
+              {#if audioVol?.present}
+                <div class="rounded-lg bg-ink-950 border border-ink-800 p-3 space-y-3">
+                  <div class="text-[11px] uppercase tracking-wider text-ink-500">
+                    Audio levels <span class="text-ink-600 font-mono">{audioVol.card?.name}</span>
+                  </div>
+                  {#if audioVol.playback}
+                    <label class="block space-y-1">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-ink-400">Output (speaker)</span>
+                        <span class="font-mono text-violet-300">{outVol}%</span>
+                      </div>
+                      <input type="range" min="0" max="100" step="1" bind:value={outVol}
+                             on:change={() => saveAudio({ playback: outVol })}
+                             disabled={audioBusy} class="w-full accent-violet-500" />
+                    </label>
+                  {/if}
+                  {#if audioVol.capture}
+                    <label class="block space-y-1">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-ink-400">Input (mic)</span>
+                        <span class="font-mono text-violet-300">{micMuted ? 'muted' : inVol + '%'}</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <input type="range" min="0" max="100" step="1" bind:value={inVol}
+                               on:change={() => saveAudio({ capture: inVol })}
+                               disabled={audioBusy || micMuted} class="flex-1 accent-violet-500" />
+                        <button class="btn text-xs px-2 py-1 {micMuted ? 'border-red-500/40 text-red-300' : 'border-ink-700 text-ink-300'}"
+                                on:click={() => { micMuted = !micMuted; saveAudio({ capture_muted: micMuted }); }}
+                                disabled={audioBusy}>{micMuted ? 'unmute' : 'mute'}</button>
+                      </div>
+                    </label>
+                  {/if}
+                </div>
+              {/if}
             {/if}
           </div>
         {/if}

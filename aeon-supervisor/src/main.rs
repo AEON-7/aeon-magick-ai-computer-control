@@ -17,6 +17,7 @@ use tracing::info;
 mod agent_connect;
 mod api;
 mod audit;
+mod audio;
 mod auth;
 mod blocked_log;
 mod braincraft;

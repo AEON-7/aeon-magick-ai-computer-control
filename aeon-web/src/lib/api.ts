@@ -200,6 +200,18 @@ export interface UpsStatus {
 }
 export const getUps = () => req<UpsStatus>('GET', '/ups');
 
+// ── Audio in/out volume (BrainCraft WM8960 via amixer) ──
+// present:false when no codec card is fitted (mains-only / no BrainCraft).
+export interface AudioVolume {
+  present: boolean;
+  card?: { index: number; name: string };
+  playback?: { control: string; percent: number } | null;   // speaker/headphone
+  capture?: { control: string; percent: number; muted: boolean } | null; // mic
+}
+export const getAudioVolume = () => req<AudioVolume>('GET', '/audio/volume');
+export const setAudioVolume = (p: { playback?: number; capture?: number; capture_muted?: boolean }) =>
+  req<AudioVolume>('PUT', '/audio/volume', p);
+
 // ── fleet (decentralized roster of peer Orbs over the tailnet/LAN) ──
 // Offline peers come back as { online:false, addr } stubs — the rich fields
 // are only present for Orbs that answered their heartbeat, so all but `online`

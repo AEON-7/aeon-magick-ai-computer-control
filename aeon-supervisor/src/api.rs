@@ -413,6 +413,10 @@ pub fn build_router(cfg: Config) -> Router {
         // Waveshare UPS HAT (E) battery state (relays the aeon-ups daemon's
         // /run/aeon/ups.json; {"present":false} when no HAT).
         .route("/ups",                get(crate::ups::get_ups))
+        // Audio in/out volume (BrainCraft WM8960 via amixer); {present:false}
+        // when no codec card is fitted.
+        .route("/audio/volume",
+            get(crate::audio::get_audio).put(crate::audio::put_audio))
         // On-device live vision (OCR / detection over the capture feed).
         .route("/vision/detections",  get(crate::vision::get_detections))
         // OCR-anchored grounding: GET /vision/find?query=Save → ranked text
