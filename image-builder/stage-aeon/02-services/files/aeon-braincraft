@@ -1,0 +1,1145 @@
+#!/usr/bin/env python3
+"""aeon-braincraft — drives the Adafruit BrainCraft HAT (240x240 ST7789 SPI TFT,
+3 buttons + joystick, WM8960 I2S codec) as the Orb's on-device face, camera
+viewfinder, and local/hosted voice assistant.
+
+Like aeon-vision.py, the main loop RE-READS /etc/aeon/braincraft.toml every
+iteration, so a config edit (mode flip, backend switch, enable/disable) takes
+effect without a restart. Status is published atomically to
+/run/aeon/braincraft.json for the supervisor's braincraft relay + web tile.
+
+Three button-cyclable modes (a button / joystick-press cycles ai→viewfinder→voice):
+  * ai         — the idle interface: renders backend mode/persona, a listening/
+                 speaking indicator, and the last response (wrapped) on the TFT.
+  * viewfinder — pulls a frame from aeon-streamer's unix socket (the SAME tap
+                 aeon-vision uses, so we never open a 2nd handle on the capture
+                 device), downscales to 240x240, pushes to the TFT, and — when
+                 overlay=true — draws /run/aeon/vision.json detection boxes.
+                 Button A = photo, Button B = toggle video record.
+  * voice      — push-to-talk on Button A: mic → ASR → LLM → TTS → speaker.
+                 backend.mode "local"  = sherpa-onnx Whisper ASR + Kokoro TTS +
+                 a local LLM endpoint (127.0.0.1:8000, OpenAI-compatible / hailo-ollama).
+                 backend.mode "hosted" = ASR/LLM/TTS POSTed to a DGX Spark, so
+                 the Orb can "make calls" with different personas.
+
+Self-idles (writes {"present": false} and sleeps) when braincraft is disabled in
+the config, the ST7789/SPI display libs can't import, or there's no SPI device —
+so the image is harmless when no HAT is attached. EVERY hardware-library import
+(spidev / display driver / gpiod / sounddevice / numpy / PIL) is guarded so a
+missing lib (the voice/display stack is installed later by the button-driven
+aeon-voice installer, so it's often absent) degrades gracefully, never crashes.
+
+Tunables (env, set in the unit, override braincraft.toml):
+  AEON_BRAINCRAFT_MODE     (ai|viewfinder|voice)  — startup mode override
+  AEON_STREAMER_SOCK       (/run/aeon/streamer.sock)
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+OUT = "/run/aeon/braincraft.json"
+CMD_FILE = "/run/aeon/braincraft.cmd"
+BRAINCRAFT_TOML = "/etc/aeon/braincraft.toml"
+STREAMER_SOCK = os.environ.get("AEON_STREAMER_SOCK", "/run/aeon/streamer.sock")
+VISION_JSON = "/run/aeon/vision.json"
+UPS_JSON = "/run/aeon/ups.json"               # aeon-ups.py UPS HAT (E) telemetry
+CAPTURE_DIR = "/var/lib/aeon/captures"
+FRAME_TMP = "/run/aeon/.braincraft-frame.jpg"
+SAY_WAV = "/run/aeon/.braincraft-say.wav"
+ASR_WAV = "/run/aeon/.braincraft-asr.wav"
+
+# Local LLM endpoint we try first in backend.mode="local" — hailo-ollama /
+# OpenAI-compatible. Same base aeon-hailo uses for the Hailo LLM backend.
+LOCAL_LLM_URL = "http://127.0.0.1:8000/v1"
+
+# Where the aeon-voice installer drops the sherpa-onnx models. ONE CPU runtime
+# (sherpa-onnx) serves BOTH text-to-speech (Kokoro) and speech-to-text (Whisper);
+# the LLM runs on the Hailo NPU, so the CPU is free for voice.
+KOKORO_DIR = "/usr/share/aeon/voice/kokoro"     # Kokoro TTS model dir
+WHISPER_DIR = "/usr/share/aeon/voice/whisper"   # Whisper ASR model dir
+# sherpa-onnx CPU threads. Measured on the Pi 5: Kokoro TTS is FASTEST at 2
+# threads (~0.43x realtime); 1 is too few and 3-4 add ONNX intra-op sync overhead
+# on this small model and run slower. Override via AEON_VOICE_THREADS to retune.
+VOICE_THREADS = int(os.environ.get("AEON_VOICE_THREADS", "2"))
+
+
+# ── config ──────────────────────────────────────────────────────────────────
+def load_cfg():
+    """braincraft.toml → flat dict, with env overrides. Stdlib tomllib (Py 3.11+)."""
+    cfg = {}
+    try:
+        import tomllib
+        with open(BRAINCRAFT_TOML, "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, ImportError, ValueError):
+        cfg = {}
+    audio = cfg.get("audio", {}) if isinstance(cfg.get("audio"), dict) else {}
+    backend = cfg.get("backend", {}) if isinstance(cfg.get("backend"), dict) else {}
+    hosted = cfg.get("hosted", {}) if isinstance(cfg.get("hosted"), dict) else {}
+    mode = os.environ.get("AEON_BRAINCRAFT_MODE", cfg.get("mode", "ai"))
+    if mode not in ("ai", "viewfinder", "voice"):
+        mode = "ai"
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "mode": mode,
+        "overlay": bool(cfg.get("overlay", True)),
+        "audio_device": str(audio.get("device", "auto")),
+        "tts": str(audio.get("tts", "kokoro")),
+        "asr": str(audio.get("asr", "whisper")),
+        "tts_voice": int(audio.get("tts_voice", 0)),   # Kokoro speaker id (0-10)
+        "tts_speed": float(audio.get("tts_speed", 1.0)),
+        "backend_mode": str(backend.get("mode", "local")),
+        "persona": str(backend.get("persona", "")),
+        "llm_url": str(hosted.get("llm_url", "http://192.168.1.116:8000/v1")),
+        "tts_url": str(hosted.get("tts_url", "http://192.168.1.116:8002")),
+        "asr_url": str(hosted.get("asr_url", "http://192.168.1.116:8001")),
+    }
+
+
+def write_json(obj):
+    """Atomic publish (tmp + os.replace), exactly like aeon-vision.write_json."""
+    tmp = OUT + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(obj, f)
+        os.replace(tmp, OUT)
+    except OSError as e:
+        sys.stderr.write(f"aeon-braincraft: write {OUT}: {e}\n")
+
+
+def read_ups():
+    """The UPS HAT (E) telemetry published by aeon-ups.py, or None if no UPS is
+    fitted / the daemon isn't running. A tiny JSON read each loop — cheap, and a
+    missing/garbled file just means 'no battery meter' rather than an error."""
+    try:
+        with open(UPS_JSON) as f:
+            d = json.load(f)
+        return d if d.get("present") else None
+    except (OSError, ValueError):
+        return None
+
+
+# ── hardware / model presence probes ─────────────────────────────────────────
+def have_display_libs():
+    """True only if the ST7789 driver chain + PIL + numpy + spidev all import.
+
+    These ship via the aeon-voice installer, so on a fresh image they're absent
+    and we degrade to a no-display idle rather than crashing.
+    """
+    try:
+        import spidev  # noqa: F401
+        import numpy  # noqa: F401
+        from PIL import Image  # noqa: F401
+        import st7789  # noqa: F401  (Pimoroni/Adafruit ST7789 Python driver)
+        return True
+    except Exception:
+        return False
+
+
+def have_spi_device():
+    """A /dev/spidev* node means the SPI bus is enabled (dtparam=spi=on)."""
+    try:
+        return any(n.startswith("spidev") for n in os.listdir("/dev"))
+    except OSError:
+        return False
+
+
+def voice_installed():
+    """Core voice pieces present — the sherpa-onnx runtime + the Kokoro TTS model.
+    (Whisper ASR is optional: the device can still speak and fall back to hosted
+    ASR, so TTS + runtime are the load-bearing test.)"""
+    try:
+        import sherpa_onnx  # noqa: F401
+    except Exception:
+        return False
+    return os.path.isfile(os.path.join(KOKORO_DIR, "model.onnx"))
+
+
+def idle_status(cfg):
+    """The present:false payload — WITH a machine-readable `reason` + capability
+    flags so the web UI can tell 'the display/voice stack isn't installed yet'
+    (offer the Install button) from 'SPI is off' or 'reseat the HAT', instead of
+    a bare {present:false} that always reads as a seating problem. The display
+    libs (spidev/st7789/PIL/numpy) ship via the button-driven aeon-voice install,
+    so on a fresh image `libs_missing` is the EXPECTED first state, not an error."""
+    libs = have_display_libs()
+    spi = have_spi_device()
+    if not cfg["enabled"]:
+        reason = "disabled"
+    elif not libs:
+        reason = "libs_missing"   # display/voice stack not installed yet
+    else:
+        reason = "no_spi"         # dtparam=spi=on missing / no /dev/spidev*
+    return {
+        "present": False,
+        "enabled": cfg["enabled"],
+        "reason": reason,
+        "have_display_libs": libs,
+        "have_spi": spi,
+        "voice_installed": voice_installed(),
+    }
+
+
+def detect_gpiochip():
+    """Which gpiochip carries the 40-pin header.
+
+    Pi 5 (BCM2712) routes the header through RP1 → gpiochip4; Pi 4 (BCM2711)
+    exposes it on gpiochip0. We parse /proc/device-tree/model — the same
+    model-string idiom aeon-hdmi-csi.sh uses to fence Pi-5-only behaviour.
+    """
+    try:
+        with open("/proc/device-tree/model", "rb") as f:
+            model = f.read().decode("ascii", "replace")
+    except OSError:
+        model = ""
+    if "Raspberry Pi 5" in model:
+        return "gpiochip4"
+    if "Raspberry Pi 4" in model:
+        return "gpiochip0"
+    # Unknown board: prefer gpiochip4 if it exists (Pi 5 family), else chip0.
+    return "gpiochip4" if os.path.exists("/dev/gpiochip4") else "gpiochip0"
+
+
+def probe_audio(device):
+    """Resolve the ALSA playback+capture device for the configured preference.
+
+    `device=auto` → prefer USB audio: the WM8960 I2S codec is UNVERIFIED on Pi 5
+    / RP1, so a plug-in USB sound card is the supported default. We only attempt
+    the WM8960 when it's named explicitly. Returns (name, playback, capture).
+    """
+    def cards():
+        # /proc/asound/cards: lines like " 1 [Device  ]: USB-Audio - ...".
+        out = []
+        try:
+            with open("/proc/asound/cards") as f:
+                txt = f.read()
+        except OSError:
+            return out
+        for ln in txt.splitlines():
+            ln = ln.strip()
+            if not ln or ln[0].isalpha() is False and ":" not in ln:
+                pass
+            # index in column 0
+            head = ln.split()
+            if head and head[0].isdigit():
+                idx = head[0]
+                lower = ln.lower()
+                out.append((idx, lower, ln))
+        return out
+
+    def dev_ok(alsa_dev):
+        # Best-effort: aplay/arecord -l list the hw nodes; if the tools are
+        # absent we optimistically assume the named card is usable.
+        return True
+
+    cards_list = cards()
+    chosen = None
+    if device == "auto":
+        # Prefer a USB-Audio card.
+        for idx, lower, _raw in cards_list:
+            if "usb" in lower:
+                chosen = (f"hw:{idx}", "usb")
+                break
+        # Then a WM8960 if it happens to be present and nothing else is — but
+        # do NOT silently trust it as the default per the support note above.
+        if chosen is None:
+            for idx, lower, _raw in cards_list:
+                if "wm8960" in lower:
+                    chosen = (f"hw:{idx}", "wm8960")
+                    break
+        if chosen is None and cards_list:
+            idx = cards_list[0][0]
+            chosen = (f"hw:{idx}", "default")
+        if chosen is None:
+            return ("default", False, False)
+        name, _kind = chosen
+    elif device == "usb":
+        name = None
+        for idx, lower, _raw in cards_list:
+            if "usb" in lower:
+                name = f"hw:{idx}"
+                break
+        if name is None:
+            return ("usb", False, False)
+    elif device == "wm8960":
+        name = None
+        for idx, lower, _raw in cards_list:
+            if "wm8960" in lower:
+                name = f"hw:{idx}"
+                break
+        if name is None:
+            return ("wm8960", False, False)
+    else:
+        # Treat as a literal ALSA device name.
+        name = device
+
+    playback = dev_ok(name)
+    capture = dev_ok(name)
+    return (name, playback, capture)
+
+
+def http_reachable(url):
+    """A quick HEAD/GET to confirm the backend endpoint answers. Never hangs."""
+    if not url:
+        return False
+    base = url.rstrip("/")
+    # /v1 base → probe /models; bare base → probe root. Both via curl --max-time.
+    probe = base + "/models" if base.endswith("/v1") else base + "/"
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", "2", probe],
+            capture_output=True, timeout=4, text=True,
+        )
+        code = (r.stdout or "").strip()
+        return code.isdigit() and int(code) < 500
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+# ── frame grab (mirrors aeon-vision.grab_frame) ──────────────────────────────
+def grab_frame():
+    """Pull one JPEG from the streamer's unix socket. Returns bytes or None.
+
+    Identical tap to aeon-vision: hits /snapshot on /run/aeon/streamer.sock so we
+    never fight the single-consumer capture device for a second open.
+    """
+    try:
+        out = subprocess.run(
+            ["curl", "-s", "--max-time", "4", "--unix-socket", STREAMER_SOCK,
+             "http://localhost/snapshot"],
+            capture_output=True, timeout=6,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        sys.stderr.write(f"aeon-braincraft: streamer grab failed: {e}\n")
+        return None
+    data = out.stdout
+    # A real JPEG starts FF D8; anything else (HTML error, empty) → no frame.
+    if len(data) > 3 and data[0] == 0xFF and data[1] == 0xD8:
+        return data
+    return None
+
+
+def read_detections():
+    """Current /run/aeon/vision.json detections (boxes are fractions 0..1)."""
+    try:
+        with open(VISION_JSON) as f:
+            v = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not v.get("present") or not v.get("detections"):
+        return []
+    return v.get("detections", [])
+
+
+# ── the display ──────────────────────────────────────────────────────────────
+class Display:
+    """Thin wrapper over the ST7789 240x240 panel. Becomes a no-op (ok=False)
+    when the driver chain is unavailable, so callers never branch on imports."""
+
+    W = 240
+    H = 240
+
+    def __init__(self):
+        self.ok = False
+        self.driver = "st7789"
+        self._disp = None
+        self._Image = None
+        self._ImageDraw = None
+        self._ImageFont = None
+        try:
+            import st7789
+            from PIL import Image, ImageDraw, ImageFont
+            self._Image = Image
+            self._ImageDraw = ImageDraw
+            self._ImageFont = ImageFont
+            # BrainCraft HAT wiring: SPI0, CS0, DC=GPIO25, BL=GPIO22, no reset.
+            # rotation 180 puts the image upright with the HAT's button edge down.
+            self._disp = st7789.ST7789(
+                height=240, width=240, rotation=180,
+                port=0, cs=0, dc=25, backlight=22,
+                spi_speed_hz=60 * 1000 * 1000,
+            )
+            try:
+                self._disp.begin()
+            except Exception:
+                pass
+            self.ok = True
+        except Exception as e:
+            sys.stderr.write(f"aeon-braincraft: display init failed: {e}\n")
+            self.ok = False
+
+    def _font(self, size):
+        try:
+            return self._ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
+        except Exception:
+            return self._ImageFont.load_default()
+
+    def blank(self):
+        return self._Image.new("RGB", (self.W, self.H), (0, 0, 0)) if self.ok else None
+
+    def show(self, img):
+        if self.ok and img is not None:
+            try:
+                self._disp.display(img)
+            except Exception as e:
+                sys.stderr.write(f"aeon-braincraft: display push failed: {e}\n")
+
+    def _wrap(self, draw, text, font, max_w):
+        words = (text or "").split()
+        lines, cur = [], ""
+        for w in words:
+            trial = (cur + " " + w).strip()
+            if draw.textlength(trial, font=font) <= max_w:
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def _draw_battery(self, draw, ups):
+        """A compact battery glyph + percent in the top-right of the header band.
+        Fill color tracks charge (green/amber/red); a bolt overlays when charging.
+        No-op when no UPS HAT (E) is fitted (ups is None)."""
+        if not ups:
+            return
+        pct = ups.get("percent")
+        if pct is None:
+            return
+        pct = max(0, min(100, int(pct)))
+        charging = bool(ups.get("charging")) or "charg" in str(ups.get("state", ""))
+        if charging:
+            col = (60, 200, 120)
+        elif pct <= 15:
+            col = (230, 70, 60)
+        elif pct <= 40:
+            col = (230, 180, 40)
+        else:
+            col = (90, 200, 110)
+        # Battery body sits just left of the orb glyph (W-26..W-8), centered in
+        # the 0..30 header band.
+        bw, bh = 24, 14
+        bx = self.W - 26 - 6 - bw
+        by = 15 - bh // 2
+        draw.rectangle((bx, by, bx + bw, by + bh), outline=(210, 210, 220), width=1)
+        draw.rectangle((bx + bw, by + 4, bx + bw + 2, by + bh - 4), fill=(210, 210, 220))
+        fillw = max(1, int((bw - 3) * pct / 100))
+        draw.rectangle((bx + 2, by + 2, bx + 2 + fillw, by + bh - 2), fill=col)
+        if charging:
+            mx, my = bx + bw // 2, by + bh // 2
+            draw.line([(mx + 2, my - 5), (mx - 2, my + 1), (mx + 1, my + 1),
+                       (mx - 2, my + 5)], fill=(20, 25, 30), width=1)
+        txt = f"{pct}%"
+        f = self._font(12)
+        tw = draw.textlength(txt, font=f)
+        draw.text((bx - 4 - tw, 8), txt, font=f, fill=(200, 205, 215))
+
+    def render_ai(self, status):
+        """The idle 'face': backend mode/persona, a state indicator, last reply."""
+        if not self.ok:
+            return
+        img = self.blank()
+        draw = self._ImageDraw.Draw(img)
+        title_f = self._font(20)
+        body_f = self._font(15)
+        small_f = self._font(12)
+
+        backend = status.get("backend", {})
+        bmode = backend.get("mode", "local")
+        persona = backend.get("persona") or "default"
+        state = status.get("_voice_state", "idle")  # idle|listening|speaking
+        colors = {"idle": (90, 110, 160), "listening": (40, 200, 90),
+                  "speaking": (230, 150, 40)}
+        accent = colors.get(state, (90, 110, 160))
+
+        # Header band + the Orb glyph (a filled ring).
+        draw.rectangle((0, 0, self.W, 30), fill=(20, 20, 28))
+        draw.text((8, 6), "AEON ORB", font=title_f, fill=(220, 220, 235))
+        draw.ellipse((self.W - 26, 6, self.W - 8, 24), outline=accent, width=3)
+        self._draw_battery(draw, status.get("ups"))
+
+        draw.text((8, 40), f"{bmode} · {persona}", font=body_f, fill=accent)
+        draw.text((8, 62), f"[{state}]", font=small_f, fill=accent)
+
+        reply = (status.get("last_response") or {}).get("text", "")
+        y = 86
+        for ln in self._wrap(draw, reply, body_f, self.W - 16)[:9]:
+            draw.text((8, y), ln, font=body_f, fill=(200, 205, 215))
+            y += 17
+        self.show(img)
+
+    def render_frame(self, jpeg, detections, overlay):
+        """Downscale the grabbed JPEG to 240x240 and (optionally) draw boxes."""
+        if not self.ok:
+            return
+        try:
+            import io
+            src = self._Image.open(io.BytesIO(jpeg)).convert("RGB")
+        except Exception as e:
+            sys.stderr.write(f"aeon-braincraft: jpeg decode failed: {e}\n")
+            return
+        img = src.resize((self.W, self.H))
+        if overlay and detections:
+            draw = self._ImageDraw.Draw(img)
+            label_f = self._font(11)
+            for d in detections[:60]:
+                box = d.get("box") or {}
+                try:
+                    x = float(box.get("x", 0)) * self.W
+                    y = float(box.get("y", 0)) * self.H
+                    w = float(box.get("w", 0)) * self.W
+                    h = float(box.get("h", 0)) * self.H
+                except (TypeError, ValueError):
+                    continue
+                draw.rectangle((x, y, x + w, y + h), outline=(40, 220, 90), width=2)
+                label = str(d.get("text") or d.get("label") or "")[:18]
+                if label:
+                    draw.text((x + 1, max(0, y - 12)), label, font=label_f,
+                              fill=(40, 220, 90))
+        self.show(img)
+
+    def render_message(self, title, body):
+        if not self.ok:
+            return
+        img = self.blank()
+        draw = self._ImageDraw.Draw(img)
+        draw.text((8, 8), title, font=self._font(18), fill=(220, 220, 235))
+        y = 40
+        for ln in self._wrap(draw, body, self._font(15), self.W - 16)[:10]:
+            draw.text((8, y), ln, font=self._font(15), fill=(200, 205, 215))
+            y += 18
+        self.show(img)
+
+
+# ── buttons / joystick ───────────────────────────────────────────────────────
+class Buttons:
+    """Reads the BrainCraft HAT's 3 buttons (A=GPIO17, B=GPIO27, joystick-press)
+    via libgpiod. No-op (ok=False) when gpiod / the chip is unavailable."""
+
+    # BrainCraft HAT: button A = BCM23, button B = BCM24, joystick select = BCM4.
+    # (Pins are stable across the 40-pin header; only the CHIP differs Pi4/Pi5.)
+    PIN_A = 23
+    PIN_B = 24
+    PIN_SEL = 4
+
+    def __init__(self, chip_name):
+        self.ok = False
+        self.chip_name = chip_name
+        self._lines = {}
+        self._chip = None
+        self._prev = {"a": 1, "b": 1, "sel": 1}
+        try:
+            import gpiod
+            self._gpiod = gpiod
+            self._chip = gpiod.Chip(chip_name)
+            for key, pin in (("a", self.PIN_A), ("b", self.PIN_B), ("sel", self.PIN_SEL)):
+                try:
+                    line = self._chip.get_line(pin)
+                    line.request(consumer="aeon-braincraft",
+                                 type=gpiod.LINE_REQ_DIR_IN,
+                                 flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
+                    self._lines[key] = line
+                except Exception:
+                    # Newer libgpiod (v2) has a different API; skip the button
+                    # rather than crash. The aeon-voice installer pins a known lib.
+                    pass
+            self.ok = bool(self._lines)
+        except Exception as e:
+            sys.stderr.write(f"aeon-braincraft: gpiod init failed: {e}\n")
+            self.ok = False
+
+    def poll(self):
+        """Return the set of buttons that went LOW (pressed) since last poll.
+
+        Buttons are active-low with a pull-up, so a press reads 0. We edge-detect
+        in software (debounce-by-loop) → {'a','b','sel'} subset."""
+        pressed = set()
+        if not self.ok:
+            return pressed
+        for key, line in self._lines.items():
+            try:
+                val = line.get_value()
+            except Exception:
+                continue
+            if self._prev.get(key, 1) == 1 and val == 0:
+                pressed.add(key)
+            self._prev[key] = val
+        return pressed
+
+
+# ── audio: TTS / ASR / capture ───────────────────────────────────────────────
+def tts_speak(text, cfg, audio_dev):
+    """Speak `text` via the active backend's TTS path. Best-effort, never hangs."""
+    text = (text or "").strip()
+    if not text:
+        return
+    if cfg["backend_mode"] == "hosted":
+        _tts_hosted(text, cfg, audio_dev)
+    else:
+        _tts_local(text, cfg, audio_dev)
+
+
+def _aplay(wav_path, audio_dev):
+    if not os.path.isfile(wav_path):
+        return
+    args = ["aplay", "-q"]
+    if audio_dev and audio_dev != "default":
+        args += ["-D", audio_dev]
+    args.append(wav_path)
+    try:
+        subprocess.run(args, capture_output=True, timeout=60)
+    except (subprocess.SubprocessError, OSError) as e:
+        sys.stderr.write(f"aeon-braincraft: aplay failed: {e}\n")
+
+
+# sherpa-onnx engines are expensive to construct (load the ONNX graphs), so we
+# build each once and cache it for the life of the daemon.
+_KOKORO_TTS = None
+_WHISPER_REC = None
+
+
+def _write_wav(path, samples, sample_rate):
+    """Write float32 [-1,1] samples (from sherpa-onnx) as 16-bit mono PCM WAV."""
+    import wave
+    try:
+        import numpy as np
+        pcm = (np.clip(np.asarray(samples, dtype="float32"), -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    except Exception:
+        import struct
+        pcm = b"".join(struct.pack("<h", max(-32768, min(32767, int(s * 32767)))) for s in samples)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm)
+
+
+def _get_kokoro_tts():
+    """Lazily build + cache the sherpa-onnx Kokoro OfflineTts engine."""
+    global _KOKORO_TTS
+    if _KOKORO_TTS is not None:
+        return _KOKORO_TTS
+    try:
+        import sherpa_onnx
+    except Exception:
+        sys.stderr.write("aeon-braincraft: sherpa-onnx not installed; skipping TTS\n")
+        return None
+    model = os.path.join(KOKORO_DIR, "model.onnx")
+    if not os.path.isfile(model):
+        sys.stderr.write("aeon-braincraft: kokoro model not installed; skipping TTS\n")
+        return None
+    try:
+        cfg = sherpa_onnx.OfflineTtsConfig(
+            model=sherpa_onnx.OfflineTtsModelConfig(
+                kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
+                    model=model,
+                    voices=os.path.join(KOKORO_DIR, "voices.bin"),
+                    tokens=os.path.join(KOKORO_DIR, "tokens.txt"),
+                    data_dir=os.path.join(KOKORO_DIR, "espeak-ng-data"),
+                ),
+                num_threads=VOICE_THREADS,
+                provider="cpu",
+            ),
+            max_num_sentences=2,
+        )
+        _KOKORO_TTS = sherpa_onnx.OfflineTts(cfg)
+        return _KOKORO_TTS
+    except Exception as e:
+        sys.stderr.write(f"aeon-braincraft: kokoro init failed: {e}\n")
+        return None
+
+
+def _tts_local(text, cfg, audio_dev):
+    """sherpa-onnx Kokoro TTS → WAV → aplay. Models dropped by the aeon-voice installer."""
+    tts = _get_kokoro_tts()
+    if tts is None:
+        return
+    try:
+        audio = tts.generate(text, sid=int(cfg.get("tts_voice", 0)),
+                             speed=float(cfg.get("tts_speed", 1.0)))
+        if not audio or not getattr(audio, "samples", None):
+            sys.stderr.write("aeon-braincraft: kokoro produced no audio\n")
+            return
+        _write_wav(SAY_WAV, audio.samples, audio.sample_rate)
+    except Exception as e:
+        sys.stderr.write(f"aeon-braincraft: kokoro TTS failed: {e}\n")
+        return
+    _aplay(SAY_WAV, audio_dev)
+
+
+def _tts_hosted(text, cfg, audio_dev):
+    """POST text + persona voice to the hosted TTS (qwen3-tts), play the WAV."""
+    url = cfg["tts_url"].rstrip("/") + "/tts"
+    payload = json.dumps({"text": text, "voice": cfg["persona"] or "default",
+                          "format": "wav"})
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "30", "-H", "Content-Type: application/json",
+             "-X", "POST", "-d", payload, "-o", SAY_WAV, url],
+            capture_output=True, timeout=35,
+        )
+        if r.returncode != 0 or not os.path.isfile(SAY_WAV):
+            sys.stderr.write("aeon-braincraft: hosted TTS request failed\n")
+            return
+    except (subprocess.SubprocessError, OSError) as e:
+        sys.stderr.write(f"aeon-braincraft: hosted TTS failed: {e}\n")
+        return
+    _aplay(SAY_WAV, audio_dev)
+
+
+def record_mic(audio_dev, seconds=5):
+    """Capture `seconds` of mono 16 kHz WAV from the mic via arecord. Best-effort.
+
+    Returns the WAV path or None. (A real VAD would gate on silence; this is the
+    simple fixed-window capture the push-to-talk button triggers.)"""
+    args = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
+            "-d", str(int(seconds))]
+    if audio_dev and audio_dev != "default":
+        args += ["-D", audio_dev]
+    args.append(ASR_WAV)
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=seconds + 10)
+        if r.returncode != 0 or not os.path.isfile(ASR_WAV):
+            sys.stderr.write("aeon-braincraft: arecord failed\n")
+            return None
+    except (subprocess.SubprocessError, OSError) as e:
+        sys.stderr.write(f"aeon-braincraft: arecord failed: {e}\n")
+        return None
+    return ASR_WAV
+
+
+def asr_transcribe(wav_path, cfg):
+    """WAV → text via the active backend. Returns the transcript string ('' on fail)."""
+    if not wav_path or not os.path.isfile(wav_path):
+        return ""
+    if cfg["backend_mode"] == "hosted":
+        return _asr_hosted(wav_path, cfg)
+    return _asr_local(wav_path, cfg)
+
+
+def _get_whisper_rec():
+    """Lazily build + cache the sherpa-onnx Whisper OfflineRecognizer."""
+    global _WHISPER_REC
+    if _WHISPER_REC is not None:
+        return _WHISPER_REC
+    try:
+        import sherpa_onnx
+    except Exception:
+        sys.stderr.write("aeon-braincraft: sherpa-onnx not installed; skipping ASR\n")
+        return None
+    import glob
+
+    def pick(patterns):
+        for pat in patterns:
+            m = sorted(glob.glob(os.path.join(WHISPER_DIR, pat)))
+            if m:
+                return m[0]
+        return None
+
+    # Prefer the int8-quantised graphs for speed on the Pi CPU.
+    enc = pick(["*encoder*.int8.onnx", "*encoder*.onnx"])
+    dec = pick(["*decoder*.int8.onnx", "*decoder*.onnx"])
+    tok = pick(["*tokens*.txt"])
+    if not (enc and dec and tok):
+        sys.stderr.write("aeon-braincraft: whisper model files missing; skipping ASR\n")
+        return None
+    try:
+        _WHISPER_REC = sherpa_onnx.OfflineRecognizer.from_whisper(
+            encoder=enc, decoder=dec, tokens=tok, num_threads=VOICE_THREADS,
+        )
+        return _WHISPER_REC
+    except Exception as e:
+        sys.stderr.write(f"aeon-braincraft: whisper init failed: {e}\n")
+        return None
+
+
+def _asr_local(wav_path, cfg):
+    """Offline ASR via sherpa-onnx Whisper. Transcribes the 16 kHz mono WAV that
+    record_mic/arecord wrote. Returns the transcript ('' on any failure)."""
+    rec = _get_whisper_rec()
+    if rec is None:
+        return ""
+    try:
+        import wave
+        import numpy as np
+        wf = wave.open(wav_path, "rb")
+        sr = wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+        wf.close()
+        samples = np.frombuffer(frames, dtype="<i2").astype("float32") / 32768.0
+        s = rec.create_stream()
+        s.accept_waveform(sr, samples)
+        rec.decode_stream(s)
+        return (s.result.text or "").strip()
+    except Exception as e:
+        sys.stderr.write(f"aeon-braincraft: whisper ASR failed: {e}\n")
+        return ""
+
+
+def _asr_hosted(wav_path, cfg):
+    """POST the WAV to the hosted ASR (qwen3-asr); expect {"text": "..."}."""
+    url = cfg["asr_url"].rstrip("/") + "/asr"
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "30", "-X", "POST",
+             "-F", f"audio=@{wav_path}", url],
+            capture_output=True, timeout=35, text=True,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return ""
+        return json.loads(r.stdout).get("text", "").strip()
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
+        sys.stderr.write(f"aeon-braincraft: hosted ASR failed: {e}\n")
+        return ""
+
+
+def llm_reply(prompt, cfg):
+    """Send the transcript to the active LLM, return the assistant's reply text.
+
+    OpenAI /v1/chat/completions shape on both paths; the persona rides as the
+    system message (and is echoed to the hosted side so a DGX Spark can route to
+    the right voice/agent). All via curl --max-time → never hangs the loop."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return ""
+    if cfg["backend_mode"] == "hosted":
+        base = cfg["llm_url"].rstrip("/")
+    else:
+        base = LOCAL_LLM_URL.rstrip("/")
+    url = base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
+
+    persona = cfg["persona"]
+    messages = []
+    if persona:
+        messages.append({"role": "system",
+                         "content": f"You are {persona}, the Aeon Orb's voice."})
+    messages.append({"role": "user", "content": prompt})
+    body = {"model": persona or "default", "messages": messages,
+            "max_tokens": 200, "temperature": 0.7}
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "40", "-H", "Content-Type: application/json",
+             "-X", "POST", "-d", json.dumps(body), url],
+            capture_output=True, timeout=45, text=True,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return ""
+        data = json.loads(r.stdout)
+        return data["choices"][0]["message"]["content"].strip()
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError, IndexError) as e:
+        sys.stderr.write(f"aeon-braincraft: LLM call failed: {e}\n")
+        return ""
+
+
+# ── captures: photo + video record ───────────────────────────────────────────
+def take_photo(jpeg):
+    """Save the full-res grabbed JPEG to the captures dir. Returns the path/None."""
+    if jpeg is None:
+        return None
+    try:
+        os.makedirs(CAPTURE_DIR, exist_ok=True)
+    except OSError:
+        pass
+    path = os.path.join(CAPTURE_DIR, f"photo-{int(time.time() * 1000)}.jpg")
+    try:
+        with open(path, "wb") as f:
+            f.write(jpeg)
+        return path
+    except OSError as e:
+        sys.stderr.write(f"aeon-braincraft: photo save failed: {e}\n")
+        return None
+
+
+class Recorder:
+    """Manages a single video-record subprocess. Prefers rpicam-vid (the Pi-5
+    camera path), else ffmpeg reading the streamer's MJPEG snapshot stream.
+    Stopped with SIGINT/SIGTERM — NEVER kill -9 (matches the repo's posture so a
+    half-written container is finalised instead of corrupted)."""
+
+    def __init__(self):
+        self.proc = None
+        self.path = None
+
+    @property
+    def recording(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self):
+        if self.recording:
+            return self.path
+        try:
+            os.makedirs(CAPTURE_DIR, exist_ok=True)
+        except OSError:
+            pass
+        ts = int(time.time() * 1000)
+        if _have("rpicam-vid"):
+            self.path = os.path.join(CAPTURE_DIR, f"clip-{ts}.h264")
+            # No -t 0 timeout cap removal here: an explicit large duration plus
+            # SIGINT stop keeps it bounded even if the daemon dies mid-record.
+            args = ["rpicam-vid", "-t", "0", "--codec", "h264",
+                    "--width", "1280", "--height", "720", "-o", self.path]
+        elif _have("ffmpeg"):
+            self.path = os.path.join(CAPTURE_DIR, f"clip-{ts}.mp4")
+            # Read the streamer's MJPEG snapshot endpoint over the unix socket.
+            args = ["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "mjpeg",
+                    "-i", f"unix://{STREAMER_SOCK}",
+                    "-c:v", "libx264", "-preset", "ultrafast", self.path]
+        else:
+            sys.stderr.write("aeon-braincraft: no rpicam-vid/ffmpeg; cannot record\n")
+            self.path = None
+            return None
+        try:
+            self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"aeon-braincraft: record spawn failed: {e}\n")
+            self.proc = None
+            self.path = None
+        return self.path
+
+    def stop(self):
+        """Graceful stop: SIGINT (finalise container), then SIGTERM, then give up
+        — but NEVER SIGKILL, which would truncate the file."""
+        if not self.recording:
+            self.proc = None
+            return
+        import signal
+        try:
+            self.proc.send_signal(signal.SIGINT)
+            self.proc.wait(timeout=5)
+        except Exception:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=5)
+            except Exception:
+                sys.stderr.write("aeon-braincraft: recorder won't stop; leaving it\n")
+        self.proc = None
+
+
+def _have(binname):
+    from shutil import which
+    return which(binname) is not None
+
+
+# ── command channel ──────────────────────────────────────────────────────────
+def claim_commands():
+    """Atomically grab the command file so concurrent supervisor appends land in
+    a fresh one, then return its lines. os.replace is atomic on the same fs."""
+    proc = CMD_FILE + ".proc"
+    try:
+        os.replace(CMD_FILE, proc)
+    except OSError:
+        return []  # no command file this loop
+    try:
+        with open(proc) as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        lines = []
+    try:
+        os.unlink(proc)
+    except OSError:
+        pass
+    return lines
+
+
+# ── status assembly ──────────────────────────────────────────────────────────
+def build_status(cfg, disp, buttons, gpiochip, audio, mode, voice_state,
+                 last_utt, last_resp, last_photo, recording, reachable):
+    name, playback, capture = audio
+    return {
+        "present": True,
+        "ok": True,
+        "enabled": cfg["enabled"],
+        "mode": mode,
+        "overlay": cfg["overlay"],
+        "display": {"driver": disp.driver, "w": disp.W, "h": disp.H, "ok": disp.ok},
+        "buttons": {"chip": gpiochip, "ok": buttons.ok},
+        "audio": {"device": name, "playback": bool(playback), "capture": bool(capture),
+                  "tts": cfg["tts"], "asr": cfg["asr"],
+                  "ok": bool(playback or capture)},
+        "backend": {"mode": cfg["backend_mode"],
+                    "persona": cfg["persona"] or None,
+                    "reachable": bool(reachable)},
+        "voice_installed": voice_installed(),
+        "last_utterance": last_utt,
+        "last_response": last_resp,
+        "captures": {"last_photo": last_photo, "recording": bool(recording)},
+        "ups": read_ups(),     # battery meter (None if no UPS HAT (E) fitted)
+        "ts_ms": int(time.time() * 1000),
+        # Internal hint for the display renderer; harmless extra key in the JSON.
+        "_voice_state": voice_state,
+    }
+
+
+# ── main loop ────────────────────────────────────────────────────────────────
+def main():
+    cfg = load_cfg()
+
+    # Self-idle: disabled, OR no display libs, OR no SPI device → harmless idle.
+    def should_idle(c):
+        return (not c["enabled"]) or (not have_display_libs()) or (not have_spi_device())
+
+    if should_idle(cfg):
+        reason = ("disabled" if not cfg["enabled"]
+                  else "no display libs" if not have_display_libs()
+                  else "no SPI device")
+        write_json(idle_status(cfg))
+        sys.stderr.write(f"aeon-braincraft: idling ({reason})\n")
+        while should_idle(cfg):
+            time.sleep(30)
+            cfg = load_cfg()
+            write_json(idle_status(cfg))
+
+    # Hardware is present + enabled: bring up display + buttons.
+    gpiochip = detect_gpiochip()
+    disp = Display()
+    buttons = Buttons(gpiochip)
+    rec = Recorder()
+    mode = cfg["mode"]
+    voice_state = "idle"
+    last_utt = {"role": "user", "text": "", "ts_ms": 0}
+    last_resp = {"role": "assistant", "text": "", "ts_ms": 0}
+    last_photo = None
+    last_reach_check = 0.0
+    reachable = False
+
+    sys.stderr.write(f"aeon-braincraft: starting (mode={mode}, chip={gpiochip}, "
+                     f"display={disp.ok})\n")
+
+    MODES = ("ai", "viewfinder", "voice")
+
+    def cycle_mode():
+        nonlocal mode
+        mode = MODES[(MODES.index(mode) + 1) % len(MODES)]
+        sys.stderr.write(f"aeon-braincraft: mode -> {mode}\n")
+
+    def run_voice_turn(audio_dev):
+        nonlocal voice_state, last_utt, last_resp
+        voice_state = "listening"
+        if disp.ok:
+            disp.render_message("Listening...", "")
+        wav = record_mic(audio_dev, seconds=5)
+        text = asr_transcribe(wav, cfg)
+        if text:
+            last_utt = {"role": "user", "text": text, "ts_ms": int(time.time() * 1000)}
+        reply = llm_reply(text, cfg) if text else ""
+        if reply:
+            last_resp = {"role": "assistant", "text": reply,
+                         "ts_ms": int(time.time() * 1000)}
+        voice_state = "speaking"
+        if reply:
+            tts_speak(reply, cfg, audio_dev)
+        voice_state = "idle"
+
+    while True:
+        try:
+            cfg = load_cfg()
+            # A config flip to disabled / yanked HAT drops us back to idle.
+            if should_idle(cfg):
+                rec.stop()
+                write_json(idle_status(cfg))
+                time.sleep(2)
+                continue
+
+            audio = probe_audio(cfg["audio_device"])
+            audio_dev = audio[0]
+
+            # Refresh backend reachability at most every ~10 s (it's a network hop).
+            now = time.monotonic()
+            if now - last_reach_check > 10:
+                if cfg["backend_mode"] == "hosted":
+                    reachable = http_reachable(cfg["llm_url"])
+                else:
+                    reachable = http_reachable(LOCAL_LLM_URL)
+                last_reach_check = now
+
+            # ── command channel ────────────────────────────────────────────
+            transient_mode = None
+            for line in claim_commands():
+                if line == "photo":
+                    last_photo = take_photo(grab_frame()) or last_photo
+                elif line == "record:start":
+                    rec.start()
+                elif line == "record:stop":
+                    rec.stop()
+                elif line.startswith("say:"):
+                    say_text = line[4:].strip()
+                    if say_text:
+                        last_resp = {"role": "assistant", "text": say_text,
+                                     "ts_ms": int(time.time() * 1000)}
+                        voice_state = "speaking"
+                        tts_speak(say_text, cfg, audio_dev)
+                        voice_state = "idle"
+                elif line.startswith("mode:"):
+                    m = line[5:].strip()
+                    if m in MODES:
+                        transient_mode = m
+                # Unknown lines are ignored.
+            if transient_mode:
+                mode = transient_mode
+
+            # ── buttons ────────────────────────────────────────────────────
+            pressed = buttons.poll()
+            # Joystick-press cycles modes everywhere.
+            if "sel" in pressed:
+                cycle_mode()
+
+            if mode == "ai":
+                # In the idle interface, button A also cycles (no camera/voice action).
+                if "a" in pressed or "b" in pressed:
+                    cycle_mode()
+                status = build_status(cfg, disp, buttons, gpiochip, audio, mode,
+                                      voice_state, last_utt, last_resp, last_photo,
+                                      rec.recording, reachable)
+                write_json(status)
+                if disp.ok:
+                    disp.render_ai(status)
+                time.sleep(0.4)  # idle screen — slower cadence
+
+            elif mode == "viewfinder":
+                if "a" in pressed:
+                    last_photo = take_photo(grab_frame()) or last_photo
+                if "b" in pressed:
+                    if rec.recording:
+                        rec.stop()
+                    else:
+                        rec.start()
+                jpeg = grab_frame()
+                dets = read_detections() if cfg["overlay"] else []
+                status = build_status(cfg, disp, buttons, gpiochip, audio, mode,
+                                      voice_state, last_utt, last_resp, last_photo,
+                                      rec.recording, reachable)
+                write_json(status)
+                if disp.ok and jpeg is not None:
+                    disp.render_frame(jpeg, dets, cfg["overlay"])
+                elif disp.ok:
+                    disp.render_message("Viewfinder", "no frame from streamer")
+                time.sleep(0.15)  # ~6-7 Hz so the live view + buttons feel responsive
+
+            elif mode == "voice":
+                # Push-to-talk: button A runs a full mic→ASR→LLM→TTS turn.
+                if "a" in pressed:
+                    run_voice_turn(audio_dev)
+                status = build_status(cfg, disp, buttons, gpiochip, audio, mode,
+                                      voice_state, last_utt, last_resp, last_photo,
+                                      rec.recording, reachable)
+                write_json(status)
+                if disp.ok:
+                    disp.render_ai(status)
+                time.sleep(0.12)  # responsive so the PTT button latches quickly
+
+        except Exception as e:
+            # One bad frame / audio glitch must not exit the daemon.
+            sys.stderr.write(f"aeon-braincraft: loop error: {e}\n")
+            time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()

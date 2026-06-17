@@ -1,0 +1,26 @@
+# Aeon Magick — fleet membership (Phase 1).
+#
+# Connect Orbs into one decentralized fleet: every Orb is a peer, and each
+# Orb's web console (the "Fleet" tab) shows a live roster of all the others —
+# model, what each controls, UPS %, sources, health — by polling them directly
+# over the tailnet/LAN. Each Orb stays independently configured; this file only
+# governs fleet membership + discovery, nothing else.
+#
+# To ENROLL this Orb in a fleet:
+#   1. Pick ONE shared `token` (any long random string) and set the SAME value
+#      in every member Orb's fleet.toml. It's the credential peers use to read
+#      each other's status over HTTPS — keep it secret. (A later phase syncs it
+#      securely between Orbs; for now set it by hand.)
+#   2. List the other Orbs' addresses (LAN IPs or tailnet names) in `seeds`.
+#   3. systemctl restart aeon-supervisor   (or reboot)
+# Until `token` is set, the fleet is "unconfigured" and the Fleet tab shows
+# only this Orb.
+
+[fleet]
+# id  = ""               # optional; defaults to this Orb's machine-id
+label  = ""              # what this Orb controls, shown in the roster (e.g. "Windows PC")
+token  = ""              # SHARED secret — same on every fleet member; empty = not enrolled
+
+[discovery]
+tailscale = true         # also auto-discover peer Orbs from `tailscale status`
+seeds = []               # static peers, e.g. ["192.168.1.25", "192.168.1.56"]

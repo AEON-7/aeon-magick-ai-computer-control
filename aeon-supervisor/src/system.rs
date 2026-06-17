@@ -71,10 +71,10 @@ pub async fn poweroff(
     }))
 }
 
-/// GET /api/system/info — uptime, load, temp, free memory. Useful for
-/// the UI to show "ok to reboot" indicators (e.g. don't reboot during
-/// heavy load) AND as a one-stop health endpoint for agents.
-pub async fn info(State(_state): State<AppState>) -> Json<Value> {
+/// Point-in-time system health — uptime, load, temp, free memory, cpu count.
+/// Shared by GET /api/system/info and the fleet heartbeat (`fleet.rs`), so the
+/// two never drift. Returns a JSON object WITHOUT an `ok` field (callers add it).
+pub fn snapshot() -> Value {
     let uptime_s: u64 = std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|s| s.split_whitespace().next().map(str::to_string))
@@ -122,15 +122,25 @@ pub async fn info(State(_state): State<AppState>) -> Json<Value> {
         .map(|n| n.get())
         .unwrap_or(0);
 
-    Json(json!({
-        "ok": true,
+    json!({
         "uptime_seconds": uptime_s,
         "loadavg": { "1m": loadavg.0, "5m": loadavg.1, "15m": loadavg.2 },
         "cpu_temp_c": temp_c,
         "cpu_count": cpu_count,
         "mem_total_kb": mem_total_kb,
         "mem_available_kb": mem_avail_kb,
-    }))
+    })
+}
+
+/// GET /api/system/info — uptime, load, temp, free memory. Useful for
+/// the UI to show "ok to reboot" indicators (e.g. don't reboot during
+/// heavy load) AND as a one-stop health endpoint for agents.
+pub async fn info(State(_state): State<AppState>) -> Json<Value> {
+    let mut v = snapshot();
+    if let Some(o) = v.as_object_mut() {
+        o.insert("ok".to_string(), json!(true));
+    }
+    Json(v)
 }
 
 // ── Configuration backup / restore ─────────────────────────────────────

@@ -98,7 +98,7 @@ async fn force_relaunch(State(state): State<SharedState>) -> impl IntoResponse {
 /// - "ffmpeg"    → read the latest single-frame JPEG file ffmpeg writes
 async fn snapshot_proxy(State(state): State<SharedState>) -> Response<Body> {
     let kind = state.read().pipeline_kind.unwrap_or("ustreamer");
-    if kind == "ffmpeg-h264" {
+    if kind == "ffmpeg-h264" || kind == "libcamera-h264" {
         // H.264 mode: ffmpeg writes an atomic JPEG to the snapshot path.
         return serve_snapshot_from_file(&state).await;
     }
@@ -113,7 +113,7 @@ async fn snapshot_proxy(State(state): State<SharedState>) -> Response<Body> {
 /// - "ffmpeg"    → proxy from ffmpeg's mpjpeg TCP listener
 async fn stream_proxy(State(state): State<SharedState>) -> Response<Body> {
     let kind = state.read().pipeline_kind.unwrap_or("ustreamer");
-    if kind == "ffmpeg-h264" {
+    if kind == "ffmpeg-h264" || kind == "libcamera-h264" {
         // H.264 mode: the low-latency live view is /h264 (WebSocket +
         // WebCodecs). This MJPEG /stream stays available as a fallback for
         // browsers without WebCodecs, synthesized from the snapshot file.
@@ -404,7 +404,7 @@ struct RecordStartReq {
 /// POST /record/start {duration_s?} — begin recording the live H.264 stream to
 /// MP4. Requires the ffmpeg-h264 pipeline (the only one that publishes AUs).
 async fn record_start(State(state): State<SharedState>, body: bytes::Bytes) -> impl IntoResponse {
-    if state.read().pipeline_kind != Some("ffmpeg-h264") {
+    if !matches!(state.read().pipeline_kind, Some("ffmpeg-h264") | Some("libcamera-h264")) {
         return (
             StatusCode::CONFLICT,
             Json(json!({"ok": false, "err": "recording requires H.264 stream mode — set the stream format to h264 first"})),
@@ -415,7 +415,16 @@ async fn record_start(State(state): State<SharedState>, body: bytes::Bytes) -> i
         .and_then(|r| r.duration_s);
     let fps = state.0.cfg.output.fps;
     let ffmpeg = state.0.cfg.ffmpeg_bin.clone();
-    match state.0.record.start(&state.0.h264_tx, ffmpeg, fps, duration_s) {
+    // Mux the configured ALSA capture (BrainCraft mic for camera-csi, or the
+    // tc358743 HDMI-audio card for hdmi-csi) into the MP4; empty = video-only.
+    let cap = &state.0.cfg.capture;
+    let (adev, arate, ach) =
+        (cap.audio_device.clone(), cap.audio_rate, cap.audio_channels);
+    match state
+        .0
+        .record
+        .start(&state.0.h264_tx, ffmpeg, fps, adev, arate, ach, duration_s)
+    {
         Ok(info) => (StatusCode::OK, Json(json!({"ok": true, "recording": info}))),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"ok": false, "err": e}))),
     }

@@ -130,6 +130,122 @@ export const getSystemState = () => req<SupervisorState>('GET', '/state');
 export const getStreamerState = () => req<StreamerState>('GET', '/streamer/state');
 export const relaunchStreamer = () => req<{ ok: boolean }>('POST', '/streamer/relaunch');
 
+// ── capture-source picker (which video source the console view shows) ──
+export interface StreamerConfig {
+  ok: boolean;
+  source: string;            // auto | cam-link-usb | hdmi-csi | camera-csi
+  platform: string;          // pi4 | pi5 | other
+  available_sources: string[];
+  fps?: number;
+  format?: string;
+  width?: number;            // encode width  (used when match_source = false)
+  height?: number;           // encode height (used when match_source = false)
+  match_source?: boolean;    // true = track source res (capped 1080p); false = fixed W×H
+  rotation?: number;         // clockwise degrees: 0 | 90 | 180 | 270
+  hflip?: boolean;           // mirror left↔right (after rotation)
+  vflip?: boolean;           // mirror top↔bottom (after rotation)
+}
+export const getStreamerConfig = () => req<StreamerConfig>('GET', '/streamer/config');
+export const setStreamerSource = (source: string) =>
+  req<{ ok: boolean; source: string; restarted?: boolean }>('PUT', '/streamer/config', { source });
+
+// Encode resolution. Lower W×H (or match_source:false at 1280×720) sharply cuts
+// the Pi 5 software-H.264 CPU + power on the capture-card paths. Restarts the
+// streamer so the new resolution applies to stream/snapshot/recording/vision.
+export interface ResolutionPatch { width?: number; height?: number; match_source?: boolean }
+export const setStreamerResolution = (r: ResolutionPatch) =>
+  req<{ ok: boolean; width?: number; height?: number; match_source?: boolean; restarted?: boolean }>(
+    'PUT', '/streamer/config', r);
+
+// Server-side display orientation. Restarts the streamer so the rotated
+// pipeline applies to the live stream, /snapshot, recordings, and vision.
+export interface OrientationPatch { rotation?: number; hflip?: boolean; vflip?: boolean }
+export const setStreamerOrientation = (o: OrientationPatch) =>
+  req<{ ok: boolean; rotation?: number; hflip?: boolean; vflip?: boolean; restarted?: boolean }>(
+    'PUT', '/streamer/config', o);
+
+// ── USB webcam passthrough (expose a video source to the target as a webcam) ──
+export interface WebcamConfig {
+  ok: boolean;
+  enabled: boolean;
+  source: string;            // off | camera-csi | hdmi-csi | cam-link-usb
+  available_sources: string[];
+  supported: boolean;        // gadget supported (usb_f_uvc present)
+}
+export const getWebcamConfig = () => req<WebcamConfig>('GET', '/webcam');
+export const setWebcam = (source: string) =>      // "off" disables the webcam function
+  req<{ ok: boolean; source: string; restarted?: boolean }>('PUT', '/webcam', { source });
+
+// ── UPS / battery (Waveshare UPS HAT (E) — 2× 21700, I2C 0x2D) ──
+// Mirrors /run/aeon/ups.json (aeon-ups.py) relayed by the supervisor at /api/ups.
+// `present:false` means no UPS HAT detected (mains-only Orb) — hide the meter.
+export interface UpsStatus {
+  present: boolean;
+  ok?: boolean;
+  state?: string;             // "fast-charging" | "charging" | "discharging" | "idle"
+  charging?: boolean;
+  fast_charging?: boolean;
+  on_battery?: boolean;       // running off cells (no meaningful Type-C input)
+  percent?: number;           // 0–100 pack state-of-charge
+  battery_mv?: number;
+  battery_ma?: number;        // <0 = discharging into the Pi
+  remaining_mah?: number;
+  minutes_to_empty?: number | null;   // present only while discharging
+  minutes_to_full?: number | null;    // present only while charging
+  vbus_mv?: number;           // Type-C input voltage (mV)
+  cells_mv?: number[];        // per-21700-cell voltages
+  min_cell_mv?: number;
+  low_voltage_mv?: number;    // safe-shutdown threshold (per cell)
+  shutdown_pending_s?: number | null; // counting down to low-batt poweroff, else null
+}
+export const getUps = () => req<UpsStatus>('GET', '/ups');
+
+// ── fleet (decentralized roster of peer Orbs over the tailnet/LAN) ──
+// Offline peers come back as { online:false, addr } stubs — the rich fields
+// are only present for Orbs that answered their heartbeat, so all but `online`
+// are optional.
+export interface FleetOrb {
+  online: boolean;
+  addr?: string;
+  is_self?: boolean;
+  id?: string;
+  hostname?: string;
+  label?: string;
+  model?: string;            // pi5 | pi4 | other
+  lan_ip?: string;
+  sources?: string[];
+  view_source?: string;
+  webcam?: { enabled: boolean; source: string };
+  ups?: { present: boolean; charge?: number; on_battery?: boolean };
+  health?: {
+    uptime_seconds: number;
+    cpu_temp_c: number;
+    loadavg: { '1m': number; '5m': number; '15m': number };
+    mem_total_kb: number;
+    mem_available_kb: number;
+  };
+  version?: string;
+}
+export interface FleetRoster {
+  ok: boolean;
+  configured: boolean;       // false until this Orb has a shared fleet token
+  self: FleetOrb;
+  peers: FleetOrb[];
+}
+export const getFleetRoster = () => req<FleetRoster>('GET', '/fleet/roster');
+
+export interface FleetConfig {
+  ok: boolean;
+  configured: boolean;
+  id: string;
+  label: string;
+  tailscale: boolean;
+  seeds: string[];
+}
+export const getFleetConfig = () => req<FleetConfig>('GET', '/fleet/config');
+export const setFleetConfig = (patch: { label?: string; seeds?: string[]; tailscale?: boolean }) =>
+  req<{ ok: boolean }>('PUT', '/fleet/config', patch);
+
 // ── screen recording ──
 export interface RecordingInfo {
   id: string;
@@ -1636,3 +1752,177 @@ export const getBlockedPackets = (limit = 300) =>
     'GET',
     `/security/blocked?limit=${limit}`,
   );
+
+// ── Hailo AI HAT+ (Hailo-10H) ──────────────────────────────────────────
+// On-device NPU: install the runtime, watch live stats, deploy/unload
+// models. All routes are ADMIN-gated like /api/orbnet/* (no allow-list
+// bypass). The supervisor merges /usr/local/bin/aeon-hailo's JSON with its
+// in-memory install/deploy TASKS + a curated model library. mem_* is a
+// self-maintained ledger (usable budget ~5500 MB), NOT a kernel readout.
+
+/** Live NPU telemetry. null when the device/tooling is absent. */
+export interface HailoStats {
+  nnc_util_pct: number;   // neural-network-core utilisation
+  temp_c: number;
+  power_w: number;
+  cpu_util_pct?: number;
+}
+
+/** One model in the curated library / loaded set. */
+export interface HailoModel {
+  id: string;
+  name: string;
+  kind: 'llm' | 'vlm' | 'stt' | 'vision' | 'ocr';
+  params?: string;        // e.g. "1B", "8B"
+  quant?: string;         // e.g. "int4", "w4a16"
+  size_mb: number;        // RAM footprint when loaded
+  fits: boolean;          // size_mb <= free budget (greyed in UI if false)
+  state: 'available' | 'downloading' | 'deployed' | 'loaded';
+  license?: string;
+  use_for?: string;       // short "good for OCR / chat / …" blurb
+}
+
+/** Whole-subsystem snapshot driving the three dashboard states. */
+export interface HailoStatus {
+  ok: boolean;
+  enabled: boolean;
+  device_present: boolean;
+  hat: 'hailo-10h' | 'hailo-8' | 'other' | 'none';
+  installed: boolean;
+  // Self-maintained ledger (MB). Usable budget is ~5500 MB.
+  mem_total_mb: number;
+  mem_used_mb: number;
+  mem_free_mb: number;
+  stats: HailoStats | null;
+  loaded: HailoModel[];
+  consumers?: string[];   // e.g. ["aeon-vision (OCR)"]
+}
+
+export const getHailoStatus = () =>
+  req<HailoStatus>('GET', '/hailo/status');
+
+/** Kick off the non-blocking package install (apt + model-zoo debs). */
+export const installHailo = () =>
+  req<{ ok: boolean; started: boolean; err?: string }>('POST', '/hailo/install');
+
+/** Poll the install progress bar — reuses the shared DeployStatus shape. */
+export const getHailoInstallStatus = () =>
+  req<DeployStatus>('GET', '/hailo/install/status');
+
+/** The curated model library merged with live deployed/loaded state. */
+export const getHailoModels = () =>
+  req<{ ok: boolean; models: HailoModel[] }>('GET', '/hailo/models');
+
+/** Non-blocking deploy (download + load) of a library model; poll status. */
+export const deployHailoModel = (id: string) =>
+  req<{ ok: boolean; started: boolean; err?: string }>(
+    'POST',
+    `/hailo/models/${encodeURIComponent(id)}/deploy`,
+  );
+
+/** Evict a loaded model to free NPU RAM. */
+export const unloadHailoModel = (id: string) =>
+  req<{ ok: boolean; err?: string }>(
+    'POST',
+    `/hailo/models/${encodeURIComponent(id)}/unload`,
+  );
+
+// ── BrainCraft HAT (AI interface + camera viewfinder + voice) ──────────
+// The aeon-braincraft daemon drives the 240x240 TFT + buttons; the supervisor
+// relays its /run/aeon/braincraft.json (`daemon`), owns braincraft.toml
+// (`config`, re-read live by the daemon), pushes transient photo/record/say
+// commands, and runs the button-driven voice-stack install (Piper + Vosk +
+// display/audio libs, NOT baked). present:false ⇒ no HAT / daemon idle.
+
+export type BraincraftMode = 'ai' | 'viewfinder' | 'voice';
+export type BraincraftBackend = 'local' | 'hosted';
+
+/** Persisted config (braincraft.toml). */
+export interface BraincraftConfig {
+  enabled: boolean;
+  mode: BraincraftMode;
+  overlay: boolean;
+  audio: { device: string; tts: string; asr: string };
+  backend: { mode: BraincraftBackend; persona: string };
+  hosted: { llm_url: string; tts_url: string; asr_url: string };
+}
+
+/** Live device state from the daemon (/run/aeon/braincraft.json). */
+export interface BraincraftDaemon {
+  present: boolean;
+  ok?: boolean;
+  enabled?: boolean;
+  /** When present=false, WHY: needs the install vs SPI off vs reseat the HAT. */
+  reason?: 'disabled' | 'libs_missing' | 'no_spi';
+  have_display_libs?: boolean;
+  have_spi?: boolean;
+  mode?: BraincraftMode;
+  overlay?: boolean;
+  display?: { driver: string; w: number; h: number; ok: boolean };
+  buttons?: { chip: string; ok: boolean };
+  audio?: { device: string; playback: boolean; capture: boolean; tts: string; asr: string; ok: boolean };
+  backend?: { mode: string; persona: string | null; reachable: boolean };
+  voice_installed?: boolean;
+  last_utterance?: { role: string; text: string; ts_ms: number } | null;
+  last_response?: { role: string; text: string; ts_ms: number } | null;
+  captures?: { last_photo: string | null; recording: boolean };
+  ts_ms?: number;
+}
+
+/** What aeon-voice reports as installed. */
+export interface VoiceStackStatus {
+  installed: boolean;
+  sherpa: boolean;     // sherpa-onnx CPU runtime (serves both TTS + ASR)
+  kokoro: boolean;     // Kokoro TTS model present
+  whisper: boolean;    // Whisper ASR model present
+  display_lib: boolean;
+  audio: boolean;
+  voice_model: string | null;
+  asr_model: string | null;
+}
+
+export interface BraincraftStatus {
+  ok: boolean;
+  enabled: boolean;
+  config: BraincraftConfig;
+  daemon: BraincraftDaemon;
+  voice: VoiceStackStatus;
+  voice_installing: boolean;
+}
+
+export const getBraincraftStatus = () =>
+  req<BraincraftStatus>('GET', '/braincraft/status');
+
+/** Partial config update — only the present fields are merged into the toml. */
+export interface BraincraftConfigPatch {
+  enabled?: boolean;
+  mode?: BraincraftMode;
+  overlay?: boolean;
+  audio_device?: string;
+  tts?: string;
+  asr?: string;
+  backend_mode?: BraincraftBackend;
+  persona?: string;
+  llm_url?: string;
+  tts_url?: string;
+  asr_url?: string;
+}
+export const setBraincraftConfig = (patch: BraincraftConfigPatch) =>
+  req<{ ok: boolean; config?: BraincraftConfig; err?: string }>('PUT', '/braincraft/config', patch);
+
+/** Take a still in viewfinder mode (daemon saves the full-res frame). */
+export const braincraftCapture = () =>
+  req<{ ok: boolean; err?: string }>('POST', '/braincraft/capture');
+/** Start/stop a viewfinder video recording. */
+export const braincraftRecord = (action: 'start' | 'stop') =>
+  req<{ ok: boolean; err?: string }>('POST', '/braincraft/record', { action });
+/** Speak text through the active TTS path (local Piper / hosted persona voice). */
+export const braincraftSay = (text: string) =>
+  req<{ ok: boolean; err?: string }>('POST', '/braincraft/say', { text });
+
+/** Kick off the non-blocking voice/display-stack install (Piper + Vosk + libs). */
+export const installVoiceStack = () =>
+  req<{ ok: boolean; started: boolean; err?: string }>('POST', '/braincraft/voice/install');
+/** Poll the voice-install progress bar — reuses the shared DeployStatus shape. */
+export const getVoiceInstallStatus = () =>
+  req<DeployStatus>('GET', '/braincraft/voice/install/status');

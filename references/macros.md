@@ -3,20 +3,20 @@
 Load this when you want to run a **deterministic keyboard-driven sequence**
 (macros) or fetch a stored **agent playbook** (prompts). Macros are for the
 moments that don't need vision; your reasoning loop drives the moments that do.
-All calls assume `https://${AEON_HOST}/` with HTTP Basic
-`$AEON_USER:$AEON_PASSWD`.
+All calls assume `https://${AEON_HOST}/` with a Bearer token
+`$AEON_TOKEN`.
 
 ## Macros — run a stored action sequence
 
 ```bash
 # List
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/macros"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/macros"
 
 # Fetch one macro's TOML
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/macros/open-spotlight"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/macros/open-spotlight"
 
 # Run with params
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"params": {"query": "Slack"}}' \
     "https://$AEON_HOST/api/macros/open-spotlight/run"
@@ -30,7 +30,7 @@ Author your own by PUTing a TOML body to `/api/macros/<name>` (and
 `/etc/aeon/macros/` shadow shipped ones on name collision.
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT --data-binary @my-macro.toml \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT --data-binary @my-macro.toml \
     "https://$AEON_HOST/api/macros/my-macro"
 ```
 
@@ -75,8 +75,8 @@ vision loop for the parts that actually need eyes.
 ## Prompts — stored agent playbooks
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/prompts"
-curl -sk -u "$AEON_USER:$AEON_PASSWD" \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/prompts"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
     "https://$AEON_HOST/api/prompts/agent-quickstart"
 ```
 

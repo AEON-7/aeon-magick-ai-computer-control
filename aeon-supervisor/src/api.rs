@@ -243,6 +243,10 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/streamer/config",
             get(crate::streamer_config::get_config)
                 .put(crate::streamer_config::put_config))
+        // USB webcam passthrough (expose a video source to the target as a UVC cam)
+        .route("/webcam",
+            get(crate::webcam::get_webcam)
+                .put(crate::webcam::put_webcam))
         // HID
         .route("/hid/status", get(crate::proxy::hid_status))
         .route("/hid/type", post(crate::proxy::hid_type))
@@ -406,6 +410,46 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/hardware/chips",     get(crate::hardware::hardware_chips))
         .route("/hardware/i2c",       get(crate::hardware::hardware_i2c))
         .route("/hardware/overlays",  get(crate::hardware::hardware_overlays))
+        // Waveshare UPS HAT (E) battery state (relays the aeon-ups daemon's
+        // /run/aeon/ups.json; {"present":false} when no HAT).
+        .route("/ups",                get(crate::ups::get_ups))
+        // On-device live vision (OCR / detection over the capture feed).
+        .route("/vision/detections",  get(crate::vision::get_detections))
+        // OCR-anchored grounding: GET /vision/find?query=Save → ranked text
+        // matches with click-ready centres. VLM describe-screen: POST
+        // /vision/describe {prompt?} → natural-language read of the screen.
+        .route("/vision/find",        get(crate::vision::get_find))
+        .route("/vision/describe",    post(crate::vision::post_describe))
+        // Hailo — on-device AI accelerator (Hailo-10H AI HAT+): driver/model-zoo
+        // install + model deploy/unload. Admin-only over REST (see auth.rs;
+        // gated by the /api/hailo/ prefix, NOT allow-listed). All device-specific
+        // logic lives in /usr/local/bin/aeon-hailo; this is the control plane.
+        .route("/hailo/status",            get(crate::hailo::status))
+        .route("/hailo/install",           post(crate::hailo::post_install))
+        .route("/hailo/install/status",    get(crate::hailo::get_install_status))
+        .route("/hailo/models",            get(crate::hailo::get_models))
+        .route("/hailo/models/:id/deploy", post(crate::hailo::post_deploy))
+        .route("/hailo/models/:id/unload", post(crate::hailo::post_unload))
+        // BrainCraft HAT — AI interface + camera viewfinder + local/hosted voice.
+        // The aeon-braincraft daemon owns the device; this is the control plane
+        // (status relay + config + transient photo/record/say + the button-driven
+        // voice-stack install). Normal user auth, like vision/webcam.
+        .route("/braincraft/status",  get(crate::braincraft::status))
+        .route("/braincraft/config",
+            get(crate::braincraft::get_config).put(crate::braincraft::put_config))
+        .route("/braincraft/capture", post(crate::braincraft::post_capture))
+        .route("/braincraft/record",  post(crate::braincraft::post_record))
+        .route("/braincraft/say",     post(crate::braincraft::post_say))
+        .route("/braincraft/voice/install",        post(crate::braincraft::voice_install))
+        .route("/braincraft/voice/install/status", get(crate::braincraft::voice_install_status))
+        // ── Fleet (Phase 1): peer roster over the tailnet/LAN ──
+        // /fleet/status is the PEER-facing heartbeat — allow-listed past user
+        // auth below, but the handler requires the shared X-Fleet-Token.
+        .route("/fleet/status",       get(crate::fleet::get_status))
+        // /fleet/roster + /fleet/config are local-web (normal user auth).
+        .route("/fleet/roster",       get(crate::fleet::get_roster))
+        .route("/fleet/config",
+            get(crate::fleet::get_config).put(crate::fleet::put_config))
         // OrbNet — opt-in anonymous Matrix federation over Tor (admin-only; see auth.rs)
         .route("/orbnet/status",          get(crate::orbnet::status))
         .route("/orbnet/enable",          post(crate::orbnet::enable))
@@ -598,6 +642,9 @@ async fn auth_middleware(
         || path == "/login"
         || path == "/logout"
         || path == "/setup/password"
+        // Peer-facing fleet heartbeat: gated by the shared X-Fleet-Token inside
+        // the handler (fleet.rs), so it must bypass the user-session/token check.
+        || path == "/fleet/status"
     {
         return next.run(req).await;
     }

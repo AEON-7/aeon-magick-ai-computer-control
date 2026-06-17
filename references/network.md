@@ -3,12 +3,12 @@
 The device can layer DNSCrypt + a VPN + Tor/I2P over the target's outbound
 traffic, and manage its own WiFi uplink. Load this when you're setting up the
 device's network posture. All calls assume `https://${AEON_HOST}/` with HTTP
-Basic `$AEON_USER:$AEON_PASSWD`.
+Basic `$AEON_TOKEN`.
 
 Read the current posture first:
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/network"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/network"
 ```
 
 Returns the full config: USB ethernet mode, DNSCrypt + anonymized relays, Tor,
@@ -30,16 +30,16 @@ never into chat.**
 ```bash
 # AirVPN: API key → generate a stealth config → select → enable
 B="https://$AEON_HOST/api/network/vpn/providers/airvpn"
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST -H 'Content-Type: application/json' \
     -d '{"api_key":"<64-char key>"}' "$B/setup"
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST -H 'Content-Type: application/json' \
     -d '{"server_id":"Ainalrami","mode":"openvpn_ssl"}' "$B/generate"   # SSL ≈ looks like HTTPS
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST -H 'Content-Type: application/json' \
     -d '{"server_id":"Ainalrami"}' "$B/select"
 # Commercial WG (Mullvad / IVPN / AzireVPN): same shape —
 #   /providers/{mullvad,ivpn,azirevpn}/setup {"credential":"…"} → /pick-fastest → /select
 # Then enable the VPN (kill_switch recommended):
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT -H 'Content-Type: application/json' \
     -d '{"vpn":{"provider":"airvpn","enabled":true,"kill_switch":true}}' \
     "https://$AEON_HOST/api/network"
 ```
@@ -69,11 +69,11 @@ list, public IP + country).
 tar-pitted by the Tor network).
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT -H 'Content-Type: application/json' \
     -d '{"tor":{"enabled":true,"mode":"split_tunnel","over_vpn":true}}' \
     "https://$AEON_HOST/api/network"
 # Change identity (new Tor circuit / SIGNAL NEWNYM):
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST "https://$AEON_HOST/api/network/vpn/rotate"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST "https://$AEON_HOST/api/network/vpn/rotate"
 ```
 
 **`.onion` in a browser:** the Pi's Tor only serves apps that resolve `.onion`
@@ -89,10 +89,10 @@ Always proxy-based — browsers must point at the daemon's HTTP proxy
 
 ```bash
 # Read i2pd status (installed, running, bound addresses, browser-hint URLs)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/i2p/status"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/i2p/status"
 
 # Enable + optional outproxy + over-VPN
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT -H 'Content-Type: application/json' \
     -d '{"i2p":{"enabled":true,"over_vpn":false,"outproxy":"exit.stormycloud.i2p"}}' \
     "https://$AEON_HOST/api/network"
 ```
@@ -107,14 +107,14 @@ sees the client IP.
 
 ```bash
 # Auto + strict criteria + min trust 4
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT -H 'Content-Type: application/json' \
     -d '{"dnscrypt":{"enabled":true,"server_mode":"auto",
          "auto_criteria":{"no_logs":true,"dnssec":true,"no_filter":true,
                           "outside_five_eyes":true,"min_trust_score":4}}}' \
     "https://$AEON_HOST/api/network"
 
 # Anonymized relays on, auto-picked by criteria
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT -H 'Content-Type: application/json' \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT -H 'Content-Type: application/json' \
     -d '{"dnscrypt":{"anon_relays":{"enabled":true,"mode":"auto",
          "criteria":{"no_logs":true,"outside_five_eyes":true,"dnssec":true}}}}' \
     "https://$AEON_HOST/api/network"
@@ -129,18 +129,18 @@ The device's own uplink — scan, join, forget.
 
 ```bash
 # Current state (connected SSID, radio on/off, AP-fallback flag)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/wifi/state"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/wifi/state"
 
 # Scan nearby networks
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/wifi/scan"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/wifi/scan"
 
 # Connect (persisted across reboots; omit psk for open networks)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H "Content-Type: application/json" \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST -H "Content-Type: application/json" \
     -d '{"ssid": "my-home", "psk": "secret"}' \
     "https://$AEON_HOST/api/wifi/connect"
 
 # Forget a known network
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X DELETE "https://$AEON_HOST/api/wifi/known"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X DELETE "https://$AEON_HOST/api/wifi/known"
 ```
 
 ## MCP

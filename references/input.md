@@ -2,14 +2,14 @@
 
 The **act** half of see+act. Every op is a single atomic HTTPS POST — press →
 release happens server-side, so a dropped packet can never leave a key or
-button stuck. All calls assume `https://${AEON_HOST}/` with HTTP Basic
-`$AEON_USER:$AEON_PASSWD`. There is intentionally **no `key_down`/`key_up`
+button stuck. All calls assume `https://${AEON_HOST}/` with a Bearer token
+`$AEON_TOKEN`. There is intentionally **no `key_down`/`key_up`
 split** — that's the design lesson inherited from `cursed-hid`.
 
 ## type — emit a string
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"text": "Hello, world."}' \
     "https://$AEON_HOST/api/hid/type"
@@ -23,7 +23,7 @@ counters so you can detect data loss. To enter text into a field: focus it
 ## key — a chord (Cmd+Space, Ctrl+C, F11, …)
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"keys": ["GUI","SPACE"], "hold_ms": 30}' \
     "https://$AEON_HOST/api/hid/key"
@@ -37,7 +37,7 @@ atomic op.
 ## click — left/right/middle, single/double/triple
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"button": "left", "count": 1}' \
     "https://$AEON_HOST/api/hid/click"
@@ -50,7 +50,7 @@ half-pressed-button failure mode is possible.
 ## move — relative cursor delta
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"dx": 100, "dy": -40}' \
     "https://$AEON_HOST/api/hid/move"
@@ -70,7 +70,7 @@ exactly — no relative-acceleration drift. Compute it from a snapshot:
 
 ```bash
 # move (and optionally click) at an absolute point
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"x": 0.5, "y": 0.5, "buttons": 0}' \
     "https://$AEON_HOST/api/hid/move_abs"
@@ -92,7 +92,7 @@ element.**
 for step in '{"x":0.2,"y":0.3,"buttons":1}' \
             '{"x":0.6,"y":0.7,"buttons":1}' \
             '{"x":0.6,"y":0.7,"buttons":0}'; do
-  curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST -H "Content-Type: application/json" \
+  curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST -H "Content-Type: application/json" \
       -d "$step" "https://$AEON_HOST/api/hid/move_abs"
 done
 ```
@@ -104,7 +104,7 @@ this to drag). `release_all` always clears any held button.
 ## scroll
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"dy": -3}' \
     "https://$AEON_HOST/api/hid/scroll"
@@ -118,7 +118,7 @@ doesn't match the absolute descriptor.
 ## persona — hot-swap which keyboard/mouse the target sees
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" \
     -d '{"persona": "logitech-mx"}' \
     "https://$AEON_HOST/api/hid/persona"
@@ -144,7 +144,7 @@ reboots.
 ## release_all — panic button
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     "https://$AEON_HOST/api/hid/release_all"
 ```
 

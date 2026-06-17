@@ -4,7 +4,7 @@
 //! Monitors for exit, relaunches on signal from the watchdog.
 
 use crate::capture::{self, Pipeline};
-use crate::config::Platform;
+use crate::config::{Platform, Source};
 use crate::state::{chrono, SharedState};
 use anyhow::Result;
 use std::process::Stdio;
@@ -13,12 +13,122 @@ use tracing::{info, warn};
 
 pub async fn run(state: SharedState) -> Result<()> {
     loop {
+        // ── CAMERA-CSI branch (Pi 5 + a Raspberry Pi camera via libcamera) ──
+        // A Pi camera has no plain-v4l2 device to open or enumerate (its node
+        // is raw Bayer needing the ISP), so rpicam-vid owns the sensor and
+        // feeds ffmpeg. Kept in its own branch so the v4l2 detect/spawn path
+        // below stays the exact Cam Link / HDMI-CSI path. The pipeline still
+        // terminates in ffmpeg's H.264 stdout → h264_pipe, so the watchdog's
+        // counter-based liveness (pipeline_kind "libcamera-h264") works the
+        // same as the Cam Link H.264 path.
+        if state.0.cfg.capture.source == Source::CameraCsi {
+            let (res, cam_id) = {
+                let out = &state.0.cfg.output;
+                // Report the post-rotation geometry: a 90/270 turn swaps W↔H.
+                let (w, h) = if state.0.cfg.capture.swaps_dims() {
+                    (out.height, out.width)
+                } else {
+                    (out.width, out.height)
+                };
+                (format!("{w}x{h}"), state.0.cfg.capture.camera_id)
+            };
+            info!(camera_id = cam_id, %res,
+                  "camera-csi: spawning rpicam-vid → ffmpeg (H.264 + JPEG snapshot)");
+            let (mut child, mut sidecar) = match spawn_libcamera_h264(&state) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!(?e, "libcamera spawn failed, retrying in 2s");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+            state.mutate(|s| {
+                s.mode = Some(capture::CaptureMode {
+                    format: Box::leak(format!("h264 (libcamera cam{cam_id})").into_boxed_str()),
+                    resolution: res.clone(),
+                });
+                s.enum_hash = None;
+                s.last_relaunch = Some(chrono::DateTime::now());
+                s.relaunch_count += 1;
+                s.online = false;
+                s.captured_fps = 0;
+                s.pipeline_kind = Some("libcamera-h264");
+            });
+            // ffmpeg's H.264 stdout → broadcast (same reader as the Cam Link
+            // H.264 pipeline: bumps frames_published for watchdog liveness).
+            if let Some(stdout) = child.stdout.take() {
+                let counter = std::sync::Arc::clone(&state.0.frames_published);
+                let tx = state.0.h264_tx.clone();
+                tokio::spawn(crate::h264_pipe::run(stdout, tx, counter));
+                info!("h264_pipe reader spawned for libcamera run");
+            } else {
+                warn!("libcamera ffmpeg child has no stdout pipe — frames won't reach webapi");
+            }
+            tokio::select! {
+                status = child.wait() => {
+                    warn!(?status, "libcamera ffmpeg exited; relaunching");
+                }
+                _ = state.0.relaunch_signal.notified() => {
+                    info!("relaunch signaled, killing libcamera pipeline");
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                _ = state.0.shutdown_signal.notified() => {
+                    info!("shutdown signaled, killing libcamera pipeline");
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let _ = sidecar.kill().await; // release the camera
+                    return Ok(());
+                }
+            }
+            // Always reap the rpicam sidecar so it releases the camera before
+            // the next spawn (else the relaunch hits "camera in use").
+            let _ = sidecar.kill().await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+
         // Wait until the device exists.
         wait_for_device(&state).await;
 
-        // Decide which pipeline to use based on the v4l2 enum + user's
-        // configured output preferences.
-        let pipeline =
+        // Decide which pipeline to use.
+        //
+        // HDMI-CSI (Pi 5 X1301 / TC358743) needs a FIXED pipeline: the rp1-cfe
+        // CSI capture node doesn't enumerate discrete sizes, so detect_pipeline
+        // can't pick a mode (it errors "no ffmpeg-ingestible v4l2 format"). The
+        // aeon-hdmi-csi service has already pinned the node to UYVY at the
+        // source resolution and enabled the csi2→CFE link, so we build a fixed
+        // UYVY FfmpegRescale at the node's current resolution and honour the
+        // configured output.format ("mjpeg" = browser-native <img>, "h264" =
+        // WebCodecs). The other sources keep the auto-detect path.
+        let pipeline = if state.0.cfg.capture.source == Source::HdmiCsi {
+            // Use the source's REAL locked mode (resolution + framerate) from the
+            // bridge DV-timings, so `-r target_fps` decimates from the true input
+            // rate (1080p30 vs 1080p60 etc.) instead of always assuming 60 — and
+            // /state reports what's actually coming in. Falls back to the node's
+            // current resolution @ 60 when no signal is locked yet.
+            let (res, src_fps) = match capture::current_dv_timings() {
+                Some((w, h, fps)) => (format!("{w}x{h}"), fps),
+                None => (
+                    capture::current_resolution(&state.0.cfg.device)
+                        .unwrap_or_else(|| "1920x1080".to_string()),
+                    60,
+                ),
+            };
+            info!(%res, src_fps, target_fps = state.0.cfg.output.fps,
+                  match_source = state.0.cfg.output.match_source,
+                  fmt = %state.0.cfg.output.format, "hdmi-csi: source mode");
+            Pipeline::FfmpegRescale {
+                source_format: "uyvy422".to_string(),
+                source_resolution: res,
+                source_fps: src_fps,
+                target_width: state.0.cfg.output.width,
+                target_height: state.0.cfg.output.height,
+                target_fps: state.0.cfg.output.fps,
+                target_format: state.0.cfg.output.format.clone(),
+                scale_algorithm: state.0.cfg.output.scale_algorithm.clone(),
+            }
+        } else {
             match capture::detect_pipeline(&state.0.cfg.device, &state.0.cfg.output) {
                 Ok(p) => p,
                 Err(e) => {
@@ -26,7 +136,8 @@ pub async fn run(state: SharedState) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     continue;
                 }
-            };
+            }
+        };
 
         let enum_hash = capture::enum_signature(&state.0.cfg.device).ok();
 
@@ -60,6 +171,17 @@ pub async fn run(state: SharedState) -> Result<()> {
                     res,
                 )
             }
+        };
+        // A 90/270 display rotation swaps the reported resolution (W↔H) so
+        // /state introspection matches what clients actually receive; the
+        // H.264 SPS and JPEG headers already carry the true post-rotation
+        // geometry, so this is cosmetic-only.
+        let display_res = if state.0.cfg.capture.swaps_dims() {
+            parse_wxh(&display_res)
+                .map(|(w, h)| format!("{h}x{w}"))
+                .unwrap_or(display_res)
+        } else {
+            display_res
         };
         let kind_tag: &'static str = match &pipeline {
             Pipeline::Ustreamer(_) => "ustreamer",
@@ -312,13 +434,20 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     // those bars; we then crop them out before scaling so the agent's
     // view has the same aspect ratio as the host's actual screen and
     // HID coords map 1:1.
-    let detected = capture::detect_content_crop(
-        &cfg.ffmpeg_bin,
-        &cfg.device,
-        source_format,
-        source_resolution,
-        *source_fps,
-    );
+    //
+    // HDMI-CSI (rp1-cfe) captures a desktop — no pillarbox to crop, and the
+    // low-probesize cropdetect pass stalls on that node — so skip it there.
+    let detected = if cfg.capture.source == Source::HdmiCsi {
+        Ok(None)
+    } else {
+        capture::detect_content_crop(
+            &cfg.ffmpeg_bin,
+            &cfg.device,
+            source_format,
+            source_resolution,
+            *source_fps,
+        )
+    };
     let crop_filter = match &detected {
         Ok(Some(c)) => {
             info!(
@@ -378,9 +507,19 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     // Decimate before scale (same reasoning as the h264 path): swscale runs
     // per input frame, so without this it processes the full 60fps capture
     // even when target_fps is lower. fps filter at the head fixes that.
-    let scale_filter = match crop_filter {
-        Some(c) => format!("fps={target_fps},{c},{scale_part}"),
-        None => format!("fps={target_fps},{scale_part}"),
+    // Append the configured display rotation/flip last (after crop+scale), so
+    // the served MJPEG snapshot/stream carries the same orientation as the
+    // H.264 path. `None` for the identity orientation.
+    let orient = cfg.capture.orientation_vf();
+    let scale_filter = {
+        let core = match &crop_filter {
+            Some(c) => format!("fps={target_fps},{c},{scale_part}"),
+            None => format!("fps={target_fps},{scale_part}"),
+        };
+        match orient {
+            Some(rot) => format!("{core},{rot}"),
+            None => core,
+        }
     };
 
     // Q:v for ffmpeg MJPEG: 1 = best, 31 = worst. We map our 1–100 jpeg_quality
@@ -422,6 +561,15 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
                                           // because the encoder string IS used
                                           // when we add an h264 file output.
 
+    // The rp1-cfe CSI node (HDMI-CSI) has no frame-rate ioctl and needs a real
+    // probe before it delivers frames — the Cam-Link-tuned 32-byte probe just
+    // stalls it ("not enough frames to estimate rate"). The Cam Link keeps the
+    // minimal probe for near-zero startup latency. [Confirmed on Pi 5 + X1301.]
+    let (probesize, analyzeduration) = if cfg.capture.source == Source::HdmiCsi {
+        ("20M", "5M")
+    } else {
+        ("32", "0")
+    };
     let mut cmd = Command::new(&cfg.ffmpeg_bin);
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
@@ -446,8 +594,8 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
         .arg("-fflags").arg("nobuffer")
         .arg("-flags").arg("low_delay")
         .arg("-avioflags").arg("direct")
-        .arg("-probesize").arg("32")
-        .arg("-analyzeduration").arg("0")
+        .arg("-probesize").arg(probesize)
+        .arg("-analyzeduration").arg(analyzeduration)
         // Input
         .arg("-f").arg("v4l2")
         .arg("-input_format").arg(source_format)
@@ -547,13 +695,19 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
 
     // Reuse the same pillarbox/letterbox crop detection as the MJPEG path
     // so HID coordinates still map 1:1 to the host's logical display.
-    let detected = capture::detect_content_crop(
-        &cfg.ffmpeg_bin,
-        &cfg.device,
-        source_format,
-        source_resolution,
-        *source_fps,
-    );
+    // (Skip it for HDMI-CSI: a desktop has no pillarbox + the cropdetect pass
+    // stalls on the rp1-cfe node.)
+    let detected = if cfg.capture.source == Source::HdmiCsi {
+        Ok(None)
+    } else {
+        capture::detect_content_crop(
+            &cfg.ffmpeg_bin,
+            &cfg.device,
+            source_format,
+            source_resolution,
+            *source_fps,
+        )
+    };
     let crop_filter = match &detected {
         Ok(Some(c)) => {
             info!(w = c.width, h = c.height, x = c.x, y = c.y, "h264: content crop detected");
@@ -612,10 +766,15 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
     // fps knob actually control cost. The `fps` filter itself is cheap (it
     // selects frames by PTS; no per-pixel work).
     let fps_part = format!("fps={target_fps}");
+    // Display rotation/flip applied AFTER scale (in the landscape target geometry);
+    // a 90/270 transpose then yields the portrait frame the encoder + split both
+    // see, so H.264 and the JPEG snapshot stay in lock-step.
+    let orient = cfg.capture.orientation_vf();
     let base = [
         fps_part.as_str(),
         crop_filter.as_deref().unwrap_or(""),
         scale_part.as_str(),
+        orient.as_deref().unwrap_or(""),
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
@@ -644,6 +803,13 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
     let gop = out.h264_gop.max(1).to_string();
     let snapshot_path = out.snapshot_path.display().to_string();
 
+    // HDMI-CSI (rp1-cfe) needs a real probe to start; Cam Link keeps the
+    // minimal one for low startup latency. (See spawn_ffmpeg.)
+    let (probesize, analyzeduration) = if cfg.capture.source == Source::HdmiCsi {
+        ("20M", "5M")
+    } else {
+        ("32", "0")
+    };
     let mut cmd = Command::new(&cfg.ffmpeg_bin);
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
@@ -652,8 +818,8 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         .arg("-fflags").arg("nobuffer")
         .arg("-flags").arg("low_delay")
         .arg("-avioflags").arg("direct")
-        .arg("-probesize").arg("32")
-        .arg("-analyzeduration").arg("0")
+        .arg("-probesize").arg(probesize)
+        .arg("-analyzeduration").arg(analyzeduration)
         // Input
         .arg("-f").arg("v4l2")
         .arg("-input_format").arg(source_format)
@@ -696,4 +862,132 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         .stderr(Stdio::inherit());
 
     Ok(cmd.spawn()?)
+}
+
+/// Camera-CSI pipeline (Pi 5 + a Raspberry Pi camera, e.g. the HQ Camera /
+/// IMX477). A Pi camera's v4l2 node is raw Bayer needing the ISP, so ffmpeg
+/// can't `-f v4l2` it directly — we go through libcamera. `rpicam-vid` emits
+/// an **MJPEG** stream (self-describing, so ffmpeg parses frame boundaries
+/// with no width/height/stride assumptions — robust against the buffer
+/// alignment that bites the raw-yuv420 route at non-16-aligned heights like
+/// 1080). ffmpeg ingests it and splits into the SAME two sinks as the Cam
+/// Link H.264 path:
+///
+///   output 1: H.264 Annex-B → stdout → `h264_pipe::run` → WebSocket/WebCodecs
+///   output 2: a single JPEG, atomically rewritten → `/snapshot` (+ the MJPEG
+///             `<img>` fallback)
+///
+/// Returns `(ffmpeg child, rpicam-vid child)`. The caller owns BOTH; it must
+/// kill the rpicam sidecar on relaunch/shutdown so the sensor is released
+/// before the next spawn.
+fn spawn_libcamera_h264(state: &SharedState) -> Result<(Child, Child)> {
+    let cfg = &state.0.cfg;
+    let out = &cfg.output;
+
+    if let Some(parent) = out.snapshot_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let w = out.width.max(2);
+    let h = out.height.max(2);
+    let fps = out.fps.max(1);
+    let cam_id = cfg.capture.camera_id;
+
+    // ── Stage 1: rpicam-vid → MJPEG on stdout ──
+    // NOTE: orientation (rotation/flip) is realised ONLY in the ffmpeg filter
+    // graph below (see `orientation_vf` in the filter_complex). Do NOT also add
+    // rpicam-vid `--rotation`/`--hflip`/`--vflip` here — that would rotate the
+    // frame twice. The single-layer (ffmpeg) model is deliberate: it keeps the
+    // H.264 stream, the JPEG snapshot, recordings, and the vision tap identical
+    // and dodges rpicam's 0/180-only `--rotation` limitation.
+    let mut rpicam = Command::new("rpicam-vid");
+    rpicam
+        .arg("--camera").arg(cam_id.to_string())
+        .arg("-t").arg("0") // run until killed
+        .arg("--nopreview")
+        .arg("--flush") // flush each frame for lower latency
+        .arg("--width").arg(w.to_string())
+        .arg("--height").arg(h.to_string())
+        .arg("--framerate").arg(fps.to_string())
+        .arg("--codec").arg("mjpeg")
+        .arg("--quality").arg("90")
+        .arg("-o").arg("-")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut rpicam_child = rpicam.spawn().map_err(|e| {
+        anyhow::anyhow!("spawning rpicam-vid (is rpicam-apps installed + a camera attached?): {e}")
+    })?;
+    // Hand rpicam's stdout pipe to ffmpeg's stdin (the tokio documented
+    // ChildStdout → Stdio handoff).
+    let rpicam_stdio: Stdio = rpicam_child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("rpicam-vid produced no stdout pipe"))?
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("rpicam stdout → Stdio: {e}"))?;
+
+    // ── Stage 2: ffmpeg ingests MJPEG, splits to H.264 + JPEG snapshot ──
+    // Pi 5 has no HW H.264 encoder, so libx264 (already the non-Pi4 default).
+    let venc = match cfg.platform {
+        Platform::Pi4 => "h264_v4l2m2m",
+        _ => "libx264",
+    };
+    let bitrate = format!("{}k", out.h264_bitrate_kbps.max(500));
+    let gop = out.h264_gop.max(1).to_string();
+    let qv = {
+        let inverted = 31u32.saturating_sub(((cfg.jpeg_quality as u32) * 31) / 100);
+        inverted.clamp(2, 15).to_string()
+    };
+    let snap_fps = fps.clamp(1, 6).to_string();
+    let snapshot_path = out.snapshot_path.display().to_string();
+    // No crop (a camera has no pillarbox) and no scale (rpicam already emits
+    // w×h). Decimate to target fps at the head, apply the configured display
+    // rotation/flip, then split — so the H.264 stream AND the JPEG snapshot are
+    // rotated identically (Pi-camera mounts are often physically turned).
+    let filter_complex = match cfg.capture.orientation_vf() {
+        Some(rot) => format!("[0:v]fps={fps},{rot},split=2[vh][vj]"),
+        None => format!("[0:v]fps={fps},split=2[vh][vj]"),
+    };
+
+    let mut cmd = Command::new(&cfg.ffmpeg_bin);
+    cmd.arg("-hide_banner")
+        .arg("-loglevel").arg("warning")
+        .arg("-y")
+        .arg("-fflags").arg("nobuffer")
+        .arg("-flags").arg("low_delay")
+        // Input: MJPEG stream from rpicam-vid's stdout.
+        .arg("-f").arg("mjpeg")
+        .arg("-i").arg("pipe:0")
+        .arg("-filter_complex").arg(&filter_complex)
+        // output 1: H.264 Annex-B → stdout
+        .arg("-map").arg("[vh]")
+        .arg("-r").arg(fps.to_string())
+        .arg("-c:v").arg(venc)
+        .arg("-b:v").arg(&bitrate)
+        .arg("-g").arg(&gop)
+        .arg("-bf").arg("0")
+        .arg("-pix_fmt").arg("yuv420p");
+    if venc == "libx264" {
+        cmd.arg("-preset").arg("ultrafast").arg("-tune").arg("zerolatency");
+    }
+    cmd.arg("-bsf:v").arg("dump_extra=freq=keyframe")
+        .arg("-f").arg("h264")
+        .arg("pipe:1")
+        // output 2: atomic single-frame JPEG snapshot
+        .arg("-map").arg("[vj]")
+        .arg("-r").arg(&snap_fps)
+        .arg("-c:v").arg("mjpeg")
+        .arg("-q:v").arg(&qv)
+        .arg("-update").arg("1")
+        .arg("-atomic_writing").arg("1")
+        .arg("-f").arg("image2")
+        .arg(&snapshot_path)
+        .stdin(rpicam_stdio)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
+    let ffmpeg_child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("spawning ffmpeg (libcamera pipeline): {e}"))?;
+    Ok((ffmpeg_child, rpicam_child))
 }

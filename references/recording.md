@@ -3,7 +3,7 @@
 On-demand screen recording. The device subscribes to the live H.264 stream and
 muxes it to MP4 with `ffmpeg -c copy` (no re-encode → nearly free on the Pi).
 Load this when you need a video of what the target did, not just stills. All
-calls assume `https://${AEON_HOST}/` with HTTP Basic `$AEON_USER:$AEON_PASSWD`.
+calls assume `https://${AEON_HOST}/` with a Bearer token `$AEON_TOKEN`.
 
 **Precondition:** recording requires the **H.264 stream mode**. If `state`
 (see `references/vision.md`) shows `streamer.mode` is not `h264`, set the
@@ -14,12 +14,12 @@ stream format to h264 first — otherwise `record/start` returns
 
 ```bash
 # default 30s
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" -d '{}' \
     "https://$AEON_HOST/api/streamer/record/start"
 
 # custom length, e.g. 120s
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H "Content-Type: application/json" -d '{"seconds": 120}' \
     "https://$AEON_HOST/api/streamer/record/start"
 ```
@@ -36,11 +36,11 @@ customizable length, no re-encode cost.
 
 ```bash
 # stop + finalize the in-progress MP4
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     "https://$AEON_HOST/api/streamer/record/stop"
 
 # status: the active recording (id, elapsed) if any, plus finished list + note
-curl -sk -u "$AEON_USER:$AEON_PASSWD" \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
     "https://$AEON_HOST/api/streamer/record/state"
 ```
 
@@ -48,14 +48,14 @@ curl -sk -u "$AEON_USER:$AEON_PASSWD" \
 
 ```bash
 # list finished recordings (id, size, human-readable timestamp), newest first
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/streamer/recordings"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/streamer/recordings"
 
 # download one MP4 by id
-curl -sk -u "$AEON_USER:$AEON_PASSWD" \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
     "https://$AEON_HOST/api/streamer/recordings/<id>" -o capture.mp4
 
 # first-frame JPEG thumbnail for an id
-curl -sk -u "$AEON_USER:$AEON_PASSWD" \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
     "https://$AEON_HOST/api/streamer/recordings/<id>/thumb" -o thumb.jpg
 ```
 

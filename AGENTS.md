@@ -41,7 +41,7 @@ table is at the end ("API + MCP endpoint reference").
 
 | Feature set | What it does | API base | See section |
 |---|---|---|---|
-| **Live view + input** | Stream the screen; type / click / scroll / drag; snapshot a frame | `/streamer/*`, `/hid/*` | Talking to it as an AI agent |
+| **Live view + input** | Stream the screen; type / click / scroll / drag; snapshot a frame; on-device vision (OCR text + boxes, find-text-to-click, semantic screen description) | `/streamer/*`, `/hid/*`, `/vision/*` | Talking to it as an AI agent |
 | **HID personas** | Swap USB identity: absolute pointer (precise) vs natural relative vs vendor disguise | `/hid/persona` | Switch HID persona |
 | **Target power** | Wake / power-tap / hard-hold / reboot the controlled machine (HID + WoL) | `/target/*` | Target machine power controls |
 | **Clipboard + files + ISOs** | Two-way clipboard; stage files; mount an ISO as a virtual CDROM | `/clipboard/*`, `/files/*`, `/storage/*` | Shared clipboard / File transfer |
@@ -217,6 +217,67 @@ curl -sk -u admin:$PW \
 Returns the current JPEG. 1920×1080 by default; with `match_source` enabled it
 mirrors the source's native resolution (capped at 1080p). 4K sources downscale to fit.
 Pi 4 hardware JPEG encoding keeps frame latency around 40-80 ms on LAN.
+
+### On-device vision — OCR text, find-to-click, semantic description
+
+On a **Hailo AI HAT+ Orb** the device runs an on-board vision stack, so you can
+read and reason about the screen without shipping pixels to a remote model. It
+slots into the snapshot loop as three escalating tools, siblings of `snapshot`:
+**`snapshot`** (raw pixels / JPEG) → **`screen_text`** (ALL OCR text + boxes) /
+**`screen_find`** (find ONE specific label fast → click it) →
+**`describe_screen`** (SEMANTIC, "what is this screen?") → `click` / `click_at`
+/ `type_text`. `screen_text`/`screen_find` read the live `aeon-vision` OCR
+daemon's detections; `describe_screen` runs the deployed Qwen2-VL `.hef` on the
+NPU. All three need the on-device vision stack on a Hailo AI HAT+ Orb.
+
+#### Find on-screen text and get a click-ready location (`screen_find`)
+
+The **fast path for "click the Save button / Sign in link / Settings"**. It
+searches the live on-device OCR (the `aeon-vision` daemon's detections) for text
+matching `query` and returns ranked matches — each with `text`, `match_score`,
+`ocr_conf`, and a `center` `{x,y}` already expressed in **fractions 0..1 of the
+frame**, so you feed that `center` straight into `click_at` / `click(x,y)` with
+no pixel math. Needs **no NPU GenAI slot** — it just reads the OCR daemon's
+output, so it runs fine alongside the local LLM.
+
+```bash
+curl -sk -u admin:$PW \
+    "https://aeon-magick.local/api/vision/find?query=Save"
+# → {"ok":true,"query":"Save","count":1,
+#    "matches":[{"text":"Save","match_score":1.0,"ocr_conf":0.98,
+#                "center":{"x":0.13,"y":0.22}}],
+#    "hint":"feed center into click(x,y)"}
+```
+
+`query` is the only param (the text to look for). Returns `{ok:false}` if
+vision/OCR is off or nothing matches. Use it whenever you know the label you want
+to click; reach for `screen_text` instead when you need *every* string on screen.
+
+#### Describe the screen in natural language (`describe_screen`)
+
+The **semantic-understanding path** — a natural-language description of what's on
+the target screen right now, from the on-device Qwen2-VL vision-language model on
+the Hailo AI HAT+. Use it to answer "what is this screen?", "which dialog is
+open?", "is the upload finished?" — for exact text + coordinates use
+`screen_text` / `screen_find` instead.
+
+```bash
+curl -sk -u admin:$PW -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"prompt": "which dialog is open?", "max_tokens": 128}' \
+    https://aeon-magick.local/api/vision/describe
+# → {"ok":true,
+#    "description":"The screen shows a message that says \"Can't Connect to Server.\"",
+#    "gen_ms":2629}
+```
+
+Both params are optional: `prompt` asks a specific visual question (omit for a
+general description), `max_tokens` caps the answer length. **Latency: ~3 s warm,
+~13 s cold** — the first call loads the 2.2 GB VLM, then it stays resident and
+idle-unloads after ~180 s. It shares the NPU's **single GenAI slot** with the
+local `hailo-ollama` LLM, so it's available when the local LLM isn't resident
+(the normal online case, where the external agent is the brain); otherwise it
+returns `{ok:false}` with guidance to free the slot.
 
 ### Live MJPEG stream
 
@@ -1087,7 +1148,7 @@ https://aeon-magick.local/api/mcp
 ```
 
 with Basic auth `admin:<password>` and TLS verification off (self-signed
-cert). The server advertises 58 tools, grouped below.
+cert). The server advertises 67 tools, grouped below.
 
 The MCP handler now **enforces per-tool scope** — an agent token sees in
 `tools/list` and can call only the tools its scope permits. Token-management
@@ -1101,6 +1162,9 @@ The MCP handler now **enforces per-tool scope** — an agent token sees in
 |---|---|
 | `state` | combined streamer + HID status |
 | `snapshot` | one JPEG of the target's screen, returned as an MCP image block |
+| `screen_text` | on-device OCR — ALL detected text + boxes from the live `aeon-vision` daemon (Hailo Orb) |
+| `screen_find` | find on-screen text matching `query`, return ranked matches with a **click-ready** `center` `{x,y}` in fractions 0..1 — feed straight into `click_at`. Fast "find text → click it"; reads OCR, no NPU GenAI slot |
+| `describe_screen` | natural-language description of the screen from the on-device Qwen2-VL VLM (Hailo AI HAT+). Semantic "what is this screen?"; ~3 s warm / ~13 s cold; shares the single NPU GenAI slot with the local LLM |
 | `type_text` | type a string |
 | `key_chord` | fire a key combo |
 | `click` | left/right/middle click |
@@ -1190,7 +1254,7 @@ It also exposes stored macros + prompts as MCP **resources**
 
 ## API + MCP endpoint reference
 
-**MCP:** one endpoint, `POST /api/mcp` (JSON-RPC 2.0) — 58 tools, tabled
+**MCP:** one endpoint, `POST /api/mcp` (JSON-RPC 2.0) — 67 tools, tabled
 above. **REST:** everything under `https://<host>/api/`, basic-auth
 `admin:<pw>` or `Authorization: Bearer <token>`. Full route map:
 
@@ -1198,6 +1262,7 @@ above. **REST:** everything under `https://<host>/api/`, basic-auth
 |---|---|
 | **Auth / tokens** | `GET /auth/me` · `POST /login` `/logout` `/setup/password` `/auth/change-password` · `GET|POST /auth/tokens` · `DELETE /auth/tokens/:id` |
 | **State / stream** | `GET /state` `/streamer/state` `/streamer/snapshot` (JPEG) `/streamer/stream` (MJPEG) `/streamer/ws` (H.264) · `POST /streamer/relaunch` · `PUT /streamer/config` |
+| **Vision (Hailo Orb)** | `GET /vision/detections` (OCR text + boxes) · `GET /vision/find?query=` (ranked matches + click-ready `center`) · `POST /vision/describe` (`{prompt?, max_tokens?}` → on-device VLM description) |
 | **HID input** | `GET /hid/status` · `POST /hid/{type,key,click,button,move,move_abs,scroll,persona,release_all}` |
 | **Target power** | `GET /target/info` · `PUT /target/config` · `POST /target/{power-tap,power-hold,wake,reboot}` |
 | **Clipboard / files / ISOs** | `GET|PUT /clipboard` · `POST /clipboard/type-on-target` · `GET /files` `/files/config` · `POST /files/upload` · `GET|DELETE /files/:name` · `GET /storage` · `PUT /storage/active` · `POST /storage/upload` · `DELETE /storage/:slug` |
@@ -1335,21 +1400,28 @@ to hand out, never the agent's.
 
 ### Recipe — vision-driven control loop
 
-The proven pattern (used by Celina, our local OpenClaw anchor agent):
+The proven pattern (used by a local operator agent):
 
 1. **`state`** to confirm everything is reachable + the right persona is loaded.
 2. **`snapshot`** to fetch a frame.
-3. Reason over the frame and decide what to do.
+3. Reason over the frame and decide what to do. On a Hailo Orb you can let the
+   device do the seeing: **`screen_find`** to locate a known label and get a
+   click-ready `center` (the fast "find text → click it" path), **`screen_text`**
+   for every string + box on screen, or **`describe_screen`** to ask the
+   on-device VLM "what is this screen?" when you need semantic understanding.
 4. **`type_text` / `key_chord` / `click_at` / `scroll`** to act. To click a
    specific element, switch to the `generic-absolute` persona once and use
    **`click_at`** with the target's fractional coordinates — far more reliable
-   than relative `move_cursor`. Each call is atomic; you don't track partial
-   press state.
+   than relative `move_cursor`. With **`screen_find`** you can skip the pixel
+   math entirely: feed its `center` `{x,y}` straight into `click_at`. Each call
+   is atomic; you don't track partial press state.
 5. Optionally wait briefly, then **`snapshot`** again to confirm what changed.
 6. Loop.
 
-Latency budget: snapshot ~50-150 ms (LAN), reasoning is up to your model,
-HID action ~10-30 ms.
+Latency budget: snapshot ~50-150 ms (LAN), `screen_find` is a fast OCR lookup
+(no NPU GenAI slot), `describe_screen` ~3 s warm / ~13 s cold (shares the NPU's
+single GenAI slot with the local LLM), reasoning is up to your model, HID action
+~10-30 ms.
 
 ### Recipe — OS install from ISO
 

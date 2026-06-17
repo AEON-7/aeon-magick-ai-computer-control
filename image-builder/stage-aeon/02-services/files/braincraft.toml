@@ -1,0 +1,53 @@
+# Adafruit BrainCraft HAT — the Orb's on-device face, camera viewfinder, and
+# local/hosted voice assistant (240x240 ST7789 TFT, 3 buttons + joystick, WM8960
+# I2S codec). Driven by /usr/local/bin/aeon-braincraft, which re-reads this file
+# every loop, so edits take effect without a restart. Status is published to
+# /run/aeon/braincraft.json for the supervisor's BrainCraft tile.
+#
+# OFF by default. The display/voice stack is NOT baked — flip enabled=true, then
+# use the BrainCraft tab (button-driven aeon-voice installer) to fetch sherpa-onnx +
+# the Kokoro/Whisper models + the ST7789/PIL/gpiod libs on-device. The daemon idles harmlessly (writes
+# {"present": false}) when disabled, the display libs are missing, or no SPI
+# device is present — so the image is safe when no HAT is attached.
+
+# Master switch. When false the daemon idles and reports present:false.
+enabled = false
+
+# Startup mode (button A / joystick-press cycles ai -> viewfinder -> voice):
+#   "ai"         — the idle interface: backend mode/persona, a listening/speaking
+#                  indicator, and the last response text (wrapped) on the TFT.
+#   "viewfinder" — live camera view from the streamer socket; A=photo, B=record.
+#   "voice"      — push-to-talk on button A: mic -> ASR -> LLM -> TTS -> speaker.
+mode = "ai"
+
+# Draw /run/aeon/vision.json detection boxes (the existing vision feed; boxes are
+# fractions 0..1) over the live image in viewfinder mode.
+overlay = true
+
+[audio]
+# ALSA device preference. "auto" probes for a working playback+capture device,
+# PREFERRING USB audio — the WM8960 I2S codec is UNVERIFIED on Pi 5 / RP1, so a
+# plug-in USB sound card is the supported default. Use "usb", "wm8960", or a
+# literal ALSA device name (e.g. "hw:1") to pin it.
+device = "auto"
+tts = "kokoro"    # local TTS engine — sherpa-onnx Kokoro-82M neural voice
+asr = "whisper"   # local STT engine — sherpa-onnx Whisper base.en
+tts_voice = 0     # Kokoro speaker id (0-10; different English voices)
+tts_speed = 1.0   # 1.0 = natural; <1 slower, >1 faster
+
+[backend]
+# Where the voice pipeline's LLM (and, when hosted, ASR/TTS) runs:
+#   "local"  — sherpa-onnx Whisper ASR + Kokoro TTS on-device, LLM via http://127.0.0.1:8000
+#              (hailo-ollama / OpenAI-compatible); degrades gracefully if absent.
+#   "hosted" — ASR/LLM/TTS POSTed to a DGX Spark (see [hosted]); lets the Orb
+#              "make calls" with different personas.
+mode = "local"
+# Hosted persona name — passed as the LLM system role / model and the TTS voice.
+# Empty = the backend's default voice/agent.
+persona = ""
+
+[hosted]
+# DGX Spark endpoints used when backend.mode = "hosted".
+llm_url = "http://192.168.1.116:8000/v1"   # vLLM, OpenAI-compatible /v1/chat/completions
+tts_url = "http://192.168.1.116:8002"      # qwen3-tts  (POST /tts)
+asr_url = "http://192.168.1.116:8001"      # qwen3-asr  (POST /asr, multipart audio)

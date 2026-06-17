@@ -11,19 +11,25 @@
   // Settings (configuration) and Monitor (logs + read-only monitoring). KVM
   // controls stay inline. One source drives the desktop toolbar + mobile menu.
   type NavItem = { href: string; label: string; icon: string; title?: string };
-  const SUPER_APPS: (NavItem & { color: 'cursed' | 'sky' | 'amber' })[] = [
+  const SUPER_APPS: (NavItem & { color: 'cursed' | 'sky' | 'amber' | 'emerald' | 'flame' | 'violet' })[] = [
     { href: '/orbnet', label: 'OrbNet',     icon: 'orbnet', color: 'cursed', title: 'Decentralized services hub — Tor hidden services, IPFS, Mysterium dVPN, private chat' },
+    { href: '/fleet',  label: 'Fleet',      icon: 'fleet',  color: 'emerald', title: 'Manage every Orb as one fleet — live roster, health + sources of each peer over the tailnet/LAN' },
     { href: '/agent',  label: 'Agent Dash', icon: 'braces', color: 'sky',    title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
     { href: '/gpio',   label: 'GPIO',       icon: 'chip',   color: 'amber',  title: 'GPIO pins, HATs, power + IO — live hardware state' },
+    { href: '/hailo',  label: 'Hailo AI',   icon: 'spark',  color: 'flame',  title: 'AI HAT+ (Hailo) — install, live NPU stats, deploy/unload models' },
+    { href: '/braincraft', label: 'BrainCraft', icon: 'braincraft', color: 'violet', title: 'BrainCraft HAT — AI face, camera viewfinder (photo/record), and local/hosted voice with personas' },
   ];
   // Static class strings (Tailwind scans source text — keep them literal).
   const APP_BTN: Record<string, string> = {
-    cursed: 'border-cursed-500/50 bg-cursed-600/15 text-cursed-100 hover:bg-cursed-600/25',
-    sky:    'border-sky-500/50 bg-sky-600/15 text-sky-100 hover:bg-sky-600/25',
-    amber:  'border-amber-500/50 bg-amber-600/15 text-amber-100 hover:bg-amber-600/25',
+    cursed:  'border-cursed-500/50 bg-cursed-600/15 text-cursed-100 hover:bg-cursed-600/25',
+    sky:     'border-sky-500/50 bg-sky-600/15 text-sky-100 hover:bg-sky-600/25',
+    amber:   'border-amber-500/50 bg-amber-600/15 text-amber-100 hover:bg-amber-600/25',
+    emerald: 'border-emerald-500/50 bg-emerald-600/15 text-emerald-100 hover:bg-emerald-600/25',
+    flame:   'border-orange-500/50 bg-orange-600/15 text-orange-100 hover:bg-orange-600/25',
+    violet:  'border-violet-500/50 bg-violet-600/15 text-violet-100 hover:bg-violet-600/25',
   };
   const APP_ICON: Record<string, string> = {
-    cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300',
+    cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300', emerald: 'text-emerald-300', flame: 'text-orange-300', violet: 'text-violet-300',
   };
   const SETTINGS_ITEMS: NavItem[] = [
     { href: '/network',  label: 'Network',    icon: 'globe',  title: 'VPN · encrypted DNS · Tor/I2P · firewall' },
@@ -76,6 +82,9 @@
   let vpnOn = false;
   let vpnProvider: string = 'none';
   let dnscryptOn = false;
+  // Battery (Waveshare UPS HAT (E)). null until first poll / no UPS fitted →
+  // the meter simply doesn't render. Refreshed on the 2s state poll.
+  let ups: api.UpsStatus | null = null;
 
   // ── Mobile / fullscreen state ──
   // We track fullscreen separately from `captured` because on mobile the
@@ -133,6 +142,13 @@
     } catch (e) {
       console.warn('state refresh failed', e);
     }
+    // Battery is a separate tiny endpoint; its own try so a UPS read error
+    // (or no UPS HAT) never blanks the stream state.
+    try {
+      ups = await api.getUps();
+    } catch (e) {
+      console.warn('ups refresh failed', e);
+    }
     refreshRec();
   }
 
@@ -158,12 +174,34 @@
     if (typeof document !== 'undefined' && !document.hidden) refreshNet();
   }
 
+  // ── Battery meter (UPS HAT (E)) — derived display values ──────────────────
+  $: batteryPct = ups?.present ? Math.max(0, Math.min(100, Math.round(ups.percent ?? 0))) : null;
+  $: batteryCharging = !!ups?.charging || /charg/i.test(ups?.state ?? '');
+  // Green when charging or healthy, amber ≤40%, red ≤15% — and red whenever
+  // we're on battery so an unplugged Orb reads as "draining" at a glance.
+  $: batteryColor =
+       batteryPct == null ? 'text-zinc-400'
+       : batteryCharging ? 'text-live-400'
+       : batteryPct <= 15 ? 'text-red-400'
+       : ups?.on_battery ? 'text-amber-300'
+       : batteryPct <= 40 ? 'text-amber-400'
+       : 'text-live-400';
+  $: batteryTip = ups?.present
+       ? `Battery ${batteryPct}% · ${ups.state ?? 'unknown'}`
+         + (ups.battery_mv ? ` · ${(ups.battery_mv / 1000).toFixed(2)} V` : '')
+         + (ups.minutes_to_empty ? ` · ~${ups.minutes_to_empty} min left` : '')
+         + (ups.minutes_to_full ? ` · ~${ups.minutes_to_full} min to full` : '')
+         + (ups.on_battery ? ' · ON BATTERY' : '')
+         + (ups.shutdown_pending_s ? ` · ⚠ LOW: shutdown in ${ups.shutdown_pending_s}s` : '')
+       : '';
+
   onMount(() => {
     stream_url = api.streamURL();
     ws_url = api.streamWsURL();
     webCodecsOk = typeof window !== 'undefined' && 'VideoDecoder' in window;
     refreshState();
     refreshNet();
+    loadPickers();
     poll_iv = setInterval(refreshState, 2000);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('keydown', onKey);
@@ -814,6 +852,153 @@
       persona_switching = false;
     }
   }
+
+  // ── Video-source picker (view) + Webcam picker ──────────────────────────
+  // View source = which capture source the console shows (streamer.toml).
+  // Webcam = which source is passed through the USB gadget to the target host.
+  let streamerCfg: api.StreamerConfig | null = null;
+  let webcamCfg: api.WebcamConfig | null = null;
+  let source_switching = false;
+  let source_message = '';
+  let webcam_switching = false;
+  let webcam_message = '';
+
+  const SOURCE_LABELS: Record<string, string> = {
+    'auto': 'auto', 'cam-link-usb': 'USB capture',
+    'hdmi-csi': 'HDMI (KVM)', 'camera-csi': 'camera', 'off': 'off',
+  };
+  const sourceLabel = (s: string) => SOURCE_LABELS[s] ?? s;
+
+  async function loadPickers() {
+    try { streamerCfg = await api.getStreamerConfig(); syncOrient(); } catch (e) { console.warn('streamer cfg', e); }
+    try { webcamCfg = await api.getWebcamConfig(); } catch (e) { console.warn('webcam cfg', e); }
+  }
+
+  // ── Camera orientation (server-side rotation/flip + instant CSS preview) ──
+  // The pipeline rotates the frames themselves, so the live stream, /snapshot,
+  // recordings, and the vision/OCR tap all share one orientation. The control
+  // is optimistic: it shows the target via a CSS delta over the still-current
+  // frames while the streamer restarts (~1–2 s), then clears once the real
+  // rotated frames flow in (no double-rotation because the gap is masked by the
+  // brief reconnect).
+  const orientBtn =
+    'px-1.5 py-0.5 rounded border border-ink-700 bg-ink-800 text-cursed-300 leading-none ' +
+    'hover:bg-ink-700 focus:outline-none focus:ring-1 focus:ring-cursed-500 ' +
+    'disabled:opacity-50 disabled:cursor-wait';
+  let orient_switching = false;
+  let orient_message = '';
+  // What the pipeline is CURRENTLY emitting (frames already carry this).
+  let appliedRot = 0, appliedH = false, appliedV = false;
+  // Preview deltas applied to the on-screen video while the pipeline restarts.
+  let previewRot = 0, previewFlipH = false, previewFlipV = false;
+
+  function syncOrient() {
+    appliedRot = streamerCfg?.rotation ?? 0;
+    appliedH = streamerCfg?.hflip ?? false;
+    appliedV = streamerCfg?.vflip ?? false;
+    previewRot = 0; previewFlipH = false; previewFlipV = false;
+  }
+
+  // CSS transform on the inner video during a switch. A 90/270 delta swaps the
+  // aspect, so scale-to-fit the rotated frame inside the view box. Empty string
+  // (no transform) once committed → the real rotated frames render untouched.
+  $: orientPreviewStyle = (() => {
+    if (!previewRot && !previewFlipH && !previewFlipV) return '';
+    const parts: string[] = [];
+    if (previewRot % 180 !== 0) {
+      const w = canvas?.clientWidth || 16, h = canvas?.clientHeight || 9;
+      const s = Math.min(w, h) / Math.max(w, h);
+      parts.push(`rotate(${previewRot}deg)`, `scale(${s})`);
+    } else if (previewRot) {
+      parts.push(`rotate(${previewRot}deg)`);
+    }
+    if (previewFlipH) parts.push('scaleX(-1)');
+    if (previewFlipV) parts.push('scaleY(-1)');
+    return `transform: ${parts.join(' ')}; transition: transform .25s ease;`;
+  })();
+
+  async function applyOrientation(patch: { rotation?: number; hflip?: boolean; vflip?: boolean }) {
+    if (!streamerCfg || orient_switching) return;
+    const newRot = ((((patch.rotation ?? appliedRot) % 360) + 360) % 360);
+    const newH = patch.hflip ?? appliedH;
+    const newV = patch.vflip ?? appliedV;
+    if (newRot === appliedRot && newH === appliedH && newV === appliedV) return;
+    // Optimistic: reflect the target in the control + preview it over the frames.
+    previewRot = (((newRot - appliedRot) % 360) + 360) % 360;
+    previewFlipH = newH !== appliedH;
+    previewFlipV = newV !== appliedV;
+    streamerCfg = { ...streamerCfg, rotation: newRot, hflip: newH, vflip: newV };
+    orient_switching = true;
+    orient_message = 'rotating…';
+    try {
+      await api.setStreamerOrientation({ rotation: newRot, hflip: newH, vflip: newV });
+      // Streamer restarted; new frames now carry the orientation → drop the CSS.
+      appliedRot = newRot; appliedH = newH; appliedV = newV;
+      previewRot = 0; previewFlipH = false; previewFlipV = false;
+      await refreshState();
+      orient_message = 'rotated';
+      setTimeout(() => (orient_message = ''), 2500);
+    } catch (e) {
+      // Revert control + preview to what's actually on the wire.
+      streamerCfg = { ...streamerCfg, rotation: appliedRot, hflip: appliedH, vflip: appliedV };
+      previewRot = 0; previewFlipH = false; previewFlipV = false;
+      orient_message = 'error';
+      setTimeout(() => (orient_message = ''), 3000);
+    } finally {
+      orient_switching = false;
+    }
+  }
+  const rotateBy = (delta: number) => applyOrientation({ rotation: appliedRot + delta });
+  const toggleFlipH = () => applyOrientation({ hflip: !appliedH });
+  const toggleFlipV = () => applyOrientation({ vflip: !appliedV });
+
+  async function onSourceChange(ev: Event) {
+    const select = ev.target as HTMLSelectElement;
+    const src = select.value;
+    if (!src || src === streamerCfg?.source) return;
+    source_switching = true;
+    source_message = `→ ${sourceLabel(src)}…`;
+    try {
+      await api.setStreamerSource(src);
+      if (streamerCfg) streamerCfg = { ...streamerCfg, source: src };
+      await refreshState();
+      source_message = `view: ${sourceLabel(src)}`;
+      setTimeout(() => (source_message = ''), 3000);
+    } catch (e: any) {
+      source_message = 'error';
+      if (streamerCfg) select.value = streamerCfg.source;
+    } finally {
+      source_switching = false;
+    }
+  }
+
+  async function onWebcamChange(ev: Event) {
+    const select = ev.target as HTMLSelectElement;
+    const src = select.value; // off | camera-csi | hdmi-csi | cam-link-usb
+    const cur = webcamCfg?.enabled ? webcamCfg.source : 'off';
+    if (src === cur) return;
+    const msg = src === 'off'
+      ? 'Disable the USB webcam?\n\nThe USB gadget re-enumerates on the target (~1s blip).'
+      : `Expose "${sourceLabel(src)}" to the target as a USB webcam?\n\n` +
+        `The USB gadget re-enumerates (~1s blip). Avoid using the same source as the console view.`;
+    if (!confirm(msg)) { select.value = cur; return; }
+    webcam_switching = true;
+    webcam_message = src === 'off' ? 'disabling…' : `→ webcam ${sourceLabel(src)}…`;
+    try {
+      await api.setWebcam(src);
+      if (webcamCfg) webcamCfg = {
+        ...webcamCfg, enabled: src !== 'off',
+        source: src === 'off' ? webcamCfg.source : src,
+      };
+      webcam_message = src === 'off' ? 'webcam off' : `webcam: ${sourceLabel(src)}`;
+      setTimeout(() => (webcam_message = ''), 4000);
+    } catch (e: any) {
+      webcam_message = 'error';
+      select.value = cur;
+    } finally {
+      webcam_switching = false;
+    }
+  }
 </script>
 
 <div class="h-full flex flex-col"
@@ -849,6 +1034,48 @@
             {state.mode.resolution} · {state.mode.format} · {state.captured_fps} fps
           </span>
         {/if}
+        {#if streamerCfg && streamerCfg.available_sources.length > 1}
+          <label class="hidden md:flex items-center gap-1 text-xs font-mono text-zinc-400"
+                 title="Which video source this console shows">
+            <select value={streamerCfg.source} on:change={onSourceChange} disabled={source_switching}
+                    class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5 text-cursed-300
+                           focus:outline-none focus:ring-1 focus:ring-cursed-500
+                           disabled:opacity-50 disabled:cursor-wait">
+              {#each streamerCfg.available_sources as s}
+                <option value={s}>{sourceLabel(s)}</option>
+              {/each}
+            </select>
+          </label>
+          {#if source_message}
+            <span class="hidden md:inline text-xs font-mono text-zinc-500">{source_message}</span>
+          {/if}
+        {/if}
+        {#if streamerCfg}
+          <!-- Camera orientation: rotate ±90°, reset, and mirror H/V. Server-side
+               (the whole pipeline rotates), so it applies to the live view,
+               snapshots, recordings, and the vision tap. Shown on every Orb
+               regardless of source count — a camera mount is often turned. -->
+          <div class="hidden md:flex items-center gap-0.5 text-xs font-mono text-zinc-400"
+               title="Rotate / flip the camera view — applies to the live stream, snapshots, recordings & vision">
+            <button class={orientBtn} on:click={() => rotateBy(-90)} disabled={orient_switching}
+                    title="Rotate left 90°" aria-label="Rotate left 90 degrees">↺</button>
+            <button class="{orientBtn} {(streamerCfg.rotation ?? 0) !== 0 ? 'text-cursed-200' : ''}"
+                    on:click={() => applyOrientation({ rotation: 0, hflip: false, vflip: false })}
+                    disabled={orient_switching}
+                    title="Reset orientation to 0°">{streamerCfg.rotation ?? 0}°</button>
+            <button class={orientBtn} on:click={() => rotateBy(90)} disabled={orient_switching}
+                    title="Rotate right 90°" aria-label="Rotate right 90 degrees">↻</button>
+            <button class="{orientBtn} {streamerCfg.hflip ? 'ring-1 ring-cursed-500 bg-cursed-900/40 text-cursed-100' : ''}"
+                    on:click={toggleFlipH} disabled={orient_switching}
+                    title="Mirror horizontally" aria-label="Mirror horizontally">⇆</button>
+            <button class="{orientBtn} {streamerCfg.vflip ? 'ring-1 ring-cursed-500 bg-cursed-900/40 text-cursed-100' : ''}"
+                    on:click={toggleFlipV} disabled={orient_switching}
+                    title="Mirror vertically" aria-label="Mirror vertically">⇅</button>
+          </div>
+          {#if orient_message}
+            <span class="hidden md:inline text-xs font-mono text-zinc-500">{orient_message}</span>
+          {/if}
+        {/if}
         {#if vpnOn}
           <a href="/network" class="pill-net hidden sm:inline-flex" title="Click to manage VPN">
             <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
@@ -862,6 +1089,22 @@
             <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
             DNSCrypt
           </a>
+        {/if}
+        {#if batteryPct != null}
+          <!-- Battery meter — UPS HAT (E). SVG body fills proportionally + colors
+               by charge; ⚡ when charging. Tooltip carries voltage + runtime. -->
+          <span class="inline-flex items-center gap-1 font-mono text-xs {batteryColor}"
+                title={batteryTip} aria-label={batteryTip}>
+            <svg viewBox="0 0 28 14" class="w-6 h-3.5" fill="none" aria-hidden="true">
+              <rect x="0.5" y="0.5" width="23" height="13" rx="2.5"
+                    stroke="currentColor" stroke-width="1" opacity="0.7"/>
+              <rect x="24.5" y="4.5" width="2.5" height="5" rx="1" fill="currentColor" opacity="0.7"/>
+              <rect x="2" y="2" height="10" rx="1" fill="currentColor"
+                    width={Math.max(1.5, 20 * (batteryPct ?? 0) / 100)}/>
+            </svg>
+            <span>{batteryPct}%</span>
+            {#if batteryCharging}<span aria-hidden="true">⚡</span>{/if}
+          </span>
         {/if}
       </div>
       <!-- Right side of row 1: HID persona + mobile hamburger. -->
@@ -885,6 +1128,26 @@
           </label>
           {#if persona_message}
             <span class="hidden lg:inline text-xs font-mono text-zinc-500">{persona_message}</span>
+          {/if}
+        {/if}
+        {#if webcamCfg && webcamCfg.supported && webcamCfg.available_sources.length > 0}
+          <label class="hidden lg:flex items-center gap-1.5 text-xs font-mono text-cursed-400/80"
+                 title="Expose a video source to the target host as a USB webcam">
+            CAM:
+            <select value={webcamCfg.enabled ? webcamCfg.source : 'off'}
+                    on:change={onWebcamChange} disabled={webcam_switching}
+                    class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5 text-cursed-300
+                           focus:outline-none focus:ring-1 focus:ring-cursed-500
+                           disabled:opacity-50 disabled:cursor-wait"
+                    title="Which video source is passed through USB to the target as a webcam">
+              <option value="off">off</option>
+              {#each webcamCfg.available_sources as s}
+                <option value={s}>{sourceLabel(s)}</option>
+              {/each}
+            </select>
+          </label>
+          {#if webcam_message}
+            <span class="hidden lg:inline text-xs font-mono text-zinc-500">{webcam_message}</span>
           {/if}
         {/if}
         <!-- Hamburger: shown below lg, opens the mobile dropdown. -->
@@ -1182,16 +1445,24 @@
       on:touchcancel={onTouchEnd}
       role="application"
     >
-      {#if useH264}
-        <H264Canvas url={ws_url} on:fallback={() => (h264FellBack = true)} />
-      {:else}
-        <img
-          src={stream_url}
-          alt="target screen"
-          class="w-full h-full object-contain select-none pointer-events-none"
-          draggable="false"
-        />
-      {/if}
+      <!-- Inner display-only wrapper carrying the transient rotation PREVIEW.
+           The transform lives here, NOT on the input-capture div above, so the
+           mouse/touch coordinate frame is never rotated. orientPreviewStyle is
+           '' at steady state (layout-neutral) and only set during the ~1-2s
+           streamer restart, then self-clears once the truly-rotated server
+           stream lands. -->
+      <div class="w-full h-full" style={orientPreviewStyle}>
+        {#if useH264}
+          <H264Canvas url={ws_url} on:fallback={() => (h264FellBack = true)} />
+        {:else}
+          <img
+            src={stream_url}
+            alt="target screen"
+            class="w-full h-full object-contain select-none pointer-events-none"
+            draggable="false"
+          />
+        {/if}
+      </div>
     </div>
 
     <!-- Hidden text input parked at top-left as a 1px transparent target.

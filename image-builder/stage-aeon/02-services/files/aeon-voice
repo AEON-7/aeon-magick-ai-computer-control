@@ -1,0 +1,258 @@
+#!/bin/bash
+# aeon-voice — the ONE file that installs + probes the BrainCraft HAT's voice /
+# display stack on demand. The supervisor's braincraft.rs shells out here (the
+# stack is NOT baked, so a fresh image has no sherpa-onnx/models/ST7789 libs and
+# the aeon-braincraft daemon idles harmlessly until this runs). Mirrors aeon-hailo:
+# all the messy probing/downloading lives in one place + emits a clean JSON or
+# 'PHASE <name> <pct>' progress.
+#
+# v109: the voice stack is now sherpa-onnx (k2-fsa) — ONE CPU runtime serving
+# BOTH text-to-speech (Kokoro-82M, current best lightweight neural TTS) AND
+# speech-to-text (Whisper base.en). This replaces the old piper(TTS)+vosk(ASR)
+# pair. The LLM runs on the Hailo NPU, so the CPU is free for TTS+ASR; sherpa-onnx
+# ships a prebuilt cp313 aarch64 wheel, so the runtime is a fast binary pip install
+# on Trixie/Python 3.13 (no compile).
+#
+# Subcommands (each prints a single JSON object to stdout, except install):
+#   status   installed/sherpa/kokoro/whisper/display_lib/audio booleans + models
+#   install  apt/pip the display+audio+gpio deps, pip sherpa-onnx, download the
+#            Kokoro TTS + Whisper ASR models, writing 'PHASE <name> <pct>' lines
+#            to /run/aeon/voice-install.log
+#   stats    runtime info — loaded models + disk used (canned when absent)
+#
+# Design rules (same as aeon-hailo):
+#   * set -u everywhere; no jq — JSON is assembled with python3 (always on the
+#     image) so quoting/escaping is correct.
+#   * EVERY probe degrades to VALID, honest all-false JSON when a piece is absent
+#     so the device-free web scaffold renders cleanly (installed:false, …).
+#   * Downloads trust GitHub's TLS cert — the SAME model as the dnscrypt-proxy
+#     binary fetch in stage-aeon/01-base/00-run.sh (no extra signing key).
+#   * install logs WARN + continues where a step is non-fatal, but exits non-zero
+#     on a hard failure so the supervisor marks the install failed. Ends 'PHASE done 100'.
+set -u
+
+RUN_DIR=/run/aeon
+INSTALL_LOG="$RUN_DIR/voice-install.log"
+VOICE_DIR=/usr/share/aeon/voice          # sherpa-onnx models live here
+KOKORO_DIR="$VOICE_DIR/kokoro"           # Kokoro TTS model (model.onnx + voices.bin …)
+WHISPER_DIR="$VOICE_DIR/whisper"         # Whisper ASR model (encoder/decoder/tokens)
+
+# Pinned upstream model artefacts (trust = GitHub TLS, like dnscrypt-proxy).
+# Kokoro-82M — multi-voice English neural TTS, ~lightweight, runs real-time on
+# a Pi 5 CPU. The tarball unpacks model.onnx + voices.bin + tokens.txt + the
+# espeak-ng-data/ phonemiser dir.
+KOKORO_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"
+KOKORO_PKG="kokoro-en-v0_19"
+# Whisper base.en — accurate offline English STT. The tarball unpacks
+# <name>-encoder[.int8].onnx + <name>-decoder[.int8].onnx + <name>-tokens.txt.
+# (tiny.en is lighter if CPU is tight; base.en is the accuracy sweet spot here.)
+WHISPER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.en.tar.bz2"
+WHISPER_PKG="sherpa-onnx-whisper-base.en"
+
+mkdir -p "$RUN_DIR" "$KOKORO_DIR" "$WHISPER_DIR" 2>/dev/null || true
+
+log() { echo "aeon-voice: $*" >&2; }
+
+# ── presence probes ───────────────────────────────────────────────────────────
+# sherpa-onnx: the unified CPU runtime the daemon imports for BOTH TTS + ASR.
+have_sherpa() { python3 -c 'import sherpa_onnx' >/dev/null 2>&1; }
+
+# kokoro: the TTS model files the daemon's OfflineTts loads.
+have_kokoro() {
+    [ -f "$KOKORO_DIR/model.onnx" ] && [ -f "$KOKORO_DIR/tokens.txt" ] && return 0
+    return 1
+}
+
+# whisper: the ASR encoder/decoder/tokens the daemon's OfflineRecognizer loads.
+have_whisper() {
+    ls "$WHISPER_DIR"/*encoder*.onnx >/dev/null 2>&1 \
+        && ls "$WHISPER_DIR"/*decoder*.onnx >/dev/null 2>&1 \
+        && ls "$WHISPER_DIR"/*tokens*.txt   >/dev/null 2>&1
+}
+
+# display_lib: the ST7789 driver chain the daemon's Display class imports.
+have_display_lib() {
+    python3 -c 'import st7789, spidev, numpy; from PIL import Image' >/dev/null 2>&1
+}
+
+# audio: alsa-utils present (aplay/arecord) — the TTS playback + mic capture path.
+have_audio() {
+    command -v aplay >/dev/null 2>&1 && command -v arecord >/dev/null 2>&1
+}
+
+# The Kokoro voice package name reported in status.
+kokoro_voice_name() {
+    [ -f "$KOKORO_DIR/model.onnx" ] && echo "$KOKORO_PKG" || true
+}
+
+# The Whisper model name (derived from the encoder filename prefix) for status.
+whisper_model_name() {
+    local f
+    f="$(ls "$WHISPER_DIR"/*encoder*.onnx 2>/dev/null | head -n1)"
+    [ -n "$f" ] && basename "$f" | sed 's/-encoder.*//' || true
+}
+
+# ── status ────────────────────────────────────────────────────────────────────
+# installed = the core pieces present (sherpa runtime + Kokoro + Whisper + display
+# lib + audio). Always valid JSON, every probe degrading to false rather than
+# erroring.
+cmd_status() {
+    local sherpa kokoro whisper disp audio vmodel amodel installed
+    have_sherpa      && sherpa=true  || sherpa=false
+    have_kokoro      && kokoro=true  || kokoro=false
+    have_whisper     && whisper=true || whisper=false
+    have_display_lib && disp=true    || disp=false
+    have_audio       && audio=true   || audio=false
+    vmodel="$(kokoro_voice_name)"
+    amodel="$(whisper_model_name)"
+    if [ "$sherpa" = true ] && [ "$kokoro" = true ] && [ "$whisper" = true ] \
+       && [ "$disp" = true ] && [ "$audio" = true ]; then
+        installed=true
+    else
+        installed=false
+    fi
+    python3 - "$installed" "$sherpa" "$kokoro" "$whisper" "$disp" "$audio" "$vmodel" "$amodel" \
+        <<'PY' 2>/dev/null || echo '{"installed":false,"sherpa":false,"kokoro":false,"whisper":false,"display_lib":false,"audio":false,"voice_model":null,"asr_model":null}'
+import json, sys
+a = sys.argv
+def b(x): return x == "true"
+def s(x): return x if x else None
+print(json.dumps({
+    "installed":   b(a[1]),
+    "sherpa":      b(a[2]),
+    "kokoro":      b(a[3]),
+    "whisper":     b(a[4]),
+    "display_lib": b(a[5]),
+    "audio":       b(a[6]),
+    "voice_model": s(a[7]),
+    "asr_model":   s(a[8]),
+}))
+PY
+}
+
+# ── install ───────────────────────────────────────────────────────────────────
+# Blocking (the supervisor runs it non-blocking via a task + tails $INSTALL_LOG).
+# Writes 'PHASE <name> <pct>' lines parsed by the DeployStatus poller.
+phase() { echo "PHASE $1 $2" >> "$INSTALL_LOG"; echo "aeon-voice: phase $1 $2%" >&2; }
+
+cmd_install() {
+    : > "$INSTALL_LOG" 2>/dev/null || true
+    mkdir -p "$KOKORO_DIR" "$WHISPER_DIR" 2>/dev/null || true
+
+    # ── system deps: display + audio + gpio + archive tools (system packages).
+    phase apt 10
+    if ! apt-get update >>"$INSTALL_LOG" 2>&1; then
+        log "apt-get update failed (continuing — deps may already be cached)"
+        echo "WARN: apt-get update failed" >> "$INSTALL_LOG"
+    fi
+    # python3-spidev/pil/numpy + libgpiod for the display+buttons; alsa-utils for
+    # playback/capture; bzip2 for the .tar.bz2 model archives. Non-fatal: we fall
+    # back to pip for the Python-only bits below.
+    apt-get install -y --no-install-recommends \
+        python3-spidev python3-pil python3-numpy \
+        python3-libgpiod \
+        alsa-utils bzip2 wget ca-certificates >>"$INSTALL_LOG" 2>&1 \
+        || echo "WARN: some apt display/audio deps unavailable — will try pip" >> "$INSTALL_LOG"
+    # The libgpiod C library SONAME differs by release (Bookworm: libgpiod2,
+    # Trixie: libgpiod3). python3-libgpiod pulls the right one transitively; also
+    # install it by name (3 then 2) so it's present whichever release this is.
+    apt-get install -y libgpiod3 >>"$INSTALL_LOG" 2>&1 \
+        || apt-get install -y libgpiod2 >>"$INSTALL_LOG" 2>&1 || true
+
+    # ── Python runtime: sherpa-onnx (TTS+ASR) + the ST7789 display driver.
+    # sherpa-onnx publishes a prebuilt cp313 aarch64 manylinux wheel, so this is
+    # a fast binary install (no compile) on Trixie/Python 3.13.
+    # --break-system-packages: Pi OS (Bookworm AND Trixie) marks the system env
+    # externally-managed (PEP 668); this is a dedicated appliance, so a system-wide
+    # install is fine. The bare-pip3 fallback always fails under PEP 668 (kept as a
+    # harmless last resort for a non-managed env).
+    phase pip 30
+    pip3 install --break-system-packages sherpa-onnx st7789 >>"$INSTALL_LOG" 2>&1 \
+        || pip3 install sherpa-onnx st7789 >>"$INSTALL_LOG" 2>&1 \
+        || echo "WARN: pip sherpa-onnx/st7789 install failed — TTS/ASR/display may be degraded" >> "$INSTALL_LOG"
+
+    # ── Kokoro TTS model (sherpa-onnx tts-models release).
+    phase kokoro 55
+    if have_kokoro; then
+        log "kokoro model already present; skipping download"
+    elif curl -fsSL --retry 3 "$KOKORO_URL" -o /tmp/kokoro.tar.bz2 >>"$INSTALL_LOG" 2>&1; then
+        if tar -xjf /tmp/kokoro.tar.bz2 -C "$VOICE_DIR" >>"$INSTALL_LOG" 2>&1; then
+            # Flatten <pkg>/ into KOKORO_DIR so KOKORO_DIR/model.onnx is the model.
+            if [ -d "$VOICE_DIR/$KOKORO_PKG" ]; then
+                cp -a "$VOICE_DIR/$KOKORO_PKG/." "$KOKORO_DIR/" 2>/dev/null || true
+                rm -rf "$VOICE_DIR/$KOKORO_PKG" 2>/dev/null || true
+            fi
+        else
+            phase failed 100; log "kokoro tarball extract failed"; rm -f /tmp/kokoro.tar.bz2; return 1
+        fi
+        rm -f /tmp/kokoro.tar.bz2
+    else
+        phase failed 100; log "kokoro download failed ($KOKORO_URL)"; return 1
+    fi
+
+    # ── Whisper ASR model (sherpa-onnx asr-models release).
+    phase whisper 78
+    if have_whisper; then
+        log "whisper model already present; skipping download"
+    elif curl -fsSL --retry 3 "$WHISPER_URL" -o /tmp/whisper.tar.bz2 >>"$INSTALL_LOG" 2>&1; then
+        if tar -xjf /tmp/whisper.tar.bz2 -C "$VOICE_DIR" >>"$INSTALL_LOG" 2>&1; then
+            if [ -d "$VOICE_DIR/$WHISPER_PKG" ]; then
+                cp -a "$VOICE_DIR/$WHISPER_PKG/." "$WHISPER_DIR/" 2>/dev/null || true
+                rm -rf "$VOICE_DIR/$WHISPER_PKG" 2>/dev/null || true
+            fi
+        else
+            echo "WARN: whisper tarball extract failed — ASR will be degraded" >> "$INSTALL_LOG"
+        fi
+        rm -f /tmp/whisper.tar.bz2
+    else
+        echo "WARN: whisper download failed — ASR will be degraded" >> "$INSTALL_LOG"
+    fi
+
+    # A hard failure is one where neither TTS nor the runtime can work — those are
+    # the load-bearing pieces. A missing Whisper model already logged a WARN (the
+    # device can still speak + use hosted ASR).
+    phase verify 95
+    if ! have_sherpa; then
+        phase failed 100; log "sherpa-onnx runtime missing after install"; return 1
+    fi
+    if ! have_kokoro; then
+        phase failed 100; log "kokoro TTS model missing after install"; return 1
+    fi
+
+    phase done 100
+    log "install complete — sherpa-onnx + Kokoro TTS + Whisper ASR in $VOICE_DIR"
+    return 0
+}
+
+# ── stats ─────────────────────────────────────────────────────────────────────
+# Runtime info: which models are loaded + disk used by the voice tree. Canned
+# (zeros / nulls) when the tree is absent, so the scaffold renders.
+cmd_stats() {
+    local du_kb vmodel amodel
+    du_kb="$(du -sk "$VOICE_DIR" 2>/dev/null | awk '{print $1}')"
+    du_kb="${du_kb:-0}"
+    vmodel="$(kokoro_voice_name)"
+    amodel="$(whisper_model_name)"
+    python3 - "$du_kb" "$vmodel" "$amodel" "$(have_kokoro && echo true || echo false)" \
+        "$(have_whisper && echo true || echo false)" \
+        <<'PY' 2>/dev/null || echo '{"disk_used_mb":0,"voice_model":null,"asr_model":null,"kokoro":false,"whisper":false}'
+import json, sys
+a = sys.argv
+def s(x): return x if x else None
+print(json.dumps({
+    "disk_used_mb": round(int(a[1]) / 1024, 1),
+    "voice_model":  s(a[2]),
+    "asr_model":    s(a[3]),
+    "kokoro":       a[4] == "true",
+    "whisper":      a[5] == "true",
+}))
+PY
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    status)  cmd_status ;;
+    install) cmd_install ;;
+    stats)   cmd_stats ;;
+    *) echo "usage: aeon-voice {status|install|stats}" >&2; exit 1 ;;
+esac

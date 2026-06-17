@@ -1,0 +1,20 @@
+[Unit]
+Description=Aeon Magick — select Pi 5 CSI camera sensor from /boot/firmware/aeon-camera
+Documentation=file:///usr/local/bin/aeon-camera-select
+# Needs the FAT /boot/firmware mounted (config.txt + the flag live there). Runs
+# BEFORE anything opens the camera, so a sensor change reboots cleanly instead of
+# yanking a live capture. No-op (exit 0) when the flag is absent or already matches.
+After=local-fs.target
+Before=aeon-streamer.service aeon-hdmi-csi.service
+ConditionPathExists=/boot/firmware/config.txt
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/aeon-camera-select
+# On a sensor change the script calls `systemctl reboot` mid-start; treat the
+# resulting non-zero (1) and the clean (0) paths as success so nothing flaps.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

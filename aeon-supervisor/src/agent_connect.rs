@@ -409,6 +409,35 @@ pub async fn tailscale_devices() -> impl IntoResponse {
     Json(json!({"ok": true, "up": up, "devices": devices}))
 }
 
+/// Best-effort: the IPv4 Tailscale addresses of all PEER nodes (excluding
+/// self) on this Pi's tailnet. Used by the fleet roster to auto-discover other
+/// Orbs over the tailnet in addition to the static seed list. Returns an empty
+/// vec if Tailscale is down/unavailable — never errors.
+pub fn tailscale_peer_ipv4s() -> Vec<String> {
+    let out = Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .or_else(|_| Command::new("/usr/bin/tailscale").args(["status", "--json"]).output());
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let mut addrs = Vec::new();
+    if let Some(peers) = v.get("Peer").and_then(|x| x.as_object()) {
+        for node in peers.values() {
+            if let Some(d) = parse_ts_node(node, false) {
+                if !d.address.is_empty() {
+                    addrs.push(d.address);
+                }
+            }
+        }
+    }
+    addrs
+}
+
 /// GET /agent/systems/:id/metrics — a live SSH-gathered snapshot of a system
 /// (host, load, mem, GPUs, docker containers). The per-agent roster (pantheon)
 /// is a separate, gateway-specific integration layered on top later.

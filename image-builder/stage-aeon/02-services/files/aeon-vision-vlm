@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""aeon-vision-vlm — on-demand "describe the screen" service backed by Qwen2-VL
+on the Hailo AI HAT+ (Hailo-10H NPU). The supervisor's `describe_screen` MCP tool
++ GET/POST /api/vision/describe proxy to this over the unix socket below.
+
+Why a tiny service (not a one-shot): loading the 2.2 GB VLM onto the NPU takes
+~10 s. We load it LAZILY on the first /describe and KEEP it resident so repeat
+calls are ~3 s — then IDLE-UNLOAD it after a quiet period so the NPU's single
+GenAI slot is handed back to the local LLM (hailo-ollama). So describe_screen is
+a good NPU citizen: it borrows the slot for a describe burst, then releases it.
+
+NPU contention (Hailo-10H holds ONE GenAI model at a time): if the local LLM is
+RESIDENT when /describe is called, the VLM load fails and we return a clear,
+actionable error. In the normal (online) case the external agent is the brain
+and the local LLM is idle, so the slot is free and describe_screen just works.
+
+Endpoints (unix socket /run/aeon/vision-vlm.sock, JSON):
+  POST /describe  {prompt?, max_tokens?}  -> {ok, description, gen_ms}
+  GET  /status                            -> {ok, loaded, model, idle_unload_s}
+
+Guarded so the image is harmless without the HAT: the systemd unit's
+ConditionPathExists gates it on /dev/hailo0 + the VLM .hef, and every hailo
+import is lazy (only on the first /describe), so the listener itself is cheap.
+"""
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+import http.server
+import socketserver
+
+SOCK = os.environ.get("AEON_VLM_SOCK", "/run/aeon/vision-vlm.sock")
+STREAMER_SOCK = os.environ.get("AEON_STREAMER_SOCK", "/run/aeon/streamer.sock")
+VLM_HEF = os.environ.get("AEON_VLM_HEF", "/usr/share/aeon/hailo/hef/qwen2-vl-2b-instruct.hef")
+IDLE_UNLOAD_S = int(os.environ.get("AEON_VLM_IDLE_S", "180"))
+FRAME = 336  # Qwen2-VL .hef input is 336x336x3 RGB uint8
+
+_lock = threading.Lock()
+_vlm = None
+_vdev = None
+_last = 0.0
+
+PROMPT_TMPL = (
+    "<|im_start|>system\nYou are a precise visual assistant.<|im_end|>\n"
+    "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{q}<|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+DEFAULT_Q = ("Describe what is on this screen concisely — the app/window, key visible "
+             "text, and the current state.")
+
+
+def _log(m):
+    sys.stderr.write("aeon-vision-vlm: %s\n" % m)
+
+
+def grab_frame():
+    """Pull one JPEG from the streamer socket → 336x336 RGB uint8 (VLMs want RGB)."""
+    import numpy as np
+    import cv2
+    try:
+        out = subprocess.run(
+            ["curl", "-s", "--max-time", "4", "--unix-socket", STREAMER_SOCK,
+             "http://localhost/snapshot"],
+            capture_output=True, timeout=6,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    data = out.stdout
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        return None
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)  # BGR
+    if img is None:
+        return None
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return cv2.resize(rgb, (FRAME, FRAME)).astype(np.uint8)
+
+
+def _load_vlm():
+    global _vlm, _vdev
+    if _vlm is not None:
+        return _vlm
+    if not os.path.isfile(VLM_HEF):
+        raise RuntimeError("VLM .hef not installed: %s (deploy 'qwen2-vl-2b-instruct')" % VLM_HEF)
+    from hailo_platform import VDevice
+    from hailo_platform.genai import VLM
+    t0 = time.time()
+    _vdev = VDevice()
+    _vlm = VLM(_vdev, VLM_HEF)   # raises if the NPU GenAI slot is held by the LLM
+    _log("VLM loaded in %.1fs" % (time.time() - t0))
+    return _vlm
+
+
+def _unload_vlm():
+    global _vlm, _vdev
+    for obj, name in ((_vlm, "vlm"), (_vdev, "vdev")):
+        if obj is not None:
+            try:
+                obj.release()
+            except Exception:
+                pass
+    _vlm = None
+    _vdev = None
+    _log("VLM unloaded (idle) — NPU GenAI slot released to the LLM")
+
+
+def describe(prompt=None, max_tokens=96):
+    global _last
+    with _lock:
+        frame = grab_frame()
+        if frame is None:
+            return {"ok": False, "err": "no frame from the streamer (is the capture online?)"}
+        try:
+            vlm = _load_vlm()
+        except Exception as e:
+            return {"ok": False, "err": (
+                "VLM unavailable — the NPU GenAI slot is likely held by the local LLM. "
+                "Stop aeon-hailo-ollama (or unload its model) to use describe_screen. (%s)" % e)}
+        q = (prompt or DEFAULT_Q).strip() or DEFAULT_Q
+        try:
+            mt = max(8, min(512, int(max_tokens)))
+        except (TypeError, ValueError):
+            mt = 96
+        t0 = time.time()
+        try:
+            out = vlm.generate_all(PROMPT_TMPL.format(q=q), [frame], max_generated_tokens=mt)
+        except Exception as e:
+            return {"ok": False, "err": "VLM generate failed: %s" % e}
+        _last = time.time()
+        text = out.split("<|im_end|>")[0].strip() if isinstance(out, str) else str(out)
+        return {"ok": True, "description": text, "model": os.path.basename(VLM_HEF),
+                "gen_ms": int((time.time() - t0) * 1000)}
+
+
+def _idle_watch():
+    while True:
+        time.sleep(15)
+        with _lock:
+            if _vlm is not None and _last and (time.time() - _last) > IDLE_UNLOAD_S:
+                _unload_vlm()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/status":
+            self._send({"ok": True, "loaded": _vlm is not None,
+                        "model": os.path.basename(VLM_HEF), "idle_unload_s": IDLE_UNLOAD_S})
+        else:
+            self._send({"ok": False, "err": "not found"}, 404)
+
+    def do_POST(self):
+        if self.path != "/describe":
+            return self._send({"ok": False, "err": "not found"}, 404)
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n) if n else b""
+        try:
+            req = json.loads(raw) if raw else {}
+        except Exception:
+            req = {}
+        self._send(describe(req.get("prompt"), req.get("max_tokens", 96)))
+
+
+class UnixHTTPServer(socketserver.UnixStreamServer):
+    # BaseHTTPRequestHandler expects a (host, port) client_address tuple.
+    def get_request(self):
+        req, _ = super().get_request()
+        return req, ("local", 0)
+
+
+def main():
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _log("could not remove stale socket %s: %s" % (SOCK, e))
+    srv = UnixHTTPServer(SOCK, Handler)
+    try:
+        os.chmod(SOCK, 0o660)
+    except OSError:
+        pass
+    threading.Thread(target=_idle_watch, daemon=True).start()
+    _log("listening on %s (VLM lazy-loads on first /describe; idle-unload %ss)" % (SOCK, IDLE_UNLOAD_S))
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

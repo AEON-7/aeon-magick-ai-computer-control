@@ -1,0 +1,20 @@
+# Hailo-10H AI accelerator (Raspberry Pi AI HAT+ 2) — on-device LLM / VLM / STT
+# / vision / OCR inference.
+#
+# The supervisor's `hailo.rs` owns this file; the device-specific heavy lifting
+# (apt install, hailo-ollama, .hef downloads, the memory ledger, telemetry)
+# lives in /usr/local/bin/aeon-hailo. The curated model library it offers is
+# /usr/share/aeon/hailo/library.json (usable budget ~5500 MB of HAT RAM).
+#
+# OFF by default. The HAT runtime is NOT baked in — flip enabled=true, then use
+# the Hailo tab (POST /api/hailo/install, ADMIN-gated) to apt-install the stack
+# on-device once the AI HAT+ 2 enumerates. A reboot is required after install.
+
+# Master switch. When false, /api/hailo/* still reports honest status
+# (device_present:false, loaded:[]) but install/deploy are gated off.
+enabled = false
+
+# Model id (from library.json) to auto-load on boot once the runtime is
+# installed and the device is present — e.g. "llama3.2-1b-instruct". Empty = load
+# nothing automatically (deploy models on demand from the Hailo tab).
+autoload = ""

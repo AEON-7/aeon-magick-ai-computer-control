@@ -135,6 +135,13 @@ pub fn setup(cfg: &Config, p: &PersonaDescriptors) -> Result<()> {
         add_mass_storage_function(&root, &config_dir, ms)?;
     }
 
+    // ── Optional UVC webcam function — Cam0 camera exposed as a USB webcam ──
+    // Linked LAST (after HID/NCM/mass-storage) so existing /dev/hidg0..N
+    // numbering doesn't shift. Must be fully wired before the UDC bind below.
+    if let Some(uvc) = &p.uvc {
+        add_uvc_function(&root, &config_dir, uvc)?;
+    }
+
     // ── Bind to the UDC (USB Device Controller) — this enables the gadget ──
     write_str(&root.join("UDC"), &cfg.udc)?;
     info!(udc = %cfg.udc, "gadget bound");
@@ -210,6 +217,99 @@ fn add_ecm_function(
     Ok(())
 }
 
+/// Create a configfs symlink if the link path doesn't already exist.
+fn add_link(target: &Path, link_path: &Path) -> Result<()> {
+    if !link_path.exists() {
+        unix::fs::symlink(target, link_path)
+            .with_context(|| format!("symlink {} → {}", link_path.display(), target.display()))?;
+    }
+    Ok(())
+}
+
+fn add_uvc_function(
+    root: &Path,
+    config_dir: &Path,
+    uvc: &crate::persona::UvcConfig,
+) -> Result<()> {
+    // UVC (webcam) gadget function. The kernel's f_uvc auto-creates the
+    // control/ + streaming/ groups (incl. their class/{fs,hs,ss} dirs and the
+    // mjpeg/uncompressed format groups); we create the header + frame
+    // INSTANCES and wire the class symlinks. After UDC bind a /dev/videoN
+    // GADGET node appears, which the separate aeon-uvc (uvc-gadget) daemon
+    // feeds from the Cam0 IMX477.
+    //
+    // CRITICAL: the entire tree — including the streaming header→format link —
+    // must be wired BEFORE this function is symlinked into configs/c.1. An
+    // incompletely described UVC function makes the WHOLE gadget fail to bind
+    // at the UDC write with -EINVAL. MJPEG-only by design: advertising
+    // multiple *formats* breaks macOS QuickTime/FaceTime; multiple frame
+    // *sizes* within one format is fine.
+    let f = root.join("functions/uvc.usb0");
+    mkdir(&f)?;
+
+    // Streaming endpoint knobs for dwc2 high-speed isochronous. maxburst is
+    // SuperSpeed-only (0 on HS); interval=1 = one iso packet per microframe.
+    write_str(&f.join("streaming_maxpacket"), &uvc.streaming_maxpacket.to_string())?;
+    write_str(&f.join("streaming_interval"), "1")?;
+    write_str(&f.join("streaming_maxburst"), "0")?;
+
+    // ── CONTROL: header instance + per-speed class links ──
+    mkdir(&f.join("control/header/h"))?;
+    add_link(&f.join("control/header/h"), &f.join("control/class/fs/h"))?;
+    add_link(&f.join("control/header/h"), &f.join("control/class/ss/h"))?;
+
+    // ── STREAMING: one MJPEG format with two frame sizes ──
+    // frame1 = the configured default (uvc.width×height); frame2 = a fixed
+    // 640×480 fallback. Created frame1-then-frame2 AND named so a lexical sort
+    // agrees, so bFrameIndex is deterministic (1 = default) on any kernel.
+    let intervals = uvc
+        .frame_intervals
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let m = f.join("streaming/mjpeg/m");
+
+    let frame1 = m.join("frame1");
+    mkdir(&frame1)?;
+    write_str(&frame1.join("wWidth"), &uvc.width.to_string())?;
+    write_str(&frame1.join("wHeight"), &uvc.height.to_string())?;
+    write_str(
+        &frame1.join("dwMaxVideoFrameBufferSize"),
+        &(uvc.width as u32 * uvc.height as u32 * 2).to_string(),
+    )?;
+    write_str(&frame1.join("dwMinBitRate"), "29491200")?;
+    write_str(&frame1.join("dwMaxBitRate"), "884736000")?;
+    write_str(&frame1.join("dwFrameInterval"), &intervals)?;
+
+    let frame2 = m.join("frame2");
+    mkdir(&frame2)?;
+    write_str(&frame2.join("wWidth"), "640")?;
+    write_str(&frame2.join("wHeight"), "480")?;
+    write_str(&frame2.join("dwMaxVideoFrameBufferSize"), &(640u32 * 480 * 2).to_string())?;
+    write_str(&frame2.join("dwMinBitRate"), "18432000")?;
+    write_str(&frame2.join("dwMaxBitRate"), "147456000")?;
+    write_str(&frame2.join("dwFrameInterval"), &intervals)?;
+
+    write_str(&m.join("bDefaultFrameIndex"), "1")?; // default to frame1
+
+    // ── STREAMING: header instance, header→format link FIRST, then class links ──
+    mkdir(&f.join("streaming/header/h"))?;
+    add_link(&m, &f.join("streaming/header/h/m"))?; // header → MJPEG format
+    add_link(&f.join("streaming/header/h"), &f.join("streaming/class/fs/h"))?;
+    add_link(&f.join("streaming/header/h"), &f.join("streaming/class/hs/h"))?; // REQUIRED on HS dwc2
+    add_link(&f.join("streaming/header/h"), &f.join("streaming/class/ss/h"))?;
+
+    // ── attach to the config LAST (the enabling symlink) ──
+    let link = config_dir.join("uvc.usb0");
+    if !link.exists() {
+        unix::fs::symlink(&f, &link)
+            .with_context(|| format!("symlink {} → {}", link.display(), f.display()))?;
+    }
+    info!(w = uvc.width, h = uvc.height, "added UVC (webcam) function");
+    Ok(())
+}
+
 pub fn teardown(cfg: &Config) -> Result<()> {
     let root: PathBuf = cfg.configfs_root.join(&cfg.gadget_name);
     if !root.exists() {
@@ -238,6 +338,40 @@ pub fn teardown(cfg: &Config) -> Result<()> {
             fs::remove_dir(p).ok();
         }
         fs::remove_dir(&configs_c1).ok();
+    }
+
+    // UVC function teardown (the generic functions loop below only does a
+    // non-recursive rmdir, which FAILS on uvc.usb0's deep control/streaming
+    // subtree — leaving a stale, attribute-locked function that breaks the
+    // next persona switch, exactly like the HID-strings bug). Remove the
+    // internal symlinks, then the instances deepest-first, then the function
+    // dir (the kernel tears down its auto-created group dirs on that rmdir),
+    // so the generic loop never sees uvc.usb0. The configs/c.1/uvc.usb0
+    // symlink was already removed by the symlink loop above.
+    let uvc = root.join("functions/uvc.usb0");
+    if uvc.exists() {
+        for l in [
+            "streaming/class/fs/h",
+            "streaming/class/hs/h",
+            "streaming/class/ss/h",
+            "streaming/header/h/m",
+            "control/class/fs/h",
+            "control/class/ss/h",
+        ] {
+            let _ = fs::remove_file(uvc.join(l));
+        }
+        for d in [
+            "streaming/mjpeg/m/frame1",
+            "streaming/mjpeg/m/frame2",
+            "streaming/mjpeg/m",
+            "streaming/header/h",
+            "control/header/h",
+        ] {
+            let _ = fs::remove_dir(uvc.join(d));
+        }
+        if let Err(e) = fs::remove_dir(&uvc) {
+            tracing::warn!(?e, "failed to remove uvc.usb0 function dir during teardown");
+        }
     }
 
     // Functions. Each HID function dir may contain a nested strings/<lang>

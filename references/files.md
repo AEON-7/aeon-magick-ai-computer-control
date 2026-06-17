@@ -4,7 +4,7 @@ Two related capabilities. A **file staging area** on the Pi
 (`/var/lib/aeon/files/`) that can be served to the target, and a **USB-CDROM
 ISO library** (`/var/lib/aeon/iso/`) for OS-install workflows. Load this when
 you need to move a file to/from the target or mount an install image. All calls
-assume `https://${AEON_HOST}/` with HTTP Basic `$AEON_USER:$AEON_PASSWD`.
+assume `https://${AEON_HOST}/` with a Bearer token `$AEON_TOKEN`.
 
 ## File staging
 
@@ -14,24 +14,24 @@ toggled via `/api/files/config`, human-set).
 
 ```bash
 # List staged files (name, size_bytes, modified_ms)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/files"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/files"
 
 # Upload a file — filename rides in the Content-Disposition header
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     -H 'Content-Disposition: attachment; filename="local-file.bin"' \
     --data-binary @local-file.bin \
     "https://$AEON_HOST/api/files/upload"
 
 # Download a staged file
-curl -sk -u "$AEON_USER:$AEON_PASSWD" \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
     "https://$AEON_HOST/api/files/local-file.bin" -o copy.bin
 
 # Delete one (idempotent)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X DELETE \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X DELETE \
     "https://$AEON_HOST/api/files/local-file.bin"
 
 # Read/inspect the target-facing-server config (enabled / port / allow_upload)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/files/config"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/files/config"
 ```
 
 `what` → a shared drop folder on the Pi. `why` → move a binary to the target
@@ -46,16 +46,16 @@ USB-CDROM device — the basis of OS-install workflows.
 
 ```bash
 # List ISOs + the currently-active slug + free disk
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/storage"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/storage"
 
 # Activate one (target sees a fresh CDROM insertion on next USB enumeration)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT \
     -H "Content-Type: application/json" \
     -d '{"slug": "ubuntu-24.04"}' \
     "https://$AEON_HOST/api/storage/active"
 
 # Eject (empty slug)
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT \
     -H "Content-Type: application/json" \
     -d '{"slug": ""}' \
     "https://$AEON_HOST/api/storage/active"

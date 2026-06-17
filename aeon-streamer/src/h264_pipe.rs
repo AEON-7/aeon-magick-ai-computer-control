@@ -106,9 +106,25 @@ pub async fn run(
 
             let nal_type = buf.get(nal_start).map(|b| b & 0x1F).unwrap_or(0);
 
-            // AU boundary: a new NAL after we already hold a VCL slice means
-            // the previous picture is complete (single-slice-per-frame).
-            if au_has_vcl {
+            // Is this a *continuation* slice of the picture we're already
+            // assembling? libx264 with sliced-threads (the `-tune zerolatency`
+            // low-latency path) splits ONE picture into multiple slices — first
+            // slice has first_mb_in_slice == 0, the rest have it > 0. In the
+            // H.264 slice header first_mb_in_slice is the leading ue(v), which is
+            // 0 iff the first slice-header byte's MSB is set (ue 0 == a single
+            // '1' bit). Treating each slice as its own access unit would (a) make
+            // captured_fps count slices not pictures — a 30fps 4-slice stream
+            // reads as 120fps — and (b) hand WebCodecs partial pictures. So we
+            // group all slices of a picture into ONE AU.
+            let is_vcl = nal_type == NAL_IDR || nal_type == NAL_NON_IDR;
+            let is_continuation_slice = is_vcl
+                && au_has_vcl
+                && buf.get(nal_start + 1).map(|b| b & 0x80 == 0).unwrap_or(false);
+
+            // AU boundary: a new NAL after we already hold a VCL slice means the
+            // previous picture is complete — UNLESS this is another slice of the
+            // SAME picture, which we append rather than flush.
+            if au_has_vcl && !is_continuation_slice {
                 flush_au(
                     &tx, &units_published, &au, au_is_idr, au_has_sps, au_has_pps,
                     &last_sps, &last_pps,

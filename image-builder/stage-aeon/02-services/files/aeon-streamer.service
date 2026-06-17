@@ -9,6 +9,13 @@ Type=simple
 # /var/lib/aeon is root-owned, so the leading `+` runs this as root
 # (ignoring User=aeon) to create + chown it before the daemon starts.
 ExecStartPre=+/usr/bin/install -d -o aeon -g aeon -m 0755 /var/lib/aeon/recordings
+# Self-heal the runtime socket + snapshot dirs to aeon ownership BEFORE start.
+# install -d re-applies owner/mode even on an existing dir, so if a root-running
+# unit ever re-owns /run/aeon (e.g. a stray RuntimeDirectory=aeon), the streamer
+# fixes it here instead of crash-looping on "can't write live.jpg.tmp". The `+`
+# runs these as root, overriding User=aeon.
+ExecStartPre=+/usr/bin/install -d -o aeon -g aeon -m 0755 /run/aeon
+ExecStartPre=+/usr/bin/install -d -o aeon -g aeon -m 0755 /run/aeon/snapshots
 ExecStart=/usr/local/bin/aeon-streamer --config /etc/aeon/streamer.toml
 Restart=on-failure
 RestartSec=2

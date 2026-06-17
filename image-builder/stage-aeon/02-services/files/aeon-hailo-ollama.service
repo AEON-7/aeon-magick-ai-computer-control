@@ -1,0 +1,24 @@
+[Unit]
+Description=Hailo GenAI server (hailo-ollama) — on-device LLM/VLM REST API on :8000
+Documentation=https://www.raspberrypi.com/documentation/computers/ai.html
+# Only meaningful once the Hailo-10H runtime + the GenAI model-zoo deb are
+# installed (button-driven) and the device has enumerated. The two conditions
+# make this a clean no-op on a Pi without the HAT, before the install, or on the
+# Hailo-8 (no generative stack) — so shipping it enabled is harmless.
+# NOTE: the hailo-ollama binary path is finalized on real hardware (Stage 7);
+# if the GenAI deb installs it somewhere other than /usr/bin, adjust ExecStart +
+# the ConditionPathExists to match (the condition keeps this safe meanwhile).
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/dev/hailo0
+ConditionPathExists=/usr/bin/hailo-ollama
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hailo-ollama
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

@@ -144,6 +144,10 @@ fn try_setup_persona(cfg: &config::Config) -> Result<()> {
         info!(iso = %ms.iso_path, "mass-storage CDROM enabled");
         desc.mass_storage = Some(ms);
     }
+    if let Some(uvc) = load_uvc_config() {
+        info!(w = uvc.width, h = uvc.height, "UVC webcam enabled (Cam0 → USB webcam)");
+        desc.uvc = Some(uvc);
+    }
     gadget::setup(cfg, &desc)
 }
 
@@ -253,4 +257,48 @@ fn load_mass_storage_config() -> Option<persona::MassStorageConfig> {
         return None;
     }
     Some(persona::MassStorageConfig { iso_path })
+}
+
+/// Read /etc/aeon/uvc.toml. Returns a UvcConfig if `enabled = true`, else None
+/// (no webcam function → the gadget stays HID/ethernet only). This only
+/// decides whether the gadget ADVERTISES a webcam to the host; the actual
+/// frames are pumped by the separate `aeon-uvc` (uvc-gadget) daemon, which
+/// opens the Cam0 IMX477 only while the host is streaming.
+///
+/// Schema (top-level keys):
+/// ```toml
+/// enabled = true
+/// width = 1280
+/// height = 720
+/// fps = 30
+/// streaming_maxpacket = 2048
+/// ```
+fn load_uvc_config() -> Option<persona::UvcConfig> {
+    let raw = std::fs::read_to_string("/etc/aeon/uvc.toml").ok()?;
+    let v: toml::Value = toml::from_str(&raw).ok()?;
+    if !v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let width = v.get("width").and_then(|x| x.as_integer()).unwrap_or(1280).clamp(2, 4096) as u16;
+    let height = v.get("height").and_then(|x| x.as_integer()).unwrap_or(720).clamp(2, 4096) as u16;
+    let fps = v.get("fps").and_then(|x| x.as_integer()).unwrap_or(30).clamp(1, 120) as u32;
+    // dwc2 (Pi 5 OTG) in USB-2.0 high-speed caps isochronous wMaxPacketSize at
+    // 1024 and has no high-bandwidth iso, so 2048/3072 endpoints never enable and
+    // the host can't start streaming (Windows: 0x80070006). Default to and clamp
+    // at 1024 so a stale uvc.toml can't re-break it.
+    let streaming_maxpacket =
+        v.get("streaming_maxpacket").and_then(|x| x.as_integer()).unwrap_or(1024).clamp(1, 1024) as u16;
+    // dwFrameInterval is in 100ns units (1s = 10_000_000). Advertise the
+    // configured fps, plus a 15fps fallback so a bandwidth-constrained host
+    // can negotiate a lighter rate.
+    let mut frame_intervals = vec![10_000_000u32 / fps.max(1)];
+    if fps > 15 {
+        frame_intervals.push(10_000_000 / 15);
+    }
+    Some(persona::UvcConfig {
+        width,
+        height,
+        frame_intervals,
+        streaming_maxpacket,
+    })
 }

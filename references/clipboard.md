@@ -5,19 +5,19 @@ A two-way text channel between the agent and the target, stored on the Pi
 clipboard, so this is how you hand long credentials, tokens, log snippets, or
 context to the target: stage the text here, then **type it onto the target via
 HID**. Load this when you need that. All calls assume `https://${AEON_HOST}/`
-with HTTP Basic `$AEON_USER:$AEON_PASSWD`.
+with a Bearer token `$AEON_TOKEN`.
 
 ## read the buffer
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" "https://$AEON_HOST/api/clipboard"
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/clipboard"
 # → {"ok":true,"text":"…","size_bytes":N,"max_bytes":65536}
 ```
 
 ## write the buffer
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X PUT \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X PUT \
     -H "Content-Type: application/json" \
     -d '{"text": "secret-token-xyz"}' \
     "https://$AEON_HOST/api/clipboard"
@@ -29,7 +29,7 @@ Replaces existing content; anything over 64 KB is truncated (`trimmed:true`).
 ## type the buffer onto the target (HID)
 
 ```bash
-curl -sk -u "$AEON_USER:$AEON_PASSWD" -X POST \
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
     "https://$AEON_HOST/api/clipboard/type-on-target"
 # → {"ok":true,"typed":24,"skipped":2,"input_chars":26}
 ```

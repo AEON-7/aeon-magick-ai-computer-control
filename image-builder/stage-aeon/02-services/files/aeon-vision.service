@@ -1,0 +1,22 @@
+[Unit]
+Description=Aeon Magick — on-device live vision OCR/detection over the capture feed
+# Reads frames from aeon-streamer's unix socket; bound to the streamer so a
+# capture-source switch (which restarts aeon-streamer) restarts vision too and
+# it re-reads the active source / model in lockstep.
+After=aeon-streamer.service
+Wants=aeon-streamer.service
+PartOf=aeon-streamer.service
+
+[Service]
+Type=simple
+Environment=AEON_VISION_INTERVAL_S=0.5
+# Inference must never starve capture/HID — nice it down + cap its CPU share.
+Nice=5
+CPUWeight=50
+# Runs as root: reads the aeon-owned streamer socket + writes /run/aeon/vision.json.
+ExecStart=/usr/bin/python3 /usr/local/bin/aeon-vision
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

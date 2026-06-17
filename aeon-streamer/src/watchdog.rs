@@ -73,7 +73,16 @@ pub async fn run(state: SharedState) -> Result<()> {
         // The hash check is only valuable for the ustreamer path, where
         // format changes mean ustreamer needs new args.
         let pipeline_kind = state.read().pipeline_kind;
-        let in_ffmpeg_family = matches!(pipeline_kind, Some("ffmpeg") | Some("ffmpeg-h264"));
+        // The counter-based-liveness family: every pipeline whose frames flow
+        // through an ffmpeg stdout pipe (jpeg_pipe / h264_pipe) and bumps
+        // frames_published — Cam Link MJPEG/H.264 AND the Pi-5 libcamera
+        // (rpicam → ffmpeg) camera path. These have no ustreamer socket to
+        // query and must NOT be enum-hash-probed (the libcamera path's
+        // cfg.device is an unused placeholder).
+        let in_ffmpeg_family = matches!(
+            pipeline_kind,
+            Some("ffmpeg") | Some("ffmpeg-h264") | Some("libcamera-h264")
+        );
         if !in_ffmpeg_family {
             if let Ok(h) = capture::enum_signature(&state.0.cfg.device) {
                 if let Some(prev) = &last_hash {

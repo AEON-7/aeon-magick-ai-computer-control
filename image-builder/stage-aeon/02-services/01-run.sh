@@ -53,41 +53,58 @@ EOF
     if ! grep -q "^# aeon-magick power optimization" "${CONFIG_TXT}"; then
         cat >> "${CONFIG_TXT}" <<'EOF'
 
-# aeon-magick power optimization
+# aeon-magick power optimization + Pi 5 CSI vision
+# Bluetooth radio is unused on every model (Cam Link / CSI capture +
+# ethernet/WiFi, never BT).
 [all]
-# Disable Pi's own HDMI output — we don't drive a monitor
-hdmi_blanking=2
-# Disable on-board audio (we don't use it)
-dtparam=audio=off
-# Disable Bluetooth (we use Cam Link UVC + ethernet/WiFi, never BT)
 dtoverlay=disable-bt
 
-# CPU at Pi 4 default 1.8 GHz (no software throttle).
+# ── Pi 4 (Cam Link USB capture path) ──
+# The Pi never drives its own monitor or audio, so blank HDMI + disable audio
+# to shave ~100-150 mA. (On Pi 5 we KEEP HDMI for console/debug, and the
+# camera stack owns the CSI connectors instead.)
 #
-# Throttle history:
-#   v7   added arm_freq=1200 + over_voltage=-2 + arm_boost=0 to fit a
-#        hypothetical Mac USB-C ceiling that turned out not to exist.
-#   v13  dropped over_voltage and arm_boost.
-#   v15  dropped the clock cap entirely.
-#   v17  unthrottled — but unblocking WiFi triggered brown-out, first
-#        guess was power budget. Tried arm_freq=1500 and 1200, still
-#        saw brown-out.
-#   v18  shipped arm_freq=1500 as a polite default after confirming
-#        the brown-out was *hardware-side* (dust + worn thermal pads +
-#        Mac USB-C state). With those fixed the throttle was insurance
-#        against a problem that wasn't there.
-#   v19  drops the throttle entirely. Pi 4's built-in thermal-throttle
-#        floor at 80°C self-protects against overheating, and with
-#        fresh thermal pads + a clean heatsink we sit at 50-65°C under
-#        normal load at full 1.8 GHz. The under-voltage watchdog timer
-#        (added in v18) stays in as a logging safety net so any future
-#        under-voltage events are recorded in the journal even though
-#        we're not actively throttling on them.
-#
-# If you ever DO see throttle / under-voltage flags in
-# `vcgencmd get_throttled` after a few minutes of normal use, the fix
-# is hardware: USB-C cable, port pair, wall charger, Y-cable. NOT
-# adding arm_freq back.
+# CPU stays at the Pi 4 default 1.8 GHz — no software throttle. If you ever see
+# throttle / under-voltage flags in `vcgencmd get_throttled` after a few
+# minutes of normal use, the fix is hardware (USB-C cable, port pair, wall
+# charger, Y-cable), NOT adding arm_freq back. The under-voltage watchdog timer
+# logs any events to the journal regardless.
+[pi4]
+hdmi_blanking=2
+dtparam=audio=off
+
+# ── Pi 5 (Geekworm X1301 HDMI-to-CSI bridge + optional Pi camera) ──
+# Both MIPI CSI connectors are hand-pinned, so turn camera auto-detect off.
+[pi5]
+camera_auto_detect=0
+# X1301 / TC358743 HDMI-to-CSI bridge on CAM1 — lets a vision agent view the
+# HDMI of a system it controls. The Geekworm X1301 wires 4 CSI lanes, and the
+# TC358743 requests >2 lanes for a 1080p60 signal — WITHOUT `4lane` the rp1-cfe
+# driver OOPSes ("Device has requested N data lanes, which is >2 configured in
+# DT") on STREAMON and NO frames ever flow (capture wedges in D-state). 4lane is
+# safe even on a 2-lane bridge (it just gives DT headroom). [Confirmed on real
+# Pi 5 + X1301 hardware, 2026-06-11.] If `dmesg | grep tc358743` is EMPTY after
+# boot, switch ,cam1 -> ,cam0 here and reboot.
+dtoverlay=tc358743,cam1,4lane=1
+# CAM0 live-camera vision source. Default: Sony IMX708 (Camera Module 3, incl.
+# the Wide variant — same sensor, lens-only difference). Because the tc358743
+# bridge above forces camera_auto_detect=0, the camera can't be auto-detected and
+# must be named here. You do NOT need to edit this by hand to swap modules: drop a
+# one-word file on the FAT /boot/firmware partition and reboot, e.g.
+#   echo imx477 > /boot/firmware/aeon-camera   # HQ Camera
+#   echo imx219 > /boot/firmware/aeon-camera   # Camera v2
+#   echo off    > /boot/firmware/aeon-camera   # no camera fitted
+# (handled by aeon-camera-select.service). Comment this out only if shipping
+# headless with no camera and no flag. See docs/PI5_CAMERA.md.
+dtoverlay=imx708,cam0
+# Raspberry Pi AI HAT+ (Hailo accelerator) over PCIe — enable the Pi 5 PCIe lane
+# at Gen3 for full bandwidth. A different bus from the CSI overlays above; purely
+# additive. If `dmesg` shows PCIe link errors after boot, drop to pciex1_gen=2.
+dtparam=pciex1
+dtparam=pciex1_gen=3
+
+# Restore the default filter so any later config lines apply to all models.
+[all]
 EOF
     fi
 fi

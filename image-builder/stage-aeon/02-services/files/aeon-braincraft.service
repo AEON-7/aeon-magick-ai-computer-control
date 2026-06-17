@@ -1,0 +1,25 @@
+[Unit]
+Description=Aeon Magick — BrainCraft HAT face / viewfinder / voice assistant
+# Reads frames from aeon-streamer's unix socket in viewfinder mode and the
+# vision feed for overlays, so order after the streamer; not bound to it
+# (the ai/voice modes work with no streamer running).
+After=aeon-streamer.service
+Wants=aeon-streamer.service
+
+[Service]
+Type=simple
+# Runs as root: drives /dev/spidev* + /dev/gpiochip* (display + buttons), the
+# ALSA audio devices, and reads the aeon-owned streamer socket + writes
+# /run/aeon/braincraft.json. The daemon self-idles (present:false) when disabled,
+# the display libs are missing, or no SPI device is present — so it starts
+# cleanly with no HAT attached.
+SupplementaryGroups=audio video spi gpio i2c
+# The display + voice pipeline must never starve capture/HID — nice it down.
+Nice=5
+CPUWeight=50
+ExecStart=/usr/local/bin/aeon-braincraft
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

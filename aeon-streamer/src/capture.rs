@@ -74,6 +74,53 @@ pub fn current_resolution(device: &Path) -> Option<String> {
     None
 }
 
+/// For the TC358743 HDMI bridge: read the LIVE source DV-timings (active
+/// resolution + framerate) from the bridge subdev that `aeon-hdmi-csi` published
+/// to `/run/aeon/hdmi-subdev`. This lets the hdmi-csi pipeline use the source's
+/// REAL mode — e.g. 1080p30 vs 1080p60, or 720p — instead of assuming 1080p60,
+/// so the `-r` fps decimation and `/state` reporting are correct. Returns
+/// `(active_w, active_h, fps)`, or `None` when no signal is locked / no subdev.
+/// fps = round(pixelclock / (total_width × total_height)).
+pub fn current_dv_timings() -> Option<(u32, u32, u32)> {
+    let subdev = std::fs::read_to_string("/run/aeon/hdmi-subdev").ok()?;
+    let subdev = subdev.trim();
+    if subdev.is_empty() {
+        return None;
+    }
+    let out = Command::new("v4l2-ctl")
+        .args(["-d", subdev, "--query-dv-timings"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // no signal locked (Link severed) → caller falls back
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Pull the first integer after the colon on each labelled line.
+    let field = |label: &str| -> Option<u64> {
+        text.lines()
+            .find(|l| l.trim().starts_with(label))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let aw = field("Active width")? as u32;
+    let ah = field("Active height")? as u32;
+    if aw == 0 || ah == 0 {
+        return None; // 0×0 = severed
+    }
+    let (tw, th, px) = (
+        field("Total width").unwrap_or(0),
+        field("Total height").unwrap_or(0),
+        field("Pixelclock").unwrap_or(0),
+    );
+    let fps = if tw > 0 && th > 0 && px > 0 {
+        ((px as f64 / (tw * th) as f64).round() as u32).clamp(1, 120)
+    } else {
+        60
+    };
+    Some((aw, ah, fps))
+}
+
 /// MD5 of the device's enumerated format list. We hash this and re-detect
 /// on changes — that's our cheap "source signal changed" signal for USB UVC
 /// devices that don't support V4L2 DV-timings.

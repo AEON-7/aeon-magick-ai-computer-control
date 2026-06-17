@@ -1,0 +1,26 @@
+[Unit]
+Description=Aeon Vision VLM (Qwen2-VL describe-screen) — Hailo-10H NPU, on-demand
+Documentation=https://www.raspberrypi.com/documentation/computers/ai.html
+# Gated so the image is harmless without the HAT or before the VLM is deployed:
+# both conditions must hold, and the VLM itself is loaded lazily on the first
+# /describe — so an enabled-but-idle service is a cheap socket listener that
+# holds NO NPU resource until actually used (then idle-unloads to free it).
+After=network-online.target aeon-streamer.service
+Wants=network-online.target
+ConditionPathExists=/dev/hailo0
+ConditionPathExists=/usr/share/aeon/hailo/hef/qwen2-vl-2b-instruct.hef
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/aeon-vision-vlm
+Restart=on-failure
+RestartSec=5
+Nice=5
+# NOTE: do NOT use RuntimeDirectory=aeon here. /run/aeon is shared infra, created
+# aeon:aeon by tmpfiles + the boot mkdir/chown; this service runs as root and just
+# writes its socket there. A RuntimeDirectory=aeon on a root service would re-own
+# /run/aeon to root:root (breaking aeon-streamer, which runs as User=aeon and must
+# create its own socket there) AND delete /run/aeon on stop, wiping every socket.
+
+[Install]
+WantedBy=multi-user.target

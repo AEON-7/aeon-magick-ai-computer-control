@@ -19,11 +19,14 @@ mod api;
 mod audit;
 mod auth;
 mod blocked_log;
+mod braincraft;
 mod captive;
 mod dns_log;
 mod dnscrypt_relays;
 mod dnscrypt_servers;
 mod firewall;
+mod fleet;
+mod hailo;
 mod i2p;
 mod ipfs;
 mod lockdown;
@@ -45,7 +48,10 @@ mod system;
 mod target;
 mod terminal;
 mod tls;
+mod ups;
+mod vision;
 mod vpn_providers;
+mod webcam;
 mod webui;
 mod wifi;
 
@@ -114,6 +120,9 @@ async fn main() -> Result<()> {
     // OrbNet self-heal: if activation was interrupted while enabled (e.g. an
     // OOM-restart mid-bootstrap), finish provisioning the owner + community.
     tokio::spawn(orbnet::reconcile_on_boot());
+    // Hailo: if the accelerator is enabled + installed and an autoload model is
+    // configured, re-deploy it on boot (NNC RAM doesn't persist across reboots).
+    tokio::spawn(hailo::reconcile_on_boot());
     // Ensure the AEON_DROP iptables chain exists at startup so every
     // DROP rule we apply (user or system) gets logged on the way down.
     // This is what populates the "Blocked traffic" panel.

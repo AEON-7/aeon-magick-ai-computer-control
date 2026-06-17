@@ -1,0 +1,21 @@
+[Unit]
+Description=Aeon Magick — UVC webcam feeder (Cam0 IMX477 → USB gadget)
+# aeon-hid must bind the gadget (and add the uvc.usb0 function) first.
+After=aeon-hid.service systemd-udev-settle.service
+Wants=aeon-hid.service
+
+[Service]
+Type=simple
+# The wrapper self-skips (exit 0) when the webcam is disabled / no camera /
+# the feeder binary isn't installed, and exit-1-retries until aeon-hid has
+# bound the uvc.usb0 gadget node.
+ExecStart=/usr/local/bin/aeon-uvc
+Restart=on-failure
+RestartSec=3
+User=root
+SupplementaryGroups=video
+# Software JPEG from libcamera is the load; contain it like the streamer.
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Aeon Magick — configure the X1301 (TC358743) HDMI-to-CSI pipeline (Pi 5)
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+# Deliberately NOT Before=aeon-streamer.service: the streamer's wait_for_device
+# blocks on /dev/aeon-hdmi (created last, after EDID + MC config), so they
+# decouple cleanly — a camera-only Pi 5 streamer needn't wait on this at all.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The CSI media nodes can appear late after boot, so retry the discovery for a
+# short window. The setup script returns 3 while the bridge isn't visible yet
+# (keep trying) and 0 once configured or definitively absent (Pi 4 / no X1301).
+# The trailing `exit 0` ensures a never-found bridge doesn't fail the boot.
+ExecStart=/bin/sh -c 'for i in $(seq 1 15); do /usr/local/bin/aeon-hdmi-csi; rc=$?; [ "$rc" != 3 ] && exit 0; sleep 1; done; exit 0'
+
+[Install]
+WantedBy=multi-user.target

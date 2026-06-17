@@ -51,6 +51,7 @@ a privacy router, and a lights-out KVM. Tap any capability to jump to the deep d
 | | Superpower | Why it's a superpower |
 |---|---|---|
 | 🖥️ | **[Zero-software computer control](#zero-software-computer-control-for-any-agent)** | See real pixels, move the mouse, type, click — on **any** machine, **any** OS, even **pre-OS**. Nothing installed on the target, ever. |
+| 👁️ | **[On-device vision grounding + VLM](#zero-software-computer-control-for-any-agent)** | The Orb's own **Hailo AI HAT+** reads the screen: `screen_find` returns **click-ready coordinates** for any on-screen label, and `describe_screen` answers *"what is this screen?"* in plain language — no cloud round-trip. |
 | 🔌 | **[The cursed HID](#the-cursed-hid--it-just-looks-like-a-keyboard)** | To the target it's a boring USB keyboard + mouse. No SDK, no agent in your files, no permission prompt. Powered over the same cable — no PSU. |
 | 🧠 | **[Build a pantheon of AI personas](#build-your-pantheon-of-ai-personas)** | Each agent gets a Soul, Identity, corpus, profile picture, and its **own designed-or-cloned voice**. Summon one specialist, or call several in parallel and let them talk. |
 | 🛰️ | **[Centralized AI-infra jump box](#the-ultimate-ai-jump-box)** | One console over every gateway, DGX Spark, and model server — live GPU / CPU / RAM, temperature, container counts, reboot / wake. |
@@ -124,6 +125,15 @@ grant permission to.**
   Two watchdogs respawn the pipeline within ~5 s of an HDMI hot-plug or resolution
   change, so the feed heals itself when the target wakes from sleep.
 - 🎬 **Record the session** to MP4 on demand — proof of exactly what an agent did.
+- 👁️ **On-device vision, no cloud** — a **Hailo AI HAT+** on the Orb itself runs the
+  whole see-then-act loop: `snapshot` (raw pixels) → `screen_text` (all OCR text +
+  boxes) → **`screen_find`** (find a specific label — "Save", "Sign in" — and get a
+  **click-ready** `center` in 0..1 fractions you feed straight into `click_at`) →
+  **`describe_screen`** (an on-device **Qwen2-VL** VLM that answers *"which dialog is
+  open?"* / *"is the upload done?"* in plain language) → `click` / `type_text`.
+  `screen_find` reads the live OCR daemon and needs no NPU slot, so it runs even while
+  the local LLM is resident. First-class **MCP tools _and_ REST** (`GET
+  /api/vision/find`, `POST /api/vision/describe`), exactly like `screen_text`.
 - ⚡ **Works pre-OS** — BIOS, FileVault, Windows OOBE, firmware screens. To the
   target it's just a perfectly boring peripheral.
 
@@ -427,7 +437,7 @@ first boot work for both:
 - **REST + curl** — every input op is an atomic POST under `/api/hid/*`; snapshots are
   a single GET. Scriptable from any language.
 - **MCP (Model Context Protocol)** — the supervisor speaks MCP Streamable HTTP at
-  `/api/mcp`, exposing **58 named tools** (scope-gated to the calling token): vision (`snapshot`, `state`, recording),
+  `/api/mcp`, exposing **67 named tools** (scope-gated to the calling token): vision (`snapshot`, `state`, recording, on-device `screen_text` / `screen_find` / `describe_screen`),
   input (`type_text`, `key_chord`, `click_at`, `drag`, `set_persona`), target power,
   clipboard + files, the **full network/privacy surface** (VPN / Tor / I2P / DNSCrypt /
   WiFi / firewall), ISO control, tokens, and read-only audit/security. Drop the URL

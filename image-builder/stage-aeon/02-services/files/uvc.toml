@@ -1,0 +1,38 @@
+# USB webcam — exposes the Cam0 camera (IMX477 / HQ Camera) to the OTG host as
+# a standard UVC webcam, alongside the HID + USB-ethernet gadget functions.
+#
+# Two cooperating pieces read this file:
+#   * aeon-hid  — when enabled, ADDS a uvc.usb0 function to the USB gadget so
+#                 the host enumerates a webcam (changing this needs an
+#                 aeon-hid restart: `systemctl restart aeon-hid`).
+#   * aeon-uvc  — the feeder daemon that pumps Cam0 frames into the gadget,
+#                 opening the camera only while the host is actively viewing.
+#
+# ⚠ Cam0 is a SINGLE resource: the network streamer's `camera-csi` source
+#   (streamer.toml) and this webcam both consume the IMX477 and are mutually
+#   exclusive. On a webcam-enabled Orb, set streamer.toml [capture] source =
+#   "hdmi-csi" so the agent's network view uses the KVM (Cam1) and leaves Cam0
+#   free for the webcam.
+#
+# OFF by default — flip enabled=true on a Pi 5 with the camera fitted.
+
+enabled = false
+# Which source feeds the webcam (set via the WebCam picker / PUT /api/webcam):
+#   camera-csi   → the Pi camera (Cam0/IMX477) via libcamera
+#   hdmi-csi     → the X1301 HDMI-to-CSI bridge (Cam1) via v4l2 (/dev/aeon-hdmi)
+#   cam-link-usb → a USB capture stick via v4l2 (/dev/kvmd-video)
+# ⚠ Don't point this at the SAME source the console view (streamer.toml) uses —
+#   a camera is a single consumer; pick different sources for view vs. webcam.
+source = "camera-csi"
+camera_id = 0            # rpicam/libcamera --camera N selector (camera-csi only)
+width = 1280
+height = 720
+fps = 30
+streaming_maxpacket = 1024   # MUST stay 1024 on the Pi 5. dwc2 in USB-2.0
+                             # high-speed caps isochronous wMaxPacketSize at 1024
+                             # and does NOT implement high-bandwidth iso (the
+                             # 2048/3072 multi-transaction geometry). A 2048-byte
+                             # iso endpoint can't be brought up, so the host does
+                             # PROBE/COMMIT but never reaches the streaming
+                             # alt-setting — Windows (strict bandwidth reservation)
+                             # then fails with 0x80070006. Leave at 1024.

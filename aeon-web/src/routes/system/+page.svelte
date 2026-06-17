@@ -30,11 +30,16 @@
     jpeg_quality: number;
     width: number;
     height: number;
+    match_source: boolean;
     format: string;
     hw_accel: boolean;
   } | null = null;
   let stagedFps = 24;
   let stagedQuality = 70;
+  // 'match' = track source res (capped 1080p); 'WxH' = fixed encode size.
+  // Lower sizes cut the Pi 5 software-H.264 CPU/power on the capture paths.
+  let stagedResolution = 'match';
+  const RES_PRESETS = ['match', '1920x1080', '1280x720', '960x540', '640x360'];
   let streamerSaving = false;
   let streamerMsg = '';
 
@@ -48,6 +53,7 @@
           jpeg_quality: r.jpeg_quality,
           width: r.width,
           height: r.height,
+          match_source: r.match_source ?? true,
           format: r.format,
           hw_accel: r.hw_accel,
         };
@@ -57,6 +63,7 @@
         if (!streamerSaving) {
           stagedFps = r.fps;
           stagedQuality = r.jpeg_quality;
+          stagedResolution = (r.match_source ?? true) ? 'match' : `${r.width}x${r.height}`;
         }
       }
     } catch {
@@ -69,6 +76,14 @@
     streamerSaving = true;
     streamerMsg = '';
     try {
+      // 'match' tracks the source; otherwise force a fixed W×H to cut encode CPU.
+      const resPatch =
+        stagedResolution === 'match'
+          ? { match_source: true }
+          : (() => {
+              const [w, h] = stagedResolution.split('x').map(Number);
+              return { match_source: false, width: w, height: h };
+            })();
       const r = await fetch('/api/streamer/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -76,10 +91,11 @@
         body: JSON.stringify({
           fps: stagedFps,
           jpeg_quality: stagedQuality,
+          ...resPatch,
         }),
       }).then((r) => r.json());
       if (r.ok) {
-        streamerMsg = `✓ saved + restarted aeon-streamer (fps=${stagedFps}, q=${stagedQuality})`;
+        streamerMsg = `✓ saved + restarted aeon-streamer (fps=${stagedFps}, res=${stagedResolution}, q=${stagedQuality})`;
         await refreshStreamer();
       } else {
         streamerMsg = `✗ ${r.err ?? 'save failed'}`;
@@ -350,6 +366,35 @@
               <span>30 (default)</span>
               <span>60 (smoothest — low-res only)</span>
             </div>
+          </div>
+
+          <!-- encode resolution: the Pi 5 has no HW H.264 encoder, so lowering
+               this cuts software-libx264 CPU + power on the capture-card paths.
+               'Match source' tracks the input (capped 1080p). -->
+          <div class="space-y-1">
+            <div class="flex justify-between text-[11px] uppercase tracking-wider">
+              <span class="text-zinc-500">Encode resolution</span>
+              <span class="font-mono text-cursed-300">
+                {stagedResolution === 'match' ? 'match source' : stagedResolution}
+              </span>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              {#each RES_PRESETS as r}
+                <button type="button"
+                        on:click={() => (stagedResolution = r)}
+                        disabled={streamerSaving}
+                        class="flex-1 min-w-[88px] rounded-md border px-3 py-2 font-mono text-xs transition
+                               {stagedResolution === r
+                                 ? 'border-cursed-500 bg-cursed-500/20 text-cursed-300'
+                                 : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
+                  {r === 'match' ? 'match' : r.replace('x', '×')}
+                </button>
+              {/each}
+            </div>
+            <p class="text-[10px] text-zinc-600 font-mono">
+              Lower = less CPU/power (Pi 5 software-encodes H.264). 720p ≈ ½ the
+              encode load of 1080p; pair with 15 fps on marginal power.
+            </p>
           </div>
 
           <!-- quality slider -->

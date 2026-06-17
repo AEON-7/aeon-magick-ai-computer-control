@@ -84,6 +84,36 @@ for (const f of files) {
   hats.push(rec);
 }
 
+// ── Curated additions ──
+// Boards NOT in pinout.xyz that we run on the Orb. Same record shape as parsed
+// entries so the supervisor's collision tool (check_stack) covers them. Physical
+// header pin -> role; power/ground/i2c/spi are shareable, dedicated gpio/pcm are
+// exclusive (see hardware.rs pin_shareable).
+const HAT_ADDITIONS = [
+  {
+    id: 'braincraft-hat',
+    name: 'Adafruit BrainCraft HAT',
+    type: ['ai', 'display', 'audio', 'io'],
+    pins: { '2': 'power', '4': 'power', '6': 'ground', '9': 'ground', '14': 'ground', '20': 'ground', '25': 'ground', '30': 'ground', '34': 'ground', '39': 'ground', '3': 'i2c', '5': 'i2c', '7': 'gpio', '11': 'gpio', '13': 'gpio', '15': 'gpio', '16': 'gpio', '18': 'gpio', '36': 'gpio', '12': 'pcm', '35': 'pcm', '38': 'pcm', '40': 'pcm', '19': 'spi', '23': 'spi', '24': 'spi', '22': 'gpio', '37': 'gpio', '29': 'gpio', '31': 'gpio', '32': 'gpio', '33': 'gpio' },
+    i2c: { '0x1a': { name: 'Audio codec', device: 'wm8960' } },
+    manufacturer: 'Adafruit',
+    eeprom: true,
+    description: 'BrainCraft HAT: 1.54in 240x240 SPI TFT (ST7789), WM8960 I2S stereo mic+speaker (0x1a), 3 buttons+joystick, DotStar, fan. NOTE: I2S audio is UNVERIFIED on Pi 5 (RP1 differs from BCM2835). Stacking on the AI HAT+ needs a ~16mm header to clear the Hailo heatsink.',
+    url: 'https://www.adafruit.com/product/4374',
+  },
+  {
+    id: 'rpi-ai-hat-plus',
+    name: 'Raspberry Pi AI HAT+',
+    type: ['ai'],
+    pins: { '2': 'power', '4': 'power', '6': 'ground', '9': 'ground', '27': 'id', '28': 'id' },
+    manufacturer: 'Raspberry Pi',
+    eeprom: true,
+    description: 'AI HAT+ (Hailo-8 / 8L / 10H accelerator). Data is over the PCIe FFC ribbon, NOT GPIO — from the 40-pin header it uses only 5V/GND + the ID EEPROM (pins 27/28). Tall Hailo heatsink: stacking another HAT needs an extended header + standoffs. Pin-compatible with most HATs; the only overlap is the shared ID-EEPROM pins.',
+    url: 'https://www.raspberrypi.com/products/ai-hat/',
+  },
+];
+for (const a of HAT_ADDITIONS) hats.push(a);
+
 hats.sort((a, b) => a.id.localeCompare(b.id));
 
 // ── Curated augmentations ──

@@ -98,6 +98,9 @@ fn tools_catalog() -> Value {
         "tools": [
             tool("state", "Get the current device state — streamer online, capture resolution, FPS, HID persona, keyboard/mouse online flags.", json!({"type":"object","properties":{}})),
             tool("snapshot", "Capture one JPEG frame of the target host's screen. Returns the frame as an MCP image content block (base64 JPEG, ~50–150ms latency).", json!({"type":"object","properties":{}})),
+            tool("screen_text", "Read the on-device vision/OCR of the current capture feed (text + detected objects from the aeon-vision daemon — CPU OCR or the Hailo AI HAT+). Each detection has text/label, confidence, and a box in FRACTIONS 0..1 of the frame — feed a box centre straight into click(x,y). Returns {present:false} if vision is disabled or no frame is available.", json!({"type":"object","properties":{}})),
+            tool("screen_find", "Find on-screen TEXT matching a query and get its clickable location — the fast path for 'click the X button/link/field'. Searches the live OCR (aeon-vision) for `query` and returns ranked matches, each with a `center` {x,y} in FRACTIONS 0..1 of the frame to feed straight into click(x,y). Returns ok:false if vision is off or nothing matches. Prefer this over reading all of screen_text when you know the label you want.", json!({"type":"object","properties":{"query":{"type":"string","description":"text to find, e.g. 'Save', 'Sign in', 'Settings'"}},"required":["query"]})),
+            tool("describe_screen", "Get a natural-language description of what's on the target screen RIGHT NOW, from the on-device Qwen2-VL vision model (Hailo AI HAT+). Optional `prompt` asks a specific visual question (e.g. 'which dialog is open?', 'is the upload finished?'). Use for SEMANTIC understanding of the screen; use screen_text/screen_find for exact text + coordinates. ~3s warm / ~13s cold. NOTE: shares the NPU's single GenAI slot with the local LLM, so it's available when the local hailo-ollama LLM isn't resident (the normal online case); returns ok:false with guidance otherwise.", json!({"type":"object","properties":{"prompt":{"type":"string","description":"optional visual question; omit for a general description"},"max_tokens":{"type":"integer","description":"max generated tokens (default 96)"}}})),
             tool("record_start", "Record the target's screen to an MP4. Optional `duration_s` auto-stops after N seconds (default 30; 0 = open-ended / manual stop, capped at 1h). One recording at a time; requires H.264 stream mode. Returns the recording id — download later with list_recordings + GET /api/streamer/recordings/<id>.", json!({"type":"object","properties":{"duration_s":{"type":"integer","description":"auto-stop after N seconds; omit for the 30s default, 0 for manual-stop-only"}}})),
             tool("record_stop", "Stop the in-progress screen recording and finalize the MP4.", json!({"type":"object","properties":{}})),
             tool("recording_state", "Screen-recording status: the active recording (id, elapsed) if any, plus finished recordings with sizes.", json!({"type":"object","properties":{}})),
@@ -427,6 +430,28 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 }],
                 "isError": false,
             }))
+        }
+        "screen_text" => {
+            let v = tokio::fs::read_to_string("/run/aeon/vision.json")
+                .await
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .unwrap_or_else(|| json!({ "present": false }));
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "screen_find" => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or("screen_find needs a `query` string argument")?;
+            let v = crate::vision::screen_find_value(query).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
+        "describe_screen" => {
+            let prompt = args.get("prompt").and_then(|v| v.as_str());
+            let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64());
+            let v = crate::vision::describe_screen_value(prompt, max_tokens).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v).unwrap_or_default()))
         }
         "record_start" => {
             let dur = args.get("duration_s").and_then(|v| v.as_u64());
@@ -1095,7 +1120,7 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         "issue_token" | "revoke_token" | "list_tokens" | "target_power_tap"
         | "target_power_hold" | "target_wake" | "target_reboot" | "pi_reboot" => Admin,
         "run_macro" => Macros,
-        "state" | "snapshot" | "recording_state" | "list_recordings" | "list_macros"
+        "state" | "snapshot" | "screen_text" | "recording_state" | "list_recordings" | "list_macros"
         | "network_status" | "security_metrics" | "firewall_rules" | "dns_blacklist"
         | "dns_sources" | "audit_log" | "target_info" | "get_clipboard" | "list_files"
         | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"

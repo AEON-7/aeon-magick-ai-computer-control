@@ -23,13 +23,14 @@ ambiguity in audit logs.
 
 ## Tools (agent-facing, grouped)
 
-The server's full catalog is **58 tools**. You won't see all 58: the MCP
+The server's full catalog is **67 tools**. You won't see all 67: the MCP
 handler enforces **per-tool scope**, so `tools/list` returns — and `tools/call`
 permits — only the tools your token's tier allows. A **read** token sees the
-read-only tools (`state`, `snapshot`, and the observability + `*_state` /
-`*_status` queries); a **full** token additionally sees the interactive surface
-(HID input + network config). The admin-only tools (see *Not exposed to agents*
-below) are in the 58 but are never listed or callable for any agent token.
+read-only tools (`state`, `snapshot`, `screen_text`, and the observability +
+`*_state` / `*_status` queries); a **full** token additionally sees the
+interactive surface (HID input + network config + `screen_find` /
+`describe_screen`). The admin-only tools (see *Not exposed to agents* below) are
+in the 67 but are never listed or callable for any agent token.
 
 Each tool has the same shape as the curl endpoint in the matching reference;
 the linked file has the detail.
@@ -39,6 +40,23 @@ the linked file has the detail.
 |---|---|
 | `state` | combined streamer + HID status |
 | `snapshot` | one JPEG of the target's screen, as an MCP image block |
+| `screen_text` | on-device OCR — all text on screen now, each with a box in 0..1 fractions (Hailo Orb) |
+| `screen_find` | find on-screen text matching a query → ranked matches with a click-ready `center` {x,y}; the fast "find text → click it" path. No NPU GenAI slot needed |
+| `describe_screen` | natural-language read of the screen via on-device Qwen2-VL (`prompt?`/`max_tokens?`); semantic understanding. ~3s warm/~13s cold; shares the NPU's single GenAI slot with the local LLM |
+
+**Scope note:** `screen_text` is **Read**-tier (a read token sees it);
+`screen_find` and `describe_screen` are **Full**-tier — a read-only token won't
+see them in `tools/list`.
+
+**REST-only vision controls (no MCP tool yet):** capture **source-switching**
+(`GET/PUT /api/streamer/config {source}` — flip between `cam-link-usb` /
+`hdmi-csi` screen capture and a `camera-csi` physical-thing camera) and
+**webcam passthrough** (`GET/PUT /api/webcam` — present a source to the OTG
+target as a UVC webcam) are **HTTP-only** — there is no `set_source`,
+`view_source`, `set_webcam`, or `webcam_state` tool in the catalog. To change
+what the Orb sees or expose a webcam over MCP, fall back to curl (same pattern
+as AirVPN `generate` and Tor `rotate` below). See `references/vision.md` and
+the `aeon-webcam` skill.
 
 ### Input — `references/input.md`
 | Tool | What it does |
@@ -105,20 +123,55 @@ the linked file has the detail.
 | `i2p_status` | i2pd daemon state + bound addresses |
 | `wifi_state` / `wifi_scan` / `wifi_connect` | WiFi uplink management |
 
+### Onions + IPFS — anonymous publishing
+| Tool | What it does |
+|---|---|
+| `hidden_service_list` | list Tor v3 onion services |
+| `hidden_service_create` | publish a new onion service |
+| `hidden_service_remove` | tear one down |
+| `ipfs_status` | IPFS node state |
+| `ipfs_pin` | pin a CID |
+| `ipfs_add` | add content to IPFS |
+
 ### Read-only observability
 | Tool | What it does |
 |---|---|
+| `pi_system_info` | Pi health — uptime, temp, load, memory |
 | `security_metrics` | throughput + drop counters + top clients |
 | `firewall_rules` | user-defined rules + hit counters |
 | `dns_blacklist` | blacklist + recent query log |
 | `dns_sources` | subscription sources |
 | `audit_log` | mutation + login history, filterable |
 | `blocked_log` | recent iptables drops with cause attribution |
+| `target_info` | target power bindings (read-only) |
+
+There is **no** `ups`/`battery` tool — UPS/power state (`GET /api/ups`) is
+**REST-only**; curl it if you need to know whether an Orb is on battery / low.
+Likewise **fleet** (`GET /api/fleet/roster` — see every Orb at once and pick
+which to operate) has **no MCP tool**; curl the roster. See
+the `aeon-power` skill and the `aeon-fleet` skill.
 
 It also exposes stored macros + prompts as MCP **resources**
 (`aeon://macros/<name>`, `aeon://prompts/<name>`) and prompts as MCP
 **prompts** (`prompts/list` + `prompts/get`) — so a UI like Claude Desktop's
 resource picker can browse them with no filesystem mount.
+
+## REST-only capabilities (no MCP tool — use curl)
+
+A handful of capabilities have **no tool in the 67-tool catalog** and must be
+driven over HTTP even from an MCP session:
+
+| Capability | Endpoint | Reference |
+|---|---|---|
+| Capture-source switching | `GET/PUT /api/streamer/config {source}` | `vision.md` |
+| Webcam passthrough (UVC to target) | `GET/PUT /api/webcam` | `webcam.md` |
+| UPS / battery state | `GET /api/ups` | `power.md` |
+| Fleet roster (every Orb) | `GET /api/fleet/roster` | `fleet.md` |
+| AirVPN config generator | `POST /api/network/vpn/providers/airvpn/generate` | `network.md` |
+| Tor identity rotation (NEWNYM) | `POST /api/network/vpn/rotate` | `network.md` |
+
+If MCP parity matters for any of these, the server needs new tools in
+`mcp.rs`; until then, the curl recipe in the linked reference is the way.
 
 ## Not exposed to agents
 
@@ -133,6 +186,8 @@ The admin-only tools are:
 - **Target / Pi power:** `target_power_tap`, `target_power_hold`,
   `target_wake`, `target_reboot`, `pi_reboot`.
 
-SSH key management is likewise operator-only and has no agent tool. All of the
-above are done from the web UI or an admin session. Don't look for them here,
-and don't tell an agent it can call target power or `pi_reboot` — it can't.
+These sit in a **third** scope tier (Admin) that provisioned tokens never get —
+distinct from the read/full split above. SSH key management is likewise
+operator-only and has no agent tool. All of the above are done from the web UI
+or an admin session. Don't look for them here, and don't tell an agent it can
+call target power or `pi_reboot` — it can't.

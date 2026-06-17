@@ -1,0 +1,562 @@
+#!/bin/bash
+# aeon-hailo — the ONE file holding every device-specific Hailo-10H unknown for
+# the Raspberry Pi AI HAT+ 2 (Hailo-10H). The supervisor's `hailo.rs` shells out
+# here and merges the JSON with its in-memory install TASKS + the curated library
+# (/usr/share/aeon/hailo/library.json), so all the messy device probing lives in
+# one place.
+#
+# Subcommands (each prints a single JSON object/array to stdout):
+#   status        device + HAT + install state + memory ledger + loaded models
+#   install       apt-get install hailo-h10-all (+ genai model-zoo deb), writing
+#                 'PHASE <name> <pct>' lines to /run/aeon/hailo-install.log
+#   stats         live NNC util / temp / power / cpu  (or null when no device)
+#   models        live deployed/loaded state (hailo-ollama LLMs + local .hef)
+#   deploy <id>   pull/download a model by its library id (non-blocking caller)
+#   unload <id>   evict a loaded model to free the RAM ledger
+#
+# Design rules:
+#   * set -u everywhere; no jq — JSON is assembled with python3 (present on the
+#     image) so quoting/escaping is always correct.
+#   * EVERY device-touching branch is best-effort per current Hailo docs AND
+#     degrades to VALID, honest canned JSON when /dev/hailo0 / hailortcli /
+#     hailo-ollama are absent — so the device-free web scaffold renders cleanly
+#     on a Pi with no HAT (device_present:false, stats:null, loaded:[]). Those
+#     branches are marked '# [DEVICE] finalize on real Hailo-10H'.
+#   * The memory LEDGER is self-maintained in /run/aeon/hailo-loaded.json:
+#     a JSON array of {id,name,kind,size_mb}. usable budget is 5500 MB;
+#     mem_free_mb = 5500 - sum(loaded sizes). deploy appends, unload removes.
+set -u
+
+# Default "fits" budget = the AI HAT+ 2 (Hailo-10H) DEDICATED 8 GB on-board RAM,
+# ~5500 MB usable after firmware/KV-cache (it does NOT consume system RAM — the
+# recommended path). Older Hailo-8 / 8L HATs have no dedicated RAM, so model
+# weights live in SYSTEM RAM → usable_mb() reads MemAvailable for those (8 GB Pi
+# minimum, 16 GB recommended). mem_model() reports which to the UI/README.
+USABLE_MB=5500
+usable_mb() {  # chip -> MB budget for the "fits" check
+    case "$1" in
+        hailo-10h) echo 5500 ;;
+        hailo-8)   awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 4096 ;;
+        *)         echo "$USABLE_MB" ;;
+    esac
+}
+mem_model() {  # chip -> where model weights live
+    case "$1" in
+        hailo-10h) echo dedicated ;;
+        hailo-8)   echo system ;;
+        *)         echo unknown ;;
+    esac
+}
+RUN_DIR=/run/aeon
+LEDGER="$RUN_DIR/hailo-loaded.json"
+INSTALL_LOG="$RUN_DIR/hailo-install.log"
+LIBRARY=/usr/share/aeon/hailo/library.json
+HEF_DIR=/usr/share/aeon/hailo/hef          # local marker dir for downloaded vision .hef
+OLLAMA_BASE="http://127.0.0.1:8000"        # hailo-ollama (LLM backend)
+HEF_S3="https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v5.3.0/hailo10h"
+
+mkdir -p "$RUN_DIR" "$HEF_DIR" 2>/dev/null || true
+[ -f "$LEDGER" ] || echo '[]' > "$LEDGER" 2>/dev/null || true
+
+log() { echo "aeon-hailo: $*" >&2; }
+
+# ── device detection ──────────────────────────────────────────────────────────
+# device_present: a /dev/hailo0 char node OR a Hailo PCIe device. We match the
+# Hailo VENDOR id (1e60) as well as the name, because a stock pci.ids DB may not
+# know a newer chip's product name but `lspci -nn` always shows the numeric ids.
+device_present() {
+    [ -e /dev/hailo0 ] && return 0
+    lspci -d 1e60: 2>/dev/null | grep -q . && return 0
+    lspci 2>/dev/null | grep -qi hailo && return 0
+    return 1
+}
+
+# The Hailo PCIe device id (vendor 1e60) as lowercase 4-hex, or empty if none.
+hailo_pci_id() {
+    lspci -nn -d 1e60: 2>/dev/null \
+        | grep -oiE '1e60:[0-9a-f]{4}' | head -1 | cut -d: -f2 | tr 'A-Z' 'a-z'
+}
+
+# hat: map the chip to the contract enum. AUTHORITATIVE once the runtime is
+# installed — `hailortcli fw-control identify` ("Device Architecture" =
+# HAILO10H / HAILO8 / HAILO8L). PRE-INSTALL hailortcli doesn't exist yet, so we
+# map by PCIe DEVICE ID. The lspci human-readable NAME is unreliable here: a stock
+# pci.ids DB doesn't know the Hailo-10H (AI HAT+ 2) id and prints "Device <hex>",
+# so the old name match ('hailo.*10') wrongly returned "other". The Hailo-8 / 8L
+# share the well-known id 2864; any OTHER vendor-1e60 device is the newer 10H.
+detect_hat() {
+    if ! device_present; then echo "none"; return; fi
+    local id arch devid
+    if command -v hailortcli >/dev/null 2>&1; then
+        id="$(hailortcli fw-control identify 2>/dev/null)"
+        arch="$(printf '%s\n' "$id" | grep -i 'Device Architecture' | tr 'a-z' 'A-Z')"
+        case "$arch" in
+            *HAILO10H*) echo "hailo-10h"; return ;;
+            *HAILO8L*|*HAILO8*) echo "hailo-8"; return ;;
+        esac
+    fi
+    devid="$(hailo_pci_id)"
+    case "$devid" in
+        2864) echo "hailo-8";   return ;;   # Hailo-8 / 8L (AI HAT+ / AI Kit)
+        45c4) echo "hailo-10h"; return ;;   # Hailo-10H / AI HAT+ 2 (confirmed on hw 2026-06-14)
+        "")   : ;;                           # nothing parsed — fall through to name probe
+        *)    echo "hailo-10h"; return ;;    # any other Hailo PCIe id → assume the newer 10H
+    esac
+    # Last-resort name probe (covers a future pci.ids that DOES name the chip).
+    if lspci 2>/dev/null | grep -qiE 'hailo.*10';  then echo "hailo-10h"; return; fi
+    if lspci 2>/dev/null | grep -qiE 'hailo[ -]*8'; then echo "hailo-8";   return; fi
+    echo "other"
+}
+
+# installed: the CHIP-appropriate metapackage is present — hailo-h10-all for the
+# AI HAT+ 2 (Hailo-10H), hailo-all for older Hailo-8 / 8L HATs.
+installed() {
+    case "${1:-$(detect_hat)}" in
+        hailo-10h) dpkg -s hailo-h10-all >/dev/null 2>&1 && echo true || echo false ;;
+        hailo-8)   dpkg -s hailo-all     >/dev/null 2>&1 && echo true || echo false ;;
+        *) { dpkg -s hailo-h10-all >/dev/null 2>&1 || dpkg -s hailo-all >/dev/null 2>&1; } \
+               && echo true || echo false ;;
+    esac
+}
+
+# ── memory ledger ─────────────────────────────────────────────────────────────
+ledger_used_mb() {
+    python3 - "$LEDGER" <<'PY' 2>/dev/null || echo 0
+import json,sys
+try:
+    a=json.load(open(sys.argv[1]))
+    print(int(sum(float(m.get("size_mb",0)) for m in a)))
+except Exception:
+    print(0)
+PY
+}
+
+# ── stats ─────────────────────────────────────────────────────────────────────
+# {nnc_util_pct,temp_c,power_w,cpu_util_pct} — live on a real HAT, null-able fields
+# when a probe is unavailable. cpu_util_pct comes from /proc/stat (always works).
+# [DEVICE] finalize on real Hailo-10H — pyhailort query_performance_stats /
+#          query_health_stats + `hailortcli measure-power`.
+cmd_stats() {
+    if ! device_present; then echo "null"; return; fi
+    python3 - <<'PY' 2>/dev/null || echo "null"
+import json, subprocess, re, time
+
+def cpu_util():
+    def snap():
+        with open("/proc/stat") as f:
+            p=f.readline().split()[1:]
+        p=[int(x) for x in p]; idle=p[3]+p[4]; return sum(p), idle
+    t0,i0=snap(); time.sleep(0.1); t1,i1=snap()
+    dt=t1-t0
+    return round((1-(i1-i0)/dt)*100,1) if dt>0 else 0.0
+
+nnc=temp=power=None
+# [DEVICE] finalize on real Hailo-10H: live device telemetry via pyhailort.
+try:
+    from hailo_platform import Device
+    with Device() as d:
+        try:
+            ps=d.control.query_performance_stats()
+            nnc=round(float(getattr(ps,"nnc_utilization", getattr(ps,"utilization",0))),1)
+        except Exception: pass
+        try:
+            hs=d.control.query_health_stats()
+            temp=round(float(getattr(hs,"die_temperature", getattr(hs,"temperature",0))),1)
+        except Exception: pass
+except Exception:
+    pass
+# [DEVICE] finalize on real Hailo-10H: power via hailortcli measure-power.
+try:
+    out=subprocess.run(["hailortcli","measure-power"],capture_output=True,text=True,timeout=5).stdout
+    m=re.search(r"([0-9]+\.?[0-9]*)\s*W", out)
+    if m: power=round(float(m.group(1)),2)
+except Exception:
+    pass
+
+print(json.dumps({
+    "nnc_util_pct": nnc if nnc is not None else 0.0,
+    "temp_c":       temp if temp is not None else 0.0,
+    "power_w":      power if power is not None else 0.0,
+    "cpu_util_pct": cpu_util(),
+}))
+PY
+}
+
+# ── loaded / models ───────────────────────────────────────────────────────────
+# The ledger is authoritative for what the supervisor accounts as "loaded RAM".
+# On a real HAT we reconcile it with hailo-ollama's live list + the .hef marker
+# dir; with no device the ledger (usually []) is returned verbatim — honest.
+# [DEVICE] finalize on real Hailo-10H — merge live backend state into the ledger.
+reconcile_loaded() {
+    if device_present && command -v curl >/dev/null 2>&1; then
+        # hailo-ollama LLMs actually PULLED (downloaded) — /api/tags, NOT
+        # /hailo/v1/list which is the always-present manifest *store* list.
+        curl -fsS --max-time 3 "$OLLAMA_BASE/api/tags" 2>/dev/null > "$RUN_DIR/.hailo-ollama-list.json" || true
+    fi
+    cat "$LEDGER" 2>/dev/null || echo '[]'
+}
+
+cmd_models() {
+    # Live deployed/loaded state, keyed by library id. Merges:
+    #   * hailo-ollama /api/tags      → which LLM tags are pulled (deployed) /
+    #     resident (loaded)
+    #   * $HEF_DIR/*.hef               → which vision/ocr .hef are downloaded
+    #   * the ledger                   → which models the supervisor counts as
+    #     loaded into HAT RAM right now
+    local ollama_json="[]"
+    if device_present && command -v curl >/dev/null 2>&1; then
+        ollama_json="$(curl -fsS --max-time 3 "$OLLAMA_BASE/api/tags" 2>/dev/null)"
+        [ -z "$ollama_json" ] && ollama_json="[]"
+    fi
+    python3 - "$LIBRARY" "$LEDGER" "$HEF_DIR" "$ollama_json" <<'PY' 2>/dev/null || echo '{"ok":false,"models":[]}'
+import json,sys,os,glob
+lib_path,ledger_path,hef_dir,ollama_raw=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+try:
+    lib=json.load(open(lib_path))
+except Exception:
+    lib={"models":[]}
+try:
+    loaded={m["id"] for m in json.load(open(ledger_path))}
+except Exception:
+    loaded=set()
+# .hef markers on disk → that vision/ocr model is downloaded ("deployed").
+downloaded=set()
+try:
+    for p in glob.glob(os.path.join(hef_dir,"*.hef")):
+        downloaded.add(os.path.splitext(os.path.basename(p))[0])
+except Exception:
+    pass
+# hailo-ollama list → pulled LLM tags. Accept a few plausible shapes.
+ollama_tags=set()
+try:
+    o=json.loads(ollama_raw)
+    items=o.get("models",o) if isinstance(o,dict) else o
+    for it in (items or []):
+        if isinstance(it,dict):
+            t=it.get("name") or it.get("model") or it.get("tag") or it.get("id")
+            if t: ollama_tags.add(t)
+        elif isinstance(it,str):
+            ollama_tags.add(it)
+except Exception:
+    pass
+
+used=sum(float(m.get("size_mb",0)) for m in lib.get("models",[]) if m["id"] in loaded)
+budget=lib.get("usable_mb",5500)
+free=budget-used
+
+out=[]
+for m in lib.get("models",[]):
+    mid=m["id"]; size=float(m.get("size_mb",0))
+    if mid in loaded:
+        state="loaded"
+    elif mid in downloaded or m.get("source","") in ollama_tags or m.get("ollama_tag","") in ollama_tags:
+        state="deployed"
+    else:
+        state="available"
+    fits = (mid in loaded) or (size <= free)
+    out.append({
+        "id":mid,"name":m.get("name",mid),"kind":m.get("kind",""),
+        "params":m.get("params"),"quant":m.get("quant"),
+        "size_mb":int(size),"fits":bool(fits),"state":state,
+        "license":m.get("license"),"use_for":m.get("use_for"),
+    })
+print(json.dumps({"ok":True,"models":out}))
+PY
+}
+
+# ── status ────────────────────────────────────────────────────────────────────
+# The big one hailo.rs merges. Always valid JSON, device or not.
+cmd_status() {
+    local present hat inst used free stats loaded
+    if device_present; then present=true; else present=false; fi
+    hat="$(detect_hat)"
+    USABLE_MB="$(usable_mb "$hat")"
+    local memmodel; memmodel="$(mem_model "$hat")"
+    inst="$(installed "$hat")"
+    used="$(ledger_used_mb)"; used="${used:-0}"
+    free=$(( USABLE_MB - used ))
+    [ "$free" -lt 0 ] && free=0
+    stats="$(cmd_stats)"
+    loaded="$(reconcile_loaded)"
+    python3 - "$present" "$hat" "$inst" "$USABLE_MB" "$used" "$free" "$stats" "$loaded" "$LIBRARY" "$memmodel" <<'PY' 2>/dev/null || \
+        printf '{"device_present":false,"hat":"none","installed":false,"mem_model":"unknown","mem_total_mb":%d,"mem_used_mb":0,"mem_free_mb":%d,"stats":null,"loaded":[]}\n' "$USABLE_MB" "$USABLE_MB"
+import json,sys
+present=sys.argv[1]=="true"
+hat=sys.argv[2]; inst=sys.argv[3]=="true"
+total=int(sys.argv[4]); used=int(sys.argv[5]); free=int(sys.argv[6])
+memmodel=sys.argv[10] if len(sys.argv)>10 else "unknown"
+try: stats=json.loads(sys.argv[7])
+except Exception: stats=None
+try: ledger=json.loads(sys.argv[8])
+except Exception: ledger=[]
+try: lib=json.load(open(sys.argv[9]))
+except Exception: lib={"models":[]}
+by_id={m["id"]:m for m in lib.get("models",[])}
+# Expand the bare ledger entries to full HailoModel (state always "loaded").
+loaded=[]
+for e in ledger:
+    m=by_id.get(e.get("id"),{})
+    loaded.append({
+        "id":e.get("id"),"name":e.get("name",m.get("name",e.get("id"))),
+        "kind":e.get("kind",m.get("kind","")),
+        "params":m.get("params"),"quant":m.get("quant"),
+        "size_mb":int(e.get("size_mb",m.get("size_mb",0))),
+        "fits":True,"state":"loaded",
+        "license":m.get("license"),"use_for":m.get("use_for"),
+    })
+print(json.dumps({
+    "device_present":present,"hat":hat,"installed":inst,"mem_model":memmodel,
+    "mem_total_mb":total,"mem_used_mb":used,"mem_free_mb":free,
+    "stats":stats,"loaded":loaded,
+}))
+PY
+}
+
+# ── install ───────────────────────────────────────────────────────────────────
+# Blocking apt install (the caller in hailo.rs runs it non-blocking via a task
+# and tails $INSTALL_LOG). Writes 'PHASE <name> <pct>' progress lines so the
+# DeployStatus poller can parse phase + percent. Reboot is required afterwards.
+#
+# The Hailo-10H runtime (hailo-h10-all / HailoRT 5.x / h10-hailort) is published
+# ONLY for Pi OS Trixie — Bookworm's archive has just hailo-all (Hailo-8). The
+# Aeon Pi 5 image is Trixie-based for exactly this reason; the guard below refuses
+# on any non-Trixie host instead of emitting a confusing apt error.
+#
+# The generative stack (hailo-ollama + LLM/VLM model zoo) is NOT in the apt
+# archive — it's a separate .deb from Hailo's Developer Zone, pinned to 5.1.1 to
+# match the Trixie h10-hailort (5.2.0 conflicts). A copy pre-staged into
+# /usr/share/aeon/hailo/ is preferred over the network fetch when present.
+HAILO_GENAI_DEB_URL="https://dev-public.hailo.ai/2025_12/Hailo10/hailo_gen_ai_model_zoo_5.1.1_arm64.deb"
+HAILO_GENAI_DEB_LOCAL="/usr/share/aeon/hailo/hailo_gen_ai_model_zoo_5.1.1_arm64.deb"
+
+phase() { echo "PHASE $1 $2" >> "$INSTALL_LOG"; echo "aeon-hailo: phase $1 $2%" >&2; }
+
+cmd_install() {
+    # Single-flight: if another install holds the lock, REFUSE without touching
+    # $INSTALL_LOG — a stray "PHASE failed" line from a concurrent invocation
+    # would poison the dashboard's last-PHASE status (the real install reads as
+    # "failed" while it's actually succeeding). The lock auto-releases on exit.
+    exec 9>/run/aeon/hailo-install.lock
+    if ! flock -n 9; then
+        log "another Hailo install is already in progress — refusing (status left intact)"
+        return 1
+    fi
+    : > "$INSTALL_LOG" 2>/dev/null || true
+    # Pick the metapackage for the DETECTED chip — they're mutually exclusive.
+    local hat pkg; hat="$(detect_hat)"
+    case "$hat" in
+        hailo-10h) pkg=hailo-h10-all ;;   # AI HAT+ 2: dedicated 8 GB, generative-capable (Trixie)
+        hailo-8)   pkg=hailo-all ;;        # older AI HAT / AI Kit (Hailo-8 / 8L): vision, system RAM
+        *) phase failed 100
+           log "no supported Hailo chip detected (identify saw '$hat') — refusing to install the wrong runtime"
+           return 1 ;;
+    esac
+    # OS guard: hailo-h10-all / HailoRT 5.x is Trixie-only. Fail clearly on others.
+    if [ "$hat" = hailo-10h ]; then
+        local codename; codename="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")"
+        if [ "$codename" != "trixie" ]; then
+            phase failed 100
+            log "Hailo-10H needs Pi OS Trixie (hailo-h10-all/HailoRT 5.x is Trixie-only); this image is '${codename:-unknown}'. Reflash the Trixie Pi 5 image."
+            return 1
+        fi
+    fi
+    phase update 5
+    if ! apt-get update >>"$INSTALL_LOG" 2>&1; then
+        phase failed 100; log "apt-get update failed"; return 1
+    fi
+    # HailoRT's PCIe driver builds via DKMS — make sure dkms is present first.
+    phase driver 15
+    apt-get install -y dkms >>"$INSTALL_LOG" 2>&1 \
+        || echo "aeon-hailo: dkms install warned (may already be present)" >> "$INSTALL_LOG"
+    # OCR backend deps: aeon-vision's hailo PaddleOCR path uses cv2 + numpy for
+    # the DB post-process + crops. Usually pulled transitively by hailo-tappas,
+    # but install explicitly so the OCR path works on any Hailo-enabled image.
+    apt-get install -y python3-opencv python3-numpy >>"$INSTALL_LOG" 2>&1 \
+        || echo "aeon-hailo: python3-opencv/numpy install warned (Hailo OCR may be degraded)" >> "$INSTALL_LOG"
+    phase installing 30
+    log "installing $pkg for $hat"
+    if ! apt-get install -y "$pkg" >>"$INSTALL_LOG" 2>&1; then
+        phase failed 100; log "$pkg install failed"; return 1
+    fi
+    # Generative stack (LLM/VLM/STT via hailo-ollama) — a Hailo-10H capability.
+    # Prefer a pre-staged local deb; else fetch the pinned 5.1.1 deb. Best-effort:
+    # vision .hef inference works without it, so a failure here is non-fatal.
+    if [ "$hat" = hailo-10h ]; then
+        phase modelzoo 75
+        if [ -f "$HAILO_GENAI_DEB_LOCAL" ]; then
+            apt-get install -y "$HAILO_GENAI_DEB_LOCAL" >>"$INSTALL_LOG" 2>&1 \
+                || echo "aeon-hailo: local GenAI deb install warned" >> "$INSTALL_LOG"
+        elif curl -fsSL --retry 2 --max-time 900 "$HAILO_GENAI_DEB_URL" -o /tmp/hailo-genai.deb >>"$INSTALL_LOG" 2>&1; then
+            apt-get install -y /tmp/hailo-genai.deb >>"$INSTALL_LOG" 2>&1 \
+                || echo "aeon-hailo: GenAI deb install warned" >> "$INSTALL_LOG"
+            rm -f /tmp/hailo-genai.deb
+        else
+            echo "aeon-hailo: GenAI/ollama deb unavailable ($HAILO_GENAI_DEB_URL) — vision .hef still works; LLM/VLM need it" >> "$INSTALL_LOG"
+        fi
+    fi
+    phase done 100
+    log "install complete ($pkg) — REBOOT required to load the PCIe driver + firmware"
+    return 0
+}
+
+# install/status helper used by the DeployStatus poller in hailo.rs (it can also
+# parse the log itself; this gives a clean JSON if it prefers).
+cmd_install_status() {
+    python3 - "$INSTALL_LOG" <<'PY' 2>/dev/null || echo '{"phase":"idle","percent":0,"done":false,"ok":true,"log":""}'
+import sys,os
+p=sys.argv[1]
+phase="idle"; pct=0; done=False; ok=True; tail=""
+try:
+    lines=open(p).read().splitlines()
+    tail="\n".join(lines[-20:])
+    for ln in lines:
+        if ln.startswith("PHASE "):
+            parts=ln.split()
+            phase=parts[1] if len(parts)>1 else phase
+            try: pct=int(parts[2]) if len(parts)>2 else pct
+            except ValueError: pass
+    if phase=="done": done=True; ok=True
+    if phase=="failed": done=True; ok=False
+except FileNotFoundError:
+    pass
+import json
+print(json.dumps({"phase":phase,"percent":pct,"done":done,"ok":ok,"log":tail}))
+PY
+}
+
+# ── deploy ────────────────────────────────────────────────────────────────────
+# Pull/download a model by library id, then add it to the ledger so its RAM is
+# accounted. Progress to /run/aeon/hailo-deploy-<id>.log (PHASE lines), same
+# convention as install. LLM → hailo-ollama pull; vision/ocr → public S3 .hef;
+# VLM/STT → hailo_platform.genai backend.
+# [DEVICE] finalize on real Hailo-10H — wire the real backend calls.
+ledger_add() {  # id name kind size_mb
+    python3 - "$LEDGER" "$1" "$2" "$3" "$4" <<'PY' 2>/dev/null || true
+import json,sys
+path,mid,name,kind,size=sys.argv[1:6]
+try: a=json.load(open(path))
+except Exception: a=[]
+a=[m for m in a if m.get("id")!=mid]
+a.append({"id":mid,"name":name,"kind":kind,"size_mb":int(float(size))})
+json.dump(a,open(path,"w"))
+PY
+}
+
+# Resolve a library id → its kind / source / size for the dispatch below.
+lib_field() {  # id field
+    python3 - "$LIBRARY" "$1" "$2" <<'PY' 2>/dev/null
+import json,sys
+lib_path,mid,field=sys.argv[1],sys.argv[2],sys.argv[3]
+try: lib=json.load(open(lib_path))
+except Exception: lib={"models":[]}
+for m in lib.get("models",[]):
+    if m.get("id")==mid:
+        v=m.get(field,""); print(v if v is not None else ""); break
+PY
+}
+
+cmd_deploy() {
+    local id="${1:-}"
+    [ -z "$id" ] && { log "usage: deploy <id>"; return 1; }
+    local dlog="$RUN_DIR/hailo-deploy-$id.log"
+    : > "$dlog" 2>/dev/null || true
+    dphase() { echo "PHASE $1 $2" >> "$dlog"; echo "aeon-hailo: deploy $id $1 $2%" >&2; }
+
+    local kind src size name
+    kind="$(lib_field "$id" kind)"
+    src="$(lib_field "$id" source)"
+    size="$(lib_field "$id" size_mb)"; size="${size:-0}"
+    name="$(lib_field "$id" name)"; name="${name:-$id}"
+    if [ -z "$kind" ]; then dphase failed 100; log "unknown model id '$id'"; return 1; fi
+
+    dphase pulling 10
+    if device_present; then
+        case "$kind" in
+            llm)
+                # [DEVICE] finalize on real Hailo-10H — hailo-ollama pull.
+                if command -v curl >/dev/null 2>&1; then
+                    curl -fsS --max-time 1800 -X POST "$OLLAMA_BASE/api/pull" \
+                        -H 'Content-Type: application/json' \
+                        -d "{\"model\":\"${src:-$id}\"}" >>"$dlog" 2>&1 \
+                        || { dphase failed 100; log "hailo-ollama pull failed for $id"; return 1; }
+                fi
+                ;;
+            vision|ocr)
+                # [DEVICE] finalize on real Hailo-10H — public S3 .hef download.
+                local url="${src:-$HEF_S3/$id.hef}"
+                case "$url" in http*) : ;; *) url="$HEF_S3/$url";; esac
+                if command -v wget >/dev/null 2>&1; then
+                    wget -q -O "$HEF_DIR/$id.hef" "$url" >>"$dlog" 2>&1 \
+                        || { dphase failed 100; log "wget .hef failed for $id ($url)"; return 1; }
+                elif command -v curl >/dev/null 2>&1; then
+                    curl -fsSL --max-time 1800 -o "$HEF_DIR/$id.hef" "$url" >>"$dlog" 2>&1 \
+                        || { dphase failed 100; log "curl .hef failed for $id ($url)"; return 1; }
+                fi
+                # PP-OCRv5 recognition needs its 18383-char dictionary next to the
+                # .hef (aeon-vision's ocr_hailo builds ['blank']+dict+[' '] = 18385
+                # classes from it). Fetch once; non-fatal.
+                if [ "$kind" = "ocr" ] && [ ! -f "$HEF_DIR/ppocrv5_dict.txt" ]; then
+                    curl -fsSL --max-time 120 -o "$HEF_DIR/ppocrv5_dict.txt" \
+                        "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/ppocrv5_dict.txt" \
+                        >>"$dlog" 2>&1 || echo "WARN: ppocrv5 dict download failed — OCR recognition degraded" >>"$dlog"
+                fi
+                ;;
+            vlm|stt)
+                # [DEVICE] genai (VLM / Speech2Text) .hef — a public dev-public.hailo.ai
+                # blob, loaded by hailo_platform.genai.VLM(vdevice, hef_path). It holds
+                # the NPU's single GenAI slot, so describe_screen swaps it with the
+                # resident hailo-ollama LLM. The library `source` must be the .hef URL.
+                local url="${src:-}"
+                case "$url" in
+                    http*) curl -fsSL --max-time 3600 -o "$HEF_DIR/$id.hef" "$url" >>"$dlog" 2>&1 \
+                        || { dphase failed 100; log "genai .hef download failed for $id ($url)"; return 1; } ;;
+                    *) echo "aeon-hailo: genai model $id has no .hef source URL — set the library 'source'" >> "$dlog" ;;
+                esac
+                ;;
+            *) dphase failed 100; log "unhandled kind '$kind'"; return 1;;
+        esac
+    else
+        # Device-free scaffold: record the intent so the UI advances + the ledger
+        # reflects the (simulated) load. Honest because cmd_status still reports
+        # device_present:false.
+        echo "aeon-hailo: no Hailo device — recording $id in ledger (scaffold mode)" >> "$dlog"
+    fi
+
+    dphase loading 90
+    ledger_add "$id" "$name" "$kind" "$size"
+    dphase done 100
+    return 0
+}
+
+# ── unload ────────────────────────────────────────────────────────────────────
+cmd_unload() {
+    local id="${1:-}"
+    [ -z "$id" ] && { log "usage: unload <id>"; return 1; }
+    if device_present && command -v curl >/dev/null 2>&1; then
+        # [DEVICE] finalize on real Hailo-10H — evict from the live backend.
+        # hailo-ollama's pull/unload take {"model": <tag>} (NOT ollama's {"name"});
+        # and the live tag is the library `source`, not the catalog id.
+        curl -fsS --max-time 30 -X POST "$OLLAMA_BASE/api/unload" \
+            -H 'Content-Type: application/json' -d "{\"model\":\"$(lib_field "$id" source)\"}" >/dev/null 2>&1 || true
+    fi
+    python3 - "$LEDGER" "$id" <<'PY' 2>/dev/null || true
+import json,sys
+path,mid=sys.argv[1],sys.argv[2]
+try: a=json.load(open(path))
+except Exception: a=[]
+json.dump([m for m in a if m.get("id")!=mid],open(path,"w"))
+PY
+    return 0
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    status)         cmd_status ;;
+    install)        cmd_install ;;
+    install-status) cmd_install_status ;;
+    stats)          cmd_stats ;;
+    models)         cmd_models ;;
+    deploy)         shift; cmd_deploy "$@" ;;
+    unload)         shift; cmd_unload "$@" ;;
+    *) echo "usage: aeon-hailo {status|install|install-status|stats|models|deploy <id>|unload <id>}" >&2; exit 1 ;;
+esac

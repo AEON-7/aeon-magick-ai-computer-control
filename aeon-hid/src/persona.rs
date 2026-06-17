@@ -59,6 +59,11 @@ pub struct PersonaDescriptors {
     /// loading installer ISOs into the target Mac's boot picker.
     /// Built from `/etc/aeon/storage.toml` at gadget-setup time.
     pub mass_storage: Option<MassStorageConfig>,
+    /// If `Some`, add a UVC webcam function — the Cam0 camera (IMX477) exposed
+    /// to the OTG host as a standard USB webcam, alongside HID + ethernet.
+    /// Built from `/etc/aeon/uvc.toml` at gadget-setup time; frames are pumped
+    /// by the separate aeon-uvc (uvc-gadget) daemon.
+    pub uvc: Option<UvcConfig>,
 }
 
 /// USB mass-storage (CDROM) gadget function config.
@@ -77,6 +82,30 @@ pub struct EcmConfig {
     pub host_mac: String,
     /// MAC for Pi's own `usb0` interface.
     pub dev_mac: String,
+}
+
+/// UVC (USB Video Class) webcam gadget function config. The Cam0 camera
+/// (IMX477) is exposed to the OTG host as a standard MJPEG webcam. The
+/// configfs descriptors are built from these values (gadget.rs); the frames
+/// are pumped by the `aeon-uvc` (uvc-gadget) daemon, which opens the camera
+/// only while the host is streaming. Built from `/etc/aeon/uvc.toml`.
+#[derive(Debug, Clone)]
+pub struct UvcConfig {
+    /// Default frame width (e.g. 1280). A 640×480 fallback frame is always
+    /// also advertised by the gadget.
+    pub width: u16,
+    /// Default frame height (e.g. 720).
+    pub height: u16,
+    /// Advertised frame intervals in 100ns units (30fps = 333333,
+    /// 15fps = 666666). First entry is the default.
+    pub frame_intervals: Vec<u32>,
+    /// Isochronous max-packet size for the streaming endpoint. MUST stay 1024
+    /// on the Pi 5: dwc2 in USB-2.0 high-speed caps iso wMaxPacketSize at 1024
+    /// and does NOT implement high-bandwidth iso (the 2048/3072 multi-transaction
+    /// geometry), so 2048/3072 are illegal here — a 2048-byte iso endpoint can't
+    /// be brought up and the host does PROBE/COMMIT but never reaches the
+    /// streaming alt-setting. See `uvc.toml` for the full rationale.
+    pub streaming_maxpacket: u16,
 }
 
 pub fn descriptors_for(p: Persona) -> PersonaDescriptors {
@@ -295,6 +324,7 @@ fn generic() -> PersonaDescriptors {
         serial: String::new(),
         ecm: None,
         mass_storage: None,
+        uvc: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -332,6 +362,7 @@ fn generic_absolute() -> PersonaDescriptors {
         serial: String::new(),
         ecm: None,
         mass_storage: None,
+        uvc: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -387,6 +418,7 @@ fn logitech_mx() -> PersonaDescriptors {
         serial: String::new(), // injected by main.rs
         ecm: None,
         mass_storage: None,
+        uvc: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -447,6 +479,7 @@ fn apple_magic() -> PersonaDescriptors {
         serial: String::new(), // injected by main.rs
         ecm: None,
         mass_storage: None,
+        uvc: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",
@@ -510,6 +543,7 @@ fn apple_magic_stable() -> PersonaDescriptors {
         serial: String::new(), // injected by main.rs
         ecm: None,
         mass_storage: None,
+        uvc: None,
         functions: vec![
             HidFunction {
                 name: "hid.kbd",

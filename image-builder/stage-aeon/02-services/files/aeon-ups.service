@@ -1,0 +1,20 @@
+[Unit]
+Description=Aeon Magick — Waveshare UPS HAT (E) monitor + low-battery safe-shutdown
+# Needs /dev/i2c-1 (i2c-dev module + i2c_arm dtparam, both shipped in the image).
+After=systemd-modules-load.service local-fs.target
+Wants=systemd-modules-load.service
+
+[Service]
+Type=simple
+# Tunables default to Waveshare's tested values; override here if your pack or
+# shutdown timing differs.
+Environment=AEON_UPS_BUS=1
+Environment=AEON_UPS_LOW_MV=3150
+Environment=AEON_UPS_GRACE_S=60
+# Runs as root: reads I2C 0x2D and may issue `systemctl poweroff` on low batt.
+ExecStart=/usr/bin/python3 /usr/local/bin/aeon-ups
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -88,6 +88,9 @@ impl RecordManager {
         h264_tx: &broadcast::Sender<H264Au>,
         ffmpeg_bin: PathBuf,
         fps: u32,
+        audio_device: String,
+        audio_rate: u32,
+        audio_channels: u32,
         duration_s: Option<u64>,
     ) -> Result<RecInfo, String> {
         let mut guard = self.active.lock();
@@ -120,7 +123,8 @@ impl RecordManager {
         let out_task = out.clone();
         let stop_task = stop.clone();
         tokio::spawn(async move {
-            match record_loop(&me_loop, &id_task, rx, &out_task, &ffmpeg_bin, fps, cap, stop_task)
+            match record_loop(&me_loop, &id_task, rx, &out_task, &ffmpeg_bin, fps,
+                               audio_device, audio_rate, audio_channels, cap, stop_task)
                 .await
             {
                 Ok(bytes) => {
@@ -330,28 +334,52 @@ async fn record_loop(
     out: &Path,
     ffmpeg_bin: &Path,
     fps: u32,
+    audio_device: String,
+    audio_rate: u32,
+    audio_channels: u32,
     cap_s: u64,
     stop: Arc<Notify>,
 ) -> Result<u64, String> {
+    // Video always arrives as H.264 Annex-B on stdin (the broadcast pipe).
+    // With an `audio_device` set we add an ALSA input and mux an AAC track into
+    // the MP4 — video stays `-c copy` (already-encoded NALs) so the live
+    // broadcast pipe is untouched. Empty `audio_device` reproduces the exact
+    // historical video-only command, byte-for-byte.
+    let audio = !audio_device.trim().is_empty();
+    let mut args: Vec<String> =
+        vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    if audio {
+        // Audio = input 0. thread_queue_size absorbs ALSA buffering while
+        // ffmpeg waits for the first video keyframe.
+        args.extend([
+            "-thread_queue_size".into(), "1024".into(),
+            "-f".into(), "alsa".into(),
+            "-ar".into(), audio_rate.to_string(),
+            "-ac".into(), audio_channels.to_string(),
+            "-i".into(), audio_device.clone(),
+        ]);
+    }
+    // Video = input 1 (or 0 when no audio).
+    args.extend([
+        "-fflags".into(), "+genpts".into(),
+        "-f".into(), "h264".into(),
+        "-framerate".into(), fps.to_string(),
+        "-i".into(), "pipe:0".into(),
+    ]);
+    if audio {
+        args.extend([
+            "-map".into(), "1:v:0".into(), "-map".into(), "0:a:0".into(),
+            "-c:v".into(), "copy".into(),
+            "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(),
+            "-async".into(), "1".into(), "-shortest".into(),
+        ]);
+    } else {
+        args.extend(["-c".into(), "copy".into()]);
+    }
+    args.extend(["-movflags".into(), "+faststart".into(), "-y".into()]);
+
     let mut child = tokio::process::Command::new(ffmpeg_bin)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts",
-            "-f",
-            "h264",
-            "-framerate",
-            &fps.to_string(),
-            "-i",
-            "pipe:0",
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            "-y",
-        ])
+        .args(&args)
         .arg(out)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

@@ -1,0 +1,25 @@
+# On-device live vision — OCR / object detection over the Orb's capture feed.
+#
+# aeon-vision pulls frames from the running aeon-streamer (it reads the
+# streamer's /snapshot socket, so it never opens a second handle on the
+# single-consumer camera/HDMI device), runs a model, and publishes structured
+# detections to /run/aeon/vision.json → GET /api/vision/detections + the
+# `screen_text` MCP tool. Boxes are fractions 0..1 — the same convention the
+# click(x,y) tool uses — so an agent can act on a detection directly.
+#
+# OFF by default. Flip enabled=true once a backend is ready.
+#
+# backend:
+#   "tesseract" — CPU OCR (needs the `tesseract-ocr` apt package). Works on any
+#                 Pi; best for reading the controlled SCREEN (hdmi-csi / cam-link-usb).
+#   "hailo"     — OCR/detection on the Raspberry Pi AI HAT+ (Hailo-8/8L/10H).
+#                 Finalised on-device once the HAT enumerates and the .hef models
+#                 are placed under /usr/share/aeon/vision/. Falls back to
+#                 tesseract until that path is wired, so the feature still works.
+
+enabled = false
+backend = "tesseract"
+interval_s = 0.5        # seconds between inferences (1/this = fps cap)
+min_conf = 40           # drop detections below this confidence (0-100)
+lang = "eng"            # tesseract language
+max_detections = 200    # cap per frame (keeps the JSON + the agent's context sane)

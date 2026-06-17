@@ -17,6 +17,7 @@ apt-get install -y --no-install-recommends \
     usbutils \
     pciutils \
     i2c-tools \
+    python3-smbus \
     ethtool \
     ca-certificates \
     curl \
@@ -32,10 +33,13 @@ apt-get install -y --no-install-recommends \
     tor \
     obfs4proxy \
     i2pd
-# Tailscale via their official repo (Debian Bookworm)
-curl -fsSL https://pkgs.tailscale.com/stable/raspbian/bookworm.noarmor.gpg \
+# Tailscale via their official repo. Derive the suite from THIS image's
+# /etc/os-release (in-chroot) so the same stage works for a Bookworm (pi4) or a
+# Trixie (pi5) bake — don't hardcode the codename (it would break the other track).
+TSCODENAME="\$(. /etc/os-release && echo \${VERSION_CODENAME:-bookworm})"
+curl -fsSL "https://pkgs.tailscale.com/stable/raspbian/\${TSCODENAME}.noarmor.gpg" \
     | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
-curl -fsSL https://pkgs.tailscale.com/stable/raspbian/bookworm.tailscale-keyring.list \
+curl -fsSL "https://pkgs.tailscale.com/stable/raspbian/\${TSCODENAME}.tailscale-keyring.list" \
     | tee /etc/apt/sources.list.d/tailscale.list
 apt-get update
 apt-get install -y tailscale
@@ -53,4 +57,26 @@ rm -rf /tmp/dnscrypt.tgz /tmp/linux-arm64
 # config file when [dnscrypt].enabled is toggled.
 useradd -r -s /usr/sbin/nologin -d /var/cache/dnscrypt-proxy _dnscrypt-proxy 2>/dev/null || true
 install -d -m 0755 -o _dnscrypt-proxy -g _dnscrypt-proxy /etc/dnscrypt-proxy /var/cache/dnscrypt-proxy
+EOF
+
+# libcamera / rpicam stack for the Pi 5 "camera-csi" vision source (rpicam-vid).
+# Bookworm renamed libcamera-apps → rpicam-apps; try the new name first, fall
+# back to the old one, and never abort the bake if neither resolves (the
+# camera path is optional + the user can apt-install on-device). v4l-utils
+# (already installed above) provides v4l2-ctl + media-ctl for the HDMI-CSI
+# bridge — no extra package needed there.
+on_chroot << 'EOF'
+apt-get install -y --no-install-recommends rpicam-apps \
+  || apt-get install -y --no-install-recommends libcamera-apps \
+  || echo "WARN: rpicam-apps/libcamera-apps unavailable — camera-csi source will need an on-device apt install"
+EOF
+
+# On-device vision AI: CPU OCR (tesseract — works on any Pi; the vision daemon's
+# default backend). The Hailo runtime is deliberately NOT baked — it's installed
+# chip-aware + button-driven by the Hailo AI super-app (POST /api/hailo/install →
+# hailo-all for a Hailo-8/8L, hailo-h10-all for the AI HAT+ 2 / Hailo-10H), so a
+# fresh image never forces the wrong runtime. See docs/HAILO.md.
+on_chroot << 'EOF'
+apt-get install -y --no-install-recommends tesseract-ocr \
+  || echo "WARN: tesseract-ocr unavailable — vision OCR backend needs an on-device apt install"
 EOF

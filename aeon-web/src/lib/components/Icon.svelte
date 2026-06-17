@@ -22,11 +22,19 @@
     cpu: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>',
     chip: '<rect x="7" y="7" width="10" height="10" rx="1"/><circle cx="12" cy="12" r="1.5"/><path d="M10 2v5M14 2v5M10 17v5M14 17v5M2 10h5M2 14h5M17 10h5M17 14h5"/>',
     orbnet: '<circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5" r="1.8"/><circle cx="19" cy="5" r="1.8"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="19" r="1.8"/><path d="M6.6 6.6 10 10M17.4 6.6 14 10M6.6 17.4 10 14M17.4 17.4 14 14"/>',
+    fleet: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
     power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
     zap: '<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>',
     reboot: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
     chevron: '<path d="M6 9l6 6 6-6"/>',
     keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/>',
+    // AI chip with a spark inside — a silicon die (rounded square) sprouting
+    // pin legs on all four sides, with a lightning spark at its core. Reads
+    // as "NPU / accelerated AI".
+    spark: '<rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/><path d="M12.5 9.5 10.5 12.5h2l-1 2.5 3-3.2h-2.2l1.2-2.3z"/>',
+    // BrainCraft HAT: a small TFT screen wearing a friendly face — the Orb's
+    // 240x240 display as its "face" (two eyes + a smile), on a stand.
+    braincraft: '<rect x="3" y="4" width="18" height="14" rx="2"/><circle cx="9.5" cy="10" r="1"/><circle cx="14.5" cy="10" r="1"/><path d="M9 13.2a3.2 3.2 0 0 0 6 0"/><path d="M9 21h6M12 18v3"/>',
   };
   $: inner = P[name] ?? '';
 </script>
