@@ -6,6 +6,45 @@ button stuck. All calls assume `https://${AEON_HOST}/` with a Bearer token
 `$AEON_TOKEN`. There is intentionally **no `key_down`/`key_up`
 split** — that's the design lesson inherited from `cursed-hid`.
 
+## ⚡ Start here — deterministic agent control
+
+**1. Put the Orb on the `generic-absolute` persona first.** It's the
+deterministic agent default (see *persona* below). On a relative persona
+(`logitech-mx`, `generic-composite`, `apple-magic-stable`) the cursor drifts
+with the host's pointer-acceleration and your clicks miss; `generic-absolute`
+makes `move_abs`/`click_at` land on the **exact** fraction you ask for. One
+call, then it persists across reboots:
+
+```bash
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" -X POST \
+    -H "Content-Type: application/json" -d '{"persona":"generic-absolute"}' \
+    "https://$AEON_HOST/api/hid/persona"   # ~1 s USB re-enumeration on the target
+```
+
+**2. The canonical loop: `screen_find`/snapshot → `click_at(center)` → `type`.**
+The vision tools (`screen_find`, `describe_screen`) hand back a clickable
+`center {x,y}` already in 0..1 fractions — feed it straight into `click_at`,
+no math.
+
+**3. Timing — the #1 reason input "doesn't land":** the device is fast, the
+*target* isn't. After a launcher hotkey (Cmd+Space → Spotlight, Cmd+Tab, a
+menu) the field isn't focused for a beat, so a string typed immediately is
+dropped. Never fire a sequence back-to-back — go **act → wait → verify → act**:
+
+1. `key ["GUI","SPACE"]` — open Spotlight
+2. **wait ~400–800 ms** (or snapshot until the search box is visible)
+3. `type "Mail"` — into the now-focused box
+4. **snapshot** to confirm the match is highlighted
+5. `key ["ENTER"]`
+
+One slow, verified pass beats three fast blind ones.
+
+**4. Keep the target awake.** On a long task a Mac will sleep/lock and your
+snapshot freezes on the last frame. Every ~30–60 s of idle, nudge it — a tiny
+`move_abs` jiggle (`{"x":0.5,"y":0.5}` then `{"x":0.5,"y":0.502}`) or a lone
+`SHIFT` chord — to hold the session open without disturbing focus or typing
+anything.
+
 ## type — emit a string
 
 ```bash

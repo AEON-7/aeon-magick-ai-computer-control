@@ -123,7 +123,11 @@ The whole loop is **state → snapshot → act → snapshot again**:
    are all `true`. If anything is false, **stop and report to the user** — it's
    almost always a cable, not software. There's no point sending input that
    won't land. (Also worth a glance: `GET /api/ups` — if `on_battery: true`
-   with a low `charge`, the Orb may be about to power down.)
+   with a low `charge`, the Orb may be about to power down.) **Then ensure the
+   `generic-absolute` persona** — the deterministic agent default; on a relative
+   persona (`logitech-mx` etc.) `click_at` drifts and misses. One
+   `POST /api/hid/persona {"persona":"generic-absolute"}` (persists across
+   reboots). See `references/input.md` → *⚡ Start here*.
 2. **Know what you're looking at.** `GET /api/streamer/config` tells you the
    current `source`. If you need to see the controlled screen, use a screen
    source (`hdmi-csi` / `cam-link-usb`); to look at a physical thing, switch to
@@ -149,7 +153,13 @@ The whole loop is **state → snapshot → act → snapshot again**:
    reliable path, no acceleration drift. (On a relative persona, drive there
    with segmented `move` instead, splitting deltas larger than ±127.)
 6. **`click_at`** / **`click`** (or `key`, `type`, `scroll`, `drag`) to act.
-   For text entry: focus the field (move + click), then `type`.
+   For text entry: focus the field (move + click), then `type`. **Mind the
+   timing** — the device is fast but the *target* isn't: after a launcher hotkey
+   (Cmd+Space, Cmd+Tab, a menu) wait ~0.5 s for the field to focus *before*
+   `type`, then snapshot to verify. Firing the whole sequence back-to-back is
+   the usual cause of "the text didn't land" (see `references/input.md` →
+   *⚡ Start here*). On long tasks, jiggle the pointer every ~30–60 s to stop the
+   target sleeping.
 7. **`snapshot`** again to verify the change happened. If not, loop to step 4
    with the new frame.
 
