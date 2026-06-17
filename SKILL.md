@@ -285,7 +285,8 @@ model loads each only when its task needs it — never all at once:
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `keyboard_online: false` | Charging-only USB-C cable | Swap to a data cable |
+| `keyboard_online: false` / HID `not attached` on a **Pi 5**, even with a known-good data cable | Kernel regression (≥6.6.42, incl. Trixie 6.18): Pi 5 dwc2 USB-C gadget mode is broken **over USB-C-to-USB-C cables** specifically ([raspberrypi/linux #6289](https://github.com/raspberrypi/linux/issues/6289)). The Orb side is fine (gadget bound). | Use a **USB-A-to-USB-C** path to the target (USB-A end on the host) — the only confirmed workaround. On a USB-C-only host, put a USB-C→USB-A adapter on the host + a USB-A→USB-C cable to the Pi, or use a dock/hub with USB-A. Not a config fix. |
+| `keyboard_online: false` (other) | Charging-only USB-C cable | Swap to a data cable |
 | `streamer_online: false` | Capture source not enumerated | Re-seat the capture source; confirm the target is outputting HDMI; check `GET /api/streamer/config` `available_sources` |
 | Continuous letter repeats on target | Lost release event (rare) | `release_all` (see `references/input.md`) |
 | Snapshot frozen + `ups.on_battery: true` | Orb may be powering down on a draining battery | Check `GET /api/ups`; restore mains power (see the `aeon-power` skill) |
