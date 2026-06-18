@@ -318,8 +318,11 @@ fn generic() -> PersonaDescriptors {
         id_vendor: 0x1d6b,  // Linux Foundation
         id_product: 0x0104, // Multifunction Composite Gadget
         bcd_device: 0x0100,
-        manufacturer: "aeon-magick",
-        product: "Aeon Magick AI Computer Control",
+        // Neutral, non-revealing strings — the gadget must NEVER announce itself
+        // as "Aeon Magick AI Computer Control" on the target (that's an obvious
+        // tell). A plain composite-device name blends in.
+        manufacturer: "Generic",
+        product: "USB Composite Device",
         // Filled in at runtime by main.rs from /etc/aeon/usb-serial.state
         serial: String::new(),
         ecm: None,
@@ -354,11 +357,18 @@ fn generic() -> PersonaDescriptors {
 /// pointing can't be a boot device). Driven via the /move_abs API.
 fn generic_absolute() -> PersonaDescriptors {
     PersonaDescriptors {
-        id_vendor: 0x1d6b,  // Linux Foundation
-        id_product: 0x0104, // Multifunction Composite Gadget
+        // Disguise as a Logitech keyboard+mouse receiver — believable for a
+        // composite keyboard + pointer, and (unlike "Aeon Magick AI Computer
+        // Control") gives away nothing. Uses PID 0xc31c (plain Logitech USB
+        // Keyboard, driven by usbhid) NOT the Unifying-receiver 0xc52b, which
+        // makes Linux bind hid-logitech-dj and wedge the daemon (see
+        // logitech_mx). The absolute-pointer descriptor below is unaffected by
+        // the VID/PID, so it stays deterministic.
+        id_vendor: 0x046d,  // Logitech
+        id_product: 0xc31c, // Logitech USB Keyboard (plain HID, hid-logitech-dj-safe)
         bcd_device: 0x0100,
-        manufacturer: "aeon-magick",
-        product: "Aeon Magick AI Computer Control",
+        manufacturer: "Logitech",
+        product: "USB Receiver",
         serial: String::new(),
         ecm: None,
         mass_storage: None,
@@ -383,7 +393,7 @@ fn generic_absolute() -> PersonaDescriptors {
                 report_length: 6,
                 report_desc: ABS_POINTER_DESC,
                 kind: HidKind::Mouse,
-                interface_label: Some("Absolute Pointer"),
+                interface_label: Some("Mouse"),
             },
             HidFunction {
                 name: "hid.consumer",
