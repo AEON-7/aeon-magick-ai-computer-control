@@ -25,7 +25,17 @@ one set of credentials.
 > **Credentials — read this first.** Every call authenticates with
 > `Authorization: Bearer $AEON_TOKEN` against `https://$AEON_HOST` (self-signed
 > cert → `curl -k`). The token is **never** written into this skill. Supply it
-> however you already hold it — both work:
+> however you already hold it — any of these work:
+> - **From the Orb's built-in provisioning (the usual path):** the Agent Dash
+>   "Provision" button mints your token and drops it at
+>   `~/.openclaw/agents/<your-agent-id>/agent/aeon-magick-access.json` (JSON:
+>   `{api_base, token}`). Load it — this is what to use if you got a `401` after
+>   provisioning (the token's in that file, not yet in your env):
+>   ```bash
+>   A=$(ls ~/.openclaw/agents/*/agent/aeon-magick-access.json 2>/dev/null | head -1)
+>   export AEON_TOKEN=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["token"])' "$A")
+>   export AEON_HOST=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["api_base"].split("//")[1].split("/")[0])' "$A")
+>   ```
 > - **Inject your own:** `export AEON_HOST=<orb ip>` and `export AEON_TOKEN=<your
 >   Orb token>` (e.g. pulled from your password manager) for the session, then run
 >   any command below as-is.
