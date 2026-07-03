@@ -28,6 +28,15 @@
   let raf = 0;
   let keyTimer: ReturnType<typeof setTimeout> | undefined;
   let destroyed = false;
+  // Drop-to-newest guard on the ENCODED side. The output callback already
+  // keeps only the newest decoded frame, but decoder.decode() queues
+  // internally with no bound — a slow decode or a hidden tab (rAF stopped,
+  // WS still delivering) accumulates lag chunk by chunk. When the queue
+  // backs up we stop feeding deltas and resync at the next IDR (≤1 GOP away).
+  let waitingForKey = false;
+  const onVisibility = () => {
+    if (document.visibilityState === 'hidden') waitingForKey = true;
+  };
 
   const hasWebCodecs = () =>
     typeof window !== 'undefined' &&
@@ -137,6 +146,13 @@
       const isKey = (buf[0] & 1) === 1;
       const au = buf.subarray(1);
       if (!sawKey && !isKey) return; // wait for the first IDR before decoding
+      // Bounded decode queue: if the decoder is falling behind, skip deltas
+      // until the next keyframe so latency can't accumulate client-side.
+      if (decoder && decoder.decodeQueueSize > 4) waitingForKey = true;
+      if (waitingForKey) {
+        if (!isKey) return;
+        waitingForKey = false;
+      }
       if (!configured) {
         if (!isKey) return;
         try {
@@ -168,15 +184,19 @@
       }
     };
     ws.onerror = () => fallback('ws-error');
-    ws.onclose = () => {
-      if (!sawKey) fallback('ws-closed');
-    };
+    // Always surface a close — before the first keyframe it means the H.264
+    // path isn't there; after it (streamer/supervisor restart, e.g. a config
+    // PUT) the old behavior froze the canvas on the last frame forever. The
+    // parent treats both as transient and re-mounts when the feed returns.
+    ws.onclose = () => fallback(sawKey ? 'ws-closed-live' : 'ws-closed');
 
+    document.addEventListener('visibilitychange', onVisibility);
     raf = requestAnimationFrame(paintLoop);
   });
 
   onDestroy(() => {
     destroyed = true;
+    document.removeEventListener('visibilitychange', onVisibility);
     teardown();
   });
 </script>

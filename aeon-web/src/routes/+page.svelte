@@ -62,9 +62,24 @@
   // H.264 streamer engages WebCodecs as soon as state reports it.
   let ws_url = '';
   let webCodecsOk = false;
-  // Sticky: set when H264Canvas reports a fallback (decoder/ws failure) so
-  // we don't flap back into a known-bad H.264 attempt on the next poll.
+  // Set when H264Canvas reports a fallback so we don't flap straight back
+  // into a known-bad H.264 attempt on the next poll. Sticky ONLY for real
+  // capability failures (no WebCodecs / configure / decode errors). For
+  // transient reasons — WS closed by a streamer restart (every config PUT
+  // does one), no keyframe yet, network blip — we retry after a short hold:
+  // the old always-sticky behavior stranded the session on the 6 fps
+  // live.jpg MJPEG fallback (or a frozen canvas) until a manual reload.
   let h264FellBack = false;
+  let h264RetryTimer: ReturnType<typeof setTimeout> | undefined;
+  const H264_TRANSIENT = ['ws-closed', 'ws-closed-live', 'ws-error', 'no-keyframe'];
+  function onH264Fallback(reason: string) {
+    console.info('[aeon] H.264 view fell back:', reason);
+    h264FellBack = true;
+    if (H264_TRANSIENT.includes(reason)) {
+      clearTimeout(h264RetryTimer);
+      h264RetryTimer = setTimeout(() => (h264FellBack = false), 5000);
+    }
+  }
   let state: api.StreamerState | null = null;
   // Derived: use H.264 only if the browser supports it, the streamer is
   // emitting h264, and we haven't already hit a fallback this session.
@@ -198,7 +213,10 @@
   onMount(() => {
     stream_url = api.streamURL();
     ws_url = api.streamWsURL();
-    webCodecsOk = typeof window !== 'undefined' && 'VideoDecoder' in window;
+    webCodecsOk =
+      typeof window !== 'undefined' &&
+      'VideoDecoder' in window &&
+      'EncodedVideoChunk' in window;
     refreshState();
     refreshNet();
     loadPickers();
@@ -225,6 +243,7 @@
 
   onDestroy(() => {
     clearInterval(poll_iv);
+    clearTimeout(h264RetryTimer);
     document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKey);
@@ -1453,7 +1472,7 @@
            stream lands. -->
       <div class="w-full h-full" style={orientPreviewStyle}>
         {#if useH264}
-          <H264Canvas url={ws_url} on:fallback={() => (h264FellBack = true)} />
+          <H264Canvas url={ws_url} on:fallback={(e) => onH264Fallback(e.detail.reason)} />
         {:else}
           <img
             src={stream_url}

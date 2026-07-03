@@ -507,14 +507,24 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     // Decimate before scale (same reasoning as the h264 path): swscale runs
     // per input frame, so without this it processes the full 60fps capture
     // even when target_fps is lower. fps filter at the head fixes that.
+    //
+    // setpts BEFORE fps: v4l2 frames carry wall-clock capture PTS, and when
+    // the encoder can't keep up the kernel drops frames, leaving PTS gaps.
+    // A PTS-driven fps filter must back-fill every gap with duplicates —
+    // an unbounded debt that made the output timeline fall behind wall time
+    // by MINUTES on the Pi 5 (software encode, zero headroom). Re-stamping
+    // to a dense count-based timeline first turns fps= into a pure 1-in-N
+    // decimator: overload sheds frames at the v4l2 queue (always freshest)
+    // and content lag stays bounded by the driver's buffer ring instead.
     // Append the configured display rotation/flip last (after crop+scale), so
     // the served MJPEG snapshot/stream carries the same orientation as the
     // H.264 path. `None` for the identity orientation.
     let orient = cfg.capture.orientation_vf();
     let scale_filter = {
+        let head = format!("setpts=N/({source_fps}*TB),fps={target_fps}");
         let core = match &crop_filter {
-            Some(c) => format!("fps={target_fps},{c},{scale_part}"),
-            None => format!("fps={target_fps},{scale_part}"),
+            Some(c) => format!("{head},{c},{scale_part}"),
+            None => format!("{head},{scale_part}"),
         };
         match orient {
             Some(rot) => format!("{core},{rot}"),
@@ -765,7 +775,23 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
     // touch target_fps frames — roughly halving CPU at 30fps and making the
     // fps knob actually control cost. The `fps` filter itself is cheap (it
     // selects frames by PTS; no per-pixel work).
-    let fps_part = format!("fps={target_fps}");
+    //
+    // setpts BEFORE fps — the minutes-of-lag fix (Pi 5 hdmi-csi, v110):
+    // v4l2 frames carry wall-clock capture PTS. When libx264 (software on
+    // Pi 5) can't keep up, backpressure fills the kernel vb2 ring and the
+    // driver drops frames — leaving GAPS in the wall-clock PTS stream. The
+    // fps filter is a PTS-driven CFR resampler: it must back-fill every gap
+    // with duplicates of the last held frame, so it owes target_fps output
+    // slots per wall second no matter how few real frames arrive, while the
+    // encoder retires fewer — an unbounded virtual backlog. Observed: output
+    // timeline advancing at 2/3 wall speed, content 2.5-3 min stale after
+    // 6-7 min, ffmpeg dequeuing ~1 real frame per 20 s and re-encoding
+    // thousands of duplicates. Re-stamping to a dense count-based timeline
+    // (setpts=N/(src*TB)) makes fps= a deterministic 1-in-N decimator with
+    // no gap-fill obligation: overload sheds frames at the v4l2 ring (which
+    // always drops stalest-first from the pipeline's perspective) and the
+    // worst-case content lag is the ring depth (~0.5 s), not unbounded.
+    let fps_part = format!("setpts=N/({source_fps}*TB),fps={target_fps}");
     // Display rotation/flip applied AFTER scale (in the landscape target geometry);
     // a 90/270 transpose then yields the portrait frame the encoder + split both
     // see, so H.264 and the JPEG snapshot stay in lock-step.
