@@ -35,6 +35,7 @@ for u in \
     aeon-vision.service \
     aeon-vision-vlm.service \
     aeon-braincraft.service \
+    aeon-audio-init.service \
     dnscrypt-proxy.service; do
     install -m 0644 "${THIS_DIR}/files/${u}" "${ROOTFS_DIR}/etc/systemd/system/${u}"
 done
@@ -90,6 +91,10 @@ install -d "${ROOTFS_DIR}/boot/firmware/overlays"
 install -m 0644 "${THIS_DIR}/files/wm8960-mic.dtbo" "${ROOTFS_DIR}/boot/firmware/overlays/wm8960-mic.dtbo"
 install -m 0755 "${THIS_DIR}/files/aeon-voice"         "${ROOTFS_DIR}/usr/local/bin/aeon-voice"
 install -m 0644 "${THIS_DIR}/files/braincraft.toml"    "${ROOTFS_DIR}/etc/aeon/braincraft.toml"
+# Boot-time WM8960 audio init: opens the DAC->output-mixer routing (off at chip
+# default = silent speaker on a fresh flash) + sane levels. Self-skips with no
+# codec. Ships on both tracks (BrainCraft is not Pi-5-gated).
+install -m 0755 "${THIS_DIR}/files/aeon-audio-init.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-audio-init"
 # Hailo-10H AI accelerator (Pi AI HAT+ 2). The supervisor's hailo.rs shells out
 # to /usr/local/bin/aeon-hailo for all device-specific work (status/install/
 # stats/models/deploy/unload) and offers the curated library.json (installed in
@@ -193,6 +198,9 @@ systemctl enable aeon-vision.service
 systemctl enable aeon-vision-vlm.service
 # BrainCraft HAT interface/viewfinder/voice (idles cleanly if disabled / no HAT).
 systemctl enable aeon-braincraft.service
+# WM8960 audio baseline so a fresh flash boots with an audible speaker (self-skips
+# with no codec). Both tracks — the BrainCraft is not Pi-5-gated.
+systemctl enable aeon-audio-init.service
 
 # Pin system DNS to the local dnscrypt-proxy (127.0.2.1) via resolvconf's 'head'
 # file. NetworkManager normally registers this, but /etc/resolv.conf was observed

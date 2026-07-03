@@ -1,0 +1,15 @@
+[Unit]
+Description=Aeon Magick — initialise BrainCraft WM8960 audio (DAC routing + levels)
+# Run after the sound card + any saved-state restore are up, and before the
+# BrainCraft voice daemon opens the device. Harmless (self-skips) with no codec.
+After=sound.target alsa-restore.service alsa-state.service
+Before=aeon-braincraft.service
+Wants=sound.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/aeon-audio-init
+
+[Install]
+WantedBy=multi-user.target

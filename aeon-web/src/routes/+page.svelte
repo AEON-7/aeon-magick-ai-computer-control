@@ -829,6 +829,23 @@
   // Triggers a USB re-enumeration on the target — ~1s blip. The choice is
   // persisted on the device in /etc/aeon/persona.state and survives reboots.
 
+  // Single source of truth for the persona dropdown (both the desktop toolbar
+  // and the mobile menu render from this). `agent: true` marks an agent-focused
+  // persona — one whose pointer is an ABSOLUTE device, so an AI agent's
+  // click_at / move_abs land on exact pixel coordinates with no relative drift.
+  // The selector surfaces that with a badge so a human can see at a glance when
+  // the box is in agent-drive mode (the persona can also be set over the API by
+  // the agent itself). `warn` flags the experimental Apple multi-touch persona.
+  const HID_PERSONAS: { value: string; label: string; agent?: boolean; warn?: boolean }[] = [
+    { value: 'generic-composite', label: 'generic-composite' },
+    { value: 'generic-absolute', label: 'generic-absolute', agent: true },
+    { value: 'logitech-mx', label: 'logitech-mx' },
+    { value: 'apple-magic-stable', label: 'apple-magic-stable' },
+    { value: 'apple-magic', label: 'apple-magic', warn: true },
+  ];
+  const isAgentPersona = (p: string | undefined): boolean =>
+    !!p && HID_PERSONAS.some((x) => x.value === p && x.agent);
+
   let persona_switching = false;
   let persona_message = '';
 
@@ -1139,12 +1156,20 @@
                      text-cursed-300 focus:outline-none focus:ring-1 focus:ring-cursed-500
                      disabled:opacity-50 disabled:cursor-wait"
               title="Switch USB HID persona — triggers a 1-second re-enumeration on the target.">
-              <option value="generic-composite">generic-composite</option>
-              <option value="logitech-mx">logitech-mx</option>
-              <option value="apple-magic-stable">apple-magic-stable</option>
-              <option value="apple-magic">apple-magic ⚠</option>
+              {#each HID_PERSONAS as p}
+                <option value={p.value}>{p.label}{p.agent ? ' ⌖' : ''}{p.warn ? ' ⚠' : ''}</option>
+              {/each}
             </select>
           </label>
+          {#if isAgentPersona(hid.persona)}
+            <span
+              class="hidden lg:inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]
+                     font-mono font-semibold uppercase tracking-wide
+                     bg-cursed-500/15 text-cursed-300 border border-cursed-500/40"
+              title="Agent-focused HID: an absolute pointer, so an AI agent's click_at / move_abs land on exact pixel coordinates (no relative drift).">
+              ⌖ Agent HID
+            </span>
+          {/if}
           {#if persona_message}
             <span class="hidden lg:inline text-xs font-mono text-zinc-500">{persona_message}</span>
           {/if}
@@ -1341,15 +1366,24 @@
       {#if hid}
         <!-- HID persona dropdown — full-width in the menu. -->
         <label class="flex items-center justify-between gap-2 text-xs font-mono text-cursed-400/80">
-          <span>HID persona:</span>
+          <span class="flex items-center gap-1.5">
+            HID persona:
+            {#if isAgentPersona(hid.persona)}
+              <span
+                class="inline-flex items-center rounded px-1 py-0.5 text-[10px] font-semibold
+                       uppercase tracking-wide bg-cursed-500/15 text-cursed-300 border border-cursed-500/40"
+                title="Agent-focused HID: absolute pointer — click_at / move_abs land on exact pixel coordinates.">
+                ⌖ Agent
+              </span>
+            {/if}
+          </span>
           <select value={hid.persona} on:change={onPersonaChange}
                   disabled={persona_switching}
                   class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5
                          text-cursed-300 flex-1 disabled:opacity-50">
-            <option value="generic-composite">generic-composite</option>
-            <option value="logitech-mx">logitech-mx</option>
-            <option value="apple-magic-stable">apple-magic-stable</option>
-            <option value="apple-magic">apple-magic ⚠</option>
+            {#each HID_PERSONAS as p}
+              <option value={p.value}>{p.label}{p.agent ? ' ⌖' : ''}{p.warn ? ' ⚠' : ''}</option>
+            {/each}
           </select>
         </label>
       {/if}

@@ -19,7 +19,27 @@ use std::process::Command;
 const OUT_ANALOG: &[&str] = &["Speaker", "Headphone"]; // the slider drives these
 const OUT_FALLBACK: &[&str] = &["Master", "PCM", "Playback"]; // USB cards: one combined
 const OUT_DIGITAL: &[&str] = &["Playback", "PCM"]; // path-opener behind the analog stage
+// DAPM routing switches that connect the DAC into the analog output mixer.
+// On the WM8960 these default OFF, so the DAC never reaches Speaker/Headphone
+// even with the analog volumes up and the digital `Playback` open — the
+// classic "every level looks set but it's dead silent" trap. Flip them on
+// (all present ones) whenever we drive the analog outputs. Absent on USB
+// cards, so the name-match guard simply skips them there.
+const OUT_ROUTE: &[&str] = &["Left Output Mixer PCM", "Right Output Mixer PCM"];
 const IN_CTRL: &[&str] = &["Capture", "Mic", "Mic Boost"];
+// WM8960 mic input path behind the `Capture` PGA. The input-boost-mixer GAIN
+// (`… Input Boost Mixer …`) defaults to 0 = muted, so the ADC reads pure
+// silence even with `Capture` up and the connect switches on; the connect
+// switches (`… Input Mixer Boost`, `… Boost Mixer LINPUTn`) route LINPUT1/
+// RINPUT1 in. We open all present ones when the capture level is set.
+const IN_ROUTE_GAIN: &[&str] =
+    &["Left Input Boost Mixer LINPUT1", "Right Input Boost Mixer RINPUT1"];
+const IN_ROUTE_SW: &[&str] = &[
+    "Left Input Mixer Boost",
+    "Right Input Mixer Boost",
+    "Left Boost Mixer LINPUT1",
+    "Right Boost Mixer RINPUT1",
+];
 
 fn amixer(args: &[&str]) -> Option<String> {
     let out = Command::new("amixer").args(args).output().ok()?;
@@ -163,6 +183,13 @@ fn apply(p: &VolPatch) {
                     amixer(&["-c", &cs, "sset", c, "100%"]);
                 }
             }
+            // Connect the DAC into the analog output mixer (DAPM switch,
+            // defaults off — without it the slider above moves a dead net).
+            for c in OUT_ROUTE {
+                if names.iter().any(|n| n == c) {
+                    amixer(&["-c", &cs, "sset", c, "on"]);
+                }
+            }
         } else if let Some(c) = first_present(&names, OUT_FALLBACK) {
             amixer(&["-c", &cs, "sset", c, &pv]);
         }
@@ -170,6 +197,18 @@ fn apply(p: &VolPatch) {
     if let Some(v) = p.capture {
         if let Some(c) = first_present(&names, IN_CTRL) {
             amixer(&["-c", &cs, "sset", c, &format!("{}%", v.clamp(0, 100)), "cap"]);
+            // Open the mic path behind the PGA: un-mute the input-boost-mixer
+            // gain (0 by default) and close the LINPUT/RINPUT connect switches.
+            for c in IN_ROUTE_GAIN {
+                if names.iter().any(|n| n == c) {
+                    amixer(&["-c", &cs, "sset", c, "100%"]);
+                }
+            }
+            for c in IN_ROUTE_SW {
+                if names.iter().any(|n| n == c) {
+                    amixer(&["-c", &cs, "sset", c, "on"]);
+                }
+            }
         }
     }
     if let Some(m) = p.capture_muted {
