@@ -119,10 +119,21 @@ def publish():
         log("publish failed:", e)
 
 
+def keep_connected(pid, addrs):
+    """Pin a discovered Orb as a PERSISTENT peer so the lowpower ConnMgr can't
+    prune the link — without a stable connection, floodsub delivery to/from that
+    Orb is intermittent. Idempotent; kubo dials the peer and reconnects it."""
+    for a in addrs or []:
+        if ":" in a or a.startswith("127."):
+            continue  # IPv4 LAN/tailnet only
+        sh("peer", "/ip4/%s/tcp/4001/p2p/%s" % (a, pid), timeout=10)
+
+
 def merge_peer(ann):
     pid = ann.get("peer_id")
     if not pid or not isinstance(ann.get("models"), list):
         return
+    keep_connected(pid, ann.get("addrs"))
     with _lock:
         reg = read_json(REGISTRY, {"peers": {}})
         peers = reg.setdefault("peers", {})
@@ -143,24 +154,53 @@ def merge_peer(ann):
             log("registry write failed:", e)
 
 
+SUBFILE = "/run/aeon/modelshare-sub.ndjson"
+
+
 def sub_loop():
     """Reconnecting subscriber. Each line from `aeon-ipfs sub` is one JSON
-    announcement (kubo emits one pubsub message per line)."""
+    announcement (kubo emits one pubsub message per line).
+
+    IMPORTANT: kubo's `pubsub sub` BUFFERS its stdout when it's a pipe, so small,
+    infrequent announcements never flush to a reader — a subscriber reading the
+    pipe silently receives nothing. Writing to a real FILE flushes per message,
+    so we point the subscriber at a file and TAIL it. The file lives on tmpfs
+    (/run) and is truncated on every (re)connect to bound its size; we also
+    recycle the subscription periodically to keep it small and freshly meshed."""
+    os.makedirs(os.path.dirname(SUBFILE), exist_ok=True)
     while True:
+        p = None
         try:
-            p = subprocess.Popen([SCRIPT, "sub", TOPIC], stdout=subprocess.PIPE, text=True)
-            for line in p.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    merge_peer(json.loads(line))
-                except Exception:
-                    pass  # ignore malformed / foreign messages
-            p.wait()
+            open(SUBFILE, "w").close()  # truncate
+            fout = open(SUBFILE, "wb")
+            p = subprocess.Popen([SCRIPT, "sub", TOPIC], stdout=fout,
+                                 stderr=subprocess.DEVNULL)
+            fout.close()
+            start = time.time()
+            with open(SUBFILE, "r") as fin:
+                while p.poll() is None:
+                    line = fin.readline()
+                    if line:
+                        line = line.strip()
+                        if line:
+                            try:
+                                merge_peer(json.loads(line))
+                            except Exception:
+                                pass  # malformed / foreign message
+                    else:
+                        if time.time() - start > 600:
+                            break  # recycle: truncate the tmpfs file + re-mesh
+                        time.sleep(0.3)
         except Exception as e:
             log("sub loop error:", e)
-        time.sleep(5)  # daemon restarted / not ready yet — back off and retry
+        finally:
+            if p is not None:
+                try:
+                    p.terminate()
+                    p.wait(timeout=3)
+                except Exception:
+                    pass
+        time.sleep(3)  # daemon restarted / not ready yet — back off and retry
 
 
 def pub_loop():

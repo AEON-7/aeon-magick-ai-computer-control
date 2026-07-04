@@ -58,10 +58,21 @@ configure() {
   # Gateway reachable from any device; API stays localhost-only (it's powerful).
   ipfs_cmd config Addresses.Gateway "/ip4/0.0.0.0/tcp/${GATEWAY_PORT}" >/dev/null 2>&1 || true
   ipfs_cmd config Addresses.API "/ip4/127.0.0.1/tcp/${API_PORT}" >/dev/null 2>&1 || true
-  # Pubsub (gossipsub) — the substrate for fleet-free Model Share discovery:
-  # every Orb gossips its model catalog on a well-known topic and converges on
-  # a global index with no shared token. Needs a daemon restart to take effect.
+  # Pubsub — the substrate for fleet-free Model Share discovery: every Orb
+  # gossips its model catalog on a well-known topic and converges on a global
+  # index with no shared token. Needs a daemon restart to take effect. We use
+  # FLOODSUB (not gossipsub): on a sparse topic like ours — a handful of Orbs,
+  # not thousands — gossipsub's mesh is slow/unreliable to form and drops
+  # messages, whereas floodsub delivers every announcement to every connected
+  # subscriber. Small, infrequent messages make the O(N) fan-out a non-issue.
   ipfs_cmd config --json Pubsub.Enabled true >/dev/null 2>&1 || true
+  ipfs_cmd config Pubsub.Router floodsub >/dev/null 2>&1 || true
+  # Keep peers CONNECTED. The lowpower init profile sets a tiny ConnMgr
+  # HighWater, so once an Orb has a few dozen peers it aggressively prunes
+  # connections — including the very links Model Share pubsub rides on, making
+  # delivery intermittent. Raise the watermarks so inter-Orb links survive.
+  ipfs_cmd config --json Swarm.ConnMgr.LowWater 200 >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.ConnMgr.HighWater 500 >/dev/null 2>&1 || true
   # AcceleratedDHTClient makes provider lookups (finding who hosts a CID) far
   # faster on a wide network — worth the modest memory on a Pi 4/5.
   ipfs_cmd config --json Experimental.AcceleratedDHTClient true >/dev/null 2>&1 || true
@@ -287,8 +298,17 @@ cmd_id()      { ipfs_cmd id -f='<id>' 2>/dev/null; }
 # Model Share gossip primitives (used by aeon-modelshare):
 #   pub <topic>    publish stdin to a pubsub topic
 #   sub <topic>    stream messages on a pubsub topic (one per line, blocks)
+#   peer <maddr>   add a persistent peer (kept connected across ConnMgr pruning)
 cmd_pub() { ipfs_cmd pubsub pub "${1:-}" 2>/dev/null; }
-cmd_sub() { ipfs_cmd pubsub sub "${1:-}" 2>/dev/null; }
+# EXEC (not a child): replace this bash with ipfs so its stdout is the caller's
+# fd directly. Going through an extra bash+runuser layer buffers the stream so
+# small, infrequent announcements never flush to a reader's pipe — the reason
+# subscribers silently received nothing. `exec` fixes that.
+cmd_sub() { exec runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" pubsub sub "${1:-}"; }
+# Keep discovered Orbs persistently connected: kubo's Peering survives the
+# lowpower ConnMgr's aggressive pruning, which otherwise drops the inter-Orb
+# link and makes pubsub delivery intermittent.
+cmd_peer() { ipfs_cmd swarm peering add "${1:-}" >/dev/null 2>&1 || true; }
 # MFS (mutable filesystem) primitives — used to build/EDIT a model directory
 # while reusing the (multi-GB) weights by CID reference, so editing a model's
 # card/readme/image never re-uploads or re-downloads the weights. All paths are
@@ -330,6 +350,7 @@ case "${1:-}" in
   id)      cmd_id ;;
   pub)     shift; cmd_pub "$@" ;;
   sub)     shift; cmd_sub "$@" ;;
+  peer)    shift; cmd_peer "$@" ;;
   mfs-mkdir) shift; cmd_mfs_mkdir "$@" ;;
   mfs-cp)    shift; cmd_mfs_cp "$@" ;;
   mfs-rm)    shift; cmd_mfs_rm "$@" ;;
