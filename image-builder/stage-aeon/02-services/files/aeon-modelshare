@@ -72,17 +72,32 @@ def self_addrs():
 
 
 def self_label():
-    """Human label from fleet.toml (reused — Model Share needs no fleet token,
-    but the label is a nice display name if the user set one)."""
+    """Human label for this Orb: the fleet.toml `label` if the user set one, else
+    a readable-but-distinct fallback (hostname + peer-id tail). The old version
+    returned the value AS-IS, which for an empty `label =  # comment` line handed
+    back the COMMENT text — that's what showed up as the peer name."""
     try:
         with open(FLEET_TOML) as f:
             for line in f:
-                line = line.strip()
-                if line.startswith("label"):
-                    return line.split("=", 1)[1].strip().strip('"')
+                s = line.strip()
+                if s.startswith("label"):
+                    val = s.split("=", 1)[1].strip()
+                    if val.startswith('"'):          # quoted value
+                        end = val.find('"', 1)
+                        val = val[1:end] if end > 0 else val[1:]
+                    else:                             # bare token + optional # comment
+                        val = val.split("#", 1)[0].strip()
+                    if val:
+                        return val
+                    break
     except Exception:
         pass
-    return ""
+    try:
+        host = subprocess.run(["hostname"], capture_output=True, text=True, timeout=3).stdout.strip()
+    except Exception:
+        host = "orb"
+    tail = SELF_PID[-4:] if SELF_PID else ""
+    return f"{host}·{tail}" if tail else host
 
 
 def read_json(path, default):
