@@ -547,6 +547,8 @@ pub fn build_router(cfg: Config) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/ipfs/models/import-hf", post(crate::ipfs::import_hf))
         .route("/ipfs/models/import-ollama", post(crate::ipfs::import_ollama))
+        .route("/ipfs/models/import-civitai", post(crate::ipfs::import_civitai))
+        .route("/ipfs/models/tokens", get(crate::ipfs::get_source_tokens).post(crate::ipfs::set_source_token))
         .route("/ipfs/models/fetch",  post(crate::ipfs::fetch_model))
         .route("/ipfs/models/remove", post(crate::ipfs::remove_model))
         // Model LIBRARY: pull a shared model DOWN to this Orb as plain files

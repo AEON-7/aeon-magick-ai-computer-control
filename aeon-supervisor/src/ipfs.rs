@@ -390,6 +390,73 @@ fn catalog_add(entry: ModelEntry) {
     }
 }
 
+// ── Per-source auth tokens (optional; for gated / mature-content pulls) ──────
+// A user can register a token per model host — HuggingFace (gated repos),
+// Civitai (gated + mature "red" content), Ollama — so the importer authenticates
+// the download. Secrets: stored 0600, NEVER put in a model card or gossiped, and
+// masked (not returned) over the API.
+const TOKENS_JSON: &str = "/etc/aeon/model-tokens.json";
+
+fn read_tokens() -> HashMap<String, String> {
+    std::fs::read_to_string(TOKENS_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// The registered token for a source ("huggingface" | "civitai" | "ollama"), if any.
+fn source_token(source: &str) -> Option<String> {
+    read_tokens().get(source).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+#[derive(Deserialize)]
+pub struct SetTokenReq {
+    pub source: String,
+    pub token: String, // empty string clears it
+}
+
+/// POST /api/ipfs/models/tokens — set (or clear) a source's auth token.
+pub async fn set_source_token(State(_s): State<AppState>, Json(req): Json<SetTokenReq>) -> Json<Value> {
+    let source = req.source.trim().to_ascii_lowercase();
+    if !["huggingface", "civitai", "ollama"].contains(&source.as_str()) {
+        return Json(json!({"ok": false, "err": "unknown source"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut t = read_tokens();
+        let tok = req.token.trim();
+        if tok.is_empty() {
+            t.remove(&source);
+        } else {
+            t.insert(source.clone(), tok.to_string());
+        }
+        if let Some(dir) = std::path::Path::new(TOKENS_JSON).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = format!("{TOKENS_JSON}.tmp");
+        if std::fs::write(&tmp, serde_json::to_vec_pretty(&t).unwrap_or_default()).is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::rename(&tmp, TOKENS_JSON);
+        }
+        json!({"ok": true})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "token task failed"}));
+    Json(v)
+}
+
+/// GET /api/ipfs/models/tokens — which sources have a token set (values MASKED).
+pub async fn get_source_tokens(State(_s): State<AppState>) -> Json<Value> {
+    let t = read_tokens();
+    let mask = |k: &str| t.get(k).map(|v| !v.trim().is_empty()).unwrap_or(false);
+    Json(json!({
+        "ok": true,
+        "huggingface": mask("huggingface"),
+        "civitai": mask("civitai"),
+        "ollama": mask("ollama"),
+    }))
+}
+
 /// In-flight model work: name-or-cid → phase string ("adding to IPFS…",
 /// "fetching from swarm…", "error: …"). Errors stay until the next attempt
 /// for the same key so the UI can surface them.
@@ -1453,14 +1520,23 @@ fn hf_agent() -> ureq::Agent {
 }
 
 fn hf_get_json(url: &str) -> Result<Value, String> {
-    let resp = hf_agent().get(url).call().map_err(|e| match e {
+    http_get_json(url, source_token("huggingface").as_deref())
+}
+
+/// GET a URL as JSON, optionally with a Bearer auth token (for gated content).
+fn http_get_json(url: &str, auth: Option<&str>) -> Result<Value, String> {
+    let mut req = hf_agent().get(url);
+    if let Some(t) = auth {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = req.call().map_err(|e| match e {
         ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
-            "model is gated/private on HuggingFace (needs a token) — not supported".to_string()
+            "gated/private — add an auth token for this source (Settings) and retry".to_string()
         }
-        ureq::Error::Status(404, _) => "repo not found on HuggingFace".to_string(),
-        other => format!("HF request failed: {other}"),
+        ureq::Error::Status(404, _) => "not found".to_string(),
+        other => format!("request failed: {other}"),
     })?;
-    resp.into_json::<Value>().map_err(|e| format!("bad HF json: {e}"))
+    resp.into_json::<Value>().map_err(|e| format!("bad json: {e}"))
 }
 
 /// Parse a HuggingFace URL / id into (repo_id, optional specific file path).
@@ -1549,6 +1625,23 @@ fn kind_from_pipeline(pt: &str) -> &'static str {
         "feature-extraction" | "sentence-similarity" => "embedding",
         "image-classification" | "object-detection" | "image-segmentation" | "depth-estimation"
         | "zero-shot-image-classification" => "vision",
+        // Generative / diffusion (ComfyUI · Stable Diffusion · Flux · video).
+        "text-to-image" | "image-to-image" | "unconditional-image-generation" => "checkpoint",
+        "text-to-video" | "image-to-video" => "checkpoint",
+        _ => "other",
+    }
+}
+
+/// Map a Civitai model type to our card `kind` (generative model classes).
+fn kind_from_civitai(t: &str) -> &'static str {
+    match t.to_ascii_lowercase().as_str() {
+        "checkpoint" => "checkpoint",
+        "lora" | "locon" | "dora" => "lora",
+        "vae" => "vae",
+        "controlnet" => "controlnet",
+        "textualinversion" => "embedding",
+        "upscaler" => "upscaler",
+        "motionmodule" => "checkpoint",
         _ => "other",
     }
 }
@@ -1562,10 +1655,15 @@ fn hf_download(
     label: &str,
     grand_total: u64,
     prior_done: u64,
+    auth: Option<&str>,
 ) -> Result<(String, u64), String> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
-    let resp = hf_agent().get(url).call().map_err(|e| format!("download {label}: {e}"))?;
+    let mut rq = hf_agent().get(url);
+    if let Some(t) = auth {
+        rq = rq.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = rq.call().map_err(|e| format!("download {label}: {e}"))?;
     let mut reader = resp.into_reader();
     let mut file = std::fs::File::create(dest).map_err(|e| format!("create {label}: {e}"))?;
     let mut hasher = Sha256::new();
@@ -1696,7 +1794,7 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
     for (path, size, oid) in &weights {
         let leaf = path.rsplit('/').next().unwrap_or(path).to_string();
         let url = format!("https://huggingface.co/{repo}/resolve/main/{path}");
-        let (sha, n) = hf_download(&url, &dir.join(&leaf), key, &leaf, total, prior)?;
+        let (sha, n) = hf_download(&url, &dir.join(&leaf), key, &leaf, total, prior, source_token("huggingface").as_deref())?;
         prior += n;
         if primary_file.is_empty() && is_weight(path) {
             primary_file = leaf.clone();
@@ -1883,7 +1981,7 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
 
     let leaf = format!("{model}-{tag}.gguf");
     let blob_url = format!("https://{host}/v2/{ns}/{model}/blobs/{digest}");
-    let (sha, _n) = hf_download(&blob_url, &dir.join(&leaf), key, &leaf, size, 0)?;
+    let (sha, _n) = hf_download(&blob_url, &dir.join(&leaf), key, &leaf, size, 0, source_token("ollama").as_deref())?;
     let verified = !expected_sha.is_empty() && expected_sha.eq_ignore_ascii_case(&sha);
 
     // Small text layers → license + a README from the system prompt.
@@ -1966,6 +2064,211 @@ pub async fn import_ollama(State(_s): State<AppState>, Json(req): Json<ImportOll
     task_set(&key, "fetching model info…");
     tokio::task::spawn_blocking(move || {
         if let Err(e) = do_import_ollama(&reference, &model_name, &key) {
+            task_set(&key, &format!("error: {e}"));
+        } else {
+            task_clear(&key);
+            announce();
+        }
+    });
+    Json(json!({"ok": true, "importing": importing}))
+}
+
+// ── Civitai import (generative models: checkpoints, LoRAs, VAEs, ControlNets) ─
+// Civitai's API resolves a model version to a downloadable file + a published
+// SHA-256; gated / mature ("red") content needs the account's token. We prefer
+// the SafeTensor file (never a pickle) so the shared network stays code-safe.
+
+/// Parse a Civitai reference into (model_id, optional version_id).
+fn parse_civitai_ref(input: &str) -> Result<(Option<u64>, Option<u64>), String> {
+    let s = input.trim();
+    // /api/download/models/<vid>  or  ?modelVersionId=<vid>
+    if let Some(i) = s.find("/api/download/models/") {
+        let tail: String = s[i + 21..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(v) = tail.parse() { return Ok((None, Some(v))); }
+    }
+    let vid = s.find("modelVersionId=").and_then(|i| {
+        s[i + 15..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
+    });
+    // /models/<id>
+    let mid = if let Some(i) = s.find("/models/") {
+        s[i + 8..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
+    } else {
+        s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
+    };
+    if mid.is_none() && vid.is_none() {
+        return Err("expected a civitai.com/models/<id> URL or a model/version id".into());
+    }
+    Ok((mid, vid))
+}
+
+fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Result<(), String> {
+    let (model_id, version_id) = parse_civitai_ref(reference)?;
+    let auth = source_token("civitai");
+    task_set(key, "resolving Civitai model…");
+
+    // Resolve to a specific version + its parent model summary.
+    let (version, model_meta) = if let Some(vid) = version_id {
+        let v = http_get_json(&format!("https://civitai.com/api/v1/model-versions/{vid}"), auth.as_deref())?;
+        let m = v.get("model").cloned().unwrap_or_else(|| json!({}));
+        (v, m)
+    } else {
+        let mid = model_id.ok_or("no model id")?;
+        let m = http_get_json(&format!("https://civitai.com/api/v1/models/{mid}"), auth.as_deref())?;
+        let v = m.get("modelVersions").and_then(|a| a.as_array()).and_then(|a| a.first()).cloned()
+            .ok_or("model has no downloadable versions")?;
+        (v, m)
+    };
+
+    let files = version.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    // Prefer a SafeTensor primary-model file; never a pickle.
+    let pick = files.iter()
+        .find(|f| f.get("type").and_then(|v| v.as_str()) == Some("Model")
+            && f.get("metadata").and_then(|m| m.get("format")).and_then(|v| v.as_str()) == Some("SafeTensor"))
+        .or_else(|| files.iter().find(|f| f.get("metadata").and_then(|m| m.get("format")).and_then(|v| v.as_str()) == Some("SafeTensor")))
+        .cloned();
+    let file = match pick {
+        Some(f) => f,
+        None => return Err("no SafeTensor file on this model — pickle/.ckpt-only models aren't accepted (code-execution risk); pick one with a safetensors version".into()),
+    };
+
+    let leaf = {
+        let n = file.get("name").and_then(|v| v.as_str()).unwrap_or("model.safetensors");
+        n.rsplit('/').next().unwrap_or(n).to_string()
+    };
+    let size = (file.get("sizeKB").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1024.0) as u64;
+    let expected_sha = file.get("hashes").and_then(|h| h.get("SHA256")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let vid = version.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+    // Download URL — token as a query param survives Civitai's CDN redirect.
+    let mut dl = file.get("downloadUrl").and_then(|v| v.as_str()).map(String::from)
+        .unwrap_or_else(|| format!("https://civitai.com/api/download/models/{vid}"));
+    if let Some(t) = &auth {
+        dl.push_str(if dl.contains('?') { "&" } else { "?" });
+        dl.push_str(&format!("token={t}"));
+    }
+
+    let free = free_bytes(MODELS_DIR);
+    if size > 0 && size + 512 * 1024 * 1024 > free {
+        return Err(format!("not enough disk: model is {} but only {} free", human(size), human(free)));
+    }
+    let dir = staging_root().join(format!("civitai-{}", new_draft_id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let (sha, _n) = hf_download(&dl, &dir.join(&leaf), key, &leaf, size, 0, None)?;
+    let verified = !expected_sha.is_empty() && expected_sha.eq_ignore_ascii_case(&sha);
+
+    // Reject anything that isn't actually a safetensors (fake/mislabelled).
+    {
+        let mut head = [0u8; 16];
+        let hn = { use std::io::Read; std::fs::File::open(dir.join(&leaf)).and_then(|mut f| f.read(&mut head)).unwrap_or(0) };
+        if !matches!(sniff_kind(&head[..hn]), "safetensors") {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err("downloaded file is not a valid safetensors".into());
+        }
+    }
+
+    // Preview image → card image (best-effort; may be mature for "red" models).
+    let mut image_name = String::new();
+    if let Some(url) = version.get("images").and_then(|a| a.as_array()).and_then(|a| a.first())
+        .and_then(|i| i.get("url")).and_then(|v| v.as_str())
+    {
+        let ext = url.rsplit('.').next().filter(|e| e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("jpg");
+        let name = format!("card-image.{}", safe_img_ext(ext));
+        if let Ok(r) = hf_agent().get(url).call() {
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok() && !bytes.is_empty()
+                && std::fs::write(dir.join(&name), &bytes).is_ok()
+            {
+                image_name = name;
+            }
+        }
+    }
+
+    let m_type = model_meta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let m_name = model_meta.get("name").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty()).unwrap_or(model_name_hint).to_string();
+    let nsfw = model_meta.get("nsfw").and_then(|v| v.as_bool()).unwrap_or(false)
+        || version.get("model").and_then(|m| m.get("nsfw")).and_then(|v| v.as_bool()).unwrap_or(false);
+    let base_model = version.get("baseModel").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut tags: Vec<String> = model_meta.get("tags").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).take(6).collect()).unwrap_or_default();
+    if nsfw { tags.insert(0, "nsfw".into()); }
+    let readme = String::from_utf8(strip_html(model_meta.get("description").and_then(|v| v.as_str()).unwrap_or("")).into_bytes()).unwrap_or_default();
+    let _ = std::fs::write(dir.join("README.md"), format!("# {m_name}\n\nImported from Civitai: {reference}\n\n{readme}\n"));
+
+    let card = ModelCard {
+        kind: kind_from_civitai(m_type).to_string(),
+        base_model,
+        params: String::new(),
+        quant: String::new(),
+        license: String::new(),
+        description: format!("Imported from Civitai{}", if nsfw { " (mature content)" } else { "" }),
+        intended_use: String::new(),
+        tags,
+        format: "safetensors".into(),
+        image: image_name,
+        readme: true,
+    };
+    let (origin_id, origin_label) = crate::fleet::identity();
+    let source = format!("https://civitai.com/models/{}", model_meta.get("id").and_then(|v| v.as_u64()).unwrap_or(vid));
+    let card_doc = json!({
+        "schema": "aeon-model-card/1", "name": m_name, "file": leaf,
+        "size_bytes": size, "sha256": sha, "card": card,
+        "verified": verified, "source": source,
+        "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
+    });
+    std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default())
+        .map_err(|e| format!("write card: {e}"))?;
+
+    task_set(key, "adding to IPFS…");
+    let cid = run_script(&["add", &dir.to_string_lossy()])?;
+    if cid.is_empty() {
+        return Err("ipfs add produced no CID".into());
+    }
+    catalog_add(ModelEntry {
+        cid, name: m_name, file: leaf, size_bytes: size,
+        sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
+        verified, source,
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// Strip HTML tags → plain text (Civitai descriptions are HTML).
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").chars().take(4000).collect()
+}
+
+#[derive(Deserialize)]
+pub struct ImportCivitaiReq {
+    pub reference: String,
+}
+
+/// POST /api/ipfs/models/import-civitai — import a generative model from Civitai
+/// (checkpoint / LoRA / VAE / …). Uses the stored Civitai token for gated +
+/// mature content. Non-blocking; poll /models.
+pub async fn import_civitai(State(_s): State<AppState>, Json(req): Json<ImportCivitaiReq>) -> Json<Value> {
+    if !read_config().enabled {
+        return Json(json!({"ok": false, "err": "IPFS is off — enable it first"}));
+    }
+    let reference = req.reference.trim().to_string();
+    if parse_civitai_ref(&reference).is_err() {
+        return Json(json!({"ok": false, "err": "not a valid Civitai model reference"}));
+    }
+    let key = format!("civitai-{}", new_draft_id());
+    let importing = key.clone();
+    task_set(&key, "fetching model info…");
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = do_import_civitai(&reference, "Civitai model", &key) {
             task_set(&key, &format!("error: {e}"));
         } else {
             task_clear(&key);

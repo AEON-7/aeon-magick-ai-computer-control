@@ -75,6 +75,16 @@
   let hfBusy = false;
   let ollamaRef = '';
   let ollamaBusy = false;
+  let civitaiRef = '';
+  let civitaiBusy = false;
+  let tokens: { huggingface: boolean; civitai: boolean; ollama: boolean } = { huggingface: false, civitai: false, ollama: false };
+  let showTokens = false;
+  let tokenInput: { huggingface: string; civitai: string; ollama: string } = { huggingface: '', civitai: '', ollama: '' };
+  const tokenRows = [
+    { src: 'huggingface' as const, label: 'HuggingFace', ph: 'hf_xxx…' },
+    { src: 'civitai' as const, label: 'Civitai', ph: 'Civitai API key' },
+    { src: 'ollama' as const, label: 'Ollama', ph: 'ollama token' },
+  ];
 
   // ── Push a model to a connected system (Agent Dashboard: DGX / gateways) ──
   let systems: Array<{ id: string; label: string; address: string; roles?: string[]; status?: string }> = [];
@@ -206,6 +216,36 @@
       else ollamaRef = '';
     } catch (e: any) { err = e?.message ?? 'import failed'; }
     ollamaBusy = false; await load();
+  }
+
+  async function importCivitai() {
+    const reference = civitaiRef.trim();
+    if (!reference) return;
+    civitaiBusy = true; err = '';
+    try {
+      const r = await api('/models/import-civitai', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference }),
+      });
+      if (r && r.ok === false) err = r.err || 'import failed';
+      else civitaiRef = '';
+    } catch (e: any) { err = e?.message ?? 'import failed'; }
+    civitaiBusy = false; await load();
+  }
+
+  async function loadTokens() {
+    try { const r = await api('/models/tokens'); if (r?.ok) tokens = { huggingface: !!r.huggingface, civitai: !!r.civitai, ollama: !!r.ollama }; } catch {}
+  }
+
+  async function saveToken(source: 'huggingface' | 'civitai' | 'ollama') {
+    try {
+      await api('/models/tokens', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, token: tokenInput[source] }),
+      });
+      tokenInput[source] = '';
+      await loadTokens();
+    } catch {}
   }
 
   const api = (path: string, opts: RequestInit = {}) =>
@@ -454,7 +494,7 @@
   }
 
   onMount(() => {
-    load(); loadSystems(); loadKarma();
+    load(); loadSystems(); loadKarma(); loadTokens();
     poll = setInterval(() => { load(); loadKarma(); }, 5000);
   });
   // Reset the push status line whenever a different model detail opens.
@@ -581,6 +621,37 @@
         <button class="btn text-sm px-4 py-2 rounded-md" on:click={importOllama} disabled={ollamaBusy || !ollamaRef.trim()}>{ollamaBusy ? 'Starting…' : 'Import'}</button>
       </div>
       <p class="text-[11px] text-ink-600 -mt-2">Pulls the GGUF weights straight from the Ollama registry and verifies them against the layer digest — no Ollama install needed.</p>
+
+      <!-- import generative models from Civitai -->
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-lg">🎨</span>
+        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+               bind:value={civitaiRef} placeholder="Import from Civitai — a model URL (civitai.com/models/…) for checkpoints, LoRAs, VAEs"
+               on:keydown={(e) => e.key === 'Enter' && importCivitai()} />
+        <button class="btn text-sm px-4 py-2 rounded-md" on:click={importCivitai} disabled={civitaiBusy || !civitaiRef.trim()}>{civitaiBusy ? 'Starting…' : 'Import'}</button>
+      </div>
+      <p class="text-[11px] text-ink-600 -mt-2">Generative models for ComfyUI / Stable Diffusion. Prefers the SafeTensor file (never a pickle) and verifies the SHA-256. Gated + mature (“red”) content needs a Civitai token below.</p>
+
+      <!-- optional per-source auth tokens for gated / mature pulls -->
+      <div class="text-[11px]">
+        <button class="text-cursed-400 hover:underline font-mono" on:click={() => (showTokens = !showTokens)}>
+          {showTokens ? '▾' : '▸'} Auth tokens for gated models
+          <span class="text-ink-600">({[tokens.huggingface && 'HF', tokens.civitai && 'Civitai', tokens.ollama && 'Ollama'].filter(Boolean).join(' · ') || 'none set'})</span>
+        </button>
+        {#if showTokens}
+          <div class="mt-2 space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-3">
+            <p class="text-ink-500">Optional. A token lets the importer pull gated repos (HuggingFace), mature/“red” content (Civitai), or private models (Ollama). Stored encrypted-at-rest on this Orb (0600), never shared or gossiped.</p>
+            {#each tokenRows as { src, label, ph }}
+              <div class="flex items-center gap-2">
+                <span class="w-24 text-ink-400 font-mono">{label}</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded {tokens[src] ? 'bg-emerald-900/50 text-emerald-300' : 'bg-ink-800 text-ink-500'}">{tokens[src] ? 'set' : 'not set'}</span>
+                <input type="password" class="flex-1 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-ink-100 font-mono" placeholder={ph} bind:value={tokenInput[src]} />
+                <button class="btn px-2 py-1 rounded" on:click={() => saveToken(src)}>{tokenInput[src].trim() ? 'Save' : 'Clear'}</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
     {/if}
 
     {#if uploadPct >= 0}
