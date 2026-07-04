@@ -31,7 +31,8 @@ mkdir -p "$HERE/scripts"
 cp "$SFILES/aeon-ipfs.sh"    "$HERE/scripts/aeon-ipfs"
 cp "$SFILES/aeon-storage.sh" "$HERE/scripts/aeon-storage"
 cp "$SFILES/aeon-nas.sh"     "$HERE/scripts/aeon-nas"
-chmod 0755 "$HERE/scripts/aeon-ipfs" "$HERE/scripts/aeon-storage" "$HERE/scripts/aeon-nas"
+cp "$SFILES/aeon-modelshare" "$HERE/scripts/aeon-modelshare"  # Model Share gossip daemon
+chmod 0755 "$HERE/scripts/aeon-ipfs" "$HERE/scripts/aeon-storage" "$HERE/scripts/aeon-nas" "$HERE/scripts/aeon-modelshare"
 
 echo "== 4. buildx multi-arch =="
 docker buildx inspect aeon-builder >/dev/null 2>&1 || docker buildx create --name aeon-builder --use >/dev/null

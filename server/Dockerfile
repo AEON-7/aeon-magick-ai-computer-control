@@ -16,12 +16,15 @@ ARG TARGETARCH
 ARG KUBO_VERSION=v0.42.0
 
 # Runtime deps for the cross-platform surface: openssh-client + rsync (Agent
-# Dashboard, terminal, model push over SSH), python3 (storage/nas helpers),
-# iproute2 (route lookups for pushes), curl/ca-certs (kubo + Tailscale),
-# procps (pkill for the container IPFS daemon), tini (PID 1 reaping).
+# Dashboard, terminal, model push over SSH), python3 (storage/nas + Model Share
+# gossip daemon), iproute2 (route lookups for pushes), curl/ca-certs (kubo +
+# Tailscale), procps (pkill for the container IPFS daemon), tini (PID 1 reaping),
+# clamav + clamav-freshclam (download-sandbox virus scan; freshclam keeps sigs
+# current, on-demand clamscan — no resident clamd).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl bash python3 openssh-client rsync \
       iproute2 procps tar xz-utils tini \
+      clamav clamav-freshclam \
  && rm -rf /var/lib/apt/lists/*
 
 # Pre-install kubo (IPFS) for the target arch so the first "enable IPFS" is
@@ -37,12 +40,14 @@ COPY bin/${TARGETARCH}/aeon-supervisor /usr/local/bin/aeon-supervisor
 # The SvelteKit static UI (arch-independent).
 COPY web/ /usr/share/aeon/web/
 # Cross-platform helper scripts (systemd-free paths kick in inside the container).
-COPY scripts/aeon-ipfs    /usr/local/bin/aeon-ipfs
-COPY scripts/aeon-storage /usr/local/bin/aeon-storage
-COPY scripts/aeon-nas     /usr/local/bin/aeon-nas
-COPY entrypoint.sh        /entrypoint.sh
+COPY scripts/aeon-ipfs       /usr/local/bin/aeon-ipfs
+COPY scripts/aeon-storage    /usr/local/bin/aeon-storage
+COPY scripts/aeon-nas        /usr/local/bin/aeon-nas
+COPY scripts/aeon-modelshare /usr/local/bin/aeon-modelshare
+COPY entrypoint.sh           /entrypoint.sh
 RUN chmod 0755 /usr/local/bin/aeon-supervisor /usr/local/bin/aeon-ipfs \
-      /usr/local/bin/aeon-storage /usr/local/bin/aeon-nas /entrypoint.sh
+      /usr/local/bin/aeon-storage /usr/local/bin/aeon-nas \
+      /usr/local/bin/aeon-modelshare /entrypoint.sh
 
 # Persist admin auth + TLS cert + tokens, and the IPFS repo + model library.
 VOLUME ["/etc/aeon", "/var/lib/aeon"]
