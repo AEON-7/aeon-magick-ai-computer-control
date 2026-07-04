@@ -328,6 +328,14 @@ pub struct ModelCard {
     /// True when a README.md is present in the shared dir.
     #[serde(default)]
     pub readme: bool,
+    /// Mature/adult content (e.g. Civitai NSFW) — hidden unless the viewer has
+    /// opted into mature content (with an 18+ attestation).
+    #[serde(default)]
+    pub nsfw: bool,
+    /// Example/gallery image filenames inside the shared dir (gallery-1.<ext>…),
+    /// e.g. sample generations for a diffusion model. Served same-origin.
+    #[serde(default)]
+    pub gallery: Vec<String>,
 }
 
 /// One shared model = one IPFS directory CID. `origin_*` is the identity of the
@@ -455,6 +463,55 @@ pub async fn get_source_tokens(State(_s): State<AppState>) -> Json<Value> {
         "civitai": mask("civitai"),
         "ollama": mask("ollama"),
     }))
+}
+
+// ── Mature-content viewing (opt-in, with an 18+ attestation) ────────────────
+const VIEW_JSON: &str = "/etc/aeon/modelshare-view.json";
+
+fn read_view() -> Value {
+    std::fs::read_to_string(VIEW_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .unwrap_or_else(|| json!({"mature_ok": false, "attested_ms": 0}))
+}
+
+/// GET /api/ipfs/models/view — the mature-content opt-in state.
+pub async fn get_view_settings(State(_s): State<AppState>) -> Json<Value> {
+    let v = read_view();
+    Json(json!({
+        "ok": true,
+        "mature_ok": v.get("mature_ok").and_then(|b| b.as_bool()).unwrap_or(false),
+        "attested_ms": v.get("attested_ms").and_then(|n| n.as_i64()).unwrap_or(0),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ViewReq {
+    pub mature_ok: bool,
+    #[serde(default)]
+    pub attest_18: bool, // must be true to ENABLE mature content
+}
+
+/// POST /api/ipfs/models/view — opt into (or out of) mature content. Enabling
+/// REQUIRES an 18+ attestation; we record the timestamp of the attestation.
+pub async fn set_view_settings(State(_s): State<AppState>, Json(req): Json<ViewReq>) -> Json<Value> {
+    if req.mature_ok && !req.attest_18 {
+        return Json(json!({"ok": false, "err": "an 18+ attestation is required to view mature content"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let doc = json!({
+            "mature_ok": req.mature_ok,
+            "attested_ms": if req.mature_ok { epoch_ms() } else { 0 },
+        });
+        if let Some(dir) = std::path::Path::new(VIEW_JSON).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(VIEW_JSON, serde_json::to_vec_pretty(&doc).unwrap_or_default());
+        json!({"ok": true, "mature_ok": req.mature_ok})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "view task failed"}));
+    Json(v)
 }
 
 /// In-flight model work: name-or-cid → phase string ("adding to IPFS…",
@@ -1095,10 +1152,13 @@ pub async fn model_image(
     use axum::response::IntoResponse;
     let cid = q.get("cid").cloned().unwrap_or_default();
     let name = q.get("name").cloned().unwrap_or_default();
-    // card-image.<ext> only — no path traversal, no arbitrary files.
-    let ok_name = name.strip_prefix("card-image.").map(|e| {
-        e.chars().all(|c| c.is_ascii_alphanumeric())
-    }).unwrap_or(false);
+    // Whitelist card-image.<ext> and gallery-<n>.<ext> only — no path traversal,
+    // no arbitrary files.
+    let ext_ok = |e: &str| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric());
+    let ok_name = name.strip_prefix("card-image.").map(&ext_ok).unwrap_or(false)
+        || name.strip_prefix("gallery-").is_some_and(|rest| {
+            rest.split_once('.').is_some_and(|(n, e)| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() && ext_ok(e))
+        });
     if !valid_cid(&cid) || !ok_name {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
     }
@@ -1880,6 +1940,7 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
         format: format.to_string(),
         image: image_name,
         readme: dir.join("README.md").exists(),
+        ..Default::default()
     };
     let (origin_id, origin_label) = crate::fleet::identity();
     let source = format!("https://huggingface.co/{repo}");
@@ -2014,6 +2075,7 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
         format: "gguf".into(),
         image: String::new(),
         readme: true,
+        ..Default::default()
     };
     let (origin_id, origin_label) = crate::fleet::identity();
     let ns_seg = if ns == "library" { String::new() } else { format!("{ns}/") };
@@ -2165,20 +2227,25 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
         }
     }
 
-    // Preview image → card image (best-effort; may be mature for "red" models).
+    // Example GALLERY (up to 6) → card thumbnail + gallery-N.<ext> (best-effort;
+    // may be mature for "red" models — the viewer's mature opt-in gates display).
     let mut image_name = String::new();
-    if let Some(url) = version.get("images").and_then(|a| a.as_array()).and_then(|a| a.first())
-        .and_then(|i| i.get("url")).and_then(|v| v.as_str())
-    {
-        let ext = url.rsplit('.').next().filter(|e| e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("jpg");
-        let name = format!("card-image.{}", safe_img_ext(ext));
-        if let Ok(r) = hf_agent().get(url).call() {
-            let mut bytes = Vec::new();
-            use std::io::Read;
-            if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok() && !bytes.is_empty()
-                && std::fs::write(dir.join(&name), &bytes).is_ok()
-            {
-                image_name = name;
+    let mut gallery: Vec<String> = Vec::new();
+    if let Some(imgs) = version.get("images").and_then(|a| a.as_array()) {
+        for (i, url) in imgs.iter().filter_map(|im| im.get("url").and_then(|v| v.as_str())).take(6).enumerate() {
+            let ext = url.rsplit('.').next().filter(|e| e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("jpg");
+            let name = format!("gallery-{}.{}", i + 1, safe_img_ext(ext));
+            if let Ok(r) = hf_agent().get(url).call() {
+                let mut bytes = Vec::new();
+                use std::io::Read;
+                if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok() && !bytes.is_empty()
+                    && std::fs::write(dir.join(&name), &bytes).is_ok()
+                {
+                    if image_name.is_empty() {
+                        image_name = name.clone();
+                    }
+                    gallery.push(name);
+                }
             }
         }
     }
@@ -2207,6 +2274,8 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
         format: "safetensors".into(),
         image: image_name,
         readme: true,
+        nsfw,
+        gallery,
     };
     let (origin_id, origin_label) = crate::fleet::identity();
     let source = format!("https://civitai.com/models/{}", model_meta.get("id").and_then(|v| v.as_u64()).unwrap_or(vid));

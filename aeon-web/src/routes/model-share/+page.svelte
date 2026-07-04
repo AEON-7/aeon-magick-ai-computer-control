@@ -15,6 +15,7 @@
     kind?: string; base_model?: string; params?: string; quant?: string;
     license?: string; description?: string; intended_use?: string;
     tags?: string[]; format?: string; image?: string; readme?: boolean;
+    nsfw?: boolean; gallery?: string[];
   };
   type Entry = {
     cid: string; name: string; file?: string; size_bytes: number;
@@ -44,6 +45,13 @@
   // filters
   let query = '';
   let kindFilter = 'all';
+  let onDevice = false;        // show only models this Orb has downloaded
+  let activeTags = new Set<string>();
+  // mature-content opt-in (18+ attestation)
+  let matureOk = false;
+  let showAgeGate = false;
+  let ageAttest18 = false;
+  let ageAccept = false;
   const KINDS = ['all', 'llm', 'vlm', 'vision', 'stt', 'tts', 'embedding', 'other'];
   const KIND_ICON: Record<string, string> = {
     llm: '💬', vlm: '👁️', vision: '🖼️', stt: '🎙️', tts: '🔊', embedding: '🧭', other: '📦',
@@ -312,13 +320,26 @@
   }
 
   $: filtered = rows.filter((r) => {
-    if (kindFilter !== 'all' && (r.entry.card?.kind || 'other') !== kindFilter) return false;
+    const c = r.entry.card;
+    if (c?.nsfw && !matureOk) return false;                 // mature hidden unless opted-in
+    if (onDevice && !r.local) return false;                 // On Device
+    if (kindFilter !== 'all' && (c?.kind || 'other') !== kindFilter) return false;
+    if (activeTags.size && !(c?.tags ?? []).some((t) => activeTags.has(t))) return false;
     if (!query.trim()) return true;
     const q = query.toLowerCase();
-    const c = r.entry.card;
     return [r.entry.name, c?.base_model, c?.description, c?.params, c?.quant, ...(c?.tags ?? [])]
       .filter(Boolean).join(' ').toLowerCase().includes(q);
   });
+
+  // Most common tags across the (mature-filtered) library — for quick filtering.
+  $: commonTags = (() => {
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+      if (r.entry.card?.nsfw && !matureOk) continue;
+      for (const t of r.entry.card?.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([t]) => t);
+  })();
 
   function resetForm() {
     pendingFile = null; editingCid = null; imageB64 = ''; imageExt = '';
@@ -494,9 +515,31 @@
   }
 
   onMount(() => {
-    load(); loadSystems(); loadKarma(); loadTokens();
+    load(); loadSystems(); loadKarma(); loadTokens(); loadView();
     poll = setInterval(() => { load(); loadKarma(); }, 5000);
   });
+
+  async function loadView() {
+    try { const r = await api('/models/view'); if (r?.ok) matureOk = !!r.mature_ok; } catch {}
+  }
+  function toggleMature() {
+    if (matureOk) { setMature(false); }            // turning OFF needs no gate
+    else { ageAttest18 = false; ageAccept = false; showAgeGate = true; }
+  }
+  async function setMature(on: boolean) {
+    try {
+      const r = await api('/models/view', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mature_ok: on, attest_18: on }),
+      });
+      if (r?.ok) matureOk = on; else if (r?.err) err = r.err;
+    } catch {}
+    showAgeGate = false;
+  }
+  function toggleTag(t: string) {
+    if (activeTags.has(t)) activeTags.delete(t); else activeTags.add(t);
+    activeTags = activeTags;
+  }
   // Reset the push status line whenever a different model detail opens.
   $: if (detail) { pushMsg = ''; pushActive = false; }
   onDestroy(() => clearInterval(poll));
@@ -599,8 +642,23 @@
         <select bind:value={kindFilter} class="bg-ink-800 border border-ink-700 rounded px-2 py-2 text-ink-100 text-sm font-mono">
           {#each KINDS as k}<option value={k}>{k}</option>{/each}
         </select>
+        <button class="text-xs font-mono px-2.5 py-2 rounded border {onDevice ? 'border-cursed-600 bg-cursed-950/40 text-cursed-300' : 'border-ink-700 text-ink-400 hover:text-ink-200'}"
+                on:click={() => (onDevice = !onDevice)} title="Show only models this Orb has downloaded">⬇ On Device</button>
+        <button class="text-xs font-mono px-2.5 py-2 rounded border {matureOk ? 'border-red-700 bg-red-950/40 text-red-300' : 'border-ink-700 text-ink-400 hover:text-ink-200'}"
+                on:click={toggleMature} title="Opt in to view mature content (18+)">{matureOk ? '🔞 Mature: on' : 'Mature: off'}</button>
         <span class="text-ink-500 text-xs font-mono whitespace-nowrap">{filtered.length} model{filtered.length === 1 ? '' : 's'} · {peerCount} peer{peerCount === 1 ? '' : 's'}</span>
       </div>
+
+      {#if commonTags.length}
+        <div class="flex items-center gap-1.5 flex-wrap -mt-1">
+          <span class="text-[10px] font-mono text-ink-600">tags:</span>
+          {#each commonTags as t}
+            <button class="text-[10px] font-mono px-1.5 py-0.5 rounded {activeTags.has(t) ? 'bg-cursed-700 text-white' : 'bg-ink-800 text-ink-400 hover:text-ink-200'}"
+                    on:click={() => toggleTag(t)}>{t}</button>
+          {/each}
+          {#if activeTags.size}<button class="text-[10px] font-mono text-ink-500 hover:text-ink-300 underline" on:click={() => { activeTags = new Set(); }}>clear</button>{/if}
+        </div>
+      {/if}
 
       <!-- import straight from HuggingFace -->
       <div class="flex items-center gap-2 flex-wrap">
@@ -842,7 +900,10 @@
           <div class="flex items-center gap-2">
             <div class="font-mono text-lg text-ink-100 truncate">{detail.entry.name}</div>
             {#if detail.entry.verified}
-              <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cursed-500/15 text-cursed-300 border border-cursed-500/40" title="Every file's SHA-256 matches the hash HuggingFace published">✓ verified</span>
+              <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cursed-500/15 text-cursed-300 border border-cursed-500/40" title="Every file's SHA-256 matches the hash the source published">✓ verified</span>
+            {/if}
+            {#if c.nsfw}
+              <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-red-900/50 text-red-300 border border-red-700/50">18+</span>
             {/if}
           </div>
           <div class="text-xs text-ink-500 font-mono">{fmtBytes(detail.entry.size_bytes)} · {c.kind || 'model'}{c.format ? ' · ' + c.format : ''}</div>
@@ -853,6 +914,13 @@
         {#if detail.local}<button class="text-xs text-cursed-300 hover:underline shrink-0" on:click={() => detail && editModel(detail)}>edit</button>{/if}
       </div>
       {#if c.description}<p class="text-sm text-ink-300 leading-relaxed">{c.description}</p>{/if}
+      {#if c.gallery?.length && (!c.nsfw || matureOk)}
+        <div class="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+          {#each c.gallery as g}
+            <img src={imageSrc(detail.entry.cid, g)} alt="example generation" loading="lazy" class="h-32 rounded-lg border border-ink-700 object-cover shrink-0" />
+          {/each}
+        </div>
+      {/if}
       <div class="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs font-mono">
         {#if c.base_model}<div class="text-ink-500">base model</div><div class="text-ink-200 text-right truncate">{c.base_model}</div>{/if}
         {#if c.params}<div class="text-ink-500">parameters</div><div class="text-ink-200 text-right">{c.params}</div>{/if}
@@ -893,6 +961,30 @@
         {:else}
           <button class="btn-primary text-sm px-4 py-1.5 rounded" on:click={() => detail && download(detail)}>↓ Download + host</button>
         {/if}
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ── Mature-content age gate (18+ attestation before showing NSFW models) ── -->
+{#if showAgeGate}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" on:click={() => (showAgeGate = false)}>
+    <div class="bg-ink-900 border border-red-800/60 rounded-xl w-full max-w-md p-5 space-y-4" on:click|stopPropagation>
+      <h2 class="font-mono text-red-300 flex items-center gap-2">🔞 View mature content</h2>
+      <p class="text-sm text-ink-300 leading-relaxed">Some models on the network (e.g. Civitai content flagged mature/“red”) and their example images are adult in nature. To view them you must confirm the following.</p>
+      <label class="flex items-start gap-2 text-sm text-ink-200">
+        <input type="checkbox" class="mt-0.5" bind:checked={ageAttest18} />
+        <span>I am <span class="text-red-300">18 years of age or older</span>, and it is legal for me to view adult content where I live.</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm text-ink-200">
+        <input type="checkbox" class="mt-0.5" bind:checked={ageAccept} />
+        <span>I understand this content is contributed by third parties, is not moderated by this device, and I view it at my own discretion and responsibility.</span>
+      </label>
+      <div class="flex justify-end gap-2 pt-1">
+        <button class="btn text-sm px-3 py-1.5 rounded" on:click={() => (showAgeGate = false)}>Cancel</button>
+        <button class="text-sm px-4 py-1.5 rounded-lg font-mono {ageAttest18 && ageAccept ? 'bg-red-700 hover:bg-red-600 text-white' : 'bg-ink-800 text-ink-500 cursor-not-allowed'}"
+                disabled={!(ageAttest18 && ageAccept)} on:click={() => setMature(true)}>Proceed</button>
       </div>
     </div>
   </div>
