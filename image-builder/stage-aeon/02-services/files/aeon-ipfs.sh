@@ -55,6 +55,13 @@ configure() {
   # Gateway reachable from any device; API stays localhost-only (it's powerful).
   ipfs_cmd config Addresses.Gateway "/ip4/0.0.0.0/tcp/${GATEWAY_PORT}" >/dev/null 2>&1 || true
   ipfs_cmd config Addresses.API "/ip4/127.0.0.1/tcp/${API_PORT}" >/dev/null 2>&1 || true
+  # Pubsub (gossipsub) — the substrate for fleet-free Model Share discovery:
+  # every Orb gossips its model catalog on a well-known topic and converges on
+  # a global index with no shared token. Needs a daemon restart to take effect.
+  ipfs_cmd config --json Pubsub.Enabled true >/dev/null 2>&1 || true
+  # AcceleratedDHTClient makes provider lookups (finding who hosts a CID) far
+  # faster on a wide network — worth the modest memory on a Pi 4/5.
+  ipfs_cmd config --json Experimental.AcceleratedDHTClient true >/dev/null 2>&1 || true
 }
 
 ensure_units() {
@@ -115,9 +122,16 @@ cmd_pin()   { ipfs_cmd pin add "${1:-}" 2>&1; }
 cmd_unpin() { ipfs_cmd pin rm "${1:-}" 2>&1; }
 cmd_pins()  { ipfs_cmd pin ls --type=recursive 2>/dev/null | awk '{print $1}'; }
 cmd_add()   { ipfs_cmd add -rQ "${1:-}" 2>/dev/null; }
+cmd_cat()   { ipfs_cmd cat "${1:-}" 2>/dev/null; }
 # Best-effort direct swarm connection (multiaddr), used before pinning a
-# fleet peer's model so LAN/tailnet fetches don't wait on DHT routing.
+# peer's model so LAN/tailnet fetches don't wait on DHT routing.
 cmd_connect() { ipfs_cmd swarm connect "${1:-}" 2>&1 || true; }
+cmd_id()      { ipfs_cmd id -f='<id>' 2>/dev/null; }
+# Model Share gossip primitives (used by aeon-modelshare):
+#   pub <topic>    publish stdin to a pubsub topic
+#   sub <topic>    stream messages on a pubsub topic (one per line, blocks)
+cmd_pub() { ipfs_cmd pubsub pub "${1:-}" 2>/dev/null; }
+cmd_sub() { ipfs_cmd pubsub sub "${1:-}" 2>/dev/null; }
 
 case "${1:-}" in
   up)      cmd_up ;;
@@ -128,7 +142,11 @@ case "${1:-}" in
   unpin)   shift; cmd_unpin "$@" ;;
   pins)    cmd_pins ;;
   add)     shift; cmd_add "$@" ;;
+  cat)     shift; cmd_cat "$@" ;;
   connect) shift; cmd_connect "$@" ;;
+  id)      cmd_id ;;
+  pub)     shift; cmd_pub "$@" ;;
+  sub)     shift; cmd_sub "$@" ;;
   gateway) echo "$GATEWAY_PORT" ;;
-  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|connect <multiaddr>|gateway}" >&2; exit 1 ;;
+  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|cat <path>|connect <multiaddr>|id|pub <topic>|sub <topic>|gateway}" >&2; exit 1 ;;
 esac

@@ -25,6 +25,9 @@ const CONFIG_TOML: &str = "/etc/aeon/ipfs.toml";
 const SCRIPT: &str = "/usr/local/bin/aeon-ipfs";
 const MODELS_DIR: &str = "/var/lib/aeon/ipfs-models";
 const CATALOG_JSON: &str = "/var/lib/aeon/ipfs-models/catalog.json";
+/// Merged view of every Orb's catalog heard over pubsub, written by the
+/// `aeon-modelshare` gossip daemon. The fleet-free global index.
+const REGISTRY_JSON: &str = "/var/lib/aeon/ipfs-models/registry.json";
 /// kubo's own repo config — read directly (fast, no shell) for the PeerID the
 /// fleet heartbeat advertises so peers can swarm-connect before fetching.
 const IPFS_REPO_CONFIG: &str = "/var/lib/aeon/ipfs/config";
@@ -43,7 +46,11 @@ pub struct IpfsConfig {
 
 impl Default for IpfsConfig {
     fn default() -> Self {
-        Self { enabled: false, storage_max: default_storage() }
+        // Auto-enroll: IPFS is ON by default so an Orb joins the Model Share
+        // network the moment it boots (the aeon-ipfs-boot oneshot brings the
+        // node up unless this is explicitly set false / the opt-out flag is
+        // present). Historically this defaulted false; flipped in v112.
+        Self { enabled: true, storage_max: default_storage() }
     }
 }
 
@@ -231,25 +238,60 @@ pub async fn add_path(State(_s): State<AppState>, Json(req): Json<AddReq>) -> Js
     Json(v)
 }
 
-// ── AI model sharing ────────────────────────────────────────────────────────
+// ── Model Share: AI model publishing over IPFS ──────────────────────────────
+//
+// A shared model is an IPFS *directory* (so one CID carries both the weights
+// and a human/agent-readable model card): `ipfs add -r` a temp dir holding the
+// model file plus `model-card.json`, and the resulting dir CID resolves at
+// <gateway>/ipfs/<cid>/<file> and <gateway>/ipfs/<cid>/model-card.json.
+//
+// Discovery is fleet-FREE: the `aeon-modelshare` daemon gossips this Orb's
+// catalog over the libp2p pubsub topic `aeon-model-share/v1` and merges every
+// other Orb's announcements into registry.json. Any Orb on the IPFS network
+// converges on the same global index with no shared token — the fleet
+// heartbeat still carries the catalog too (a fast LAN path) but is not
+// required.
 
-/// One shared model. `origin_*` is the fleet identity of the Orb that FIRST
-/// shared it and travels with the entry when peers mirror it, so provenance
-/// survives replication.
+/// The model card — rich metadata written to `model-card.json` inside the
+/// shared directory AND kept in the catalog entry so the index is browsable
+/// without fetching each card.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelCard {
+    #[serde(default)]
+    pub kind: String, // llm | vlm | vision | stt | tts | embedding | other
+    #[serde(default)]
+    pub base_model: String,
+    #[serde(default)]
+    pub params: String, // "8B", "74M", …
+    #[serde(default)]
+    pub quant: String, // "int4", "fp16", "gguf-q4_k_m", …
+    #[serde(default)]
+    pub license: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub intended_use: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub format: String, // gguf | safetensors | onnx | hef | …
+}
+
+/// One shared model = one IPFS directory CID. `origin_*` is the identity of the
+/// Orb that FIRST shared it; it travels with the entry when peers mirror it, so
+/// provenance survives replication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
-    pub cid: String,
-    pub name: String,
+    pub cid: String, // directory CID
+    pub name: String, // display name
+    #[serde(default)]
+    pub file: String, // model filename inside the dir (for the download link)
     #[serde(default)]
     pub size_bytes: u64,
     #[serde(default)]
     pub sha256: String,
     #[serde(default)]
-    pub kind: String, // llm | vlm | vision | stt | tts | other (free text)
-    #[serde(default)]
-    pub desc: String,
-    #[serde(default)]
-    pub license: String,
+    pub card: ModelCard,
     #[serde(default)]
     pub added_at_ms: i64,
     #[serde(default)]
@@ -355,12 +397,13 @@ pub async fn models(State(_s): State<AppState>) -> Json<Value> {
     Json(v)
 }
 
-/// POST /api/ipfs/models/upload?kind=&desc=&license= — streaming model upload.
-/// Body = raw file bytes (Content-Disposition carries the filename), same
-/// pattern as the ISO upload (body limit disabled in api.rs). The bytes stream
-/// to a staging file; `ipfs add` (which pins) then moves the content into the
-/// blockstore in the background and the staging copy is deleted — models are
-/// stored once, in IPFS. Poll /models until the task for this name clears.
+/// POST /api/ipfs/models/upload?name=&card=<urlencoded json> — streaming model
+/// upload. Body = raw file bytes (Content-Disposition carries the filename),
+/// same pattern as the ISO upload (body limit disabled in api.rs). The bytes
+/// stream to a per-share staging directory; a `model-card.json` is written
+/// beside the file, then `ipfs add -r` adds the whole DIRECTORY (pinning it)
+/// so one CID carries the weights + the card. The staging dir is deleted after
+/// (content lives in the blockstore). Poll /models until the task clears.
 pub async fn upload_model(
     State(_s): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
@@ -377,18 +420,25 @@ pub async fn upload_model(
         .and_then(|v| v.to_str().ok())
         .and_then(crate::storage::parse_cd_filename)
         .unwrap_or_else(|| format!("model-{}", epoch_ms()));
-    // Keep the display name; sanitize only the staging path component.
-    let safe: String = filename
+    // The model filename inside the shared dir — sanitized so the gateway path
+    // is clean; the display name lives in the card/entry.
+    let safe_file: String = filename
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect();
+    let display = q.get("name").cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| filename.clone());
+    let card: ModelCard = q
+        .get("card")
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
-    let staging = std::path::Path::new(MODELS_DIR).join("staging");
-    if let Err(e) = std::fs::create_dir_all(&staging) {
+    // Per-share staging directory: <MODELS_DIR>/staging/<epoch>/<file> + card.
+    let share_dir = std::path::Path::new(MODELS_DIR).join("staging").join(epoch_ms().to_string());
+    if let Err(e) = std::fs::create_dir_all(&share_dir) {
         return Json(json!({"ok": false, "err": format!("mkdir staging: {e}")}));
     }
-    let tmp_path = staging.join(format!("{safe}.partial"));
-    let final_path = staging.join(&safe);
+    let file_path = share_dir.join(&safe_file);
+    let tmp_path = share_dir.join(format!("{safe_file}.partial"));
 
     let mut file = match tokio::fs::File::create(&tmp_path).await {
         Ok(f) => f,
@@ -401,107 +451,111 @@ pub async fn upload_model(
         let bytes = match chunk {
             Ok(b) => b,
             Err(e) => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
+                let _ = tokio::fs::remove_dir_all(&share_dir).await;
                 return Json(json!({"ok": false, "err": format!("stream read: {e}")}));
             }
         };
         hasher.update(&bytes);
         if let Err(e) = file.write_all(&bytes).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+            let _ = tokio::fs::remove_dir_all(&share_dir).await;
             return Json(json!({"ok": false, "err": format!("write: {e}")}));
         }
         bytes_written += bytes.len() as u64;
     }
     if let Err(e) = file.flush().await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        let _ = tokio::fs::remove_dir_all(&share_dir).await;
         return Json(json!({"ok": false, "err": format!("flush: {e}")}));
     }
     drop(file);
-    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &file_path).await {
+        let _ = tokio::fs::remove_dir_all(&share_dir).await;
         return Json(json!({"ok": false, "err": format!("rename: {e}")}));
     }
 
     let sha256_hex = hex::encode(hasher.finalize());
     let (origin_id, origin_label) = crate::fleet::identity();
+
+    // Write the model-card.json into the dir (goes into IPFS with the model).
+    let card_doc = json!({
+        "schema": "aeon-model-card/1",
+        "name": display,
+        "file": safe_file,
+        "size_bytes": bytes_written,
+        "sha256": sha256_hex,
+        "card": card,
+        "shared_by": { "id": origin_id, "label": origin_label },
+        "created_ms": epoch_ms(),
+    });
+    let card_path = share_dir.join("model-card.json");
+    if let Err(e) = tokio::fs::write(&card_path, serde_json::to_vec_pretty(&card_doc).unwrap_or_default()).await {
+        let _ = tokio::fs::remove_dir_all(&share_dir).await;
+        return Json(json!({"ok": false, "err": format!("write card: {e}")}));
+    }
+
     let entry_seed = ModelEntry {
-        cid: String::new(), // filled after `ipfs add`
-        name: filename.clone(),
+        cid: String::new(), // filled after `ipfs add -r`
+        name: display.clone(),
+        file: safe_file,
         size_bytes: bytes_written,
         sha256: sha256_hex.clone(),
-        kind: q.get("kind").cloned().unwrap_or_default(),
-        desc: q.get("desc").cloned().unwrap_or_default(),
-        license: q.get("license").cloned().unwrap_or_default(),
+        card,
         added_at_ms: epoch_ms(),
         origin_id,
         origin_label,
     };
 
-    task_set(&filename, "adding to IPFS…");
-    let path_str = final_path.to_string_lossy().to_string();
-    let key = filename.clone();
+    task_set(&display, "adding to IPFS…");
+    let dir_str = share_dir.to_string_lossy().to_string();
+    let key = display.clone();
     tokio::task::spawn_blocking(move || {
-        match run_script(&["add", &path_str]) {
+        // `ipfs add -rQ <dir>` → the directory's root CID (weights + card).
+        match run_script(&["add", &dir_str]) {
             Ok(cid) if !cid.is_empty() => {
                 let mut entry = entry_seed;
                 entry.cid = cid;
                 catalog_add(entry);
-                let _ = std::fs::remove_file(&path_str); // bytes now live in the blockstore
+                let _ = std::fs::remove_dir_all(&dir_str); // bytes now in the blockstore
                 task_clear(&key);
+                announce(); // gossip the updated catalog immediately
             }
             Ok(_) => task_set(&key, "error: add produced no CID"),
             Err(e) => task_set(&key, &format!("error: {e}")),
         }
     });
 
-    Json(json!({
-        "ok": true,
-        "name": filename,
-        "size_bytes": bytes_written,
-        "sha256": sha256_hex,
-        "processing": true,
-    }))
+    Json(json!({"ok": true, "name": display, "size_bytes": bytes_written, "processing": true}))
+}
+
+/// Nudge the gossip daemon to re-announce this Orb's catalog now (so a fresh
+/// share/unshare shows up on peers within seconds instead of the next tick).
+/// Best-effort: the daemon also announces on a timer.
+fn announce() {
+    let _ = std::fs::write("/run/aeon/modelshare-announce", "");
 }
 
 #[derive(Deserialize)]
 pub struct FetchReq {
-    pub cid: String,
-    pub name: String,
-    #[serde(default)]
-    pub size_bytes: u64,
-    #[serde(default)]
-    pub sha256: String,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub desc: String,
-    #[serde(default)]
-    pub license: String,
-    #[serde(default)]
-    pub origin_id: String,
-    #[serde(default)]
-    pub origin_label: String,
-    /// Source Orb hints for a direct swarm connection (LAN/tailnet addresses
-    /// + kubo PeerID from the fleet index) — best-effort, the DHT is the
-    /// fallback.
+    #[serde(flatten)]
+    pub entry: ModelEntry,
+    /// Source Orb hints for a direct swarm connection (addresses + kubo PeerID
+    /// from the registry) — best-effort; the DHT is the fallback.
     #[serde(default)]
     pub addrs: Vec<String>,
     #[serde(default)]
     pub peer_id: String,
 }
 
-/// POST /api/ipfs/models/fetch — pin a fleet peer's model on this Orb
-/// (mirror it). Swarm-connects to the source Orb when hints are provided,
-/// then `ipfs pin add` fetches the content. Progress via /models tasks.
+/// POST /api/ipfs/models/fetch — download+host a model shared by ANY Orb (no
+/// fleet needed). Swarm-connects to a hosting Orb when hints are given, then
+/// `ipfs pin add` fetches the whole directory (weights + card). Progress via
+/// /models tasks. Pinned = hosted, so this Orb joins the model's host set.
 pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) -> Json<Value> {
-    if !valid_cid(&req.cid) {
+    if !valid_cid(&req.entry.cid) {
         return Json(json!({"ok": false, "err": "invalid CID"}));
     }
-    let cid = req.cid.clone();
-    task_set(&cid, "fetching from IPFS swarm…");
+    let cid = req.entry.cid.clone();
+    task_set(&cid, "downloading from IPFS…");
     tokio::task::spawn_blocking(move || {
-        // Best-effort direct connection to the Orb that hosts it — makes
-        // LAN/tailnet fetches immediate instead of waiting on DHT routing.
         if !req.peer_id.is_empty() {
             for addr in req.addrs.iter().take(4) {
                 if addr.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':') {
@@ -510,26 +564,16 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
                 }
             }
         }
-        match run_script(&["pin", &req.cid]) {
+        match run_script(&["pin", &req.entry.cid]) {
             Ok(_) => {
-                catalog_add(ModelEntry {
-                    cid: req.cid.clone(),
-                    name: req.name,
-                    size_bytes: req.size_bytes,
-                    sha256: req.sha256,
-                    kind: req.kind,
-                    desc: req.desc,
-                    license: req.license,
-                    added_at_ms: epoch_ms(),
-                    origin_id: req.origin_id,
-                    origin_label: req.origin_label,
-                });
-                task_clear(&req.cid);
+                catalog_add(req.entry);
+                task_clear(&cid);
+                announce();
             }
-            Err(e) => task_set(&req.cid, &format!("error: {e}")),
+            Err(e) => task_set(&cid, &format!("error: {e}")),
         }
     });
-    Json(json!({"ok": true, "fetching": cid}))
+    Json(json!({"ok": true, "fetching": true}))
 }
 
 /// POST /api/ipfs/models/remove — unshare: unpin the CID + drop the catalog
@@ -541,9 +585,119 @@ pub async fn remove_model(State(_s): State<AppState>, Json(req): Json<CidReq>) -
             read_catalog().into_iter().filter(|e| e.cid != req.cid).collect();
         let _ = write_catalog(&entries);
         task_clear(&req.cid);
+        announce();
         json!({"ok": true})
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "remove task failed"}));
+    Json(v)
+}
+
+/// One Orb's gossiped presence in registry.json (written by aeon-modelshare).
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RegPeer {
+    #[serde(default)]
+    peer_id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    addrs: Vec<String>,
+    #[serde(default)]
+    updated_ms: i64,
+    #[serde(default)]
+    models: Vec<ModelEntry>,
+}
+
+fn read_registry() -> HashMap<String, RegPeer> {
+    std::fs::read_to_string(REGISTRY_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("peers").cloned())
+        .and_then(|p| serde_json::from_value(p).ok())
+        .unwrap_or_default()
+}
+
+fn self_peer_id() -> String {
+    std::fs::read_to_string(IPFS_REPO_CONFIG)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("Identity").and_then(|i| i.get("PeerID")).and_then(|p| p.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
+/// GET /api/ipfs/models/registry — the FLEET-FREE global index. Unions this
+/// Orb's local catalog (pinned = hosted here) with every peer the gossip
+/// daemon has heard on the pubsub topic, grouped by CID so a model mirrored on
+/// several Orbs is one row with multiple hosts. Also returns in-flight tasks.
+pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        let me = self_peer_id();
+        let local = read_catalog();
+        let peers = read_registry();
+        let tasks: HashMap<String, String> = tasks().lock().map(|g| g.clone()).unwrap_or_default();
+
+        // cid -> (entry, hosts[])
+        let mut rows: HashMap<String, (ModelEntry, Vec<Value>)> = HashMap::new();
+        let mut push_host = |cid: &str, entry: &ModelEntry, host: Value| {
+            let e = rows.entry(cid.to_string()).or_insert_with(|| (entry.clone(), Vec::new()));
+            e.1.push(host);
+        };
+        for e in &local {
+            push_host(&e.cid, e, json!({"label": "this orb", "is_self": true, "online": true, "peer_id": me}));
+        }
+        for (_pid, p) in &peers {
+            for e in &p.models {
+                let host = json!({
+                    "label": if p.label.is_empty() { p.peer_id.chars().take(12).collect::<String>() } else { p.label.clone() },
+                    "is_self": p.peer_id == me,
+                    "online": true,
+                    "peer_id": p.peer_id,
+                    "addrs": p.addrs,
+                    "updated_ms": p.updated_ms,
+                });
+                push_host(&e.cid, e, host);
+            }
+        }
+        let local_cids: std::collections::HashSet<String> = local.iter().map(|e| e.cid.clone()).collect();
+        let mut out: Vec<Value> = rows
+            .into_iter()
+            .map(|(cid, (entry, hosts))| {
+                json!({ "entry": entry, "hosts": hosts, "local": local_cids.contains(&cid) })
+            })
+            .collect();
+        // newest first by the entry's added_at_ms
+        out.sort_by(|a, b| {
+            let ai = a["entry"]["added_at_ms"].as_i64().unwrap_or(0);
+            let bi = b["entry"]["added_at_ms"].as_i64().unwrap_or(0);
+            bi.cmp(&ai)
+        });
+        json!({"ok": true, "self_peer_id": me, "models": out, "tasks": tasks, "peer_count": peers.len()})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "registry task failed"}));
+    Json(v)
+}
+
+/// GET /api/ipfs/models/card?cid=<dirCID> — fetch a shared model's card JSON
+/// through the local node (`ipfs cat <cid>/model-card.json`), so the browser
+/// never needs cross-origin access to the gateway.
+pub async fn model_card(
+    State(_s): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let cid = q.get("cid").cloned().unwrap_or_default();
+    if !valid_cid(&cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        match run_script(&["cat", &format!("{cid}/model-card.json")]) {
+            Ok(s) => serde_json::from_str::<Value>(&s)
+                .map(|card| json!({"ok": true, "card": card}))
+                .unwrap_or_else(|_| json!({"ok": false, "err": "card not valid JSON"})),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "card task failed"}));
     Json(v)
 }

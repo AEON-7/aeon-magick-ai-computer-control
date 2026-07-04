@@ -1,0 +1,14 @@
+[Unit]
+Description=Aeon Magick — auto-enroll in IPFS / Model Share at boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# First run downloads kubo (~30 MB) and inits the repo — give it room.
+TimeoutStartSec=600
+ExecStart=/usr/local/bin/aeon-ipfs-boot
+
+[Install]
+WantedBy=multi-user.target

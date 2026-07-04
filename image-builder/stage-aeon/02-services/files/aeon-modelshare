@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""aeon-modelshare — fleet-free Model Share discovery over IPFS pubsub.
+
+Every Orb gossips its shared-model catalog on a well-known libp2p pubsub topic
+and merges every other Orb's announcement into a local registry, so any Orb on
+the IPFS network converges on the SAME global model index with NO shared token,
+NO fleet enrollment, and no central server. The supervisor reads the registry
+for the Model Share console; this daemon just keeps it fresh.
+
+Two loops (threads), both driving the `aeon-ipfs` infra script so it runs the
+kubo CLI as the ipfs service user:
+  * SUB: `aeon-ipfs sub <topic>` streams peer announcements → merge into
+    registry.json keyed by PeerID, each with a last-seen timestamp; entries
+    older than PEER_TTL are pruned so orbs that go away drop off the index.
+  * PUB: every ANNOUNCE_EVERY seconds (or immediately when the supervisor
+    touches /run/aeon/modelshare-announce after a share/unshare) publish this
+    Orb's {peer_id, label, addrs, models[]} to the topic.
+
+The announcement is plain JSON. It carries only public content (CIDs +
+already-public model-card metadata); the weights themselves move over the
+normal IPFS swarm when a peer pins the CID.
+"""
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+
+TOPIC = "aeon-model-share/v1"
+SCRIPT = "/usr/local/bin/aeon-ipfs"
+MODELS_DIR = "/var/lib/aeon/ipfs-models"
+CATALOG = os.path.join(MODELS_DIR, "catalog.json")
+REGISTRY = os.path.join(MODELS_DIR, "registry.json")
+FLEET_TOML = "/etc/aeon/fleet.toml"
+ANNOUNCE_FLAG = "/run/aeon/modelshare-announce"
+
+ANNOUNCE_EVERY = 60      # seconds between periodic re-announcements
+PEER_TTL_MS = 15 * 60_000  # drop a peer not heard from in 15 min
+MAX_MODELS = 500         # cap announcement size
+
+_lock = threading.Lock()
+
+
+def log(*a):
+    print("aeon-modelshare:", *a, file=sys.stderr, flush=True)
+
+
+def sh(*args, stdin=None, timeout=None):
+    return subprocess.run(
+        [SCRIPT, *args], input=stdin, capture_output=True, text=True, timeout=timeout
+    )
+
+
+def self_peer_id():
+    try:
+        r = sh("id", timeout=10)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def self_addrs():
+    """LAN/tailnet IPv4s peers can dial for a fast direct fetch."""
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout
+        return [a for a in out.split() if ":" not in a and not a.startswith("127.")]
+    except Exception:
+        return []
+
+
+def self_label():
+    """Human label from fleet.toml (reused — Model Share needs no fleet token,
+    but the label is a nice display name if the user set one)."""
+    try:
+        with open(FLEET_TOML) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("label"):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return ""
+
+
+def read_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def write_json_atomic(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def build_announcement():
+    return {
+        "v": 1,
+        "peer_id": self_peer_id(),
+        "label": self_label(),
+        "addrs": self_addrs(),
+        "updated_ms": int(time.time() * 1000),
+        "models": read_json(CATALOG, [])[:MAX_MODELS],
+    }
+
+
+def publish():
+    ann = build_announcement()
+    if not ann["peer_id"]:
+        return
+    try:
+        sh("pub", TOPIC, stdin=json.dumps(ann), timeout=15)
+    except Exception as e:
+        log("publish failed:", e)
+
+
+def merge_peer(ann):
+    pid = ann.get("peer_id")
+    if not pid or not isinstance(ann.get("models"), list):
+        return
+    with _lock:
+        reg = read_json(REGISTRY, {"peers": {}})
+        peers = reg.setdefault("peers", {})
+        peers[pid] = {
+            "peer_id": pid,
+            "label": ann.get("label", ""),
+            "addrs": ann.get("addrs", []),
+            "updated_ms": ann.get("updated_ms", int(time.time() * 1000)),
+            "models": ann["models"],
+        }
+        # prune stale peers
+        now = int(time.time() * 1000)
+        for k in [k for k, v in peers.items() if now - v.get("updated_ms", 0) > PEER_TTL_MS]:
+            del peers[k]
+        try:
+            write_json_atomic(REGISTRY, reg)
+        except Exception as e:
+            log("registry write failed:", e)
+
+
+def sub_loop():
+    """Reconnecting subscriber. Each line from `aeon-ipfs sub` is one JSON
+    announcement (kubo emits one pubsub message per line)."""
+    while True:
+        try:
+            p = subprocess.Popen([SCRIPT, "sub", TOPIC], stdout=subprocess.PIPE, text=True)
+            for line in p.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    merge_peer(json.loads(line))
+                except Exception:
+                    pass  # ignore malformed / foreign messages
+            p.wait()
+        except Exception as e:
+            log("sub loop error:", e)
+        time.sleep(5)  # daemon restarted / not ready yet — back off and retry
+
+
+def pub_loop():
+    last = 0.0
+    while True:
+        now = time.time()
+        flag = os.path.exists(ANNOUNCE_FLAG)
+        if flag:
+            try:
+                os.remove(ANNOUNCE_FLAG)
+            except Exception:
+                pass
+        if flag or (now - last) >= ANNOUNCE_EVERY:
+            publish()
+            last = now
+        time.sleep(2)
+
+
+def wait_for_daemon():
+    """Block until the local IPFS node answers (peer id resolves)."""
+    while not self_peer_id():
+        time.sleep(5)
+
+
+def main():
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    wait_for_daemon()
+    log("online; gossiping on", TOPIC)
+    threading.Thread(target=sub_loop, daemon=True).start()
+    pub_loop()
+
+
+if __name__ == "__main__":
+    main()

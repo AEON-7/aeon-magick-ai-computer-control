@@ -494,7 +494,9 @@ pub fn build_router(cfg: Config) -> Router {
         // IPFS AI-model sharing — upload streams to disk (body limit disabled,
         // models are GB-scale), then `ipfs add` pins it and the catalog rides
         // the fleet heartbeat so every Orb sees the federated model index.
-        .route("/ipfs/models",        get(crate::ipfs::models))
+        .route("/ipfs/models",          get(crate::ipfs::models))
+        .route("/ipfs/models/registry", get(crate::ipfs::models_registry))
+        .route("/ipfs/models/card",     get(crate::ipfs::model_card))
         .route("/ipfs/models/upload",
             post(crate::ipfs::upload_model)
                 .layer(axum::extract::DefaultBodyLimit::disable()))

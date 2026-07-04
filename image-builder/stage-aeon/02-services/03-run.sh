@@ -12,6 +12,14 @@ THIS_DIR="$(dirname "$0")"
 install -m 0755 "${THIS_DIR}/files/aeon-orbnet.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-orbnet"
 install -m 0755 "${THIS_DIR}/files/aeon-onions.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-onions"
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs"
+# Model Share: auto-enroll boot oneshot + fleet-free pubsub gossip daemon.
+install -m 0755 "${THIS_DIR}/files/aeon-ipfs-boot.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs-boot"
+install -m 0755 "${THIS_DIR}/files/aeon-modelshare"   "${ROOTFS_DIR}/usr/local/bin/aeon-modelshare"
+install -m 0644 "${THIS_DIR}/files/aeon-ipfs-boot.service"  "${ROOTFS_DIR}/etc/systemd/system/aeon-ipfs-boot.service"
+install -m 0644 "${THIS_DIR}/files/aeon-modelshare.service" "${ROOTFS_DIR}/etc/systemd/system/aeon-modelshare.service"
+on_chroot <<'MODELSHARE'
+systemctl enable aeon-ipfs-boot.service aeon-modelshare.service
+MODELSHARE
 install -m 0755 "${THIS_DIR}/files/aeon-mysterium.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-mysterium"
 install -m 0755 "${THIS_DIR}/files/aeon-myst-route.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-myst-route"
 install -m 0755 "${THIS_DIR}/files/aeon-orbnet-backup.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-orbnet-backup"
