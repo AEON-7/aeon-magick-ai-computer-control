@@ -11,6 +11,8 @@
   // the action word) so a stray click can't kill an in-flight AI
   // session.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
@@ -125,19 +127,20 @@
     return `${(kb / 1024 / 1024).toFixed(2)} GB`;
   }
 
-  /// Same double-confirm pattern as the header's target buttons —
-  /// confirm() prompts a yes/no, then prompt() asks the user to type
-  /// the action word. Avoids a stray click killing the box.
+  /// A typed action word gates both — a stray click can never kill
+  /// the box.
   async function onPiReboot() {
-    if (!confirm(
-      'Reboot the Pi?\n\n' +
-      'The web UI disconnects for ~30-60 s while the Pi reboots. ' +
-      'Any in-flight HID input, capture, MCP session, AI agent run, ' +
-      'or open SSH sessions will be lost. The USB gadget will re-' +
-      'enumerate — the target sees a ~1 s blip but stays on.'
-    )) return;
-    const phrase = prompt('Type REBOOT to confirm:');
-    if (phrase !== 'REBOOT') return;
+    if (!(await confirmRite({
+      title: 'Reboot the Pi',
+      body:
+        'The web UI disconnects for ~30-60 s while the Pi reboots. ' +
+        'Any in-flight HID input, capture, MCP session, AI agent run, ' +
+        'or open SSH sessions will be lost. The USB gadget will re-' +
+        'enumerate — the target sees a ~1 s blip but stays on.',
+      danger: true,
+      phrase: 'REBOOT',
+      confirmLabel: 'reboot Pi',
+    }))) return;
     try {
       const r = await api.rebootPi();
       msg = r.message;
@@ -147,16 +150,18 @@
   }
 
   async function onPiPoweroff() {
-    if (!confirm(
-      'Power off the Pi?\n\n' +
-      'There is NO remote way to bring it back — you\'ll need to ' +
-      'physically reach the device and unplug/replug power, or hit ' +
-      'a remote-controlled smart plug if you have one. Only do this ' +
-      'if you\'re moving the Pi or shutting down a long-running ' +
-      'session you don\'t need anymore.'
-    )) return;
-    const phrase = prompt('Type POWEROFF to confirm:');
-    if (phrase !== 'POWEROFF') return;
+    if (!(await confirmRite({
+      title: 'Power off the Pi',
+      body:
+        'There is NO remote way to bring it back — you\'ll need to ' +
+        'physically reach the device and unplug/replug power, or hit ' +
+        'a remote-controlled smart plug if you have one. Only do this ' +
+        'if you\'re moving the Pi or shutting down a long-running ' +
+        'session you don\'t need anymore.',
+      danger: true,
+      phrase: 'POWEROFF',
+      confirmLabel: 'power off Pi',
+    }))) return;
     try {
       const r = await api.poweroffPi();
       msg = r.message;
@@ -207,12 +212,16 @@
 
   async function doImport() {
     if (!bkFile) return;
-    if (!confirm(
-      'Restore configuration from this backup?\n\n' +
-      'This OVERWRITES the current device + network config, API tokens, the ' +
-      'admin password, and the connected-systems registry, then needs a reboot ' +
-      'to apply. Continue?'
-    )) return;
+    if (!(await confirmRite({
+      title: 'Restore config backup',
+      body:
+        'Restore configuration from this backup?\n\n' +
+        'This OVERWRITES the current device + network config, API tokens, the ' +
+        'admin password, and the connected-systems registry, then needs a reboot ' +
+        'to apply.',
+      danger: true,
+      confirmLabel: 'restore',
+    }))) return;
     bkBusy = 'import'; bkMsg = ''; bkRestored = false;
     try {
       const b64 = await new Promise<string>((resolve, reject) => {
@@ -236,14 +245,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">Pi system</span>
-    </div>
-  </header>
+  <PageHeader title="Pi system" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
@@ -392,7 +394,7 @@
             </summary>
             <div class="mt-3 space-y-2 text-[11px] text-zinc-500 leading-relaxed">
               <p>
-                The capture chain on a Pi 4 is roughly:
+                The capture chain is roughly:
                 <strong>Cam Link (~50 ms internal queue)</strong> →
                 <strong>ffmpeg/ustreamer encode (~30 ms)</strong> →
                 <strong>axum HTTPS body stream (~5 ms)</strong> →
@@ -405,9 +407,10 @@
               </p>
               <p>
                 The real fix is dropping the MJPEG transport entirely
-                and shipping H.264 over WebSocket — Pi 4's hardware H.264
-                encoder is already there. That's a focused upcoming PR
-                (v64+); for now the levers above are what we have.
+                and shipping H.264 over WebSocket — hardware-encoded on
+                the Pi 4 (h264_v4l2m2m), software-encoded on the Pi 5
+                (libx264). That path already exists; the levers above
+                tune the MJPEG fallback.
               </p>
             </div>
           </details>

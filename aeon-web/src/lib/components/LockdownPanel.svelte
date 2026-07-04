@@ -3,6 +3,7 @@
   // external API + MCP (admin session + KVM unaffected); individual categories
   // can be disabled instead. Admin-only surface (/api/lockdown).
   import { onMount } from 'svelte';
+  import { confirmRite } from '$lib/confirm';
 
   let enabled = false;
   let disabled: string[] = [];
@@ -33,8 +34,13 @@
       if (r.ok) { enabled = r.enabled; disabled = r.disabled_categories ?? []; }
     } finally { busy = false; }
   }
-  function toggleLockdown() {
-    if (!enabled && !confirm('Engage LOCKDOWN MODE? This refuses ALL external API + MCP calls — the Orb becomes a single-user jump box + KVM. Only the admin session works. You can release it here anytime.')) return;
+  async function toggleLockdown() {
+    if (!enabled && !(await confirmRite({
+      title: 'Engage lockdown mode',
+      body: 'This refuses ALL external API + MCP calls — the Orb becomes a single-user jump box + KVM. Only the admin session works. You can release it here anytime.',
+      danger: true,
+      confirmLabel: 'engage lockdown',
+    }))) return;
     save(!enabled, disabled);
   }
   function toggleCat(cat: string) {
@@ -48,10 +54,10 @@
   <section class="bg-ink-900 border {enabled ? 'border-red-500/60' : 'border-ink-700'} rounded-xl p-5 space-y-4">
     <div class="flex items-start justify-between gap-4 flex-wrap">
       <div>
-        <h2 class="font-mono text-sm uppercase tracking-wider {enabled ? 'text-red-300' : 'text-zinc-400'}">🔒 Lockdown &amp; API exposure</h2>
+        <h2 class="font-mono text-sm uppercase tracking-wider {enabled ? 'text-red-300' : 'text-zinc-400'}">Lockdown &amp; API exposure</h2>
         <p class="text-[11px] text-zinc-500 mt-1 max-w-md">The killswitch refuses every external API token + MCP call — the admin web session and the KVM keep working. Or disable individual categories below.</p>
       </div>
-      <button class="px-4 py-2 rounded-lg font-mono text-sm transition disabled:opacity-50 {enabled ? 'bg-red-700 text-white animate-pulse' : 'bg-red-900/30 text-red-300 border border-red-500/40 hover:bg-red-800/40'}"
+      <button class="px-4 py-2 rounded-lg font-mono text-sm transition disabled:opacity-50 {enabled ? 'bg-red-700 text-white motion-safe:animate-ember' : 'bg-red-900/30 text-red-300 border border-red-500/40 hover:bg-red-800/40'}"
               disabled={busy} on:click={toggleLockdown}>
         {enabled ? '● LOCKDOWN ENGAGED — release' : 'ENGAGE LOCKDOWN'}
       </button>

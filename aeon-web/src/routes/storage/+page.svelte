@@ -7,6 +7,9 @@
   // bootable CDROM appear on the USB-C dock and can pick it from the
   // Option-key / F12 boot menu to install or live-boot.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import Icon from '$lib/components/Icon.svelte';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
@@ -36,9 +39,11 @@
 
   async function eject() {
     if (!state || !state.active) return;
-    if (!confirm(
-      `Eject "${state.active}"?\n\nThe USB-C host will see the disk drive disappear (~1s blip).`
-    )) return;
+    if (!(await confirmRite({
+      title: 'Eject disk',
+      body: `Eject "${state.active}"?\n\nThe USB-C host will see the disk drive disappear (~1s blip).`,
+      confirmLabel: 'eject',
+    }))) return;
     try {
       await api.setActiveIso('');
       await refresh();
@@ -49,11 +54,14 @@
 
   async function activate(slug: string) {
     if (state?.active === slug) return;
-    if (!confirm(
-      `Make "${slug}" the active disk drive?\n\n` +
-      `The USB-C host will see a brief disconnect (~1s) while the gadget ` +
-      `rebuilds, then a new bootable CDROM appears in the boot menu.`
-    )) return;
+    if (!(await confirmRite({
+      title: 'Insert disk',
+      body:
+        `Make "${slug}" the active disk drive?\n\n` +
+        `The USB-C host will see a brief disconnect (~1s) while the gadget ` +
+        `rebuilds, then a new bootable CDROM appears in the boot menu.`,
+      confirmLabel: 'insert',
+    }))) return;
     try {
       await api.setActiveIso(slug);
       await refresh();
@@ -63,7 +71,12 @@
   }
 
   async function deleteIso(slug: string) {
-    if (!confirm(`Delete ISO "${slug}"? This frees disk space; not undoable.`)) return;
+    if (!(await confirmRite({
+      title: 'Delete ISO',
+      body: `Delete ISO "${slug}"? This frees disk space; not undoable.`,
+      danger: true,
+      confirmLabel: 'delete',
+    }))) return;
     try {
       await api.deleteIso(slug);
       await refresh();
@@ -123,14 +136,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">disk drive</span>
-    </div>
-  </header>
+  <PageHeader title="disk drive" />
 
   <main class="flex-1 overflow-auto p-6">
     <div class="max-w-3xl mx-auto space-y-6">
@@ -163,7 +169,9 @@
             Currently inserted
           </h3>
           {#if state?.active}
-            <button class="btn text-xs" on:click={eject}>⏏ eject</button>
+            <button class="btn text-xs inline-flex items-center gap-1.5" on:click={eject}>
+              <Icon name="release" class="w-3.5 h-3.5" />eject
+            </button>
           {/if}
         </header>
         {#if state?.active}

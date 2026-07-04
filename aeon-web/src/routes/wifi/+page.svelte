@@ -22,6 +22,8 @@
   // separate, simpler version of the client panel — this page is the
   // authenticated full-feature equivalent for ongoing management.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
 
   type Mode = 'client' | 'ap' | 'off';
@@ -203,7 +205,12 @@
   }
 
   async function forget(profile: string) {
-    if (!confirm(`Forget "${profile}"? Saved password will be deleted.`)) return;
+    if (!(await confirmRite({
+      title: 'Forget network',
+      body: `Forget "${profile}"? Saved password will be deleted.`,
+      danger: true,
+      confirmLabel: 'forget',
+    }))) return;
     try {
       const r = await fetch('/api/wifi/known', {
         method: 'DELETE',
@@ -233,11 +240,15 @@
     }
     if (
       apActivateNow &&
-      !confirm(
-        'Activating AP mode now will tear down the current client connection. ' +
-        'If you are accessing this UI over WiFi you will lose your connection — ' +
-        'use ethernet or USB to reach the device until you reconnect to the new AP.',
-      )
+      !(await confirmRite({
+        title: 'Activate AP mode',
+        body:
+          'Activating AP mode now will tear down the current client connection. ' +
+          'If you are accessing this UI over WiFi you will lose your connection — ' +
+          'use ethernet or USB to reach the device until you reconnect to the new AP.',
+        danger: true,
+        confirmLabel: 'activate AP',
+      }))
     ) {
       return;
     }
@@ -271,12 +282,16 @@
   async function setRadio(on: boolean) {
     if (
       !on &&
-      !confirm(
-        'Turn the WiFi radio off entirely?\n\n' +
-        'You will lose any active WiFi connection AND the no-internet ' +
-        'boot-fallback AP will not work either — reach the Pi via ethernet ' +
-        'or USB only.',
-      )
+      !(await confirmRite({
+        title: 'Turn WiFi radio off',
+        body:
+          'Turn the WiFi radio off entirely?\n\n' +
+          'You will lose any active WiFi connection AND the no-internet ' +
+          'boot-fallback AP will not work either — reach the Pi via ethernet ' +
+          'or USB only.',
+        danger: true,
+        confirmLabel: 'radio off',
+      }))
     ) {
       return;
     }
@@ -323,14 +338,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">WiFi</span>
-    </div>
-  </header>
+  <PageHeader title="WiFi" />
 
   <div class="flex-1 overflow-y-auto p-6 max-w-4xl w-full mx-auto space-y-6">
 

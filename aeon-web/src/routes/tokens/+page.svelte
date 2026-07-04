@@ -3,10 +3,12 @@
   // The plaintext token is shown ONCE — only after creation. After that,
   // only the argon2 hash remains on disk.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount } from 'svelte';
   import * as api from '$lib/api';
   import TipJar from '$lib/components/TipJar.svelte';
   import LockdownPanel from '$lib/components/LockdownPanel.svelte';
+  import { confirmRite } from '$lib/confirm';
 
   let tokens: api.Token[] = [];
   let loading = true;
@@ -63,7 +65,12 @@
   }
 
   async function revoke(id: string, name: string) {
-    if (!confirm(`Revoke token "${name}"? Any agent using it will lose access immediately.`)) {
+    if (!(await confirmRite({
+      title: 'Revoke token',
+      body: `Revoke token "${name}"? Any agent using it will lose access immediately.`,
+      danger: true,
+      confirmLabel: 'revoke',
+    }))) {
       return;
     }
     try {
@@ -97,14 +104,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">API tokens</span>
-    </div>
-  </header>
+  <PageHeader title="API tokens" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-4xl mx-auto w-full space-y-6">

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
@@ -111,7 +113,12 @@
   }
 
   async function deleteSrc(id: string, name: string) {
-    if (!confirm(`Remove subscription "${name}"?\n\nThis deletes the cached list; the domains will stop being blocked.`)) return;
+    if (!(await confirmRite({
+      title: 'Remove subscription',
+      body: `Remove subscription "${name}"?\n\nThis deletes the cached list; the domains will stop being blocked.`,
+      danger: true,
+      confirmLabel: 'remove',
+    }))) return;
     try {
       await api.deleteDnsSource(id);
       await refresh();
@@ -214,14 +221,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">DNS log + blacklist</span>
-    </div>
-  </header>
+  <PageHeader title="DNS log + blacklist" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-4xl mx-auto w-full space-y-6">

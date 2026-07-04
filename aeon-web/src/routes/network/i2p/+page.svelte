@@ -10,6 +10,7 @@
   // The actual outproxy + VPN provider toggle still lives on
   // /network (under the VPN section) — this page is read-mostly.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
@@ -40,14 +41,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/network" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← NETWORK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">I2P config</span>
-    </div>
-  </header>
+  <PageHeader title="I2P config" backHref="/network" backLabel="NETWORK" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">

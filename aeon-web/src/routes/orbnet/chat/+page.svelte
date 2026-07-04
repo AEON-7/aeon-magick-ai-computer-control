@@ -5,6 +5,10 @@
   // supervisor's admin-only /api/orbnet/* surface.
   import { onMount, onDestroy } from 'svelte';
   import qrcode from 'qrcode-generator';
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import Icon from '$lib/components/Icon.svelte';
+  import { toast } from '$lib/toast';
+  import { confirmRite, askRite } from '$lib/confirm';
 
   type Status = {
     ok: boolean; enabled: boolean; onion: string; homeserver_up: boolean;
@@ -122,7 +126,12 @@
     await loadStatus();
   }
   async function deactivate() {
-    if (!confirm('Take OrbNet offline? Your account + rooms persist for re-enable.')) return;
+    if (!(await confirmRite({
+      title: 'Take OrbNet offline',
+      body: 'Take OrbNet offline? Your account + rooms persist for re-enable.',
+      danger: true,
+      confirmLabel: 'take offline',
+    }))) return;
     busy = 'Stopping…';
     await api('/disable', { method: 'POST' });
     busy = '';
@@ -138,27 +147,36 @@
     showMod = false;
   }
   async function createGroup() {
-    const name = prompt('Group name?');
+    const name = await askRite({ title: 'New group', label: 'group name', placeholder: 'e.g. ops-council' });
     if (!name) return;
     const r = await api('/group', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, invite: [] }),
     });
     if (r.ok) await loadRooms();
-    else alert('Could not create group: ' + JSON.stringify(r.err));
+    else toast.error('Could not create group: ' + JSON.stringify(r.err));
   }
   async function startDm() {
-    const uid = prompt('Direct message which Orb user? (e.g. @nova:abc…onion)');
+    const uid = await askRite({
+      title: 'Direct message',
+      label: 'Orb user',
+      placeholder: '@nova:abc…onion',
+    });
     if (!uid) return;
     const r = await api('/dm', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_id: uid }),
     });
     if (r.ok) await loadRooms();
-    else alert('Could not start DM: ' + JSON.stringify(r.err));
+    else toast.error('Could not start DM: ' + JSON.stringify(r.err));
   }
   async function peerOrb() {
-    const onion = prompt('Connect another Orb — paste its OrbNet onion (xxxxx.onion). You both federate + join each other’s community rooms.');
+    const onion = await askRite({
+      title: 'Connect another Orb',
+      body: 'You both federate + join each other’s community rooms.',
+      label: 'OrbNet onion address',
+      placeholder: 'xxxxx.onion',
+    });
     if (!onion) return;
     busy = 'Peering over Tor…';
     const r = await api('/peer', {
@@ -166,8 +184,8 @@
       body: JSON.stringify({ onion }),
     });
     busy = '';
-    if (r.ok) { await loadRooms(); alert(`Peered — joined ${r.joined_rooms} of its rooms.`); }
-    else alert('Peer failed: ' + JSON.stringify(r.err));
+    if (r.ok) { await loadRooms(); toast.success(`Peered — joined ${r.joined_rooms} of its rooms.`); }
+    else toast.error('Peer failed: ' + JSON.stringify(r.err));
   }
 
   // ── manage: federation peers + personas ──
@@ -183,32 +201,58 @@
     if (showManage) loadManage();
   }
   async function unpeerOrb(onion: string) {
-    if (!confirm(`Stop federating with ${onion.slice(0, 14)}… ? You'll leave its rooms.`)) return;
+    if (!(await confirmRite({
+      title: 'Stop federating',
+      body: `Stop federating with ${onion.slice(0, 14)}… ? You'll leave its rooms.`,
+      danger: true,
+      confirmLabel: 'un-peer',
+    }))) return;
     const r = await api('/peer/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ onion }) });
     if (r.ok) { await loadManage(); await loadRooms(); }
-    else alert('Could not un-peer: ' + JSON.stringify(r.err));
+    else toast.error('Could not un-peer: ' + JSON.stringify(r.err));
   }
   async function removePersona(user_id: string, name: string) {
-    if (!confirm(`Retire persona "${name}"? It leaves all its rooms and stops responding.`)) return;
+    if (!(await confirmRite({
+      title: 'Retire persona',
+      body: `Retire persona "${name}"? It leaves all its rooms and stops responding.`,
+      danger: true,
+      confirmLabel: 'retire',
+    }))) return;
     const r = await api('/persona/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id }) });
     if (r.ok) { await loadManage(); await loadRooms(); }
-    else alert('Could not retire: ' + JSON.stringify(r.err));
+    else toast.error('Could not retire: ' + JSON.stringify(r.err));
   }
   async function leaveRoom() {
     if (!selected) return;
-    if (!confirm(`Leave "${selected.name}"?`)) return;
+    if (!(await confirmRite({
+      title: 'Leave room',
+      body: `Leave "${selected.name}"?`,
+      confirmLabel: 'leave',
+    }))) return;
     const r = await api(`/rooms/${encodeURIComponent(selected.room_id)}/leave`, { method: 'POST' });
     if (r.ok) { selected = null; messages = []; await loadRooms(); }
-    else alert('Could not leave: ' + JSON.stringify(r.err));
+    else toast.error('Could not leave: ' + JSON.stringify(r.err));
   }
   async function kickMember() {
     if (!selected) return;
-    const uid = prompt('Remove which member? Paste their Matrix ID (e.g. @nova:abc…onion).');
+    const uid = await askRite({
+      title: 'Remove member',
+      label: 'Matrix ID',
+      placeholder: '@nova:abc…onion',
+    });
     if (!uid) return;
-    const ban = confirm('OK = ban (blocks rejoin).  Cancel = kick (can rejoin).');
+    // Two explicit steps (the old confirm() overloaded Cancel to mean
+    // "kick", leaving no way to abort).
+    const ban = await confirmRite({
+      title: 'Ban or kick?',
+      body: `Ban blocks ${uid.trim()} from rejoining; kick lets them rejoin later.`,
+      danger: true,
+      confirmLabel: 'ban',
+      cancelLabel: 'just kick',
+    });
     const r = await api(`/rooms/${encodeURIComponent(selected.room_id)}/kick`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: uid.trim(), ban }) });
-    if (r.ok) alert(`${ban ? 'Banned' : 'Kicked'} ${uid}`);
-    else alert('Could not remove member (do you have the power level?): ' + JSON.stringify(r.err));
+    if (r.ok) toast.success(`${ban ? 'Banned' : 'Kicked'} ${uid}`);
+    else toast.error('Could not remove member (do you have the power level?): ' + JSON.stringify(r.err));
   }
 
   // personas — human-placed only
@@ -273,7 +317,7 @@
     const m = modelOf(eModelSel);
     if (m && m.running) { body.llm_url = m.endpoint; body.model = m.model; }
     const r = await api('/persona/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (r.ok) { editingUser = ''; await loadManage(); } else alert('Update failed: ' + JSON.stringify(r.err));
+    if (r.ok) { editingUser = ''; await loadManage(); } else toast.error('Update failed: ' + JSON.stringify(r.err));
   }
   async function placePersona() {
     if (!selected || !pName.trim()) return;
@@ -283,8 +327,8 @@
       body: JSON.stringify({ name: pName.trim(), room_id: selected.room_id, system_prompt: pPrompt, llm_url: pLlm, model: pModel }),
     });
     busy = '';
-    if (r.ok) { showPersona = false; pName = pPrompt = pLlm = pModel = pTemplate = pModelSel = ''; alert('Persona placed in ' + selected.name); }
-    else alert('Could not place persona: ' + JSON.stringify(r.err));
+    if (r.ok) { showPersona = false; pName = pPrompt = pLlm = pModel = pTemplate = pModelSel = ''; toast.success('Persona placed in ' + selected.name); }
+    else toast.error('Could not place persona: ' + JSON.stringify(r.err));
   }
 
   // moderation: hide messages whose body matches any keyword (case-insensitive)
@@ -353,15 +397,11 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">🔮 OrbNet</span>
-    </div>
+  <PageHeader title="OrbNet chat" backHref="/orbnet" backLabel="ORBNET">
     {#if status?.enabled}
       <button class="text-[11px] font-mono text-red-300/80 hover:text-red-300" on:click={deactivate}>take offline ✕</button>
     {/if}
-  </header>
+  </PageHeader>
 
   <main class="flex-1 overflow-auto">
     {#if err}<div class="m-4 p-3 rounded bg-red-900/20 border border-red-500/40 text-red-300 text-sm">{err}</div>{/if}
@@ -551,8 +591,12 @@
             {#if selected}
               <div class="px-4 py-2 border-b border-ink-800 flex items-center gap-2">
                 <span class="text-sm text-zinc-200 font-mono truncate flex-1">{selected.name}</span>
-                <button class="btn text-[11px]" on:click={kickMember} title="Remove a member (kick or ban)">⛔ kick</button>
-                <button class="btn text-[11px]" on:click={leaveRoom} title="Leave this room">⏏ leave</button>
+                <button class="btn text-[11px] inline-flex items-center gap-1" on:click={kickMember} title="Remove a member (kick or ban)">
+                  <Icon name="close" class="w-3 h-3" />kick
+                </button>
+                <button class="btn text-[11px] inline-flex items-center gap-1" on:click={leaveRoom} title="Leave this room">
+                  <Icon name="logout" class="w-3 h-3" />leave
+                </button>
                 <button class="btn text-[11px]" class:active={showPersona} on:click={openPersona}>🎭 + persona</button>
               </div>
               {#if showPersona}

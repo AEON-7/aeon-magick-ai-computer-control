@@ -31,6 +31,35 @@ export default {
         mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
         sans: ['"Inter"', 'system-ui', 'sans-serif'],
       },
+      keyframes: {
+        // The orb's slow "breathing" halo (transform+opacity only — both
+        // compositor-composited, so the loop costs no main-thread time).
+        'orb-breathe': {
+          '0%,100%': { transform: 'scale(1)', opacity: '0.3' },
+          '50%': { transform: 'scale(1.3)', opacity: '0.55' },
+        },
+        // Signal-lost flicker — mostly steady with a brief stutter.
+        'orb-flicker': {
+          '0%,92%,100%': { opacity: '0.7' },
+          '94%': { opacity: '0.3' },
+          '96%': { opacity: '0.8' },
+        },
+        // Gentler stand-in for animate-pulse on armed/destructive buttons.
+        ember: {
+          '0%,100%': { opacity: '1' },
+          '50%': { opacity: '0.65' },
+        },
+        'cursor-blink': {
+          '0%,49%': { opacity: '1' },
+          '50%,100%': { opacity: '0' },
+        },
+      },
+      animation: {
+        'orb-breathe': 'orb-breathe 4s ease-in-out infinite',
+        'orb-flicker': 'orb-flicker 4s steps(1) infinite',
+        ember: 'ember 2.4s ease-in-out infinite',
+        'cursor-blink': 'cursor-blink 1.2s steps(1) infinite',
+      },
     },
   },
   plugins: [],

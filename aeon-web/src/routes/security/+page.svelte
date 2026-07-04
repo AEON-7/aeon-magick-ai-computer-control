@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
@@ -179,14 +180,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">security console</span>
-    </div>
-  </header>
+  <PageHeader title="security console" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-5xl mx-auto w-full space-y-6">

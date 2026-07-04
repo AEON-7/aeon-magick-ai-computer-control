@@ -1,21 +1,29 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { fly } from 'svelte/transition';
   import * as api from '$lib/api';
   import H264Canvas from '$lib/components/H264Canvas.svelte';
   import Icon from '$lib/components/Icon.svelte';
+  import OrbMark from '$lib/components/OrbMark.svelte';
   import TargetPowerMenu from '$lib/components/TargetPowerMenu.svelte';
   import SpecialKeys from '$lib/components/SpecialKeys.svelte';
+  import { toast } from '$lib/toast';
+  import { confirmRite } from '$lib/confirm';
+
+  // Menus "condense" in over 120ms instead of teleporting. in: only —
+  // an out-transition would leave a 120ms ghost panel that could
+  // swallow a click near the trigger. 0ms for reduced-motion users.
+  const reduceMotion =
+    typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const menuIn = { y: -4, duration: reduceMotion ? 0 : 120 };
 
   // v99: launcher IA v2 — three "super apps" (OrbNet, Agent Dash, GPIO) stand
   // alone as color-coded buttons; everything else collapses into two dropdowns:
   // Settings (configuration) and Monitor (logs + read-only monitoring). KVM
-  // controls stay inline. One source drives the desktop toolbar + mobile menu.
-  type NavItem = { href: string; label: string; icon: string; title?: string };
-  const SUPER_APPS: (NavItem & { color: 'cursed' | 'sky' | 'amber' })[] = [
-    { href: '/orbnet', label: 'OrbNet',     icon: 'orbnet', color: 'cursed', title: 'Decentralized services hub — Tor hidden services, IPFS, Mysterium dVPN, private chat' },
-    { href: '/agent',  label: 'Agent Dash', icon: 'braces', color: 'sky',    title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
-    { href: '/gpio',   label: 'GPIO',       icon: 'chip',   color: 'amber',  title: 'GPIO pins, HATs, power + IO — live hardware state' },
-  ];
+  // controls stay inline. The registry in $lib/nav.ts drives the desktop
+  // toolbar, the mobile menu, AND the Cmd+K palette.
+  import { SUPER_APPS, SETTINGS_ITEMS, MONITOR_ITEMS } from '$lib/nav';
+  import { inputCaptured } from '$lib/capture';
   // Static class strings (Tailwind scans source text — keep them literal).
   const APP_BTN: Record<string, string> = {
     cursed: 'border-cursed-500/50 bg-cursed-600/15 text-cursed-100 hover:bg-cursed-600/25',
@@ -25,20 +33,6 @@
   const APP_ICON: Record<string, string> = {
     cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300',
   };
-  const SETTINGS_ITEMS: NavItem[] = [
-    { href: '/network',  label: 'Network',    icon: 'globe',  title: 'VPN · encrypted DNS · Tor/I2P · firewall' },
-    { href: '/wifi',     label: 'WiFi',       icon: 'wifi',   title: 'WiFi mode, saved networks, setup AP' },
-    { href: '/tokens',   label: 'API tokens', icon: 'braces', title: 'API tokens for agents / REST / MCP + lockdown' },
-    { href: '/ssh-keys', label: 'SSH keys',   icon: 'key',    title: 'SSH authorized keys' },
-    { href: '/files',    label: 'Files',      icon: 'folder', title: 'file transfer + clipboard bridge' },
-    { href: '/storage',  label: 'Disk',       icon: 'disc',   title: 'USB CD / disk-drive emulation (mount ISOs)' },
-    { href: '/system',   label: 'System',     icon: 'cpu',    title: 'Pi health + reboot/poweroff + stream tuning' },
-  ];
-  const MONITOR_ITEMS: NavItem[] = [
-    { href: '/security', label: 'Security', icon: 'shield', title: 'blocked packets, firewall + intrusion events' },
-    { href: '/dns',      label: 'DNS',      icon: 'funnel', title: 'DNS query log + blacklist' },
-    { href: '/audit',    label: 'Audit',    icon: 'list',   title: 'access + privileged-action audit log' },
-  ];
 
   let stream_url = '';
   // v64: prefer the low-latency H.264 WebCodecs canvas when the browser
@@ -68,6 +62,16 @@
     (state?.mode?.format ?? '').includes('h264');
   let hid: api.HidStatus | null = null;
   let poll_iv: ReturnType<typeof setInterval>;
+  // One derived state drives every orb on the page (header, footer,
+  // signal-lost veil) plus the canvas frame glow.
+  $: orbMode = (captured || rec.active)
+    ? 'captured' as const
+    : state
+      ? (state.online ? 'live' as const : 'offline' as const)
+      : 'idle' as const;
+  // Mirror capture into the global store so app-wide hotkeys (Cmd+K
+  // palette) stand down while keystrokes belong to the target.
+  $: inputCaptured.set(captured);
   // Network status pills — we only care about the small "is it on?"
   // booleans here, not the full config (the /network page owns that).
   // These change rarely, so we fetch once on mount + whenever the tab
@@ -186,6 +190,8 @@
   });
 
   onDestroy(() => {
+    inputCaptured.set(false);
+    if (coachTimer) clearTimeout(coachTimer);
     clearInterval(poll_iv);
     document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('keydown', onKey);
@@ -495,6 +501,34 @@
 
   let pseudoFullscreen = false;       // True when we fell back to CSS
 
+  // ── First-run gesture coaching (touch devices) ────────────────────────
+  // The touch mapping (tap=click, long-press=right-click, two-finger
+  // drag=scroll) is invisible until you know it. Shown ONCE, on the
+  // first fullscreen entry on a touch device; a tap or 12s dismisses it
+  // forever (localStorage).
+  const COACH_KEY = 'aeon-gesture-coach-seen';
+  let showGestureCoach = false;
+  let coachTimer: ReturnType<typeof setTimeout> | null = null;
+  const GESTURES: [string, string][] = [
+    ['tap', 'left click'],
+    ['long-press', 'right click'],
+    ['drag', 'move the pointer'],
+    ['two-finger drag', 'scroll'],
+  ];
+  function maybeCoach() {
+    if (!isTouchDevice) return;
+    try {
+      if (localStorage.getItem(COACH_KEY)) return;
+    } catch { return; }
+    showGestureCoach = true;
+    coachTimer = setTimeout(dismissCoach, 12000);
+  }
+  function dismissCoach() {
+    if (coachTimer) { clearTimeout(coachTimer); coachTimer = null; }
+    showGestureCoach = false;
+    try { localStorage.setItem(COACH_KEY, '1'); } catch { /* private mode */ }
+  }
+
   async function enterFullscreen() {
     if (!canvas) return;
     const el = document.documentElement as any;
@@ -527,6 +561,7 @@
       }
     } catch { /* fine */ }
     fullscreen = true;
+    maybeCoach();
   }
 
   async function exitFullscreen() {
@@ -657,7 +692,7 @@
       else await api.recordStart(0); // open-ended — records until stopped (3h hard cap)
       await refreshRec();
     } catch (e) {
-      alert('recording: ' + ((e as any)?.message ?? e));
+      toast.error('recording: ' + ((e as any)?.message ?? e));
     } finally {
       recBusy = false;
     }
@@ -701,40 +736,44 @@
   /// disruptive enough that an accidental click should never trigger
   /// one without an explicit typed phrase.
   async function onTargetReboot() {
-    if (!confirm(
-      'Reboot the USB-connected target machine?\n\n' +
-      'This will:\n' +
-      '  1. Hold the HID power button for 8s (forces the target to power off)\n' +
-      '  2. Wait 5 seconds\n' +
-      '  3. Send a Wake-on-LAN magic packet over usb0\n\n' +
-      'Requires WoL enabled in the target\'s BIOS/UEFI. If the target ' +
-      'doesn\'t support WoL, you\'ll need to press its power button by hand ' +
-      'after step 1.'
-    )) return;
-    const phrase = prompt('Type REBOOT to confirm:');
-    if (phrase !== 'REBOOT') return;
+    if (!(await confirmRite({
+      title: 'Reboot target machine',
+      body:
+        'Reboot the USB-connected target machine?\n\n' +
+        '1. Hold the HID power button for 8s (forces the target to power off)\n' +
+        '2. Wait 5 seconds\n' +
+        '3. Send a Wake-on-LAN magic packet over usb0\n\n' +
+        'Requires WoL enabled in the target\'s BIOS/UEFI. If the target ' +
+        'doesn\'t support WoL, you\'ll need to press its power button by hand ' +
+        'after step 1.',
+      danger: true,
+      phrase: 'REBOOT',
+      confirmLabel: 'reboot target',
+    }))) return;
     try {
       const r = await api.targetReboot();
-      alert(`Reboot sequence sent.\nPhases: ${r.phases.join(' → ')}\nMAC: ${r.mac}`);
+      toast.success(`Reboot sequence sent · ${r.phases.join(' → ')} · MAC ${r.mac}`);
     } catch (e: any) {
-      alert('Target reboot failed: ' + (e?.message ?? 'unknown'));
+      toast.error('Target reboot failed: ' + (e?.message ?? 'unknown'));
     }
   }
   async function onTargetPoweroff() {
-    if (!confirm(
-      'Force-power-off the USB-connected target machine?\n\n' +
-      'This holds the HID power button for 8 seconds. Every modern ' +
-      'motherboard treats that as a hardware-level shutdown — the OS ' +
-      'will NOT get a chance to flush state.\n\n' +
-      'Use the soft tap below first if you want a graceful OS shutdown.'
-    )) return;
-    const phrase = prompt('Type POWEROFF to confirm:');
-    if (phrase !== 'POWEROFF') return;
+    if (!(await confirmRite({
+      title: 'Force power-off target',
+      body:
+        'This holds the HID power button for 8 seconds. Every modern ' +
+        'motherboard treats that as a hardware-level shutdown — the OS ' +
+        'will NOT get a chance to flush state.\n\n' +
+        'Use the soft tap instead if you want a graceful OS shutdown.',
+      danger: true,
+      phrase: 'POWEROFF',
+      confirmLabel: 'force power-off',
+    }))) return;
     try {
       const r = await api.targetPowerHold();
-      alert(`Force power-off sent (${r.hold_ms}ms hold).`);
+      toast.success(`Force power-off sent (${r.hold_ms}ms hold).`);
     } catch (e: any) {
-      alert('Target poweroff failed: ' + (e?.message ?? 'unknown'));
+      toast.error('Target poweroff failed: ' + (e?.message ?? 'unknown'));
     }
   }
   /// Short tap — most OSes interpret this the same as a tap on the
@@ -742,29 +781,34 @@
   /// macOS: shows the shutdown dialog. Linux: usually starts a clean
   /// shutdown. Far less destructive than the 8-second hold.
   async function onTargetPowerTap() {
-    if (!confirm(
-      'Send a short power-button tap to the target?\n\n' +
-      'Most OSes will treat this as a graceful "shutdown please" — ' +
-      'Windows shows the power menu, macOS the shutdown dialog, Linux ' +
-      'starts the shutdown sequence. Cancel any unsaved work first.'
-    )) return;
+    if (!(await confirmRite({
+      title: 'Power-button tap',
+      body:
+        'Send a short power-button tap to the target?\n\n' +
+        'Most OSes will treat this as a graceful "shutdown please" — ' +
+        'Windows shows the power menu, macOS the shutdown dialog, Linux ' +
+        'starts the shutdown sequence. Cancel any unsaved work first.',
+      confirmLabel: 'send tap',
+    }))) return;
     try {
       const r = await api.targetPowerTap();
-      alert(`Soft tap sent (${r.hold_ms}ms).`);
+      toast.success(`Soft tap sent (${r.hold_ms}ms).`);
     } catch (e: any) {
-      alert('Power tap failed: ' + (e?.message ?? 'unknown'));
+      toast.error('Power tap failed: ' + (e?.message ?? 'unknown'));
     }
   }
   /// Wake-on-LAN. Won't do anything if the target is already on.
   async function onTargetWake() {
     try {
       const r = await api.targetWake();
-      alert(`WoL magic packet sent (mac=${r.mac}, via ${r.iface}).`);
+      toast.success(`WoL magic packet sent (mac=${r.mac}, via ${r.iface}).`);
     } catch (e: any) {
-      alert('Wake failed: ' + (e?.message ?? 'unknown') +
-            '\n\nMake sure usb0 is up and the target has DHCP\'d at least once ' +
-            '(so the ARP cache knows its MAC), or set a MAC override at ' +
-            'PUT /api/target/config.');
+      toast.error(
+        'Wake failed: ' + (e?.message ?? 'unknown') +
+        '\n\nMake sure usb0 is up and the target has DHCP\'d at least once ' +
+        '(so the ARP cache knows its MAC), or set a MAC override at ' +
+        'PUT /api/target/config.'
+      );
     }
   }
 
@@ -779,11 +823,14 @@
     const select = ev.target as HTMLSelectElement;
     const newPersona = select.value;
     if (!newPersona || newPersona === hid?.persona) return;
-    if (!confirm(
-      `Switch HID persona to "${newPersona}"?\n\n` +
-      `The USB device will re-enumerate (~1 second blip on the target). ` +
-      `The selection will persist across reboots.`
-    )) {
+    if (!(await confirmRite({
+      title: 'Switch HID persona',
+      body:
+        `Switch HID persona to "${newPersona}"?\n\n` +
+        `The USB device will re-enumerate (~1 second blip on the target). ` +
+        `The selection will persist across reboots.`,
+      confirmLabel: 'switch persona',
+    }))) {
       select.value = hid?.persona ?? '';
       return;
     }
@@ -829,12 +876,14 @@
        Keeping all buttons visible at full-Mac sizes was the explicit
        ask — the dividers + 2-row layout makes the cluster cohabit
        with the status line without overlapping. -->
-  <header class="border-b border-ink-700 bg-ink-900"
-          class:hidden={fullscreen}>
+  <header class="border-b border-ink-700 bg-ink-900 aeon-wardable"
+          class:hidden={fullscreen}
+          class:aeon-warded={captured}>
     <!-- Row 1: brand + status + persona -->
     <div class="flex items-center justify-between gap-2 px-3 sm:px-5 pt-3 pb-2">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-wrap">
-        <span class="text-cursed-400 font-mono text-xs sm:text-sm tracking-widest truncate">
+        <span class="flex items-center gap-2 text-cursed-400 font-mono text-xs sm:text-sm tracking-widest truncate">
+          <OrbMark class="w-5 h-5" mode={orbMode} />
           <span class="hidden sm:inline">AEON MAGICK AI COMPUTER CONTROL</span>
           <span class="sm:hidden">AEON MAGICK</span>
         </span>
@@ -892,7 +941,7 @@
                 on:click={() => (menuOpen = !menuOpen)}
                 aria-label="Open menu"
                 aria-expanded={menuOpen}>
-          {menuOpen ? '✕' : '☰'}
+          <Icon name={menuOpen ? 'close' : 'menu'} class="w-4 h-4" />
         </button>
       </div>
     </div>
@@ -908,19 +957,19 @@
       <!-- Group A -->
       <div class="flex items-center gap-2 pr-3">
         {#if captured}
-          <button class="btn-primary text-xs animate-pulse" on:click={exitCapture}
+          <button class="btn-primary text-xs motion-safe:animate-ember inline-flex items-center gap-1.5" on:click={exitCapture}
                   title="Release input capture (Ctrl+Alt+Esc)">
-            ⏏ release&nbsp;capture
+            <Icon name="release" class="w-3.5 h-3.5" />release&nbsp;capture
           </button>
         {:else}
-          <button class="btn text-xs" on:click={enterCapture}
+          <button class="btn text-xs inline-flex items-center gap-1.5" on:click={enterCapture}
                   title="Lock pointer + capture all keys for the remote system">
-            ⌨ capture&nbsp;input
+            <Icon name="capture" class="w-3.5 h-3.5" />capture&nbsp;input
           </button>
         {/if}
-        <button class="btn text-xs" on:click={enterFullscreen}
+        <button class="btn text-xs inline-flex items-center gap-1.5" on:click={enterFullscreen}
                 title="Fullscreen control mode — best on phones / tablets">
-          ⛶ fullscreen
+          <Icon name="fullscreen" class="w-3.5 h-3.5" />fullscreen
         </button>
         <SpecialKeys />
       </div>
@@ -942,7 +991,8 @@
             <Icon name="cpu" class="w-3.5 h-3.5 text-zinc-400" />Settings <span class="text-zinc-500">▾</span>
           </button>
           {#if settingsOpen}
-            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5">
+            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5"
+                 in:fly={menuIn}>
               {#each SETTINGS_ITEMS as it}
                 <a href={it.href} class="flex items-center gap-2 px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-ink-800" title={it.title}>
                   <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/70" />{it.label}
@@ -957,7 +1007,8 @@
             <Icon name="list" class="w-3.5 h-3.5 text-zinc-400" />Monitor <span class="text-zinc-500">▾</span>
           </button>
           {#if monitorOpen}
-            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5">
+            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5"
+                 in:fly={menuIn}>
               {#each MONITOR_ITEMS as it}
                 <a href={it.href} class="flex items-center gap-2 px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-ink-800" title={it.title}>
                   <Icon name={it.icon} class="w-3.5 h-3.5 text-cursed-300/70" />{it.label}
@@ -978,15 +1029,16 @@
         <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
         <!-- Screen recording — records the live H.264 to MP4 (agents also drive this via MCP/REST). -->
         <div class="relative flex items-center gap-1">
-          <button class="btn text-xs whitespace-nowrap {rec.active ? 'border-red-500 text-red-300 animate-pulse' : ''}"
+          <button class="btn text-xs whitespace-nowrap inline-flex items-center gap-1.5 {rec.active ? 'border-red-500 text-red-300 motion-safe:animate-ember' : ''}"
                   on:click={toggleRecord} disabled={recBusy}
                   title="Record the target screen to MP4 (30s default)">
-            {#if rec.active}■&nbsp;stop&nbsp;rec&nbsp;·&nbsp;{rec.active.elapsed_s ?? 0}s{:else}●&nbsp;record{/if}
+            {#if rec.active}<Icon name="stop" class="w-3 h-3" />stop&nbsp;rec&nbsp;·&nbsp;{rec.active.elapsed_s ?? 0}s{:else}<Icon name="record" class="w-3 h-3 text-red-400" />record{/if}
           </button>
           {#if rec.recordings.length}
             <button class="btn text-xs" on:click={() => (recListOpen = !recListOpen)} title="Recordings">▾&nbsp;{rec.recordings.length}</button>
             {#if recListOpen}
-              <div class="absolute right-0 top-full mt-1 w-72 max-h-72 overflow-y-auto bg-ink-900 border border-ink-700 rounded-lg p-2 z-50 space-y-1 text-[10px] font-mono shadow-xl">
+              <div class="absolute right-0 top-full mt-1 w-72 max-h-72 overflow-y-auto bg-ink-900 border border-ink-700 rounded-lg p-2 z-50 space-y-1 text-[10px] font-mono shadow-xl"
+                   in:fly={menuIn}>
                 {#if rec.note}
                   <p class="text-red-400 leading-snug pb-1 mb-1 border-b border-ink-800">{rec.note}</p>
                 {/if}
@@ -1022,19 +1074,19 @@
          capture/fullscreen labels collapse to icons. -->
     <div class="lg:hidden flex items-center gap-2 px-3 pb-3">
       {#if captured}
-        <button class="btn-primary text-xs animate-pulse" on:click={exitCapture}
+        <button class="btn-primary text-xs motion-safe:animate-ember inline-flex items-center gap-1.5" on:click={exitCapture}
                 title="Release input capture (Ctrl+Alt+Esc)">
-          ⏏ <span class="hidden sm:inline">release&nbsp;capture</span>
+          <Icon name="release" class="w-3.5 h-3.5" /><span class="hidden sm:inline">release&nbsp;capture</span>
         </button>
       {:else}
-        <button class="btn text-xs" on:click={enterCapture}
+        <button class="btn text-xs inline-flex items-center gap-1.5" on:click={enterCapture}
                 title="Lock pointer + capture all keys for the remote system">
-          ⌨ <span class="hidden sm:inline">capture&nbsp;input</span>
+          <Icon name="capture" class="w-3.5 h-3.5" /><span class="hidden sm:inline">capture&nbsp;input</span>
         </button>
       {/if}
-      <button class="btn text-xs" on:click={enterFullscreen}
+      <button class="btn text-xs inline-flex items-center gap-1.5" on:click={enterFullscreen}
               title="Fullscreen control mode — best on phones / tablets">
-        ⛶ <span class="hidden sm:inline">fullscreen</span>
+        <Icon name="fullscreen" class="w-3.5 h-3.5" /><span class="hidden sm:inline">fullscreen</span>
       </button>
       <SpecialKeys />
     </div>
@@ -1053,6 +1105,7 @@
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="lg:hidden border-b border-ink-700 bg-ink-900/95 backdrop-blur-sm
                 px-3 py-3 space-y-3 z-30"
+         in:fly={{ y: -6, duration: reduceMotion ? 0 : 120 }}
          on:click={closeMenu}
          role="menu"
          tabindex="-1">
@@ -1127,9 +1180,9 @@
           <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
         </div>
         <!-- Screen recording — records the live H.264 to MP4 (records until stopped; 3h cap). -->
-        <button class="btn text-xs w-full {rec.active ? 'border-red-500 text-red-300' : ''}"
+        <button class="btn text-xs w-full inline-flex items-center justify-center gap-1.5 {rec.active ? 'border-red-500 text-red-300' : ''}"
                 on:click={toggleRecord} disabled={recBusy}>
-          {#if rec.active}■ stop recording · {rec.active.elapsed_s ?? 0}s{:else}● record screen{/if}
+          {#if rec.active}<Icon name="stop" class="w-3 h-3" />stop recording · {rec.active.elapsed_s ?? 0}s{:else}<Icon name="record" class="w-3 h-3 text-red-400" />record screen{/if}
         </button>
         {#if rec.note}
           <p class="text-red-400 text-[10px] leading-snug">{rec.note}</p>
@@ -1194,6 +1247,34 @@
       {/if}
     </div>
 
+    <!-- Ambient frame glow — a pointer-events-none SIBLING of the canvas
+         (never a wrapper), so the canvas event handlers see identical
+         event flow. The edge color answers "who owns my keyboard?":
+         violet at rest, green live, smoldering red while captured. -->
+    <div class="aeon-frame pointer-events-none absolute inset-0 z-[5] transition-opacity duration-500"
+         class:aeon-frame-live={!!state?.online && !captured}
+         class:aeon-frame-captured={captured}
+         class:aeon-frame-off={!!state && !state.online}
+         aria-hidden="true"></div>
+
+    <!-- Signal-lost rite — replaces the silently-frozen <img> with a
+         designed failure state + the fix action right where you're
+         looking. Keyed on state.online (real outage), NEVER h264FellBack
+         (that's a healthy MJPEG fallback). -->
+    {#if mounted && state && !state.online}
+      <div class="absolute inset-0 z-[6] pointer-events-none flex items-center justify-center bg-ink-950/75">
+        <div class="absolute inset-0 aeon-static" aria-hidden="true"></div>
+        <div class="pointer-events-auto relative text-center space-y-3 px-6">
+          <OrbMark mode="offline" class="w-12 h-12 mx-auto motion-safe:animate-orb-flicker" />
+          <p class="font-mono text-xs tracking-[0.35em] text-zinc-300">SIGNAL LOST</p>
+          <p class="font-mono text-[11px] text-zinc-500">the orb sees nothing — the capture device is silent</p>
+          <button class="btn text-xs inline-flex items-center gap-1.5" on:click={onRelaunch}>
+            <Icon name="refresh" class="w-3.5 h-3.5" />relaunch streamer
+          </button>
+        </div>
+      </div>
+    {/if}
+
     <!-- Hidden text input parked at top-left as a 1px transparent target.
          Focused by the floating "show keyboard" button so iOS / Android
          pop their soft keyboards. Each typed char fires an `input` event
@@ -1224,6 +1305,8 @@
     {#if mounted && captured && !fullscreen}
       <div class="pointer-events-none absolute top-0 left-0 right-0 z-10
                   flex justify-center pt-2">
+        <div class="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-red-500/60 to-transparent"
+             aria-hidden="true"></div>
         <button
           class="pointer-events-auto px-4 py-1.5 rounded-full
                  bg-red-900/70 border border-red-500/60 backdrop-blur-sm
@@ -1257,7 +1340,7 @@
           on:click={exitFullscreen}
           aria-label="Exit fullscreen + release capture"
         >
-          ⏏ escape
+          <Icon name="release" class="w-4 h-4 inline -mt-0.5" /> escape
         </button>
       </div>
 
@@ -1285,7 +1368,7 @@
                          shadow-lg active:scale-95 transition-transform"
                   on:click={hideKeyboard}
                   aria-label="Hide on-screen keyboard">
-            ⌨ ⏷ hide
+            <Icon name="keyboard" class="w-4 h-4 inline -mt-0.5" /> hide
           </button>
         {:else}
           <button class="px-4 py-2.5 rounded-full
@@ -1294,7 +1377,7 @@
                          shadow-lg active:scale-95 transition-transform"
                   on:click={showKeyboard}
                   aria-label="Show on-screen keyboard">
-            ⌨ keyboard
+            <Icon name="keyboard" class="w-4 h-4 inline -mt-0.5" /> keyboard
           </button>
         {/if}
         <!-- Special-keys row. Saves a keyboard-toggle round-trip for
@@ -1302,17 +1385,25 @@
         {#if kbdVisible}
           <div class="flex gap-1.5">
             <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
-                           backdrop-blur-md text-zinc-300 active:scale-95"
-                    on:click={() => api.sendKey(['ESC'])} aria-label="Send Esc">⎋</button>
+                           backdrop-blur-md text-zinc-300 active:scale-95
+                           flex items-center justify-center"
+                    on:click={() => api.sendKey(['ESC'])} aria-label="Send Esc">
+              <Icon name="esc" class="w-5 h-5" /></button>
             <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
-                           backdrop-blur-md text-zinc-300 active:scale-95"
-                    on:click={() => api.sendKey(['TAB'])} aria-label="Send Tab">⇥</button>
+                           backdrop-blur-md text-zinc-300 active:scale-95
+                           flex items-center justify-center"
+                    on:click={() => api.sendKey(['TAB'])} aria-label="Send Tab">
+              <Icon name="tab" class="w-5 h-5" /></button>
             <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
-                           backdrop-blur-md text-zinc-300 active:scale-95"
-                    on:click={() => api.sendKey(['BACKSPACE'])} aria-label="Send Backspace">⌫</button>
+                           backdrop-blur-md text-zinc-300 active:scale-95
+                           flex items-center justify-center"
+                    on:click={() => api.sendKey(['BACKSPACE'])} aria-label="Send Backspace">
+              <Icon name="backspace" class="w-5 h-5" /></button>
             <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
-                           backdrop-blur-md text-zinc-300 active:scale-95"
-                    on:click={() => api.sendKey(['ENTER'])} aria-label="Send Enter">⏎</button>
+                           backdrop-blur-md text-zinc-300 active:scale-95
+                           flex items-center justify-center"
+                    on:click={() => api.sendKey(['ENTER'])} aria-label="Send Enter">
+              <Icon name="enter" class="w-5 h-5" /></button>
           </div>
         {/if}
       </div>
@@ -1327,16 +1418,53 @@
                        shadow-lg active:scale-95 transition-transform"
                 on:click={onReleaseAll}
                 aria-label="Release all held keys + buttons">
-          ⌨ release&nbsp;keys
+          <Icon name="keyboard" class="w-4 h-4 inline -mt-0.5" /> release&nbsp;keys
         </button>
       </div>
 
-      <!-- (gesture hint overlay removed — touch interaction is intuitive) -->
+      <!-- First-run gesture coach — shown once, then never again.
+           pointer-events-auto ON PURPOSE: the dismissing tap must not
+           forward a stray click to the target. -->
+      {#if showGestureCoach}
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="absolute inset-0 z-30 flex items-center justify-center bg-ink-950/80 backdrop-blur-sm"
+             on:click={dismissCoach}
+             on:touchend|preventDefault={dismissCoach}
+             role="presentation">
+          <div class="text-center space-y-5 px-8 max-w-sm">
+            <OrbMark class="w-10 h-10 mx-auto" />
+            <p class="font-mono text-xs tracking-[0.3em] text-cursed-300 uppercase">the orb obeys your touch</p>
+            <dl class="space-y-2.5 text-left">
+              {#each GESTURES as [gesture, effect]}
+                <div class="flex items-baseline gap-3">
+                  <dt class="font-mono text-sm text-zinc-200 w-36 text-right shrink-0">{gesture}</dt>
+                  <dd class="text-sm text-zinc-500">→ {effect}</dd>
+                </div>
+              {/each}
+            </dl>
+            <p class="font-mono text-[10px] text-zinc-600 tracking-widest">tap anywhere to begin</p>
+          </div>
+        </div>
+      {/if}
     {/if}
   </main>
 
-  <!-- bottom: console/log preview area, hidden by default; future -->
-  <footer class="px-5 py-2 border-t border-ink-700 bg-ink-900 text-xs font-mono text-zinc-500">
-    relaunches: {state?.relaunch_count ?? 0}
+  <!-- Whisper line — ambient telemetry from data the page already
+       polls (state / hid / vpn); zero new requests. -->
+  <footer class="px-5 py-2 border-t border-ink-700 bg-ink-900 text-[11px] font-mono text-zinc-500
+                 flex items-center gap-2 overflow-hidden whitespace-nowrap aeon-wardable"
+          class:hidden={fullscreen}
+          class:aeon-warded={captured}>
+    <OrbMark class="w-3 h-3" mode={orbMode} />
+    <span class="truncate">
+      {#if state?.mode}{state.mode.resolution} <span class="text-cursed-300/50">·</span> {state.mode.format} <span class="text-cursed-300/50">·</span> {state.captured_fps} fps{/if}
+      {#if hid}<span class="text-cursed-300/50"> ·</span> persona: {hid.persona}{/if}
+      {#if vpnOn}<span class="text-cursed-300/50"> ·</span> {vpnProvider.toUpperCase()}{/if}
+      {#if dnscryptOn}<span class="text-cursed-300/50"> ·</span> DNSCRYPT{/if}
+      <span class="text-cursed-300/50"> ·</span> relaunches: {state?.relaunch_count ?? 0}
+    </span>
+    <span class="hidden sm:inline ml-auto shrink-0 text-zinc-600" title="Command palette — jump to any page">⌘K to navigate</span>
+    <span class="motion-safe:animate-cursor-blink text-cursed-400/70 shrink-0" aria-hidden="true">▊</span>
   </footer>
 </div>

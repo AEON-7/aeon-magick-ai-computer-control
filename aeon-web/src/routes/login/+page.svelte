@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import * as api from '$lib/api';
+  import OrbMark from '$lib/components/OrbMark.svelte';
 
   let username = 'admin';
   let password = '';
@@ -26,8 +27,11 @@
     on:submit|preventDefault={submit}
     class="w-full max-w-sm bg-ink-900 border border-ink-700 rounded-2xl p-8 space-y-5"
   >
-    <h1 class="text-cursed-400 font-mono text-lg tracking-widest">AEON MAGICK AI COMPUTER CONTROL</h1>
-    <p class="text-zinc-400 text-sm">Sign in to access the session.</p>
+    <div class="flex items-center gap-3">
+      <OrbMark class="w-8 h-8" />
+      <h1 class="text-cursed-400 font-mono text-lg tracking-widest">AEON MAGICK AI COMPUTER CONTROL</h1>
+    </div>
+    <p class="text-zinc-400 text-sm">Gaze into the orb — sign in to access the session.</p>
 
     <label class="block">
       <span class="text-xs uppercase tracking-wider text-zinc-500">user</span>

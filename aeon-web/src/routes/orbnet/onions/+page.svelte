@@ -1,5 +1,7 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount, onDestroy } from 'svelte';
+  import { confirmRite } from '$lib/confirm';
 
   type Service = { id: string; nickname: string; local_port: number; virt_port: number; onion: string };
   type Status = { ok: boolean; enabled: boolean; tor: string; count: number; services: Service[] };
@@ -55,7 +57,12 @@
   }
 
   async function remove(id: string) {
-    if (!confirm('Retire this hidden service? Its .onion address is gone for good.')) return;
+    if (!(await confirmRite({
+      title: 'Retire hidden service',
+      body: 'Retire this hidden service? Its .onion address is gone for good.',
+      danger: true,
+      confirmLabel: 'retire',
+    }))) return;
     busy = 'Removing…';
     try {
       await api('/remove', {
@@ -83,11 +90,7 @@
 </script>
 
 <div class="min-h-screen bg-ink-950 text-ink-100">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <a href="/orbnet" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← ORBNET</a>
-    <h1 class="font-mono text-lg text-cursed-300">🧅 Hidden Services</h1>
-    <div class="w-24"></div>
-  </header>
+  <PageHeader title="Tor hidden services" backHref="/orbnet" backLabel="ORBNET" />
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-6">
     <p class="text-ink-300 text-sm leading-relaxed">

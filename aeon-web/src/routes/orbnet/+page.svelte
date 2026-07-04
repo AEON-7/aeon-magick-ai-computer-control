@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import PageHeader from '$lib/components/PageHeader.svelte';
 
   let onions: { enabled: boolean; count: number } | null = null;
   let ipfs: { enabled: boolean; daemon: string; peers: number } | null = null;
@@ -52,11 +53,7 @@
 </script>
 
 <div class="min-h-screen bg-ink-950 text-ink-100">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
-    <h1 class="font-mono text-lg text-cursed-300">🔮 OrbNet</h1>
-    <div class="w-32"></div>
-  </header>
+  <PageHeader title="OrbNet" subtitle="decentralized services hub" />
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-5">
     <p class="text-ink-300 text-sm">
