@@ -20,7 +20,7 @@ One small box you can hold in a pocket, and you can:
 - 🧠 **Build up your Pantheon** of AI agent personas — each with a soul, a voice, a corpus, and a face — and summon them to act.
 - 💾 …**deploy models**, **orchestrate containers**, **install an OS lights-out**, and **back the whole config up, encrypted**. _(keep scrolling 👇)_
 
-> **All it takes:** a **Raspberry Pi 4**, any HDMI capture stick (tested with an Elgato Cam Link 4K), and a USB-C data cable. [Full hardware list ↓](#hardware-youll-need)
+> **All it takes:** a **Raspberry Pi 4 or Pi 5**, any HDMI capture device, and a data-capable USB-C cable. Add a Hailo AI HAT+, a UPS, and an NVMe/SSD to unlock on-device vision and a shareable model library. [Full hardware list ↓](#hardware-youll-need)
 
 This isn't just Agentic AI. It's **_Robo_-Agentic AI** — the disembodied, given a body.
 
@@ -337,6 +337,67 @@ and `xterm.js`.
 
 ---
 
+## The Aether — a decentralized, unstoppable AI model network
+
+Open models are only as free as the servers that host them. A repo gets pulled, a licence changes, a mirror rate-limits you, a host goes dark — and the weights you depended on are gone. **The Aether fixes that.** It turns every Orb into a node on a **censorship-resistant network for AI models** where a model, once shared, cannot be un-shared: every Orb that holds it re-serves it, and the content-address guarantees you always get the real bytes. **No accounts, no fleet, no central server anyone can seize or switch off** — the header says it plainly: *"Built on IPFS — the InterPlanetary File System. We just think bigger."*
+
+**This is how open-source models get free.** Pull one down from HuggingFace, Ollama, or Civitai and it's **mirrored** onto the network — the moment it's on the Aether, a deleted repo, a rug-pull, a takedown, a rate limit, or an offline host can't make it disappear, because every holder re-serves it and the content-address proves you're getting the genuine article. A model stays reachable as long as at least one Orb still hosts it — so the more Orbs that pin it, the more permanent it becomes. Censorship-resistant distribution, provenance you can verify, and nothing to sign up for.
+
+![Intergalactic Model Share — a decentralized library of AI models contributed by Orbs across the network, with the Model Karma give/take gauge, live swarm-peer count, disk-allocation slider, and HuggingFace / Ollama / Civitai importers](docs/images/aether.png)
+
+Every Orb runs its own IPFS node (kubo, baked into the image), **auto-enrolls at boot** (IPFS is on by default), and gossips the catalog it hosts on a well-known pubsub topic (`aeon-model-share/v1`, floodsub). The library you browse is contributed by Orbs **everywhere**, and it converges with **no shared token and nothing to log in to** — peer catalogs simply expire on a 15-minute TTL, so what you see is who's live right now. Publish a model and it's on the Aether; there's no gatekeeper who can unpublish it.
+
+**Your Orb becomes a model vault.** Point it at a roomy microSD, an **NVMe SSD**, or an external USB drive (plug-and-play — the console formats and adopts it in a click), set a real allocation **slider** for how much disk you share, and it holds a huge library and serves it to the world. A model isn't a bare file: it's an **IPFS directory** carrying the weights + a `model-card.json` + README + card image + gallery images, so one content-address (**CID**) resolves the whole package, byte-for-byte verified.
+
+**Why this design is unkillable:**
+
+- **Swarm downloads that get *faster* the more popular a model is.** Content is addressed by hash, so a model is fetched **in parallel from every Orb that holds it** (IPFS Bitswap) — the same load-balancing that makes BitTorrent fast. Ten holders means ten sources: higher throughput for you, no single node bearing the load. Popularity *helps* instead of hurting.
+- **Tamper-proof by construction.** The CID *is* the content hash — you get exactly the bytes that were published, or nothing. No silent swaps, no poisoned mirror, no "trust me": the address itself is the integrity check.
+- **No center to attack.** Discovery is peer-to-peer gossip; hosting is whoever pins it. Take any node offline and the model stays reachable through every other holder.
+
+### Bring any open model in — and it's verified on the way
+
+The Aether isn't a walled garden — **mirror any open model onto it** with a built-in importer, then it lives on the network for as long as an Orb hosts it. Each source **cryptographically verifies the download** before it becomes a shareable model:
+
+- **HuggingFace** — "Pulls the weights, the README + author image, and verifies each LFS weight file's SHA-256 against the hash HuggingFace publishes (the LFS oid)."
+- **Ollama** — "Pulls the GGUF weights straight from the Ollama registry and verifies them against the layer digest — no Ollama install needed."
+- **Civitai** — "Generative models for ComfyUI / Stable Diffusion. Prefers the SafeTensor file (never a pickle) and verifies the SHA-256." It also pulls the gallery images into the model card.
+
+Each source takes an **optional auth token** to pull gated repos — stored `0600`, never written into a model card, and never gossiped. Mature ("red") content is **off by default**, hidden behind an opt-in **18+ age-gate attestation**.
+
+### Downloads land in quarantine — never straight in your library
+
+Because anyone can publish, a peer download is treated as untrusted until proven clean. `fetch_model` runs every incoming model through a **quarantine sandbox** whose phases surface live in the UI, in this exact order:
+
+1. **`checking disk…`** — refuses unless there's room for roughly **2× the model size** plus headroom (materializing quarantines a full copy alongside the blockstore).
+2. **`downloading to quarantine…`** — fetched over IPFS into an isolated staging dir, with a **real byte-level progress bar**: a sibling thread polls the dir as it fills, so you see honest percent *and* done/total bytes (e.g. `159 MB / 469 MB`), not a fake spinner.
+3. **`validating weights (file types)…`** — every file is sniffed by its **leading magic bytes**, not its name.
+4. **`scanning for viruses…`** — a **ClamAV** pass that degrades gracefully if the signature DB isn't fetched yet (or ClamAV isn't installed), so it never falsely blocks a clean model.
+5. **`pinning…`** — **only a clean pass** is pinned, added to the catalog, and announced.
+
+**What the validator throws out:** stowaway **executables and scripts** (ELF / PE / Mach-O / `#!`), **pickle or zip "weights"** — including torch `.pt`, which is a zip — because they can run code the instant they're loaded (the reject literally tells you to *"export it to safetensors or gguf first"*), and **fake extensions**, where a file claims `.gguf` / `.safetensors` but its magic bytes say otherwise. Only real safetensors / GGUF get through. **Rejected content never reaches the live library.**
+
+![A download in action — the quarantine progress bar ("downloading to quarantine… 34%", 159 MB / 469 MB) shown both in the in-flight list and inside the model's own card, with the model grid and importers around it](docs/images/aether-download.png)
+
+### Trust without accounts
+
+Reputation on the Aether is earned by mechanism, not by a login:
+
+- **Stars** — star a model as a community trust signal; the network tallies a `star_count` per CID across the distinct Orbs that starred it, so it can't be self-inflated.
+- **Adoption** — `host_count` is how many Orbs host a model, shown as **⬡ N orbs**; wider adoption means faster, more resilient downloads. Library ranking is `star_count × 3 + host_count`, so the models the network actually keeps float to the top.
+- **Model Karma** — a personal give/take gauge read straight from the IPFS bitswap ledger: **bytes served** to the network vs **bytes downloaded**, shown as a ratio (e.g. `0.05×`). It answers "am I giving back as much as I take?"
+- **Publisher identity** *(emerging)* — an optional, self-sovereign **ed25519 keypair** account: the public key is a pseudonymous ID with no PII, recoverable from a **BIP39 24-word seed** and portable across Orbs. The signing primitives (create/unlock/sign/verify against a publication digest) are in place, but they aren't yet wired into the publish path — it's the foundation for signed provenance, an opt-in trust layer, **not yet a shipped end-to-end signed-badge system**.
+
+### Push a model straight to your servers to deploy
+
+Discovery is only half of it. From the same console — or by handing an AI agent the keys — pull any model down to the Orb, then **push it to any system in your [Agent Dashboard](#agent-dashboard--token-telemetry)** (a DGX Spark, an agent gateway, anything you've already SSH-linked). It lands in `aeon-models/<slug>` by default, or a path you browse to on the target's filesystem. The transfer rsyncs over the **existing outbound SSH key**, so the target never has to reach back to the Orb — it works anywhere the Orb can SSH. Safety is built in: `sanitize_dest` blocks path-traversal and refuses SSH / system / boot / binary paths (`.ssh`, `/etc`, `/boot`, `/bin`, `/usr/bin`, …), and rsync forces model files **non-executable** (`--chmod=D755,F644`) — a pushed model is data, never a dropped file that becomes code.
+
+![Push to server — the entry state on a fresh Orb with no linked systems yet ("Pushing a model needs a server to push it to… Connect your first system"), alongside the rich model cards: provenance line, base model, "this orb" badge, ★ stars, ⬡ orbs adoption, and the Push to server / edit / save / unshare actions](docs/images/model-push.png)
+
+The whole flow — **discover → pull → push → deploy** — is one console, and it's fully scriptable over the **REST API and MCP** (`connected_systems`, `model_list`, `model_pull`, `model_push`, `model_push_status`), so an agent can run it end-to-end.
+
+---
+
 ## One-click model deploy to your DGX Spark
 
 Pick a model from **AEON-7's live model + container catalog** (tokenless,
@@ -527,21 +588,58 @@ BUILDING.md       Compile + build the image on macOS or Linux
 
 ## Hardware you'll need
 
-A small, cheap bill of materials — most of it you may already own:
+The Orb ships as **two hardware tracks** — a **Pi 4** image (Raspberry Pi OS Bookworm)
+and a **Pi 5** image (Trixie, with built-in Hailo AI-HAT support). Both run the same
+console and agent surface; the Pi 5 adds on-device vision/voice and NVMe-class storage.
+Pick a track, grab the bare minimum, then add from the recommended list to unlock more.
+
+### Bare minimum
+
+**Raspberry Pi 4 track** — the tested, lowest-cost path:
 
 | Part | What / why | Notes |
 |---|---|---|
-| **Raspberry Pi 4** (2 GB+) | The appliance. Its USB-C port runs **USB-OTG gadget mode** to emulate a keyboard + mouse + trackpad to the target. | Pi 4 is the tested platform. **Use a Pi 4** — the Pi 5's USB-C is power-only and can't act as the HID gadget. |
-| **microSD card** (16 GB+) | Boots the Aeon Magick Orb image. | A fast A1/A2 card helps stream latency. |
-| **HDMI video-capture device** | The "eyes" — pipes the target's HDMI into the Pi as a USB camera. | **Elgato Cam Link 4K** (rock-solid 1080p60 / 4K30) **or any ~$10 MS2109-based HDMI→USB stick**. Both auto-detected (UVC) — no drivers. |
-| **USB-C data cable** | Pi-C → target-C — carries the emulated keyboard/mouse and **powers the Pi from the target.** | Must be **data-capable**; a charge-only cable powers the Pi but enumerates no HID. |
+| **Raspberry Pi 4** (2 GB+) | The appliance. Its USB-C port runs **USB-OTG gadget mode** to emulate a keyboard + mouse + trackpad to the target. | The classic build. |
+| **microSD card** (16 GB+) | Boots the Aeon Magick Orb image. | A fast A1/A2 card helps stream latency; go bigger to host a model library (see the Aether below). |
+| **HDMI video-capture device** | The "eyes" — pipes the target's HDMI into the Pi as a USB camera. | **Elgato Cam Link 4K** or any **~$10 MS2109-based HDMI→USB stick**. Auto-detected (UVC), no drivers. |
+| **USB-C data cable** | Pi-C → target-C — carries the emulated keyboard/mouse and can **power the Pi from the target**. | Must be **data-capable**; a charge-only cable powers the Pi but enumerates no HID. |
 | **HDMI cable** | Target's HDMI-out → the capture device. | |
-| *(optional)* **Tailscale** | Reach the box — and everything it can see — from anywhere in the world. | Enabled during enrollment. |
+
+**Raspberry Pi 5 track** — same idea, a couple of hardware differences:
+
+| Part | What / why | Notes |
+|---|---|---|
+| **Raspberry Pi 5** (4 GB+) | The appliance. USB-C gadget mode still emulates the keyboard/mouse — see the **cabling note** below. | 4 GB+ recommended for on-device vision/voice. |
+| **microSD card** (16 GB+) *or* **NVMe SSD** | Boots the image; NVMe (via a PCIe/M.2 HAT) is much faster and ideal for a big model library. | The Pi 5's PCIe lane makes NVMe the standout storage upgrade. |
+| **HDMI-to-CSI capture bridge** | The "eyes" on Pi 5 — a **Geekworm X1301 / TC358743** bridge feeds HDMI in over the camera (CSI) ribbon. | A USB HDMI stick also works; the CSI bridge frees the USB bus and lowers latency. |
+| **USB-C data cable** *(see cabling note)* | Carries the emulated keyboard/mouse. | |
+| **HDMI cable** | Target's HDMI-out → the capture bridge. | |
+
+> **Powering the target link (USB-C cabling), corrected:** the Pi 5's USB-C is **not
+> power-only** — it does full USB-OTG gadget mode and emulates the keyboard/mouse just
+> like the Pi 4. The one caveat: a current kernel regression breaks **C-to-C** gadget
+> enumeration on the Pi 5 ([raspberrypi/linux #6289](https://github.com/raspberrypi/linux/issues/6289)),
+> so wire it **target USB-A → Pi USB-C** instead of C-to-C. On the Pi 4, plain **C-to-C
+> works**. Either way the target's USB can also power the Pi.
+
+### Recommended — unlock the full potential
+
+Add these to go from "remote keyboard + screen" to a self-hosted AI appliance with eyes,
+a voice, and its own shareable model vault. Each line says exactly what it buys you:
+
+| Add-on | What it unlocks | Track |
+|---|---|---|
+| **Hailo AI HAT+** (Hailo-8 / 8L, or AI HAT+ 2 / Hailo-10H) | **On-device vision, no cloud** — `screen_find` returns click-ready coordinates for any on-screen label; `describe_screen` runs a **Qwen2-VL** VLM that answers *"what is this screen?"*; plus OCR. The runtime auto-installs the right package (`hailo-all` vs `hailo-h10-all`). | **Pi 5** |
+| **UPS HAT** (e.g. Waveshare UPS HAT (E)) | **Clean, sufficient power + battery backup.** Strongly recommended on a Pi 5 that's carrying **several HATs and peripherals** (AI HAT + capture bridge + audio + NVMe) — it guarantees the Pi gets enough current to run **at full capacity** instead of browning out/throttling, and it rides through the target's power blips (and unplug events) so the Orb stays up. | **Pi 5** (helpful on Pi 4) |
+| **NVMe SSD** (Pi 5, via PCIe/M.2 HAT) **or large microSD / external USB SSD** | **A model repository.** Big, fast storage lets the Orb hold a **huge library of AI models** and share them on the Aether (below). External USB SSDs are plug-and-play — the console formats/adopts them in a click. | Both |
+| **Camera** (IMX477 HQ cam on Pi 5 CSI, or any UVC webcam) | **Real-world eyes** — feed a physical camera into the same vision pipeline (not just the target's screen). | Both (CSI = Pi 5) |
+| **BrainCraft HAT / WM8960 audio** | **A real voice + ears** — personas actually speak (designed or cloned voices) and can listen through the mics. | Both |
+| **Tailscale** *(software, free)* | Reach the box — and everything it can SSH to — from anywhere, at a stable address. | Both |
 
 Nothing is installed on the **target** — it only ever sees a USB keyboard/mouse and an
 HDMI sink. Works on macOS, Windows, Linux, and even pre-OS (BIOS, FileVault, Windows
-OOBE). The Pi is powered over the USB-C link by the target (or via its GPIO 5V pins);
-the capture device draws power from the Pi's USB-A.
+OOBE). The Pi can be powered over the USB-C link by the target, via its GPIO 5V pins, or
+(recommended for a loaded Pi 5) a UPS HAT; the capture device draws power from the Pi.
 
 ---
 

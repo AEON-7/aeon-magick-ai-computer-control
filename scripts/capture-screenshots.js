@@ -43,6 +43,12 @@ const MATRIX_DOMAIN = 'matrix.unhash.me';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Optional allow-list: AEON_SHOTS=aether,model-push captures only those images
+// (others are navigated but not written), so you can refresh one section without
+// re-shooting everything.
+const ONLY = (process.env.AEON_SHOTS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const want = (name) => ONLY.length === 0 || ONLY.includes(name);
+
 // Serialized into the page; must be self-contained (no closure over Node vars
 // other than the three injected as args).
 function REDACT({ HOSTS, MATRIX_DOMAIN }) {
@@ -104,6 +110,7 @@ async function redact(page) {
 }
 
 async function shoot(page, name, { full = false, clip } = {}) {
+  if (!want(name)) { console.log(`  · skip ${name} (filtered)`); return; }
   await redact(page);
   const opts = { path: path.join(OUT, `${name}.png`) };
   if (clip) opts.clip = clip;
@@ -221,6 +228,90 @@ async function clickText(page, text, { tag = 'button', timeout = 4000 } = {}) {
   if (!pane) pane = await clickText(page, 'Open', { timeout: 2500 });
   await sleep(3000);
   await shoot(page, 'terminal');
+
+  // 2f) AETHER MODEL SHARE — the decentralized model library. These are shot at
+  //     the native viewport (1440×900, a normal browser window) rather than a
+  //     tall full-page stitch, so the docs show what a user actually sees.
+  if (want('aether') || want('model-push') || want('aether-download')) {
+    console.log('› /model-share (Aether)');
+    await go(page, '/model-share');
+    await sleep(2800);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await shoot(page, 'aether');
+
+    // 2g) PUSH-TO-SERVER dialog — open it on the first model card that carries a
+    //     push button. With no connected systems it shows the "connect a system"
+    //     entry state; with ≥1 it shows the target picker + folder browser.
+    console.log('› Aether push-to-server dialog');
+    const pushOpened = await page
+      .locator('button:has-text("Push to server")')
+      .first()
+      .click({ timeout: 4000 })
+      .then(() => true)
+      .catch(() => false);
+    await sleep(1200);
+    if (pushOpened) {
+      await shoot(page, 'model-push');
+      await page.keyboard.press('Escape').catch(() => {});
+    } else {
+      console.log('  · no push button (no models) — skipped model-push');
+    }
+    await sleep(400);
+
+    // 2h) DOWNLOAD IN ACTION — the sandboxed pull with a live byte-level progress
+    //     bar. Peer downloads over IPFS can finish in seconds once the blocks are
+    //     cached nearby, so catching a mid-download frame by luck is unreliable.
+    //     Instead we stage a genuine in-progress state deterministically: intercept
+    //     the registry poll and mark one peer-only model as fetching at 34% (the
+    //     exact task shape the backend emits — verified against a live 469 MB
+    //     pull). The bar, phase label and byte readout are the real component
+    //     rendering real data; only the trigger is staged. No device state changes.
+    if (want('aether-download')) {
+      console.log('› Aether download-in-progress (staged from the live task shape)');
+      await page.route('**/api/ipfs/models/registry', async (route) => {
+        let data;
+        const resp = await route.fetch();
+        try { data = await resp.json(); } catch { return route.fulfill({ response: resp }); }
+        const m =
+          (data.models || []).find((x) => /Qwen2\.5-0\.5B/.test(x.entry?.name || '')) ||
+          (data.models || []).find((x) => !x.local && (x.entry?.size_bytes || 0) > 50 * 1024 * 1024);
+        if (m) {
+          m.local = false; // render its card as a fetchable (non-hosted) model
+          data.tasks = { ...(data.tasks || {}) };
+          data.tasks[m.entry.cid] = {
+            phase: 'downloading to quarantine…',
+            pct: 34,
+            done_bytes: 167116800,
+            total_bytes: m.entry.size_bytes || 491400032,
+          };
+        }
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+      });
+      await go(page, '/model-share');
+      await sleep(2600);
+      // Foreground the in-flight progress row (unique .bg-ink-900/60 wrapper) so
+      // the bar — and the same model's card mid-download below it — fill the frame.
+      // The app scrolls an inner <main>, so drive that scroller directly and seat
+      // the row ~120px from the top rather than relying on window scrollIntoView.
+      await page.evaluate(() => {
+        const row = Array.from(document.querySelectorAll('div')).find((d) =>
+          (d.className || '').toString().includes('bg-ink-900/60'));
+        if (!row) return;
+        let sc = row.parentElement;
+        while (sc && sc !== document.body) {
+          const oy = getComputedStyle(sc).overflowY;
+          if ((oy === 'auto' || oy === 'scroll') && sc.scrollHeight > sc.clientHeight + 4) break;
+          sc = sc.parentElement;
+        }
+        const scroller = sc && sc !== document.body ? sc : document.scrollingElement || document.documentElement;
+        const top = scroller.getBoundingClientRect ? scroller.getBoundingClientRect().top : 0;
+        scroller.scrollTop += row.getBoundingClientRect().top - top - 120;
+      });
+      await sleep(700);
+      await shoot(page, 'aether-download');
+      await page.unroute('**/api/ipfs/models/registry').catch(() => {});
+    }
+  }
 
   // 3) NETWORK / PRIVACY — expand the Tor+I2P and VPN <details>, neutralize the
   //    inner-scroller height clamp so the full privacy stack fits, then clip
