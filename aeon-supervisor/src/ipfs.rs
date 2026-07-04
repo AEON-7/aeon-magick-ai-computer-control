@@ -1556,6 +1556,173 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
     Ok(())
 }
 
+// ── Ollama import ───────────────────────────────────────────────────────────
+// Ollama distributes models through an OCI-style registry (registry.ollama.ai):
+// a manifest lists layers; the GGUF weights are the layer with mediaType
+// application/vnd.ollama.image.model, addressed by a sha256 digest we can pull
+// directly and verify — no running ollama needed. Same registry protocol backs
+// hailo-ollama's zoo, so this path is reused for Hailo LLM imports too.
+
+/// Parse an Ollama model reference into (namespace, model, tag). Accepts
+/// "llama3.2:3b", "library/llama3.2", "user/model:tag", or a full
+/// "ollama.com/library/llama3.2:3b" / "registry.ollama.ai/…" URL.
+fn parse_ollama_ref(input: &str) -> Result<(String, String, String), String> {
+    let s = input.trim();
+    let rest = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
+    let rest = rest
+        .strip_prefix("registry.ollama.ai/")
+        .or_else(|| rest.strip_prefix("ollama.com/"))
+        .or_else(|| rest.strip_prefix("ollama.ai/"))
+        .unwrap_or(rest);
+    let rest = rest.trim_matches('/');
+    // Split the tag off the LAST segment only (namespaces have no colon).
+    let (path, tag) = match rest.rsplit_once(':') {
+        Some((p, t)) if !t.contains('/') => (p, t.to_string()),
+        _ => (rest, "latest".to_string()),
+    };
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let (namespace, model) = match parts.as_slice() {
+        [m] => ("library".to_string(), m.to_string()),
+        [ns, m] => (ns.to_string(), m.to_string()),
+        _ => return Err("expected an ollama ref like llama3.2:3b or user/model:tag".into()),
+    };
+    let ok = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    if !ok(&namespace) || !ok(&model) || !ok(&tag) {
+        return Err("invalid ollama reference".into());
+    }
+    Ok((namespace, model, tag))
+}
+
+/// Fetch a model's Ollama-registry manifest. `host` lets the same code hit
+/// hailo-ollama's registry for Hailo imports.
+fn ollama_manifest(host: &str, ns: &str, model: &str, tag: &str) -> Result<Value, String> {
+    let url = format!("https://{host}/v2/{ns}/{model}/manifests/{tag}");
+    let resp = hf_agent()
+        .get(&url)
+        .set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .call()
+        .map_err(|e| match e {
+            ureq::Error::Status(404, _) => format!("model not found on the registry: {ns}/{model}:{tag}"),
+            other => format!("registry request failed: {other}"),
+        })?;
+    resp.into_json::<Value>().map_err(|e| format!("bad manifest json: {e}"))
+}
+
+fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), String> {
+    let (ns, model, tag) = parse_ollama_ref(reference)?;
+    let host = "registry.ollama.ai";
+    task_set(key, "resolving Ollama manifest…");
+    let manifest = ollama_manifest(host, &ns, &model, &tag)?;
+    let layers = manifest.get("layers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let find_layer = |mt: &str| layers.iter().find(|l| l.get("mediaType").and_then(|v| v.as_str()) == Some(mt)).cloned();
+
+    let model_layer = find_layer("application/vnd.ollama.image.model")
+        .ok_or("no model layer in the Ollama manifest (unsupported model type)")?;
+    let digest = model_layer.get("digest").and_then(|v| v.as_str()).ok_or("model layer missing digest")?.to_string();
+    let size = model_layer.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let expected_sha = digest.strip_prefix("sha256:").unwrap_or(&digest).to_string();
+
+    let free = free_bytes(MODELS_DIR);
+    if size > 0 && size + 512 * 1024 * 1024 > free {
+        return Err(format!("not enough disk: model is {} but only {} free", human(size), human(free)));
+    }
+    let dir = staging_root().join(format!("ollama-{}", new_draft_id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    let leaf = format!("{model}-{tag}.gguf");
+    let blob_url = format!("https://{host}/v2/{ns}/{model}/blobs/{digest}");
+    let (sha, _n) = hf_download(&blob_url, &dir.join(&leaf), key, &leaf, size, 0)?;
+    let verified = !expected_sha.is_empty() && expected_sha.eq_ignore_ascii_case(&sha);
+
+    // Small text layers → license + a README from the system prompt.
+    let fetch_text = |mt: &str| -> Option<String> {
+        let l = find_layer(mt)?;
+        let d = l.get("digest").and_then(|v| v.as_str())?;
+        hf_agent().get(&format!("https://{host}/v2/{ns}/{model}/blobs/{d}")).call().ok()?.into_string().ok()
+    };
+    let license = fetch_text("application/vnd.ollama.image.license").unwrap_or_default();
+    let license_short: String = license.lines().next().unwrap_or("").chars().take(64).collect();
+    let mut readme = format!("# {model_name}\n\nImported from Ollama: `{ns}/{model}:{tag}`\n");
+    if let Some(sys) = fetch_text("application/vnd.ollama.image.system") {
+        readme.push_str(&format!("\n## System prompt\n\n{sys}\n"));
+    }
+    let _ = std::fs::write(dir.join("README.md"), &readme);
+
+    let quant = tag.to_ascii_lowercase().split(|c| c == '-' || c == '.').rev()
+        .find(|p| { let b = p.as_bytes(); b.first() == Some(&b'q') && b.get(1).map(|c| c.is_ascii_digit()).unwrap_or(false) })
+        .unwrap_or("").to_string();
+
+    let card = ModelCard {
+        kind: "llm".into(),
+        base_model: format!("{ns}/{model}"),
+        params: parse_params(&format!("{model} {tag}")),
+        quant,
+        license: license_short,
+        description: format!("Imported from Ollama: {ns}/{model}:{tag}"),
+        intended_use: String::new(),
+        tags: vec!["ollama".into(), "gguf".into()],
+        format: "gguf".into(),
+        image: String::new(),
+        readme: true,
+    };
+    let (origin_id, origin_label) = crate::fleet::identity();
+    let ns_seg = if ns == "library" { String::new() } else { format!("{ns}/") };
+    let source = format!("https://ollama.com/{ns_seg}{model}:{tag}");
+    let card_doc = json!({
+        "schema": "aeon-model-card/1", "name": model_name, "file": leaf,
+        "size_bytes": size, "sha256": sha, "card": card,
+        "verified": verified, "source": source,
+        "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
+    });
+    std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default())
+        .map_err(|e| format!("write card: {e}"))?;
+
+    task_set(key, "adding to IPFS…");
+    let cid = run_script(&["add", &dir.to_string_lossy()])?;
+    if cid.is_empty() {
+        return Err("ipfs add produced no CID".into());
+    }
+    catalog_add(ModelEntry {
+        cid, name: model_name.to_string(), file: leaf, size_bytes: size,
+        sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
+        verified, source,
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct ImportOllamaReq {
+    pub reference: String,
+}
+
+/// POST /api/ipfs/models/import-ollama — import a model from the Ollama registry:
+/// pull the GGUF weights (verified against the layer digest) + the license/system
+/// metadata, package them as a shared IPFS model. Non-blocking; poll /models.
+pub async fn import_ollama(State(_s): State<AppState>, Json(req): Json<ImportOllamaReq>) -> Json<Value> {
+    if !read_config().enabled {
+        return Json(json!({"ok": false, "err": "IPFS is off — enable it first"}));
+    }
+    let reference = req.reference.trim().to_string();
+    let (_ns, model, tag) = match parse_ollama_ref(&reference) {
+        Ok(v) => v,
+        Err(e) => return Json(json!({"ok": false, "err": e})),
+    };
+    let model_name = if tag == "latest" { model } else { format!("{model}-{tag}") };
+    let key = model_name.clone();
+    let importing = key.clone();
+    task_set(&key, "fetching model info…");
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = do_import_ollama(&reference, &model_name, &key) {
+            task_set(&key, &format!("error: {e}"));
+        } else {
+            task_clear(&key);
+            announce();
+        }
+    });
+    Json(json!({"ok": true, "importing": importing}))
+}
+
 /// First `cdn-avatars.huggingface.co/...` URL in the page HTML — the author's
 /// avatar (the circular image HF shows on the model card). HF embeds this
 /// inside JSON in the HTML, so slashes may be escaped (`\/` or `/`);

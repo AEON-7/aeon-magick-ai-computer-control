@@ -69,6 +69,8 @@
   let toggling = false;
   let hfUrl = '';
   let hfBusy = false;
+  let ollamaRef = '';
+  let ollamaBusy = false;
 
   // ── Push a model to a connected system (Agent Dashboard: DGX / gateways) ──
   let systems: Array<{ id: string; label: string; address: string; roles?: string[]; status?: string }> = [];
@@ -185,6 +187,21 @@
       else hfUrl = '';
     } catch (e: any) { err = e?.message ?? 'import failed'; }
     hfBusy = false; await load();
+  }
+
+  async function importOllama() {
+    const reference = ollamaRef.trim();
+    if (!reference) return;
+    ollamaBusy = true; err = '';
+    try {
+      const r = await api('/models/import-ollama', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference }),
+      });
+      if (r && r.ok === false) err = r.err || 'import failed';
+      else ollamaRef = '';
+    } catch (e: any) { err = e?.message ?? 'import failed'; }
+    ollamaBusy = false; await load();
   }
 
   const api = (path: string, opts: RequestInit = {}) =>
@@ -498,6 +515,16 @@
         <button class="btn text-sm px-4 py-2 rounded-md" on:click={importHf} disabled={hfBusy || !hfUrl.trim()}>{hfBusy ? 'Starting…' : 'Import'}</button>
       </div>
       <p class="text-[11px] text-ink-600 -mt-2">Pulls the weights, the README + author image, and verifies each file's SHA-256 against the hash HuggingFace publishes.</p>
+
+      <!-- import from Ollama -->
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-lg">🦙</span>
+        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+               bind:value={ollamaRef} placeholder="Import from Ollama — a model tag (e.g. llama3.2:3b or user/model:tag)"
+               on:keydown={(e) => e.key === 'Enter' && importOllama()} />
+        <button class="btn text-sm px-4 py-2 rounded-md" on:click={importOllama} disabled={ollamaBusy || !ollamaRef.trim()}>{ollamaBusy ? 'Starting…' : 'Import'}</button>
+      </div>
+      <p class="text-[11px] text-ink-600 -mt-2">Pulls the GGUF weights straight from the Ollama registry and verifies them against the layer digest — no Ollama install needed.</p>
     {/if}
 
     {#if uploadPct >= 0}
