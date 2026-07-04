@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import StorageManager from '$lib/components/StorageManager.svelte';
   import Icon from '$lib/components/Icon.svelte';
+  import DownloadProgress from '$lib/components/DownloadProgress.svelte';
 
   // Intergalactic Model Share — a decentralized, censorship-resistant network of
   // AI models shared over IPFS (the InterPlanetary File System — we think
@@ -36,11 +37,16 @@
   let karma: Karma | null = null;
   let myStarCount = 0;
   $: karmaPct = karma ? Math.round((karma.served_bytes / Math.max(1, karma.served_bytes + karma.downloaded_bytes)) * 100) : 0;
-  let tasks: Record<string, string> = {};
+  // An in-flight upload/download/fetch. `pct` (0–100) + bytes are present only
+  // for downloads whose total size the Orb knows; otherwise it's a plain phase.
+  type Task = { phase: string; pct?: number | null; done_bytes?: number; total_bytes?: number };
+  let tasks: Record<string, Task> = {};
   let peerCount = 0;
   let selfPeer = '';
   let err = '';
-  let poll: ReturnType<typeof setInterval>;
+  let poll: ReturnType<typeof setTimeout>;
+  // Any non-error task means work is happening → poll faster for a smooth bar.
+  $: busyNow = Object.values(tasks).some((t) => !String(t?.phase ?? '').startsWith('error'));
 
   // filters
   let query = '';
@@ -494,6 +500,7 @@
       if (r && r.ok === false) err = r.err || 'download failed';
     } catch (e: any) { err = e?.message ?? 'download failed'; }
     await load();
+    scheduleTick(); // pick up the fast cadence now that a fetch is in flight
   }
 
   let confirmRemove = '';
@@ -514,9 +521,18 @@
     await load();
   }
 
+  // Self-adjusting poll: idle at 5 s, but while a download/upload is in flight
+  // tick every 1.2 s so the progress bar advances smoothly.
+  function scheduleTick() {
+    clearTimeout(poll);
+    poll = setTimeout(async () => {
+      await load(); loadKarma();
+      scheduleTick();
+    }, busyNow ? 1200 : 5000);
+  }
   onMount(() => {
     load(); loadSystems(); loadKarma(); loadTokens(); loadView();
-    poll = setInterval(() => { load(); loadKarma(); }, 5000);
+    scheduleTick();
   });
 
   async function loadView() {
@@ -542,7 +558,7 @@
   }
   // Reset the push status line whenever a different model detail opens.
   $: if (detail) { pushMsg = ''; pushActive = false; }
-  onDestroy(() => clearInterval(poll));
+  onDestroy(() => clearTimeout(poll));
 </script>
 
 <div class="min-h-screen bg-ink-950 text-ink-100">
@@ -720,11 +736,10 @@
       </div>
     {/if}
 
-    <!-- in-flight fetch/add phases -->
-    {#each Object.entries(tasks) as [key, phase] (key)}
-      <div class="flex items-center gap-2 text-xs font-mono {phase.startsWith('error') ? 'text-red-400' : 'text-amber-300'}">
-        {#if !phase.startsWith('error')}<span class="inline-block h-3 w-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin"></span>{/if}
-        <span class="truncate max-w-[16rem]">{key}</span><span class="text-ink-600">·</span><span>{phase}</span>
+    <!-- in-flight fetch/add phases (real progress bar while downloading) -->
+    {#each Object.entries(tasks) as [key, t] (key)}
+      <div class="rounded-lg border border-ink-800 bg-ink-900/60 px-3 py-2">
+        <DownloadProgress task={t} label={key} />
       </div>
     {/each}
 
@@ -791,7 +806,7 @@
 
             <div class="mt-auto pt-1 flex items-center gap-2 text-xs">
               {#if busy}
-                <span class="text-amber-300 font-mono">{busy}</span>
+                <DownloadProgress task={busy} />
               {:else}
                 <!-- Primary action on every model: push it to a connected system. -->
                 <button class="btn-primary text-xs py-1 px-2.5 rounded inline-flex items-center gap-1"
@@ -957,7 +972,7 @@
         {#if detail.local}
           <span class="self-center text-emerald-400 font-mono text-xs">✓ hosted here</span>
         {:else if tasks[detail.entry.cid]}
-          <span class="self-center text-amber-300 font-mono text-xs">{tasks[detail.entry.cid]}</span>
+          <div class="flex-1 min-w-0 self-center"><DownloadProgress task={tasks[detail.entry.cid]} /></div>
         {:else}
           <button class="btn-primary text-sm px-4 py-1.5 rounded" on:click={() => detail && download(detail)}>↓ Download + host</button>
         {/if}

@@ -514,18 +514,54 @@ pub async fn set_view_settings(State(_s): State<AppState>, Json(req): Json<ViewR
     Json(v)
 }
 
-/// In-flight model work: name-or-cid → phase string ("adding to IPFS…",
-/// "fetching from swarm…", "error: …"). Errors stay until the next attempt
-/// for the same key so the UI can surface them.
-static TASKS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// A unit of in-flight model work, surfaced to the UI. `phase` is the human
+/// label ("adding to IPFS…", "downloading to quarantine…", an "error: …" prefix
+/// flags failure). During a download where the total size is known, `pct` +
+/// `done_bytes`/`total_bytes` drive a real progress bar; otherwise `pct` is null
+/// and the UI falls back to a spinner + bytes-pulled-so-far.
+#[derive(Clone, Serialize)]
+struct TaskState {
+    phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pct: Option<u8>,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    done_bytes: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    total_bytes: u64,
+}
 
-fn tasks() -> &'static Mutex<HashMap<String, String>> {
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// In-flight model work: name-or-cid → progress state. Errors stay until the
+/// next attempt for the same key so the UI can surface them.
+static TASKS: OnceLock<Mutex<HashMap<String, TaskState>>> = OnceLock::new();
+
+fn tasks() -> &'static Mutex<HashMap<String, TaskState>> {
     TASKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn task_set(key: &str, phase: &str) {
     if let Ok(mut t) = tasks().lock() {
-        t.insert(key.to_string(), phase.to_string());
+        t.insert(
+            key.to_string(),
+            TaskState { phase: phase.to_string(), pct: None, done_bytes: 0, total_bytes: 0 },
+        );
+    }
+}
+
+/// Update a download's byte progress. `total == 0` means the size is unknown, so
+/// no percentage is reported (UI shows the spinner + bytes pulled instead). The
+/// percentage is clamped to 99 until the phase advances, so the bar never claims
+/// 100% while bytes are still landing.
+fn task_progress(key: &str, phase: &str, done: u64, total: u64) {
+    let pct = (total > 0).then(|| ((done.saturating_mul(100) / total).min(99)) as u8);
+    if let Ok(mut t) = tasks().lock() {
+        t.insert(
+            key.to_string(),
+            TaskState { phase: phase.to_string(), pct, done_bytes: done, total_bytes: total },
+        );
     }
 }
 
@@ -572,7 +608,7 @@ pub fn shared_models() -> Value {
 /// GET /api/ipfs/models — local catalog + in-flight upload/fetch phases.
 pub async fn models(State(_s): State<AppState>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| -> Value {
-        let t: HashMap<String, String> =
+        let t: HashMap<String, TaskState> =
             tasks().lock().map(|g| g.clone()).unwrap_or_default();
         json!({"ok": true, "models": read_catalog(), "tasks": t})
     })
@@ -863,8 +899,30 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
         }
 
         let q = staging_root().join(format!("quarantine-{}", new_draft_id()));
-        task_set(&cid, "downloading to quarantine…");
-        if let Err(e) = run_script(&["get", &cid, &q.to_string_lossy()]) {
+        task_progress(&cid, "downloading to quarantine…", 0, sz);
+
+        // `ipfs get` blocks until the whole directory has materialized, so a
+        // sibling thread polls the quarantine dir as it fills to drive a real
+        // byte-level progress bar. The download bytes land on disk here, so the
+        // dir size is an honest gauge against the entry's known total.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let monitor = {
+            let (stop, qm, cidm) = (stop.clone(), q.clone(), cid.clone());
+            std::thread::spawn(move || {
+                use std::sync::atomic::Ordering;
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    task_progress(&cidm, "downloading to quarantine…", dir_size(&qm), sz);
+                }
+            })
+        };
+        let got = run_script(&["get", &cid, &q.to_string_lossy()]);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = monitor.join();
+        if let Err(e) = got {
             let _ = std::fs::remove_dir_all(&q);
             return fail(&e);
         }
@@ -1029,7 +1087,7 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
         let me = self_peer_id();
         let local = read_catalog();
         let peers = read_registry();
-        let tasks: HashMap<String, String> = tasks().lock().map(|g| g.clone()).unwrap_or_default();
+        let tasks: HashMap<String, TaskState> = tasks().lock().map(|g| g.clone()).unwrap_or_default();
 
         // cid -> (entry, hosts[])
         let mut rows: HashMap<String, (ModelEntry, Vec<Value>)> = HashMap::new();
