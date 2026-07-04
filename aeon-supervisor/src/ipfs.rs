@@ -86,6 +86,19 @@ fn run_script(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Like `run_script` but returns raw stdout bytes (for binary content such as
+/// a card image — `String::from_utf8_lossy` would corrupt it).
+fn run_script_bytes(args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new(SCRIPT)
+        .args(args)
+        .output()
+        .map_err(|e| format!("spawn {SCRIPT}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{SCRIPT} {args:?}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(out.stdout)
+}
+
 /// Like `run_script` but pipes `input` to the child's stdin (for `mfs-write`,
 /// which writes stdin into an MFS file).
 fn run_script_stdin(args: &[&str], input: &[u8]) -> Result<String, String> {
@@ -732,6 +745,49 @@ pub async fn model_card(
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "card task failed"}));
     Json(v)
+}
+
+/// GET /api/ipfs/models/image?cid=<dir>&name=card-image.png — stream a shared
+/// model's card image through the supervisor (same-origin HTTPS) so it isn't
+/// blocked as mixed content the way the plain-HTTP :8080 gateway would be on
+/// the HTTPS console. Whitelisted to `card-image.<ext>` only.
+pub async fn model_image(
+    State(_s): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let cid = q.get("cid").cloned().unwrap_or_default();
+    let name = q.get("name").cloned().unwrap_or_default();
+    // card-image.<ext> only — no path traversal, no arbitrary files.
+    let ok_name = name.strip_prefix("card-image.").map(|e| {
+        e.chars().all(|c| c.is_ascii_alphanumeric())
+    }).unwrap_or(false);
+    if !valid_cid(&cid) || !ok_name {
+        return (StatusCode::BAD_REQUEST, "bad request").into_response();
+    }
+    let mime = match name.rsplit('.').next().unwrap_or("") {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+    let bytes = tokio::task::spawn_blocking(move || run_script_bytes(&["cat", &format!("{cid}/{name}")]))
+        .await
+        .unwrap_or_else(|_| Err("image task failed".into()));
+    match bytes {
+        Ok(b) => (
+            [
+                (header::CONTENT_TYPE, mime.to_string()),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
+            ],
+            b,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 /// GET /api/ipfs/models/file?cid=<dir>&name=README.md — fetch a text file from

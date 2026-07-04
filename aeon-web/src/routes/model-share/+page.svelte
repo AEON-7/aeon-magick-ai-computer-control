@@ -89,6 +89,12 @@
     return `${x.toFixed(x < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
   }
 
+  // Card images are served THROUGH the supervisor (same-origin HTTPS), not the
+  // plain-HTTP :8080 gateway — otherwise the browser blocks them as mixed
+  // content on the HTTPS console and they silently fail to render.
+  const imageSrc = (cid: string, name: string) =>
+    `/api/ipfs/models/image?cid=${cid}&name=${encodeURIComponent(name)}`;
+
   $: gatewayBase =
     typeof location !== 'undefined' ? `http://${location.hostname}:${node?.gateway_port ?? 8080}` : '';
   function downloadUrl(e: Entry) {
@@ -134,7 +140,7 @@
       license: c.license || '', description: c.description || '', intended_use: c.intended_use || '',
       tags: (c.tags || []).join(', '), readme: '',
     };
-    if (c.image) existingImageUrl = `${gatewayBase}/ipfs/${row.entry.cid}/${c.image}`;
+    if (c.image) existingImageUrl = imageSrc(row.entry.cid, c.image);
     showShare = true;
     detail = null;
     // pull the existing README so the editor is prefilled
@@ -350,7 +356,7 @@
           <div class="rounded-lg border bg-ink-900 p-3.5 flex flex-col gap-2 transition {row.local ? 'border-emerald-500/40' : 'border-ink-700 hover:border-ink-600'}">
             {#if c.image}
               <button class="block -mx-3.5 -mt-3.5 mb-1 h-24 overflow-hidden rounded-t-lg bg-ink-950" on:click={() => (detail = row)}>
-                <img src="{gatewayBase}/ipfs/{row.entry.cid}/{c.image}" alt="" class="w-full h-full object-cover" loading="lazy" />
+                <img src={imageSrc(row.entry.cid, c.image)} alt="" class="w-full h-full object-cover" loading="lazy" />
               </button>
             {/if}
             <div class="flex items-start gap-2">
@@ -475,7 +481,7 @@
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <div class="w-full max-w-lg rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
       {#if c.image}
-        <img src="{gatewayBase}/ipfs/{detail.entry.cid}/{c.image}" alt="" class="w-full max-h-48 object-cover rounded-lg border border-ink-800" />
+        <img src={imageSrc(detail.entry.cid, c.image)} alt="" class="w-full max-h-48 object-cover rounded-lg border border-ink-800" />
       {/if}
       <div class="flex items-start gap-3">
         <div class="text-2xl">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>

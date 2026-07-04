@@ -498,6 +498,7 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/models/registry", get(crate::ipfs::models_registry))
         .route("/ipfs/models/card",     get(crate::ipfs::model_card))
         .route("/ipfs/models/file",     get(crate::ipfs::model_file))
+        .route("/ipfs/models/image",    get(crate::ipfs::model_image))
         .route("/ipfs/models/upload",
             post(crate::ipfs::upload_model)
                 .layer(axum::extract::DefaultBodyLimit::disable()))
