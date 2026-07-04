@@ -18,6 +18,23 @@ use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
+/// True when the supervisor runs as the headless "Orb server" (Docker on
+/// Mac / DGX Spark / x86) rather than on a Raspberry Pi. Set via `AEON_SERVER=1`.
+/// In this mode there's no HID gadget, no video capture, no GPIO, and no
+/// host-network appliance (WiFi/firewall/VPN/Tor/DNSCrypt) — the web hides
+/// those, and startup skips their background tasks. The cross-platform
+/// surface (IPFS/Model Share, Agent Dashboard, terminal, tokens, MCP/REST)
+/// runs unchanged. Read once.
+pub fn server_mode() -> bool {
+    use std::sync::OnceLock;
+    static M: OnceLock<bool> = OnceLock::new();
+    *M.get_or_init(|| {
+        std::env::var("AEON_SERVER")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {

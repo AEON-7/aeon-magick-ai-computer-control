@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import * as api from '$lib/api';
+  import { serverMode } from '$lib/mode';
 
   // Pages that should never trigger an auth redirect — these are the
   // landing pages for unauthenticated / setup states themselves.
@@ -22,6 +23,7 @@
   onMount(async () => {
     try {
       const me = await api.getMe();
+      serverMode.set(!!me.server);
       const path = $page.url.pathname;
       if (me.state === 'open' && me.needs_setup) {
         if (!path.startsWith('/setup')) {
@@ -33,6 +35,12 @@
           goto('/login');
           return;
         }
+      }
+      // Headless server container: the KVM control page ("/") has no video or
+      // HID — land on the Agent Dashboard (the AI/fleet hub) instead.
+      if (me.server && path === '/') {
+        goto('/agent');
+        return;
       }
     } catch (e) {
       console.warn('auth probe failed', e);

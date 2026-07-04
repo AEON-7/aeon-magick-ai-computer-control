@@ -580,12 +580,14 @@ pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let server = crate::api::server_mode();
     if state.auth.is_open() {
         return Json(json!({
             "ok": true,
             "state": "open",
             "needs_setup": true,
             "admin_username_default": "admin",
+            "server": server,
         }))
         .into_response();
     }
@@ -596,12 +598,14 @@ pub async fn me(
             "authenticated": true,
             "user": id.user,
             "scope": id.scope.as_str(),
+            "server": server,
         }))
         .into_response(),
         None => Json(json!({
             "ok": true,
             "state": "locked",
             "authenticated": false,
+            "server": server,
         }))
         .into_response(),
     }

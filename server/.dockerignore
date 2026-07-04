@@ -1,0 +1,7 @@
+# Keep the build context lean: only bin/ web/ scripts/ + the Dockerfile/entrypoint
+# are needed. Everything else (docs, compose, this repo's git metadata) is noise.
+README.md
+docker-compose.yml
+build.sh
+.gitignore
+.dockerignore

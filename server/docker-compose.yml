@@ -1,0 +1,20 @@
+services:
+  aeon-orb-server:
+    image: aeon-magick/orb-server:latest
+    build:
+      context: .
+    container_name: aeon-orb-server
+    restart: unless-stopped
+    ports:
+      - "8443:443"    # web UI + REST + MCP (HTTPS, self-signed cert)
+      - "8080:8080"   # IPFS gateway
+    volumes:
+      - aeon-etc:/etc/aeon      # admin auth, TLS cert, API tokens
+      - aeon-data:/var/lib/aeon # IPFS repo + model library
+    # The Agent Dashboard + terminal + model push reach OTHER machines over SSH,
+    # so no extra host access is needed. To let the container reach hosts by
+    # Tailscale name, join it to your tailnet (see README).
+
+volumes:
+  aeon-etc:
+  aeon-data:

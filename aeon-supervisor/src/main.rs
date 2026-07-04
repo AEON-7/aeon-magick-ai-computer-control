@@ -110,33 +110,28 @@ async fn main() -> Result<()> {
     // PREROUTING redirect from wlan0 80/443 → gateway, but binding
     // unconditionally is cheap and means we don't need a separate
     // service lifecycle.
-    tokio::spawn(captive::serve());
-    // Background refresh loop for DNS blacklist subscription sources.
-    // Runs forever; checks every 5 min for stale lists and re-fetches.
-    tokio::spawn(dns_log::run_refresh_loop());
+    // Cross-platform background tasks (run everywhere, incl. the server container):
     // Agent Dash: sample each OpenClaw gateway's /agents roster on a timer and
     // accumulate per-agent token usage locally, so the dashboard can show
     // 30-day / 90-day / 1-year history beyond the gateway's short window.
     tokio::spawn(agent_connect::token_sampler_loop());
     // OrbNet persona responder: placed persona bots reply via their LLM.
     tokio::spawn(orbnet::persona_responder_loop());
-    // OrbNet self-heal: if activation was interrupted while enabled (e.g. an
-    // OOM-restart mid-bootstrap), finish provisioning the owner + community.
+    // OrbNet self-heal: finish provisioning if activation was interrupted.
     tokio::spawn(orbnet::reconcile_on_boot());
-    // Hailo: if the accelerator is enabled + installed and an autoload model is
-    // configured, re-deploy it on boot (NNC RAM doesn't persist across reboots).
-    tokio::spawn(hailo::reconcile_on_boot());
-    // Ensure the AEON_DROP iptables chain exists at startup so every
-    // DROP rule we apply (user or system) gets logged on the way down.
-    // This is what populates the "Blocked traffic" panel.
-    firewall::ensure_drop_chain();
 
-    // If the operator has enabled the target-facing HTTP file server,
-    // spawn it now. Listener binds 0.0.0.0:<configured-port>; the
-    // iptables INPUT rules from aeon-usb-net (in isolation/restricted
-    // modes) gate which clients can actually reach it. Off by default;
-    // toggle via PUT /api/files/config.
-    file_xfer::maybe_spawn_target_server().await;
+    // Pi / host-appliance-only background tasks — skipped in the headless
+    // server container (no WiFi captive portal, no host iptables/firewall,
+    // no Hailo accelerator, no USB-net target file server, no DNSCrypt).
+    if !api::server_mode() {
+        tokio::spawn(captive::serve());
+        tokio::spawn(dns_log::run_refresh_loop());
+        tokio::spawn(hailo::reconcile_on_boot());
+        // Ensure the AEON_DROP iptables chain exists so DROP rules get logged.
+        firewall::ensure_drop_chain();
+        // Target-facing HTTP file server (USB-net), off by default.
+        file_xfer::maybe_spawn_target_server().await;
+    }
 
     axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service()).await?;
     Ok(())

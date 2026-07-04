@@ -1,0 +1,4 @@
+# Build artifacts staged by build.sh — regenerated on every build, not tracked.
+bin/
+web/
+scripts/

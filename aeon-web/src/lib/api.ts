@@ -35,6 +35,8 @@ export interface MeResponse {
   user?: string;
   scope?: 'admin' | 'full' | 'macros' | 'read';
   admin_username_default?: string;
+  /// True on the headless "Orb server" container (no HID/video/GPIO/host-network).
+  server?: boolean;
 }
 
 export interface Token {

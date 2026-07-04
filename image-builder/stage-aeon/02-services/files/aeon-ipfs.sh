@@ -122,21 +122,58 @@ EOF
   systemctl daemon-reload 2>/dev/null || true
 }
 
+# ── Daemon lifecycle: systemd on a Pi, direct process in a container ─────────
+# In the headless server container there's no systemd, so run kubo directly
+# (detached, tracked by a PID file) instead of `systemctl`.
+PIDFILE=/run/aeon/ipfs.pid
+have_systemd() { [ -d /run/systemd/system ]; }
+
+daemon_active() {
+  if have_systemd; then systemctl is-active --quiet aeon-ipfs.service; return; fi
+  [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+daemon_up() {
+  if have_systemd; then
+    ensure_units
+    systemctl enable --now aeon-ipfs.service 2>/dev/null || true
+    return 0
+  fi
+  daemon_active && return 0
+  install -d /run/aeon 2>/dev/null || true
+  setsid runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" daemon --migrate=true --enable-gc \
+    </dev/null >/var/log/aeon-ipfs.log 2>&1 &
+  echo $! > "$PIDFILE"
+  # Wait (≤10s) for the API socket so a following command doesn't race the boot.
+  local i=0; while [ $i -lt 20 ] && ! ipfs_cmd id >/dev/null 2>&1; do sleep 0.5; i=$((i + 1)); done
+}
+
+daemon_down() {
+  if have_systemd; then systemctl disable --now aeon-ipfs.service 2>/dev/null || true; return; fi
+  [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || true
+  rm -f "$PIDFILE"
+  pkill -f "$IPFSBIN daemon" 2>/dev/null || true
+}
+
+daemon_restart() {
+  if have_systemd; then systemctl restart aeon-ipfs.service 2>/dev/null || true; return; fi
+  daemon_down; sleep 1; daemon_up
+}
+
 cmd_up() {
   ensure_user || return 1
   ensure_bin || return 1
   ensure_init || return 1
   configure
-  ensure_units
-  systemctl enable --now aeon-ipfs.service 2>/dev/null || true
+  daemon_up
 }
 
-cmd_down() { systemctl disable --now aeon-ipfs.service 2>/dev/null || true; }
+cmd_down() { daemon_down; }
 
 cmd_status() {
   local installed daemon ver pid peers repo smax dfree dtotal dfout
   installed=$([ -x "$IPFSBIN" ] && echo true || echo false)
-  daemon=$(systemctl is-active aeon-ipfs.service 2>/dev/null); daemon=${daemon:-inactive}
+  daemon=$(daemon_active && echo active || echo inactive)
   ver=""; pid=""; peers=0; repo=0; smax=""
   # Free/total bytes on the filesystem that backs the IPFS repo — lets the web
   # slider cap the allocation at what the disk can physically hold. df -PB1 →
@@ -161,12 +198,11 @@ cmd_storage() {
   [ -z "$size" ] && { log "usage: storage <size e.g. 10GB>"; return 1; }
   case "$size" in *[!0-9GMKTBgmktb]*) log "bad size"; return 1;; esac
   ipfs_cmd config Datastore.StorageMax "$size" >/dev/null 2>&1 || { log "set storage failed"; return 1; }
-  # Re-assert the unit so nodes provisioned before --enable-gc landed pick up
-  # periodic GC on the next restart — without it, StorageMax is just a number
-  # kubo reports but never enforces (pinned models are always kept; only
-  # unpinned cached/shared blocks are reclaimed once the repo passes the cap).
-  ensure_units
-  systemctl restart aeon-ipfs.service 2>/dev/null || true
+  # Restart to pick up the new cap (and, on systemd hosts, re-assert the unit so
+  # nodes provisioned before --enable-gc landed get periodic GC — without it
+  # StorageMax is just a number kubo reports but never enforces: pinned models
+  # are always kept; only unpinned cached/shared blocks are reclaimed).
+  daemon_restart
   echo "$size"
 }
 
