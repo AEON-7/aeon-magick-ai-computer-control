@@ -62,6 +62,46 @@ configure() {
   # AcceleratedDHTClient makes provider lookups (finding who hosts a CID) far
   # faster on a wide network — worth the modest memory on a Pi 4/5.
   ipfs_cmd config --json Experimental.AcceleratedDHTClient true >/dev/null 2>&1 || true
+  setup_root_landing
+}
+
+# kubo serves a bare 404 at the gateway root ("/") — it only resolves
+# /ipfs/<cid> paths. So the console's "gateway" QR / link (which points at the
+# base URL) opened a 404. Host a tiny branded landing page on IPFS and point
+# Gateway.RootRedirect at it, so the root — for the QR and any client — shows a
+# real "this gateway works" page instead. Idempotent: skip if already set.
+setup_root_landing() {
+  case "$(ipfs_cmd config Gateway.RootRedirect 2>/dev/null)" in
+    /ipfs/*) return 0 ;;
+  esac
+  local cid
+  cid=$(landing_html | ipfs_cmd add -Q 2>/dev/null)
+  [ -n "$cid" ] || return 0
+  ipfs_cmd pin add "$cid" >/dev/null 2>&1 || true
+  ipfs_cmd config Gateway.RootRedirect "/ipfs/$cid" >/dev/null 2>&1 || true
+}
+
+landing_html() {
+  cat <<'HTML'
+<!doctype html><html lang=en><head><meta charset=utf-8>
+<title>Aeon Orb · IPFS gateway</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+  :root{color-scheme:dark}
+  body{background:#0c0d14;color:#c4b5fd;font:16px/1.65 system-ui,-apple-system,sans-serif;
+       max-width:34rem;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;
+       justify-content:center;padding:2rem 1.5rem}
+  h1{font-weight:600;font-size:1.4rem;margin:0 0 .25rem;color:#a78bfa}
+  p{color:#9ca3af;margin:.5rem 0}
+  code{background:#1a1c28;padding:.15em .45em;border-radius:.35em;color:#a78bfa;font-size:.95em}
+  .dot{display:inline-block;width:.55em;height:.55em;border-radius:50%;background:#34d399;margin-right:.4em;vertical-align:middle}
+</style></head><body>
+<h1>🔮 Aeon Orb — IPFS gateway</h1>
+<p><span class=dot></span>This gateway is live.</p>
+<p>Fetch any content by its CID at <code>/ipfs/&lt;CID&gt;</code>, or set this as your
+gateway in IPFS Companion. Models shared from the Orb's console open here.</p>
+</body></html>
+HTML
 }
 
 ensure_units() {
@@ -73,7 +113,7 @@ Wants=network-online.target
 [Service]
 User=$SVCUSER
 Environment=IPFS_PATH=$DIR
-ExecStart=$IPFSBIN daemon --migrate=true
+ExecStart=$IPFSBIN daemon --migrate=true --enable-gc
 Restart=on-failure
 RestartSec=10
 [Install]
@@ -94,10 +134,17 @@ cmd_up() {
 cmd_down() { systemctl disable --now aeon-ipfs.service 2>/dev/null || true; }
 
 cmd_status() {
-  local installed daemon ver pid peers repo smax
+  local installed daemon ver pid peers repo smax dfree dtotal dfout
   installed=$([ -x "$IPFSBIN" ] && echo true || echo false)
   daemon=$(systemctl is-active aeon-ipfs.service 2>/dev/null); daemon=${daemon:-inactive}
   ver=""; pid=""; peers=0; repo=0; smax=""
+  # Free/total bytes on the filesystem that backs the IPFS repo — lets the web
+  # slider cap the allocation at what the disk can physically hold. df -PB1 →
+  # POSIX columns in 1-byte blocks: field 2 = total, field 4 = available.
+  dfree=0; dtotal=0
+  dfout=$(df -PB1 "$DIR" 2>/dev/null | awk 'NR==2{print $2" "$4}')
+  if [ -n "$dfout" ]; then dtotal=${dfout%% *}; dfree=${dfout##* }; fi
+  [ -z "$dtotal" ] && dtotal=0; [ -z "$dfree" ] && dfree=0
   if [ "$installed" = true ] && [ -f "$DIR/config" ]; then
     ver=$(ipfs_cmd version --number 2>/dev/null)
     pid=$(ipfs_cmd config Identity.PeerID 2>/dev/null)
@@ -105,8 +152,8 @@ cmd_status() {
     repo=$(ipfs_cmd repo stat 2>/dev/null | awk '/RepoSize/{print $2; exit}')
     [ "$daemon" = active ] && peers=$(ipfs_cmd swarm peers 2>/dev/null | wc -l | tr -d ' ')
   fi
-  printf '{"installed":%s,"daemon":"%s","version":"%s","peer_id":"%s","peers":%d,"repo_bytes":%s,"storage_max":"%s","gateway_port":%d}\n' \
-    "$installed" "$daemon" "${ver:-}" "${pid:-}" "${peers:-0}" "${repo:-0}" "${smax:-}" "$GATEWAY_PORT"
+  printf '{"installed":%s,"daemon":"%s","version":"%s","peer_id":"%s","peers":%d,"repo_bytes":%s,"storage_max":"%s","disk_free_bytes":%s,"disk_total_bytes":%s,"gateway_port":%d}\n' \
+    "$installed" "$daemon" "${ver:-}" "${pid:-}" "${peers:-0}" "${repo:-0}" "${smax:-}" "${dfree:-0}" "${dtotal:-0}" "$GATEWAY_PORT"
 }
 
 cmd_storage() {
@@ -114,6 +161,11 @@ cmd_storage() {
   [ -z "$size" ] && { log "usage: storage <size e.g. 10GB>"; return 1; }
   case "$size" in *[!0-9GMKTBgmktb]*) log "bad size"; return 1;; esac
   ipfs_cmd config Datastore.StorageMax "$size" >/dev/null 2>&1 || { log "set storage failed"; return 1; }
+  # Re-assert the unit so nodes provisioned before --enable-gc landed pick up
+  # periodic GC on the next restart — without it, StorageMax is just a number
+  # kubo reports but never enforces (pinned models are always kept; only
+  # unpinned cached/shared blocks are reclaimed once the repo passes the cap).
+  ensure_units
   systemctl restart aeon-ipfs.service 2>/dev/null || true
   echo "$size"
 }
@@ -142,6 +194,22 @@ cmd_mfs_rm()    { ipfs_cmd files rm -r "${1:-}" 2>/dev/null || true; }
 cmd_mfs_write() { ipfs_cmd files write --create --truncate "${1:-}" 2>&1; }  # stdin → file
 cmd_mfs_hash()  { ipfs_cmd files stat --hash "${1:-}" 2>/dev/null; }
 
+# get <cid> <dest> — materialize a CID (a model directory) to PLAIN files on
+# local disk, so the Orb holds a re-pushable copy (rsync to connected systems).
+# Runs as root (the supervisor invokes this script as root) reading the
+# aeon-ipfs-owned repo, then hands ownership of the output to root so rsync can
+# read it. Fetches from the network on demand if the blocks aren't local yet.
+cmd_get() {
+  local cid="${1:-}" dest="${2:-}"
+  [ -z "$cid" ] || [ -z "$dest" ] && { log "usage: get <cid> <dest>"; return 1; }
+  case "$cid" in *[!A-Za-z0-9]*) log "bad cid"; return 1;; esac
+  install -d "$(dirname "$dest")"
+  rm -rf "$dest"
+  # Root can read the 0750 aeon-ipfs repo; write the materialized tree to dest.
+  env IPFS_PATH="$DIR" "$IPFSBIN" get "$cid" -o "$dest" >/dev/null 2>&1 || { log "ipfs get failed"; return 1; }
+  du -sb "$dest" 2>/dev/null | awk '{print $1}'
+}
+
 case "${1:-}" in
   up)      cmd_up ;;
   down)    cmd_down ;;
@@ -161,6 +229,7 @@ case "${1:-}" in
   mfs-rm)    shift; cmd_mfs_rm "$@" ;;
   mfs-write) shift; cmd_mfs_write "$@" ;;
   mfs-hash)  shift; cmd_mfs_hash "$@" ;;
+  get)     shift; cmd_get "$@" ;;
   gateway) echo "$GATEWAY_PORT" ;;
-  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|cat <path>|connect <multiaddr>|id|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
+  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|cat <path>|get <cid> <dest>|connect <multiaddr>|id|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
 esac

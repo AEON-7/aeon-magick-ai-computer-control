@@ -25,6 +25,12 @@ const CONFIG_TOML: &str = "/etc/aeon/ipfs.toml";
 const SCRIPT: &str = "/usr/local/bin/aeon-ipfs";
 const MODELS_DIR: &str = "/var/lib/aeon/ipfs-models";
 const CATALOG_JSON: &str = "/var/lib/aeon/ipfs-models/catalog.json";
+/// Where models pulled DOWN to this Orb are materialized as plain files (weights
+/// + card), one `<slug>/` per model. This is the re-pushable library that
+/// `agent_connect::push_model` rsyncs to connected systems — distinct from the
+/// kubo block repo. Lives under /var/lib/aeon so it follows a relocated data
+/// root (USB storage) with everything else.
+pub const MODEL_LIBRARY_DIR: &str = "/var/lib/aeon/model-library";
 /// Merged view of every Orb's catalog heard over pubsub, written by the
 /// `aeon-modelshare` gossip daemon. The fleet-free global index.
 const REGISTRY_JSON: &str = "/var/lib/aeon/ipfs-models/registry.json";
@@ -147,6 +153,8 @@ pub async fn status(State(_s): State<AppState>) -> Json<Value> {
             "peers": get("peers", json!(0)),
             "repo_bytes": get("repo_bytes", json!(0)),
             "storage_max": get("storage_max", json!(cfg.storage_max)),
+            "disk_free_bytes": get("disk_free_bytes", json!(0)),
+            "disk_total_bytes": get("disk_total_bytes", json!(0)),
             "gateway_port": get("gateway_port", json!(8080)),
         })
     })
@@ -1578,4 +1586,180 @@ fn human(b: u64) -> String {
         i += 1;
     }
     format!("{x:.1} {}", u[i])
+}
+
+// ── Model library: pull DOWN to the Orb, ready to push to systems ────────────
+//
+// A model shared over IPFS is a directory CID (weights + model-card.json + …).
+// "Pulling it down" materializes that directory as plain files under
+// MODEL_LIBRARY_DIR/<slug>/ so the Orb holds a re-pushable copy that
+// agent_connect::push_model rsyncs to a connected system. With a big data disk
+// (the user's 1 TB card, or relocated USB storage) this library can hold many
+// models and re-push each instantly without re-fetching from the network.
+
+/// Turn a model name into a filesystem-safe slug for its library subdir.
+pub fn model_slug(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() { "model".to_string() } else { s.chars().take(80).collect() }
+}
+
+/// Look up a cataloged model by CID (exact) or by name (case-insensitive),
+/// searching this Orb's local catalog first, then the gossiped global registry.
+/// Lets callers push a model they only know by name/CID without it being local.
+pub fn find_model(id_or_cid: &str) -> Option<ModelEntry> {
+    let q = id_or_cid.trim();
+    let ql = q.to_lowercase();
+    let hit = |e: &ModelEntry| e.cid == q || e.name.to_lowercase() == ql;
+    if let Some(e) = read_catalog().into_iter().find(|e| hit(e)) {
+        return Some(e);
+    }
+    std::fs::read_to_string(REGISTRY_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<ModelEntry>>(&t).ok())
+        .and_then(|v| v.into_iter().find(|e| hit(e)))
+}
+
+/// Absolute path of a model's materialized directory in the library (may not
+/// exist yet). `pub` so agent_connect can rsync straight from it.
+pub fn library_path(slug: &str) -> std::path::PathBuf {
+    std::path::Path::new(MODEL_LIBRARY_DIR).join(slug)
+}
+
+/// True once a model's files are materialized locally (dir exists + non-empty).
+pub fn library_has(slug: &str) -> bool {
+    std::fs::read_dir(library_path(slug)).map(|mut d| d.next().is_some()).unwrap_or(false)
+}
+
+/// Materialize a model directory CID into the library (idempotent — a no-op if
+/// already present). Fetches from the IPFS network on demand. Returns the
+/// on-disk byte size. `pub` so push_model can auto-pull before rsync.
+pub fn ensure_in_library(cid: &str, slug: &str) -> Result<u64, String> {
+    let dir = library_path(slug);
+    if library_has(slug) {
+        return Ok(dir_size(&dir));
+    }
+    let dest = dir.to_string_lossy().to_string();
+    run_script(&["get", cid, &dest]).map(|s| s.trim().parse().unwrap_or_else(|_| dir_size(&dir)))
+}
+
+fn dir_size(p: &std::path::Path) -> u64 {
+    fn walk(p: &std::path::Path) -> u64 {
+        let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+        rd.flatten()
+            .map(|e| {
+                let path = e.path();
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => walk(&path),
+                    Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                    _ => 0,
+                }
+            })
+            .sum()
+    }
+    walk(p)
+}
+
+/// One library entry for the API: slug, matching catalog name/cid if known, size.
+fn library_entries() -> Vec<Value> {
+    let cat = read_catalog();
+    std::fs::read_dir(MODEL_LIBRARY_DIR)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| {
+            let slug = e.file_name().to_string_lossy().to_string();
+            // Best-effort re-associate with a catalog entry (slug ← name).
+            let hit = cat.iter().find(|c| model_slug(&c.name) == slug);
+            json!({
+                "slug": slug,
+                "name": hit.map(|c| c.name.clone()).unwrap_or_else(|| slug.clone()),
+                "cid": hit.map(|c| c.cid.clone()).unwrap_or_default(),
+                "size_bytes": dir_size(&e.path()),
+            })
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub struct PullReq {
+    /// Directory CID to pull. Optional if `name` resolves via the catalog.
+    #[serde(default)]
+    pub cid: String,
+    /// Display name — also used (slugified) as the library subdir.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Everything an MCP agent needs to choose a model to pull/push: the shared
+/// catalog (this Orb's own + gossiped peers, each with cid/name/size) and which
+/// models are already materialized in the local library.
+pub fn model_list_value() -> Value {
+    let catalog: Vec<Value> = read_catalog()
+        .into_iter()
+        .map(|e| json!({"cid": e.cid, "name": e.name, "size_bytes": e.size_bytes, "size": human(e.size_bytes), "in_library": library_has(&model_slug(&e.name))}))
+        .collect();
+    let registry: Vec<Value> = std::fs::read_to_string(REGISTRY_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<ModelEntry>>(&t).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| json!({"cid": e.cid, "name": e.name, "size_bytes": e.size_bytes, "size": human(e.size_bytes)}))
+        .collect();
+    json!({
+        "ok": true,
+        "catalog": catalog,        // shareable on this Orb
+        "network": registry,       // discovered on the network (gossip)
+        "library": library_entries(),  // pulled down, ready to push
+    })
+}
+
+/// GET /api/ipfs/models/library — what's materialized locally + total size.
+pub async fn models_library(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| {
+        let items = library_entries();
+        let total: u64 = items.iter().filter_map(|i| i.get("size_bytes").and_then(|x| x.as_u64())).sum();
+        json!({"ok": true, "library": items, "total_bytes": total, "dir": MODEL_LIBRARY_DIR})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "library task failed"}));
+    Json(v)
+}
+
+/// POST /api/ipfs/models/pull — materialize a model to the Orb's library so it
+/// can be pushed to connected systems. Resolves CID/name via the catalog when
+/// one is omitted. Synchronous but fast when the blocks are already local.
+pub async fn pull_model(State(_s): State<AppState>, Json(req): Json<PullReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        // Resolve to (cid, name): prefer explicit fields, fall back to catalog.
+        let (cid, name) = if !req.cid.is_empty() && !req.name.is_empty() {
+            (req.cid.clone(), req.name.clone())
+        } else if let Some(e) = find_model(if !req.cid.is_empty() { &req.cid } else { &req.name }) {
+            (
+                if req.cid.is_empty() { e.cid } else { req.cid.clone() },
+                if req.name.is_empty() { e.name } else { req.name.clone() },
+            )
+        } else {
+            return json!({"ok": false, "err": "unknown model — pass both cid and name, or a cataloged cid/name"});
+        };
+        if cid.is_empty() {
+            return json!({"ok": false, "err": "no CID to pull"});
+        }
+        let slug = model_slug(&name);
+        task_set(&format!("pull:{slug}"), "materializing from IPFS…");
+        let out = ensure_in_library(&cid, &slug);
+        task_clear(&format!("pull:{slug}"));
+        match out {
+            Ok(sz) => json!({"ok": true, "slug": slug, "name": name, "cid": cid, "size_bytes": sz, "size": human(sz)}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "pull task failed"}));
+    Json(v)
 }

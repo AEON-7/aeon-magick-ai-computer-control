@@ -209,6 +209,26 @@ fn tools_catalog() -> Value {
             tool("ipfs_add",
                  "Add a local file or directory (by absolute path on the Orb) to IPFS and return its root CID — e.g. to publish a site/app you built here. Reachable at the local gateway and any public IPFS gateway.",
                  json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Absolute path on the Orb to a file or directory."}}})),
+            // ── Model management: pull shared models down, push to connected systems ──
+            tool("connected_systems",
+                 "List the connected systems (DGX Sparks, agent gateways) this Orb manages over SSH — id, label, address, roles, status. Use the `id` as `system_id` for model_push / model_push_status.",
+                 json!({"type":"object","properties":{}})),
+            tool("model_list",
+                 "List AI models available to pull/push: `catalog` = shareable from this Orb, `network` = discovered over IPFS gossip, `library` = already pulled down to this Orb (ready to push). Each has cid + name + size.",
+                 json!({"type":"object","properties":{}})),
+            tool("model_pull",
+                 "Pull a shared model DOWN to this Orb's library — materializes its files locally (fetching from the IPFS network if needed) so it can be pushed to systems. Identify it by `cid`, by `name`, or both.",
+                 json!({"type":"object","properties":{"cid":{"type":"string","description":"model directory CID"},"name":{"type":"string","description":"model display name (used as the library folder)"}}})),
+            tool("model_push",
+                 "Push a model to a connected system, materializing it on the Orb first if needed, then rsyncing over the established SSH key. Runs in the BACKGROUND — poll model_push_status. Identify the model by cid and/or name (see model_list) and the target by system_id (see connected_systems).",
+                 json!({"type":"object","required":["system_id"],"properties":{
+                            "system_id":{"type":"string","description":"target system id from connected_systems"},
+                            "cid":{"type":"string","description":"model directory CID"},
+                            "name":{"type":"string","description":"model display name"},
+                            "dest":{"type":"string","description":"destination dir on the target; relative to the SSH user's home. Default aeon-models/<slug>."}}})),
+            tool("model_push_status",
+                 "Progress of model pushes to a connected system (keyed by model slug): phase, percent, and any error. Poll after model_push.",
+                 json!({"type":"object","required":["system_id"],"properties":{"system_id":{"type":"string"}}})),
             // NOTE: SSH key management is intentionally NOT exposed over MCP.
             // Granting/listing SSH access to the device is a human-admin-only
             // action (web UI + admin session). Agents must never manage SSH.
@@ -630,6 +650,47 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 axum::Json(crate::ipfs::AddReq { path }),
             )
             .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "connected_systems" => {
+            Ok(text_result(&serde_json::to_string_pretty(&crate::agent_connect::systems_value()).unwrap_or_default()))
+        }
+        "model_list" => {
+            Ok(text_result(&serde_json::to_string_pretty(&crate::ipfs::model_list_value()).unwrap_or_default()))
+        }
+        "model_pull" => {
+            let cid = args.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let v = crate::ipfs::pull_model(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::ipfs::PullReq { cid, name }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "model_push" => {
+            let system_id = args
+                .get("system_id")
+                .and_then(|v| v.as_str())
+                .ok_or("model_push needs a `system_id` — call connected_systems to list them")?
+                .to_string();
+            let cid = args.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let dest = args.get("dest").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let v = crate::agent_connect::push_model(
+                axum::extract::Path(system_id),
+                axum::Json(crate::agent_connect::PushModelReq { cid, name, dest }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "model_push_status" => {
+            let system_id = args
+                .get("system_id")
+                .and_then(|v| v.as_str())
+                .ok_or("model_push_status needs a `system_id`")?
+                .to_string();
+            let v = crate::agent_connect::push_status(axum::extract::Path(system_id)).await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
         "security_metrics" => {

@@ -30,6 +30,10 @@ apt-get install -y --no-install-recommends \
     stunnel4 \
     autossh \
     sshpass \
+    rsync \
+    parted \
+    e2fsprogs \
+    dosfstools \
     tor \
     obfs4proxy \
     i2pd

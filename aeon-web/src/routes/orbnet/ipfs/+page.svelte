@@ -1,13 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import qrcode from 'qrcode-generator';
+  import StorageManager from '$lib/components/StorageManager.svelte';
   import { getFleetRoster, type FleetOrb, type IpfsModel } from '$lib/api';
 
   type Status = {
     ok: boolean; enabled: boolean; installed: boolean; daemon: string;
     version: string; peer_id: string; peers: number; repo_bytes: number;
     storage_max: string; gateway_port: number;
+    disk_free_bytes?: number; disk_total_bytes?: number;
   };
+
   /// An index row: one model (by CID) + every fleet Orb that hosts it.
   type IndexRow = {
     m: IpfsModel;
@@ -20,7 +23,6 @@
   let busy = '';
   let poll: ReturnType<typeof setInterval>;
 
-  let storageGB = 10;
   let cid = '';
   let copied = '';
 
@@ -43,8 +45,6 @@
     try {
       status = await api('/status');
       err = '';
-      const m = (status?.storage_max ?? '10GB').match(/(\d+)/);
-      if (m && document.activeElement?.tagName !== 'INPUT') storageGB = parseInt(m[1]);
       if (status?.enabled && status?.daemon === 'active') {
         const p = await api('/pins');
         pins = p?.pins ?? [];
@@ -184,18 +184,6 @@
     busy = ''; await load();
   }
 
-  async function applyStorage() {
-    busy = 'Applying…';
-    try {
-      await api('/storage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ size: `${storageGB}GB` }),
-      });
-    } catch {}
-    busy = ''; await load();
-  }
-
   async function pin() {
     if (!cid.trim()) return;
     err = ''; busy = 'Pinning…';
@@ -321,14 +309,8 @@
         </div>
       </div>
 
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-2">
-        <div class="flex items-center justify-between">
-          <h2 class="font-mono text-cursed-300 text-sm">Storage allocation</h2>
-          <span class="text-ink-300 text-sm font-mono">{storageGB} GB</span>
-        </div>
-        <input type="range" min="1" max="200" bind:value={storageGB} class="w-full accent-cursed-500" />
-        <button class="font-mono text-xs px-3 py-1 rounded bg-cursed-700 hover:bg-cursed-600 text-white disabled:opacity-50" on:click={applyStorage} disabled={!!busy}>Apply</button>
-      </div>
+      <!-- Storage allocation + external drives + NAS (shared with Model Share). -->
+      <StorageManager />
 
       <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
         <h2 class="font-mono text-cursed-300 text-sm">Pin content (host a CID)</h2>

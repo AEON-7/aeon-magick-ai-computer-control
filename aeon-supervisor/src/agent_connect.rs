@@ -163,7 +163,13 @@ pub async fn get_pubkey() -> impl IntoResponse {
 
 /// GET /agent/systems
 pub async fn list_systems() -> impl IntoResponse {
-    Json(json!({"ok": true, "systems": load_systems()}))
+    Json(systems_value())
+}
+
+/// Connected-systems roster as a plain Value — shared by the REST handler and
+/// the MCP `connected_systems` tool so an agent can pick a valid push target.
+pub fn systems_value() -> serde_json::Value {
+    json!({"ok": true, "systems": load_systems()})
 }
 
 #[derive(Deserialize)]
@@ -4630,4 +4636,281 @@ pub async fn agent_create_persona(
         }
         Err(e) => Json(json!({"ok": false, "err": e, "manual_steps": manual_steps, "todo": todo_agent_path})),
     }
+}
+
+// ── Push a model to a connected system ───────────────────────────────────────
+//
+// The Orb materializes the model into its library (crate::ipfs::ensure_in_library
+// — pulling from the IPFS network if it isn't local yet), then rsyncs the plain
+// files to the chosen system over the SAME agent-connect SSH key already
+// authorized on it. Push runs in the background; the web UI / MCP poll
+// push_status for live percent. rsync over the existing outbound SSH means the
+// target never has to reach back to the Orb — it works anywhere the Orb can SSH.
+
+/// Live push progress, keyed by "<system_id>:<slug>". Value is a JSON status
+/// object {phase, pct, name, system, err?, done, dest?}.
+fn push_tasks() -> &'static std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>> {
+    static T: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>> =
+        std::sync::OnceLock::new();
+    T.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+fn push_set(key: &str, v: serde_json::Value) {
+    if let Ok(mut t) = push_tasks().lock() {
+        t.insert(key.to_string(), v);
+    }
+}
+
+/// Remote paths are the admin's choice, but keep them shell-safe: allow only a
+/// conservative charset and reject parent-dir escapes. Empty → caller default.
+fn sanitize_dest(dest: &str) -> String {
+    let d: String = dest
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        .collect();
+    if d.contains("..") { return String::new(); }
+    d.trim_end_matches('/').to_string()
+}
+
+#[derive(Deserialize)]
+pub struct PushModelReq {
+    /// Directory CID to push. Optional if `name` resolves via the catalog.
+    #[serde(default)]
+    pub cid: String,
+    /// Model display name (also slugified for the Orb library subdir).
+    #[serde(default)]
+    pub name: String,
+    /// Destination directory on the target. Relative → under the SSH user's
+    /// home. Empty → "aeon-models/<slug>".
+    #[serde(default)]
+    pub dest: String,
+}
+
+/// POST /agent/systems/:id/models/push — start a background push. Returns a task
+/// key to poll via models/push/status. Body: {cid?, name?, dest?}.
+pub async fn push_model(Path(id): Path<String>, Json(req): Json<PushModelReq>) -> Json<serde_json::Value> {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    // Resolve (cid, name) from the request or the model catalog.
+    let (cid, name) = if !req.cid.is_empty() && !req.name.is_empty() {
+        (req.cid.clone(), req.name.clone())
+    } else if let Some(e) = crate::ipfs::find_model(if !req.cid.is_empty() { &req.cid } else { &req.name }) {
+        (
+            if req.cid.is_empty() { e.cid } else { req.cid.clone() },
+            if req.name.is_empty() { e.name } else { req.name.clone() },
+        )
+    } else {
+        return Json(json!({"ok": false, "err": "unknown model — pass both cid and name, or a cataloged cid/name"}));
+    };
+    if cid.is_empty() {
+        return Json(json!({"ok": false, "err": "no CID to push"}));
+    }
+    let slug = crate::ipfs::model_slug(&name);
+    let dest = {
+        let d = sanitize_dest(&req.dest);
+        if d.is_empty() { format!("aeon-models/{slug}") } else { d }
+    };
+    let key = format!("{}:{}", sys.id, slug);
+    // If a push for this (system, model) is already mid-flight, don't stack.
+    if let Ok(t) = push_tasks().lock() {
+        if let Some(v) = t.get(&key) {
+            if !v.get("done").and_then(|b| b.as_bool()).unwrap_or(false) {
+                return Json(json!({"ok": true, "task": key, "already_running": true}));
+            }
+        }
+    }
+    push_set(&key, json!({"phase": "queued", "pct": 0, "name": name, "system": sys.label, "dest": dest, "done": false}));
+    let key_c = key.clone();
+    tokio::task::spawn_blocking(move || push_worker(sys, cid, name, slug, dest, key_c));
+    Json(json!({"ok": true, "task": key, "system": id}))
+}
+
+/// The blocking transfer: ensure the model is in the Orb library, then rsync it
+/// to the target with live percent. Updates push_tasks throughout.
+fn push_worker(sys: System, cid: String, name: String, slug: String, dest: String, key: String) {
+    let base = json!({"name": name, "system": sys.label, "dest": dest});
+    let upd = |phase: &str, pct: u64, extra: serde_json::Value| {
+        let mut v = base.clone();
+        v["phase"] = json!(phase);
+        v["pct"] = json!(pct);
+        v["done"] = json!(matches!(phase, "done" | "error"));
+        if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+            for (k, val) in e { o.insert(k.clone(), val.clone()); }
+        }
+        v
+    };
+
+    // 1. Pull down into the Orb library (no-op if already materialized).
+    push_set(&key, upd("pulling", 0, json!({})));
+    let bytes = match crate::ipfs::ensure_in_library(&cid, &slug) {
+        Ok(b) => b,
+        Err(e) => { push_set(&key, upd("error", 0, json!({"err": format!("pull to Orb failed: {e}")}))); return; }
+    };
+
+    // 2. Make sure the destination exists on the target.
+    let src = crate::ipfs::library_path(&slug);
+    let src_arg = format!("{}/", src.to_string_lossy()); // trailing slash → copy CONTENTS
+    let target = format!("{}@{}", sys.ssh_user, sys.address);
+    let mkdir = Command::new("ssh")
+        .arg("-i").arg(key_path())
+        .args([
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=8", "-o", "PreferredAuthentications=publickey",
+            "-p", &sys.port.to_string(), &target,
+            "mkdir", "-p", &dest,
+        ])
+        .output();
+    if let Ok(o) = &mkdir {
+        if !o.status.success() {
+            let e = String::from_utf8_lossy(&o.stderr);
+            push_set(&key, upd("error", 0, json!({"err": format!("mkdir on target failed: {}", e.lines().last().unwrap_or("ssh error"))})));
+            return;
+        }
+    } else if let Err(e) = &mkdir {
+        push_set(&key, upd("error", 0, json!({"err": format!("ssh to target failed: {e}")})));
+        return;
+    }
+
+    // 3. rsync the tree with a live overall percentage (--info=progress2).
+    push_set(&key, upd("transferring", 0, json!({"total_bytes": bytes})));
+    let ssh_e = format!(
+        "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o PreferredAuthentications=publickey -p {}",
+        key_path().display(),
+        sys.port
+    );
+    let child = Command::new("rsync")
+        .args(["-a", "--info=progress2", "--no-inc-recursive"])
+        .arg("-e").arg(&ssh_e)
+        .arg(&src_arg)
+        .arg(format!("{target}:{dest}/"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => { push_set(&key, upd("error", 0, json!({"err": format!("rsync not available on the Orb: {e}")}))); return; }
+    };
+
+    // Stream stdout: rsync's progress2 overwrites one line with '\r', so read up
+    // to each carriage return and scrape the trailing "NN%".
+    if let Some(out) = child.stdout.take() {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(out);
+        let mut buf: Vec<u8> = Vec::new();
+        while reader.read_until(b'\r', &mut buf).unwrap_or(0) > 0 {
+            let s = String::from_utf8_lossy(&buf);
+            if let Some(p) = parse_pct(&s) {
+                push_set(&key, upd("transferring", p as u64, json!({"total_bytes": bytes})));
+            }
+            buf.clear();
+        }
+    }
+    let status = child.wait();
+    let stderr = child.stderr.take().map(|mut e| {
+        use std::io::Read;
+        let mut s = String::new();
+        let _ = e.read_to_string(&mut s);
+        s
+    }).unwrap_or_default();
+
+    match status {
+        Ok(st) if st.success() => {
+            push_set(&key, upd("done", 100, json!({"total_bytes": bytes, "path": dest})));
+        }
+        Ok(_) => {
+            let msg = stderr.lines().last().unwrap_or("rsync failed").to_string();
+            push_set(&key, upd("error", 0, json!({"err": msg})));
+        }
+        Err(e) => push_set(&key, upd("error", 0, json!({"err": e.to_string()}))),
+    }
+}
+
+/// Scrape the last "NN%" out of an rsync progress fragment.
+fn parse_pct(s: &str) -> Option<u8> {
+    let pos = s.rfind('%')?;
+    let bytes = s.as_bytes();
+    let mut i = pos;
+    while i > 0 && bytes[i - 1].is_ascii_digit() { i -= 1; }
+    s[i..pos].parse::<u8>().ok().map(|p| p.min(100))
+}
+
+/// GET /agent/systems/:id/models/push/status — every push status for this
+/// system (keyed by slug), so the UI can show all in-flight/finished pushes.
+pub async fn push_status(Path(id): Path<String>) -> Json<serde_json::Value> {
+    let prefix = format!("{id}:");
+    let items: serde_json::Map<String, serde_json::Value> = push_tasks()
+        .lock()
+        .map(|t| {
+            t.iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(k, v)| (k[prefix.len()..].to_string(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(json!({"ok": true, "pushes": items}))
+}
+
+#[derive(Deserialize)]
+pub struct BrowseQuery {
+    /// Absolute directory on the target. Empty → the SSH user's home.
+    #[serde(default)]
+    pub path: String,
+}
+
+/// GET /agent/systems/:id/browse?path=… — list the sub-directories of `path` on
+/// the target, for the "push to a specific folder" picker. The path is
+/// base64'd into the remote command so nothing the user types reaches the
+/// target shell unquoted. Empty path = the SSH user's home.
+pub async fn browse_system(
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<BrowseQuery>,
+) -> Json<serde_json::Value> {
+    let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
+        return Json(json!({"ok": false, "err": "no such system"}));
+    };
+    let path = q.path.clone();
+    let v = tokio::task::spawn_blocking(move || -> serde_json::Value {
+        let b = b64(path.as_bytes());
+        // Separate the `cd` check from the listing: a folder with NO
+        // sub-directories makes `grep '/$'` exit non-zero, which must NOT be
+        // mistaken for "can't open" — hence the explicit if/else + `|| true`.
+        let remote = format!(
+            "p=$(printf %s '{b}' | base64 -d 2>/dev/null); [ -z \"$p\" ] && p=\"$HOME\"; \
+             if cd \"$p\" 2>/dev/null; then echo \"AEONPWD:$(pwd)\"; ls -1Ap 2>/dev/null | grep '/$' || true; else echo AEONERR; fi"
+        );
+        match ssh_capture(&sys, &remote) {
+            Ok(out) => {
+                if out.contains("AEONERR") || !out.contains("AEONPWD:") {
+                    return json!({"ok": false, "err": "cannot open that folder"});
+                }
+                let mut pwd = String::new();
+                let mut dirs: Vec<String> = Vec::new();
+                for line in out.lines() {
+                    if let Some(p) = line.strip_prefix("AEONPWD:") {
+                        pwd = p.trim().to_string();
+                    } else {
+                        let d = line.trim().trim_end_matches('/');
+                        if !d.is_empty() && d != "." && d != ".." {
+                            dirs.push(d.to_string());
+                        }
+                    }
+                }
+                dirs.sort();
+                let parent = if pwd == "/" || pwd.is_empty() {
+                    String::new()
+                } else {
+                    std::path::Path::new(&pwd)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                };
+                json!({"ok": true, "path": pwd, "parent": parent, "dirs": dirs})
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "browse task failed"}));
+    Json(v)
 }

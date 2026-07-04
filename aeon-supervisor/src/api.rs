@@ -163,6 +163,13 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/agent/systems/:id/deploy/catalog", get(crate::agent_connect::deploy_catalog))
         .route("/agent/systems/:id/deploy", post(crate::agent_connect::deploy_image))
         .route("/agent/systems/:id/deploy/status", get(crate::agent_connect::deploy_status))
+        // Push an IPFS-shared model DOWN to the Orb's library, then rsync it to
+        // this connected system over the agent-connect SSH key. Background;
+        // status carries live percent.
+        .route("/agent/systems/:id/models/push", post(crate::agent_connect::push_model))
+        .route("/agent/systems/:id/models/push/status", get(crate::agent_connect::push_status))
+        // Browse the target's directories for the "push to a specific folder" picker.
+        .route("/agent/systems/:id/browse", get(crate::agent_connect::browse_system))
         .route("/agent/systems/:id/agents", get(crate::agent_connect::system_agents))
         .route("/agent/systems/:id/usage", get(crate::agent_connect::system_usage))
         // F7b: deploy a NEW persona — create the workspace + SOUL/IDENTITY,
@@ -517,6 +524,22 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/models/import-hf", post(crate::ipfs::import_hf))
         .route("/ipfs/models/fetch",  post(crate::ipfs::fetch_model))
         .route("/ipfs/models/remove", post(crate::ipfs::remove_model))
+        // Model LIBRARY: pull a shared model DOWN to this Orb as plain files
+        // (re-pushable to connected systems); list what's materialized locally.
+        .route("/ipfs/models/library", get(crate::ipfs::models_library))
+        .route("/ipfs/models/pull",    post(crate::ipfs::pull_model))
+        // External USB/SSD storage: detect drives, format ("Prepare Device"),
+        // adopt one as the Orb's data store (IPFS repo + model library).
+        .route("/disks",         get(crate::storage_devices::list))
+        .route("/disks/status",  get(crate::storage_devices::status))
+        .route("/disks/prepare", post(crate::storage_devices::prepare))
+        .route("/disks/use",     post(crate::storage_devices::adopt))
+        .route("/disks/release", post(crate::storage_devices::release))
+        // Optional LAN NAS (Samba) — off by default; RW shares behind a password.
+        .route("/nas/status",   get(crate::nas::status))
+        .route("/nas/enable",   post(crate::nas::enable))
+        .route("/nas/disable",  post(crate::nas::disable))
+        .route("/nas/password", post(crate::nas::set_password))
         // Mysterium — bandwidth-sharing dVPN node (admin-only; wallet/payout off-device on mystnodes.co)
         .route("/mysterium/status",  get(crate::mysterium::status))
         .route("/mysterium/enable",  post(crate::mysterium::enable))

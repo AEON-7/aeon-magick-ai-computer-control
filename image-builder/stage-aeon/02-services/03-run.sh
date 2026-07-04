@@ -12,6 +12,10 @@ THIS_DIR="$(dirname "$0")"
 install -m 0755 "${THIS_DIR}/files/aeon-orbnet.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-orbnet"
 install -m 0755 "${THIS_DIR}/files/aeon-onions.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-onions"
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs"
+# External USB/SSD storage helper (detect / prepare / adopt a data drive).
+install -m 0755 "${THIS_DIR}/files/aeon-storage.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-storage"
+# Optional LAN NAS (Samba) helper — installs samba on first enable, off by default.
+install -m 0755 "${THIS_DIR}/files/aeon-nas.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-nas"
 # Model Share: auto-enroll boot oneshot + fleet-free pubsub gossip daemon.
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs-boot.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs-boot"
 install -m 0755 "${THIS_DIR}/files/aeon-modelshare"   "${ROOTFS_DIR}/usr/local/bin/aeon-modelshare"

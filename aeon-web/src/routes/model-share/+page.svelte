@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import StorageManager from '$lib/components/StorageManager.svelte';
 
   // Model Share — a friendly, fleet-FREE marketplace of AI models shared over
   // IPFS. Every Orb auto-enrolls at boot and gossips its catalog on a pubsub
@@ -65,6 +66,98 @@
   let toggling = false;
   let hfUrl = '';
   let hfBusy = false;
+
+  // ── Push a model to a connected system (Agent Dashboard: DGX / gateways) ──
+  let systems: Array<{ id: string; label: string; address: string; roles?: string[]; status?: string }> = [];
+  let pushSel = '';
+  let pushMsg = '';
+  let pushActive = false;
+
+  // Push dialog + destination
+  let pushEntry: Entry | null = null;        // the model being pushed (opens the dialog)
+  let pushMode: 'home' | 'custom' = 'home';  // default home folder vs a browsed folder
+  let pushDest = '';                          // chosen target directory (custom mode)
+
+  // Remote folder browser (lists directories on the target over SSH)
+  let browsePath = '';
+  let browseParent = '';
+  let browseDirs: string[] = [];
+  let browseLoading = false;
+  let browseErr = '';
+
+  async function loadSystems() {
+    try {
+      const r = await fetch('/api/agent/systems', { credentials: 'same-origin' }).then((x) => x.json());
+      systems = r?.systems ?? [];
+      if (!pushSel && systems[0]) pushSel = systems[0].id;
+    } catch { /* not admin / none registered */ }
+  }
+
+  function slugify(name: string): string {
+    const s = name.trim().toLowerCase().replace(/[^a-z0-9.-]+/g, '-').replace(/^-+|-+$/g, '');
+    return (s || 'model').slice(0, 80);
+  }
+
+  function openPush(entry: Entry) {
+    pushEntry = entry;
+    pushMode = 'home'; pushDest = '';
+    browseErr = ''; browseDirs = [];
+    pushMsg = ''; pushActive = false;
+    loadSystems();
+  }
+  function closePush() { pushEntry = null; }
+
+  function doPush() {
+    if (!pushEntry || !pushSel) return;
+    // home → backend defaults to ~/aeon-models/<slug>; custom → the browsed
+    // folder + a per-model subdir so pushes don't collide.
+    const dest = pushMode === 'custom' && pushDest ? `${pushDest.replace(/\/+$/, '')}/${slugify(pushEntry.name)}` : '';
+    pushToSystem(pushEntry, pushSel, dest);
+  }
+
+  async function pushToSystem(entry: Entry, systemId: string, dest: string) {
+    pushActive = true; pushMsg = 'starting…';
+    try {
+      const r = await fetch(`/api/agent/systems/${encodeURIComponent(systemId)}/models/push`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cid: entry.cid, name: entry.name, dest }),
+      }).then((x) => x.json());
+      if (!r?.ok) { pushMsg = 'error: ' + (r?.err ?? 'push failed'); pushActive = false; return; }
+      const slug = String(r.task ?? '').split(':').slice(1).join(':');
+      pollPush(systemId, slug);
+    } catch (e: any) { pushMsg = 'error: ' + (e?.message ?? 'push failed'); pushActive = false; }
+  }
+
+  async function browseTo(path: string) {
+    if (!pushSel) return;
+    browseLoading = true; browseErr = '';
+    try {
+      const r = await fetch(`/api/agent/systems/${encodeURIComponent(pushSel)}/browse?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' }).then((x) => x.json());
+      if (!r?.ok) { browseErr = r?.err ?? 'cannot open folder'; }
+      else { browsePath = r.path; browseParent = r.parent ?? ''; browseDirs = r.dirs ?? []; pushMode = 'custom'; pushDest = r.path; }
+    } catch (e: any) { browseErr = e?.message ?? 'browse failed'; }
+    browseLoading = false;
+  }
+  function startBrowse() { browseTo(''); }
+
+  async function pollPush(sysId: string, slug: string) {
+    try {
+      const r = await fetch(`/api/agent/systems/${encodeURIComponent(sysId)}/models/push/status`, { credentials: 'same-origin' }).then((x) => x.json());
+      const st = r?.pushes?.[slug];
+      if (st) {
+        pushMsg =
+          st.phase === 'transferring' ? `transferring ${st.pct ?? 0}%`
+          : st.phase === 'pulling' ? 'pulling to Orb…'
+          : st.phase === 'queued' ? 'queued…'
+          : st.phase === 'done' ? '✓ pushed to ' + (st.system ?? 'system') + ' → ' + (st.path ?? '')
+          : st.phase === 'error' ? 'error: ' + (st.err ?? 'failed')
+          : String(st.phase ?? '');
+        if (st.done) { pushActive = false; return; }
+      }
+    } catch { /* transient */ }
+    setTimeout(() => pollPush(sysId, slug), 1500);
+  }
 
   async function toggleIpfs() {
     if (!node) return;
@@ -314,7 +407,9 @@
     await load();
   }
 
-  onMount(() => { load(); poll = setInterval(load, 5000); });
+  onMount(() => { load(); loadSystems(); poll = setInterval(load, 5000); });
+  // Reset the push status line whenever a different model detail opens.
+  $: if (detail) { pushMsg = ''; pushActive = false; }
   onDestroy(() => clearInterval(poll));
 </script>
 
@@ -350,7 +445,9 @@
         {node?.daemon === 'active' ? 'IPFS running' : node?.enabled ? 'IPFS starting' : 'IPFS off'}
       </span>
       {#if node?.daemon === 'active'}
-        <span class="text-ink-500 text-xs font-mono">{node.peers} swarm peers · {fmtBytes(node.repo_bytes)} / {node.storage_max}</span>
+        <span class="text-ink-500 text-xs font-mono">{node.peers} swarm peers · {fmtBytes(node.repo_bytes)} /
+          <a href="/orbnet/ipfs" class="underline decoration-dotted hover:text-cursed-300"
+             title="This is your IPFS storage allocation, not an upload cap — click to adjust how much storage this Orb shares with the network">{node.storage_max}</a></span>
       {/if}
       <div class="flex-1"></div>
       <!-- on/off switch -->
@@ -363,6 +460,16 @@
     </div>
 
     {#if node?.enabled}
+      <!-- Storage allocation, external drives + LAN sharing — the same controls
+           as the IPFS page, collapsible so the model grid stays front and centre. -->
+      <details class="rounded-lg border border-ink-700 bg-ink-900/60 group">
+        <summary class="cursor-pointer select-none px-4 py-2.5 font-mono text-sm text-cursed-300 flex items-center gap-2 list-none">
+          <span class="text-ink-500 transition-transform group-open:rotate-90">▸</span>
+          Storage, drives &amp; LAN sharing
+        </summary>
+        <div class="p-3 pt-0"><StorageManager /></div>
+      </details>
+
       <!-- toolbar -->
       <div class="flex items-center gap-3 flex-wrap">
         <button class="btn-primary text-sm px-4 py-2 rounded-md" on:click={pickFile} disabled={uploadPct >= 0}>+ Share a model</button>
@@ -454,14 +561,18 @@
             <div class="mt-auto pt-1 flex items-center gap-2 text-xs">
               {#if busy}
                 <span class="text-amber-300 font-mono">{busy}</span>
-              {:else if row.local}
-                <span class="text-emerald-400 font-mono">✓ hosted here</span>
-                <button class="ml-auto text-ink-400 hover:text-cursed-300" on:click={() => editModel(row)} title="Edit this model's card, image + README">edit</button>
-                <a href={downloadUrl(row.entry)} class="text-ink-400 hover:text-cursed-300" title="Download the file from your gateway">save</a>
-                <button class="{confirmRemove === row.entry.cid ? 'text-red-400' : 'text-ink-500 hover:text-red-400'}" on:click={() => unshare(row.entry.cid)}>{confirmRemove === row.entry.cid ? 'sure?' : 'unshare'}</button>
               {:else}
-                <button class="btn text-xs py-1 px-2.5 rounded" on:click={() => download(row)}>↓ Download</button>
-                <button class="ml-auto text-ink-500 hover:text-cursed-300" on:click={() => (detail = row)}>details</button>
+                <!-- Primary action on every model: push it to a connected system. -->
+                <button class="btn-primary text-xs py-1 px-2.5 rounded inline-flex items-center gap-1"
+                        on:click={() => openPush(row.entry)} title="Push this model to a connected system (DGX / gateway)">⇧ Push to server</button>
+                {#if row.local}
+                  <button class="ml-auto text-ink-400 hover:text-cursed-300" on:click={() => editModel(row)} title="Edit this model's card, image + README">edit</button>
+                  <a href={downloadUrl(row.entry)} class="text-ink-400 hover:text-cursed-300" title="Download the file from your gateway">save</a>
+                  <button class="{confirmRemove === row.entry.cid ? 'text-red-400' : 'text-ink-500 hover:text-red-400'}" on:click={() => unshare(row.entry.cid)}>{confirmRemove === row.entry.cid ? 'sure?' : 'unshare'}</button>
+                {:else}
+                  <button class="ml-auto text-ink-500 hover:text-cursed-300" on:click={() => download(row)} title="Download + host on this Orb">↓ host</button>
+                  <button class="text-ink-500 hover:text-cursed-300" on:click={() => (detail = row)}>details</button>
+                {/if}
               {/if}
             </div>
           </div>
@@ -597,7 +708,10 @@
         hosts: {detail.hosts.map((h) => (h.is_self ? 'this orb' : h.label)).join(', ')}
       </div>
       <div class="text-[10px] text-ink-600 font-mono break-all">CID {detail.entry.cid}</div>
-      <div class="flex justify-end gap-2 pt-1">
+
+      <div class="flex justify-end gap-2 pt-1 border-t border-ink-800">
+        <button class="btn-primary text-sm px-3 py-1.5 rounded mr-auto inline-flex items-center gap-1"
+                on:click={() => detail && openPush(detail.entry)}>⇧ Push to server</button>
         <a href={downloadUrl(detail.entry)} class="btn text-sm px-3 py-1.5 rounded">Save file</a>
         {#if detail.local}
           <span class="self-center text-emerald-400 font-mono text-xs">✓ hosted here</span>
@@ -607,6 +721,82 @@
           <button class="btn-primary text-sm px-4 py-1.5 rounded" on:click={() => detail && download(detail)}>↓ Download + host</button>
         {/if}
       </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ── Push-to-server dialog: pick a connected system + destination folder ── -->
+{#if pushEntry}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" on:click={closePush}>
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+    <div class="w-full max-w-md rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-4 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
+      <div class="flex items-center justify-between gap-2">
+        <h2 class="font-mono text-cursed-300 text-sm truncate">⇧ Push “{pushEntry.name}”</h2>
+        <button class="text-ink-500 hover:text-ink-200 shrink-0" on:click={closePush}>✕</button>
+      </div>
+
+      {#if !systems.length}
+        <p class="text-sm text-ink-400">No connected systems yet. Add a DGX / gateway in the
+          <a href="/agent" class="text-cursed-300 hover:underline">Agent Dashboard</a> first.</p>
+        <div class="flex justify-end"><button class="btn text-sm px-3 py-1.5 rounded" on:click={closePush}>Close</button></div>
+      {:else}
+        <!-- 1. target system -->
+        <label class="block text-xs font-mono text-ink-400">Target system
+          <select bind:value={pushSel} class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm">
+            {#each systems as s}
+              <option value={s.id}>{s.label || s.address}{s.roles?.length ? ' · ' + s.roles.join('/') : ''}</option>
+            {/each}
+          </select>
+        </label>
+
+        <!-- 2. destination -->
+        <div class="space-y-1.5">
+          <div class="text-xs font-mono text-ink-400">Destination folder</div>
+          <label class="flex items-center gap-2 text-sm text-ink-200 cursor-pointer">
+            <input type="radio" bind:group={pushMode} value="home" /> Home folder <code class="text-ink-500 text-xs">~/aeon-models/</code>
+          </label>
+          <label class="flex items-center gap-2 text-sm text-ink-200 cursor-pointer">
+            <input type="radio" bind:group={pushMode} value="custom" on:change={startBrowse} /> Browse the target…
+          </label>
+        </div>
+
+        <!-- remote folder browser -->
+        {#if pushMode === 'custom'}
+          <div class="rounded border border-ink-700 bg-ink-950/50 p-2 space-y-1.5">
+            <div class="flex items-center gap-2 text-[11px] font-mono">
+              <button class="text-cursed-300 hover:text-cursed-200 disabled:opacity-40" on:click={() => browseTo(browseParent)} disabled={!browseParent || browseLoading} title="Up one level">⬆</button>
+              <span class="truncate flex-1 text-ink-300" title={browsePath}>{browsePath || '…'}</span>
+              {#if browseLoading}<span class="text-ink-500">…</span>{/if}
+            </div>
+            {#if browseErr}<div class="text-[11px] text-red-400 font-mono">{browseErr}</div>{/if}
+            <div class="max-h-40 overflow-y-auto space-y-0.5">
+              {#each browseDirs as d}
+                <button class="w-full text-left text-xs font-mono text-ink-300 hover:text-cursed-300 hover:bg-ink-800 rounded px-2 py-1 truncate"
+                        on:click={() => browseTo(browsePath.replace(/\/$/, '') + '/' + d)}>📁 {d}</button>
+              {:else}
+                {#if !browseLoading && !browseErr}<div class="text-[11px] text-ink-600 px-2 py-1">no sub-folders here</div>{/if}
+              {/each}
+            </div>
+            {#if browsePath}
+              <div class="text-[10px] text-ink-600 leading-snug break-all">Lands in <code class="text-ink-500">{browsePath.replace(/\/$/, '')}/{slugify(pushEntry.name)}</code></div>
+            {/if}
+          </div>
+        {/if}
+
+        {#if pushMsg}
+          <div class="text-xs font-mono {pushMsg.startsWith('error') ? 'text-red-400' : pushMsg.startsWith('✓') ? 'text-emerald-400' : 'text-amber-300'} break-all">{pushMsg}</div>
+        {/if}
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button class="btn text-sm px-3 py-1.5 rounded" on:click={closePush}>Close</button>
+          <button class="btn-primary text-sm px-4 py-1.5 rounded disabled:opacity-50"
+                  on:click={doPush} disabled={pushActive || !pushSel || (pushMode === 'custom' && !browsePath)}>
+            {pushActive ? 'pushing…' : '⇧ Push'}
+          </button>
+        </div>
+        <p class="text-[10px] text-ink-600 leading-snug">Pulls the model down to this Orb (if it isn't already), then rsyncs it to the chosen system over its SSH key.</p>
+      {/if}
     </div>
   </div>
 {/if}
