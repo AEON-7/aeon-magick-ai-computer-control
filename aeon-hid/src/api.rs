@@ -115,12 +115,47 @@ async fn post_key(
     State(state): State<SharedState>,
     Json(req): Json<KeyReq>,
 ) -> impl IntoResponse {
+    // Non-shift modifiers (Ctrl/Alt/Gui, both L and R). When any is present the
+    // chord is a shortcut, so we must NOT force an inherent Shift onto a letter
+    // key — ['CTRL','C'] has to stay Ctrl+C, not Ctrl+Shift+C.
+    const CTRL_ALT_GUI: u8 = 0x01 | 0x04 | 0x08 | 0x10 | 0x40 | 0x80;
+
     let mut modifier = 0u8;
     let mut keys: Vec<u8> = Vec::new();
+
+    // Pass 1: explicit modifier names (SHIFT / CTRL / ALT / GUI / …).
     for name in &req.keys {
         if let Some(m) = input::modifier_from_name(name) {
             modifier |= m;
-        } else if let Some(k) = input::keycode_from_name(name) {
+        }
+    }
+    let shortcut = modifier & CTRL_ALT_GUI != 0;
+
+    // Pass 2: keycodes. A single printable character carries its OWN modifier
+    // (e.g. '&' = Shift+7, 'A' = Shift+a). Phones and on-screen keyboards send
+    // the symbol without a separate SHIFT in the chord (the symbol layer isn't a
+    // physical Shift press), so derive it from the character itself — otherwise
+    // '&' types '7', '!' → '1', '*' → '8', and capitals → lowercase. OR-ing is
+    // idempotent with an explicit SHIFT, so desktop chords like ['SHIFT','&']
+    // still resolve to '&'.
+    for name in &req.keys {
+        if input::modifier_from_name(name).is_some() {
+            continue;
+        }
+        let mut chs = name.chars();
+        let single = chs.next().filter(|_| chs.next().is_none());
+        if let Some(ch) = single {
+            if let Some((m, k)) = input::ascii_to_hid(ch) {
+                // Letters inside a Ctrl/Alt/Gui shortcut keep their base keycode
+                // without the implicit Shift; symbols always need theirs (they
+                // can't be produced any other way).
+                let m = if ch.is_ascii_alphabetic() && shortcut { 0 } else { m };
+                modifier |= m;
+                keys.push(k);
+                continue;
+            }
+        }
+        if let Some(k) = input::keycode_from_name(name) {
             keys.push(k);
         } else {
             return (

@@ -23,6 +23,27 @@
   let busy = '';
   let poll: ReturnType<typeof setInterval>;
 
+  // Startup watchdog. "starting" is a DERIVED state (enabled=true but the daemon
+  // isn't active yet); without a deadline a dead/crash-looping daemon would show
+  // amber "starting" forever. If the backend reports the daemon 'failed' we show
+  // that immediately; otherwise, if it hasn't come up within STALL_MS we flip to
+  // 'stalled' with a diagnostic hint — so the UI always escapes "starting", even
+  // against an older backend that only reports active/inactive.
+  const STALL_MS = 120_000;
+  let startedAt = Date.now();
+  // Recomputed every 4s poll (each `status` reassignment retriggers this).
+  $: uiState = !status
+    ? 'off'
+    : status.daemon === 'active'
+      ? 'running'
+      : status.daemon === 'failed'
+        ? 'failed'
+        : status.enabled && Date.now() - startedAt > STALL_MS
+          ? 'stalled'
+          : status.enabled
+            ? 'starting'
+            : 'off';
+
   let cid = '';
   let copied = '';
 
@@ -45,6 +66,9 @@
     try {
       status = await api('/status');
       err = '';
+      // Reset the startup clock while the daemon is healthy, so if it later dies
+      // the stall watchdog measures from that point, not page load.
+      if (status?.daemon === 'active') startedAt = Date.now();
       if (status?.enabled && status?.daemon === 'active') {
         const p = await api('/pins');
         pins = p?.pins ?? [];
@@ -175,6 +199,7 @@
 
   async function enable() {
     busy = 'Installing kubo + starting…';
+    startedAt = Date.now(); // restart the stall watchdog for this attempt
     try { await api('/enable', { method: 'POST' }); } catch {}
     busy = ''; await load();
   }
@@ -273,15 +298,21 @@
 
     <div class="flex items-center gap-3 flex-wrap">
       <span
-        class="font-mono text-[10px] uppercase tracking-wider px-2 py-1 rounded {status?.daemon === 'active'
+        class="font-mono text-[10px] uppercase tracking-wider px-2 py-1 rounded {uiState === 'running'
           ? 'bg-emerald-900/50 text-emerald-300'
-          : status?.enabled
-            ? 'bg-amber-900/50 text-amber-300'
-            : 'bg-ink-800 text-ink-400'}"
-      >{status?.daemon === 'active' ? 'running' : status?.enabled ? 'starting' : 'off'}</span>
+          : uiState === 'failed' || uiState === 'stalled'
+            ? 'bg-red-900/50 text-red-300'
+            : uiState === 'starting'
+              ? 'bg-amber-900/50 text-amber-300'
+              : 'bg-ink-800 text-ink-400'}"
+      >{uiState}</span>
       {#if status?.daemon === 'active'}
         <span class="text-ink-400 text-xs"
           >{status.peers} peers · {fmtBytes(status.repo_bytes)} / {status.storage_max} · kubo {status.version}</span>
+      {/if}
+      {#if uiState === 'failed' || uiState === 'stalled'}
+        <span class="text-red-300/80 text-xs"
+          >daemon didn't come up — SSH in and check <code class="font-mono">journalctl -u aeon-ipfs</code></span>
       {/if}
       <div class="flex-1"></div>
       {#if busy}<span class="text-xs text-cursed-300">{busy}</span>{/if}

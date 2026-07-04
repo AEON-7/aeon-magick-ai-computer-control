@@ -441,8 +441,8 @@
 
     <!-- IPFS node status + on/off toggle -->
     <div class="rounded-lg border border-ink-700 bg-ink-900 p-3 flex items-center gap-3 flex-wrap">
-      <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-1 rounded {node?.daemon === 'active' ? 'bg-emerald-900/50 text-emerald-300' : node?.enabled ? 'bg-amber-900/50 text-amber-300' : 'bg-ink-800 text-ink-400'}">
-        {node?.daemon === 'active' ? 'IPFS running' : node?.enabled ? 'IPFS starting' : 'IPFS off'}
+      <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-1 rounded {node?.daemon === 'active' ? 'bg-emerald-900/50 text-emerald-300' : node?.daemon === 'failed' ? 'bg-red-900/50 text-red-300' : node?.enabled ? 'bg-amber-900/50 text-amber-300' : 'bg-ink-800 text-ink-400'}">
+        {node?.daemon === 'active' ? 'IPFS running' : node?.daemon === 'failed' ? 'IPFS failed' : node?.enabled ? 'IPFS starting' : 'IPFS off'}
       </span>
       {#if node?.daemon === 'active'}
         <span class="text-ink-500 text-xs font-mono">{node.peers} swarm peers · {fmtBytes(node.repo_bytes)} /
@@ -512,6 +512,8 @@
     <!-- model grid -->
     {#if !node?.enabled}
       <div class="text-ink-500 text-sm text-center py-10">IPFS is off — flip the switch above to join the Model Share network.</div>
+    {:else if node?.daemon === 'failed'}
+      <div class="text-red-300 text-sm text-center py-10">IPFS daemon failed to start — SSH into the Orb and check <code class="font-mono">journalctl -u aeon-ipfs</code>.</div>
     {:else if node?.daemon !== 'active'}
       <div class="text-ink-500 text-sm text-center py-10">Connecting to the IPFS network… (first run downloads kubo, ~30 MB)</div>
     {:else if filtered.length === 0}

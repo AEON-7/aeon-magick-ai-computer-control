@@ -30,7 +30,7 @@
     {
       key: 'ipfs', icon: '📦', name: 'IPFS', href: '/orbnet/ipfs', ready: true,
       tagline: 'Decentralized file & site hosting + a gateway for all your devices.',
-      status: ipfs ? (ipfs.enabled ? (ipfs.daemon === 'active' ? `on · ${ipfs.peers} peers` : 'starting…') : 'off') : '…',
+      status: ipfs ? (ipfs.enabled ? (ipfs.daemon === 'active' ? `on · ${ipfs.peers} peers` : ipfs.daemon === 'failed' ? 'failed' : 'starting…') : 'off') : '…',
     },
     {
       key: 'mysterium', icon: '🌐', name: 'Mysterium', href: '/orbnet/mysterium', ready: true,

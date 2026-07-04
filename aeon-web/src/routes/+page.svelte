@@ -673,9 +673,16 @@
     }
   }
   function onKbdKeydown(ev: KeyboardEvent) {
-    // Special keys → forward via /api/hid/key. We DON'T do this for
-    // printable characters because the `input` event already handled
-    // them via typeText.
+    // This keydown bubbles to the window-level `onKey`, which (because the
+    // soft keyboard set captured=true) would ALSO forward the character via
+    // /api/hid/key. On phones a symbol-layer key fires with ev.shiftKey=false,
+    // so that path drops the Shift and types the base key ('&' → '7'). Stop it
+    // here so printable chars go ONLY through the correct input→typeText path.
+    ev.stopPropagation();
+    // IME / composition sentinel — let the `input` event (typeText) handle it.
+    if (ev.isComposing || ev.keyCode === 229) return;
+    // Special keys → forward via /api/hid/key. We DON'T do this for printable
+    // characters because the `input` event already handled them via typeText.
     const k = ev.key;
     if (k === 'Enter' || k === 'Backspace' || k === 'Tab' || k === 'Escape'
         || k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight') {

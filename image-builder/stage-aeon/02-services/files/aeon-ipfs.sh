@@ -20,6 +20,9 @@ IPFSBIN=/usr/local/bin/ipfs
 UNIT=/etc/systemd/system/aeon-ipfs.service
 GATEWAY_PORT=8080
 API_PORT=5001
+# Absolute path to this script, so the systemd unit's ExecStartPre can call back
+# into it (aeon-ipfs prestart) to clear a stale lock before the daemon starts.
+SELF="$(readlink -f "$0" 2>/dev/null || echo /usr/local/bin/aeon-ipfs)"
 
 log() { echo "aeon-ipfs: $*" >&2; }
 ipfs_cmd() { runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" "$@"; }
@@ -62,23 +65,36 @@ configure() {
   # AcceleratedDHTClient makes provider lookups (finding who hosts a CID) far
   # faster on a wide network — worth the modest memory on a Pi 4/5.
   ipfs_cmd config --json Experimental.AcceleratedDHTClient true >/dev/null 2>&1 || true
-  setup_root_landing
+  # NB: the branded gateway landing page is NOT set here — it needs to `ipfs add`
+  # content, which is unreliable offline (before the daemon is up) on newer kubo.
+  # It's handled by ensure_landing() AFTER daemon_up instead.
 }
 
 # kubo serves a bare 404 at the gateway root ("/") — it only resolves
 # /ipfs/<cid> paths. So the console's "gateway" QR / link (which points at the
 # base URL) opened a 404. Host a tiny branded landing page on IPFS and point
 # Gateway.RootRedirect at it, so the root — for the QR and any client — shows a
-# real "this gateway works" page instead. Idempotent: skip if already set.
-setup_root_landing() {
+# real "this gateway works" page instead.
+#
+# Must run with the daemon ONLINE: on kubo ≥0.42 an offline `ipfs add` during
+# configure (before the daemon starts) silently fails, so the CID never gets set
+# and the QR 404s on a fresh boot. So we wait for the API, add the page online,
+# then restart ONCE so the gateway picks up the new RootRedirect. Idempotent:
+# once RootRedirect points at an /ipfs/ path we return immediately (no restart),
+# so only the very first boot pays the extra restart.
+ensure_landing() {
   case "$(ipfs_cmd config Gateway.RootRedirect 2>/dev/null)" in
     /ipfs/*) return 0 ;;
   esac
+  # Wait (≤30s) for the daemon API before adding content.
+  local i=0; while [ $i -lt 30 ] && ! ipfs_cmd id >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
   local cid
   cid=$(landing_html | ipfs_cmd add -Q 2>/dev/null)
   [ -n "$cid" ] || return 0
   ipfs_cmd pin add "$cid" >/dev/null 2>&1 || true
   ipfs_cmd config Gateway.RootRedirect "/ipfs/$cid" >/dev/null 2>&1 || true
+  # RootRedirect is read at gateway startup — restart once so it takes effect.
+  daemon_restart
 }
 
 landing_html() {
@@ -110,12 +126,24 @@ ensure_units() {
 Description=Aeon Magick — IPFS (kubo) node + gateway
 After=network-online.target
 Wants=network-online.target
+# Bound the crash-loop: if the daemon fails 5x in 10 min (e.g. a stale lock we
+# somehow can't clear, a corrupt repo, a port collision) give up and land in
+# 'failed' — a state the status endpoint surfaces — instead of retrying forever
+# behind an eternal amber "starting". (StartLimit* live in [Unit] on systemd ≥229.)
+StartLimitIntervalSec=600
+StartLimitBurst=5
 [Service]
 User=$SVCUSER
 Environment=IPFS_PATH=$DIR
+# Clear a repo.lock left by an unclean shutdown before kubo runs; '-' = ignore
+# failure so a first boot with no lock is fine.
+ExecStartPre=-$SELF prestart
 ExecStart=$IPFSBIN daemon --migrate=true --enable-gc
 Restart=on-failure
 RestartSec=10
+# Allow a real fs-repo migration / large-repo open on a slow SD card, but don't
+# let a wedged start hang indefinitely.
+TimeoutStartSec=900
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -128,10 +156,42 @@ EOF
 PIDFILE=/run/aeon/ipfs.pid
 have_systemd() { [ -d /run/systemd/system ]; }
 
-daemon_active() {
-  if have_systemd; then systemctl is-active --quiet aeon-ipfs.service; return; fi
-  [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+# Richer than a bare boolean: active | starting | failed | inactive. On a Pi we
+# read systemd's sub-state so a crash-loop (auto-restart) or a hard failure is
+# distinguishable from a genuine slow startup — the web UI keys off this so a
+# dead daemon no longer shows an eternal amber "starting".
+daemon_state() {
+  if have_systemd; then
+    case " $(systemctl show -p ActiveState -p SubState --value aeon-ipfs.service 2>/dev/null | tr '\n' ' ') " in
+      *" active "*)              echo active ;;
+      *failed*|*auto-restart*)   echo failed ;;
+      *deactivating*)            echo inactive ;;
+      *activating*)              echo starting ;;
+      *)                         echo inactive ;;
+    esac
+    return
+  fi
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then echo active; else echo inactive; fi
 }
+
+daemon_active() { [ "$(daemon_state)" = active ]; }
+
+# Remove a repo lock left by an unclean shutdown/crash — but ONLY when no ipfs
+# daemon is actually alive against this repo, so we never yank the lock from a
+# running (or legitimately starting) daemon. Called on the `up` path and by the
+# unit's ExecStartPre (`prestart`).
+clear_stale_lock() {
+  if pgrep -f "$IPFSBIN daemon" >/dev/null 2>&1; then return 0; fi
+  if have_systemd && systemctl is-active --quiet aeon-ipfs.service; then return 0; fi
+  if [ -e "$DIR/repo.lock" ]; then
+    log "clearing stale repo.lock (no live daemon)"
+    rm -f "$DIR/repo.lock" "$DIR/api" 2>/dev/null || true
+  fi
+}
+
+# Time-boxed ipfs call for status reads: a crash-looping or lock-blocked daemon
+# must never hang GET /api/ipfs/status (which has no timeout upstream).
+ipfs_cmd_to() { timeout "$1" runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" "${@:2}"; }
 
 daemon_up() {
   if have_systemd; then
@@ -140,6 +200,7 @@ daemon_up() {
     return 0
   fi
   daemon_active && return 0
+  clear_stale_lock
   install -d /run/aeon 2>/dev/null || true
   setsid runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" daemon --migrate=true --enable-gc \
     </dev/null >/var/log/aeon-ipfs.log 2>&1 &
@@ -165,7 +226,9 @@ cmd_up() {
   ensure_bin || return 1
   ensure_init || return 1
   configure
+  clear_stale_lock
   daemon_up
+  ensure_landing
 }
 
 cmd_down() { daemon_down; }
@@ -173,7 +236,7 @@ cmd_down() { daemon_down; }
 cmd_status() {
   local installed daemon ver pid peers repo smax dfree dtotal dfout
   installed=$([ -x "$IPFSBIN" ] && echo true || echo false)
-  daemon=$(daemon_active && echo active || echo inactive)
+  daemon=$(daemon_state)
   ver=""; pid=""; peers=0; repo=0; smax=""
   # Free/total bytes on the filesystem that backs the IPFS repo — lets the web
   # slider cap the allocation at what the disk can physically hold. df -PB1 →
@@ -183,11 +246,17 @@ cmd_status() {
   if [ -n "$dfout" ]; then dtotal=${dfout%% *}; dfree=${dfout##* }; fi
   [ -z "$dtotal" ] && dtotal=0; [ -z "$dfree" ] && dfree=0
   if [ "$installed" = true ] && [ -f "$DIR/config" ]; then
-    ver=$(ipfs_cmd version --number 2>/dev/null)
-    pid=$(ipfs_cmd config Identity.PeerID 2>/dev/null)
-    smax=$(ipfs_cmd config Datastore.StorageMax 2>/dev/null)
-    repo=$(ipfs_cmd repo stat 2>/dev/null | awk '/RepoSize/{print $2; exit}')
-    [ "$daemon" = active ] && peers=$(ipfs_cmd swarm peers 2>/dev/null | wc -l | tr -d ' ')
+    # These are local config reads (fast), but time-box them anyway so a wedged
+    # repo can't stall the status endpoint.
+    ver=$(ipfs_cmd_to 5 version --number 2>/dev/null)
+    pid=$(ipfs_cmd_to 5 config Identity.PeerID 2>/dev/null)
+    smax=$(ipfs_cmd_to 5 config Datastore.StorageMax 2>/dev/null)
+    # `repo stat` walks the datastore and can be slow / lock-blocked, so only run
+    # it (and swarm peers, which needs the API) when the daemon is actually up.
+    if [ "$daemon" = active ]; then
+      repo=$(ipfs_cmd_to 5 repo stat 2>/dev/null | awk '/RepoSize/{print $2; exit}')
+      peers=$(ipfs_cmd_to 5 swarm peers 2>/dev/null | wc -l | tr -d ' ')
+    fi
   fi
   printf '{"installed":%s,"daemon":"%s","version":"%s","peer_id":"%s","peers":%d,"repo_bytes":%s,"storage_max":"%s","disk_free_bytes":%s,"disk_total_bytes":%s,"gateway_port":%d}\n' \
     "$installed" "$daemon" "${ver:-}" "${pid:-}" "${peers:-0}" "${repo:-0}" "${smax:-}" "${dfree:-0}" "${dtotal:-0}" "$GATEWAY_PORT"
@@ -249,6 +318,7 @@ cmd_get() {
 case "${1:-}" in
   up)      cmd_up ;;
   down)    cmd_down ;;
+  prestart) clear_stale_lock ;;
   status)  cmd_status ;;
   storage) shift; cmd_storage "$@" ;;
   pin)     shift; cmd_pin "$@" ;;

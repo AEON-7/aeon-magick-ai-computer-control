@@ -324,8 +324,10 @@ fn write_report(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 /// Map an ASCII character to (modifier byte, HID keycode). Returns None for
 /// chars outside the printable ASCII subset (the agent should sanitize
-/// upstream — we don't try to handle UTF-8 here).
-fn ascii_to_hid(ch: char) -> Option<(u8, u8)> {
+/// upstream — we don't try to handle UTF-8 here). Public so the `/key` chord
+/// handler can recover a shifted symbol's inherent Shift (e.g. '&' = Shift+7)
+/// when the caller — a phone/on-screen keyboard — didn't send a separate SHIFT.
+pub fn ascii_to_hid(ch: char) -> Option<(u8, u8)> {
     const MOD_SHIFT: u8 = 0x02;
     match ch {
         'a'..='z' => Some((0, 4 + (ch as u8 - b'a'))),
