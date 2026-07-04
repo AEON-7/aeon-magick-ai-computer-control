@@ -4660,8 +4660,12 @@ fn push_set(key: &str, v: serde_json::Value) {
     }
 }
 
-/// Remote paths are the admin's choice, but keep them shell-safe: allow only a
-/// conservative charset and reject parent-dir escapes. Empty → caller default.
+/// Remote paths are the admin's choice, but keep them shell-safe AND out of
+/// system locations. Allow only a conservative charset, reject parent-dir
+/// escapes, and reject writes to system/config/boot/binary/SSH paths — a model
+/// is DATA and belongs in a home/data/models dir, never somewhere a dropped
+/// file becomes code (cron, systemd, authorized_keys, a replaced binary).
+/// Rejected → empty, so the caller falls back to the safe `aeon-models/` default.
 fn sanitize_dest(dest: &str) -> String {
     let d: String = dest
         .trim()
@@ -4669,7 +4673,25 @@ fn sanitize_dest(dest: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
         .collect();
     if d.contains("..") { return String::new(); }
-    d.trim_end_matches('/').to_string()
+    let d = d.trim_end_matches('/').to_string();
+    let low = d.to_ascii_lowercase();
+    // Any `.ssh` component (authorized_keys injection), and the system roots
+    // where a write is arbitrary-code / persistence. NB: /usr/share, /usr/local/
+    // share, /var/lib, /home, /root (non-.ssh), /data, /opt, /srv, /mnt and all
+    // relative paths stay allowed, so real model dirs still work.
+    if low.contains(".ssh") {
+        return String::new();
+    }
+    const DENY: &[&str] = &[
+        "/etc", "/boot", "/proc", "/sys", "/dev", "/run",
+        "/bin", "/sbin", "/lib", "/lib64",
+        "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/local/bin", "/usr/local/sbin",
+        "/var/spool", "/var/run",
+    ];
+    if d == "/" || DENY.iter().any(|p| low == *p || low.starts_with(&format!("{p}/"))) {
+        return String::new();
+    }
+    d
 }
 
 #[derive(Deserialize)]
@@ -4780,7 +4802,9 @@ fn push_worker(sys: System, cid: String, name: String, slug: String, dest: Strin
         sys.port
     );
     let child = Command::new("rsync")
-        .args(["-a", "--info=progress2", "--no-inc-recursive"])
+        // --chmod forces model files non-executable (data, never code) so a
+        // pushed tree can't drop a runnable script/binary on the target.
+        .args(["-a", "--chmod=D755,F644", "--info=progress2", "--no-inc-recursive"])
         .arg("-e").arg(&ssh_e)
         .arg(&src_arg)
         .arg(format!("{target}:{dest}/"))
