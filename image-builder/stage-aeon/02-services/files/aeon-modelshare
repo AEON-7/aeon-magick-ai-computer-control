@@ -32,6 +32,7 @@ SCRIPT = "/usr/local/bin/aeon-ipfs"
 MODELS_DIR = "/var/lib/aeon/ipfs-models"
 CATALOG = os.path.join(MODELS_DIR, "catalog.json")
 REGISTRY = os.path.join(MODELS_DIR, "registry.json")
+STARS = os.path.join(MODELS_DIR, "stars.json")  # CIDs this Orb starred (gossiped)
 FLEET_TOML = "/etc/aeon/fleet.toml"
 ANNOUNCE_FLAG = "/run/aeon/modelshare-announce"
 
@@ -40,6 +41,7 @@ PEER_TTL_MS = 15 * 60_000  # drop a peer not heard from in 15 min
 MAX_MODELS = 500         # cap announcement size
 
 _lock = threading.Lock()
+SELF_PID = ""  # our own peer id — cached in main(), used to skip self-announcements
 
 
 def log(*a):
@@ -106,6 +108,7 @@ def build_announcement():
         "addrs": self_addrs(),
         "updated_ms": int(time.time() * 1000),
         "models": read_json(CATALOG, [])[:MAX_MODELS],
+        "starred": read_json(STARS, [])[:MAX_MODELS],
     }
 
 
@@ -133,6 +136,8 @@ def merge_peer(ann):
     pid = ann.get("peer_id")
     if not pid or not isinstance(ann.get("models"), list):
         return
+    if pid == SELF_PID:
+        return  # our own announcement (floodsub delivers it back) — don't index self
     keep_connected(pid, ann.get("addrs"))
     with _lock:
         reg = read_json(REGISTRY, {"peers": {}})
@@ -143,6 +148,7 @@ def merge_peer(ann):
             "addrs": ann.get("addrs", []),
             "updated_ms": ann.get("updated_ms", int(time.time() * 1000)),
             "models": ann["models"],
+            "starred": ann.get("starred", []) if isinstance(ann.get("starred"), list) else [],
         }
         # prune stale peers
         now = int(time.time() * 1000)
@@ -226,9 +232,11 @@ def wait_for_daemon():
 
 
 def main():
+    global SELF_PID
     os.makedirs(MODELS_DIR, exist_ok=True)
     wait_for_daemon()
-    log("online; gossiping on", TOPIC)
+    SELF_PID = self_peer_id()
+    log("online; gossiping on", TOPIC, "as", SELF_PID)
     threading.Thread(target=sub_loop, daemon=True).start()
     pub_loop()
 

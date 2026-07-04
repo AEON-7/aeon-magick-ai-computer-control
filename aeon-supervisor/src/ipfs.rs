@@ -668,6 +668,81 @@ struct RegPeer {
     updated_ms: i64,
     #[serde(default)]
     models: Vec<ModelEntry>,
+    /// CIDs this peer has starred — gossiped so every Orb can tally a
+    /// community star count per model (fleet-free reputation).
+    #[serde(default)]
+    starred: Vec<String>,
+}
+
+const STARS_JSON: &str = "/var/lib/aeon/ipfs-models/stars.json";
+
+/// This Orb's starred model CIDs (a plain JSON array). Gossiped in our
+/// announcement so peers can aggregate a network-wide star count.
+fn read_stars() -> Vec<String> {
+    std::fs::read_to_string(STARS_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+        .unwrap_or_default()
+}
+
+fn write_stars(cids: &[String]) -> std::io::Result<()> {
+    if let Some(dir) = std::path::Path::new(STARS_JSON).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = format!("{STARS_JSON}.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&cids).unwrap_or_default())?;
+    std::fs::rename(tmp, STARS_JSON)
+}
+
+/// Model Karma — this Orb's bitswap ledger: bytes SERVED to the network vs bytes
+/// DOWNLOADED. A personal contribution gauge (how much you give back vs take).
+/// Read from `ipfs bitswap stat` (since the daemon started).
+fn karma() -> Value {
+    let stat = run_script(&["bitswap-stat"]).unwrap_or_default();
+    // Parse "data sent: N" / "data received: N" (bytes) from the text output.
+    let field = |needle: &str| -> u64 {
+        stat.lines()
+            .find(|l| l.trim_start().starts_with(needle))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let served = field("data sent");
+    let downloaded = field("data received");
+    let ratio = if downloaded > 0 { served as f64 / downloaded as f64 } else { 0.0 };
+    json!({ "served_bytes": served, "downloaded_bytes": downloaded, "ratio": ratio })
+}
+
+#[derive(Deserialize)]
+pub struct StarReq {
+    pub cid: String,
+}
+
+/// POST /api/ipfs/models/star — toggle a star on a model (by dir CID). Persists
+/// locally and re-announces so the star count propagates across the network.
+pub async fn star_model(State(_s): State<AppState>, Json(req): Json<StarReq>) -> Json<Value> {
+    let cid = req.cid.trim().to_string();
+    if cid.is_empty() || cid.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        return Json(json!({"ok": false, "err": "bad cid"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut stars = read_stars();
+        let starred = if let Some(i) = stars.iter().position(|c| c == &cid) {
+            stars.remove(i);
+            false
+        } else {
+            stars.push(cid.clone());
+            true
+        };
+        let _ = write_stars(&stars);
+        json!({"ok": true, "starred": starred, "count": stars.len()})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "star task failed"}));
+    // Re-announce so the updated star set gossips out immediately.
+    announce();
+    Json(v)
 }
 
 fn read_registry() -> HashMap<String, RegPeer> {
@@ -708,6 +783,13 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
             push_host(&e.cid, e, json!({"label": "this orb", "is_self": true, "online": true, "peer_id": me}));
         }
         for (_pid, p) in &peers {
+            // Skip our OWN gossiped announcement — with floodsub self-delivery the
+            // daemon hears its own catalog back, and the local catalog above
+            // already represents "this orb". Without this, every locally-hosted
+            // model shows "this orb" twice.
+            if p.peer_id == me {
+                continue;
+            }
             for e in &p.models {
                 let host = json!({
                     "label": if p.label.is_empty() { p.peer_id.chars().take(12).collect::<String>() } else { p.label.clone() },
@@ -720,23 +802,59 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
                 push_host(&e.cid, e, host);
             }
         }
+        // Community stars: a model's star count = the number of DISTINCT Orbs
+        // that starred its CID (self + every gossiped peer). Keyed by peer_id so
+        // a stale self-entry in the registry can't double-count.
+        let my_stars: std::collections::HashSet<String> = read_stars().into_iter().collect();
+        let mut starrers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for cid in &my_stars {
+            starrers.entry(cid.clone()).or_default().insert(me.clone());
+        }
+        for (_pid, p) in &peers {
+            for cid in &p.starred {
+                starrers.entry(cid.clone()).or_default().insert(p.peer_id.clone());
+            }
+        }
+
         let local_cids: std::collections::HashSet<String> = local.iter().map(|e| e.cid.clone()).collect();
         let mut out: Vec<Value> = rows
             .into_iter()
             .map(|(cid, (entry, hosts))| {
-                json!({ "entry": entry, "hosts": hosts, "local": local_cids.contains(&cid) })
+                let host_count = hosts.len();
+                let star_count = starrers.get(&cid).map(|s| s.len()).unwrap_or(0);
+                json!({
+                    "entry": entry, "hosts": hosts, "local": local_cids.contains(&cid),
+                    "host_count": host_count, "star_count": star_count,
+                    "starred": my_stars.contains(&cid),
+                })
             })
             .collect();
-        // newest first by the entry's added_at_ms
+        // Rank: most-hosted + most-starred first, then newest.
         out.sort_by(|a, b| {
-            let ai = a["entry"]["added_at_ms"].as_i64().unwrap_or(0);
-            let bi = b["entry"]["added_at_ms"].as_i64().unwrap_or(0);
-            bi.cmp(&ai)
+            let score = |m: &Value| {
+                m["star_count"].as_i64().unwrap_or(0) * 3 + m["host_count"].as_i64().unwrap_or(0)
+            };
+            score(b).cmp(&score(a)).then_with(|| {
+                let ai = a["entry"]["added_at_ms"].as_i64().unwrap_or(0);
+                let bi = b["entry"]["added_at_ms"].as_i64().unwrap_or(0);
+                bi.cmp(&ai)
+            })
         });
-        json!({"ok": true, "self_peer_id": me, "models": out, "tasks": tasks, "peer_count": peers.len()})
+        json!({"ok": true, "self_peer_id": me, "models": out, "tasks": tasks,
+               "peer_count": peers.len(), "my_star_count": my_stars.len()})
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "registry task failed"}));
+    Json(v)
+}
+
+/// GET /api/ipfs/models/karma — this Orb's Model Karma (bytes served vs
+/// downloaded, from the bitswap ledger). A personal contribution gauge; kept
+/// out of /registry so the frequent poll doesn't shell out each time.
+pub async fn models_karma(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| json!({"ok": true, "karma": karma()}))
+        .await
+        .unwrap_or_else(|_| json!({"ok": false, "err": "karma task failed"}));
     Json(v)
 }
 

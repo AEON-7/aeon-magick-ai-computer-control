@@ -520,6 +520,8 @@ pub fn build_router(cfg: Config) -> Router {
         // the fleet heartbeat so every Orb sees the federated model index.
         .route("/ipfs/models",          get(crate::ipfs::models))
         .route("/ipfs/models/registry", get(crate::ipfs::models_registry))
+        .route("/ipfs/models/karma",    get(crate::ipfs::models_karma))
+        .route("/ipfs/models/star",     post(crate::ipfs::star_model))
         .route("/ipfs/models/card",     get(crate::ipfs::model_card))
         .route("/ipfs/models/file",     get(crate::ipfs::model_file))
         .route("/ipfs/models/image",    get(crate::ipfs::model_image))

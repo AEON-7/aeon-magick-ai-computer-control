@@ -295,6 +295,8 @@ cmd_cat()   { ipfs_cmd cat "${1:-}" 2>/dev/null; }
 # peer's model so LAN/tailnet fetches don't wait on DHT routing.
 cmd_connect() { ipfs_cmd swarm connect "${1:-}" 2>&1 || true; }
 cmd_id()      { ipfs_cmd id -f='<id>' 2>/dev/null; }
+# Bitswap ledger (bytes served vs received) — powers the Model Karma gauge.
+cmd_bitswap_stat() { ipfs_cmd bitswap stat 2>/dev/null; }
 # Model Share gossip primitives (used by aeon-modelshare):
 #   pub <topic>    publish stdin to a pubsub topic
 #   sub <topic>    stream messages on a pubsub topic (one per line, blocks)
@@ -348,6 +350,7 @@ case "${1:-}" in
   cat)     shift; cmd_cat "$@" ;;
   connect) shift; cmd_connect "$@" ;;
   id)      cmd_id ;;
+  bitswap-stat) cmd_bitswap_stat ;;
   pub)     shift; cmd_pub "$@" ;;
   sub)     shift; cmd_sub "$@" ;;
   peer)    shift; cmd_peer "$@" ;;

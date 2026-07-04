@@ -23,7 +23,8 @@
     verified?: boolean; source?: string;
   };
   type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[] };
-  type Row = { entry: Entry; hosts: Host[]; local: boolean };
+  type Row = { entry: Entry; hosts: Host[]; local: boolean; host_count?: number; star_count?: number; starred?: boolean };
+  type Karma = { served_bytes: number; downloaded_bytes: number; ratio: number };
   type NodeStatus = {
     enabled: boolean; daemon: string; peers: number; gateway_port: number;
     repo_bytes: number; storage_max: string;
@@ -31,6 +32,9 @@
 
   let node: NodeStatus | null = null;
   let rows: Row[] = [];
+  let karma: Karma | null = null;
+  let myStarCount = 0;
+  $: karmaPct = karma ? Math.round((karma.served_bytes / Math.max(1, karma.served_bytes + karma.downloaded_bytes)) * 100) : 0;
   let tasks: Record<string, string> = {};
   let peerCount = 0;
   let selfPeer = '';
@@ -217,12 +221,34 @@
           tasks = r.tasks ?? {};
           peerCount = r.peer_count ?? 0;
           selfPeer = r.self_peer_id ?? '';
+          myStarCount = r.my_star_count ?? 0;
           err = '';
         }
       }
     } catch (e: any) {
       err = e?.message ?? 'failed to load';
     }
+  }
+
+  async function loadKarma() {
+    try {
+      const r = await api('/models/karma');
+      if (r?.ok) karma = r.karma;
+    } catch {}
+  }
+
+  async function toggleStar(cid: string) {
+    // optimistic: flip locally, then persist
+    rows = rows.map((r) => r.entry.cid === cid
+      ? { ...r, starred: !r.starred, star_count: (r.star_count ?? 0) + (r.starred ? -1 : 1) }
+      : r);
+    try {
+      await api('/models/star', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cid }),
+      });
+    } catch {}
+    await load();
   }
 
   function fmtBytes(n: number): string {
@@ -427,7 +453,10 @@
     await load();
   }
 
-  onMount(() => { load(); loadSystems(); poll = setInterval(load, 5000); });
+  onMount(() => {
+    load(); loadSystems(); loadKarma();
+    poll = setInterval(() => { load(); loadKarma(); }, 5000);
+  });
   // Reset the push status line whenever a different model detail opens.
   $: if (detail) { pushMsg = ''; pushActive = false; }
   onDestroy(() => clearInterval(poll));
@@ -458,6 +487,33 @@
       model, the faster it downloads. <span class="text-cursed-300">Share</span> a model to publish it with a
       model card; <span class="text-cursed-300">download</span> anyone's to run it locally (and help host it).
     </p>
+
+    {#if karma && (karma.served_bytes > 0 || karma.downloaded_bytes > 0)}
+      <div class="rounded-lg border border-ink-700 bg-ink-900 px-4 py-3 flex items-center gap-4 flex-wrap">
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="text-lg">☯</span>
+          <div>
+            <div class="text-xs font-mono text-cursed-300">Model Karma</div>
+            <div class="text-[10px] text-ink-500">given back vs pulled</div>
+          </div>
+        </div>
+        <div class="flex-1 min-w-[12rem]">
+          <div class="h-2 rounded-full bg-ink-800 overflow-hidden flex">
+            <div class="h-full bg-emerald-500" style="width:{karmaPct}%"></div>
+            <div class="h-full bg-cursed-600" style="width:{100 - karmaPct}%"></div>
+          </div>
+          <div class="flex justify-between text-[10px] font-mono mt-1">
+            <span class="text-emerald-400">served {fmtBytes(karma.served_bytes)}</span>
+            <span class="text-cursed-300">downloaded {fmtBytes(karma.downloaded_bytes)}</span>
+          </div>
+        </div>
+        <div class="text-right shrink-0">
+          <div class="font-mono text-sm {karma.ratio >= 1 ? 'text-emerald-300' : 'text-ink-300'}" title="Bytes served ÷ bytes downloaded — above 1.0× means you give more than you take">{karma.ratio.toFixed(2)}×</div>
+          <div class="text-[10px] text-ink-500">give / take</div>
+        </div>
+        {#if myStarCount > 0}<div class="text-[10px] font-mono text-amber-300 shrink-0" title="Models you've starred">★ {myStarCount}</div>{/if}
+      </div>
+    {/if}
 
     {#if err}
       <div class="rounded border border-red-700 bg-red-950/40 text-red-300 px-3 py-2 text-sm">{err}</div>
@@ -592,6 +648,16 @@
                       title={h.is_self ? 'hosted on this Orb' : 'hosted by ' + h.label}>{h.is_self ? 'this orb' : h.label}</span>
               {/each}
               {#if row.hosts.length > 3}<span class="text-[10px] font-mono text-ink-600">+{row.hosts.length - 3}</span>{/if}
+            </div>
+
+            <!-- community signals: star (trust) + adoption (orbs hosting) -->
+            <div class="flex items-center gap-3 text-[11px] font-mono">
+              <button class="flex items-center gap-1 transition-colors {row.starred ? 'text-amber-300' : 'text-ink-500 hover:text-amber-300'}"
+                      on:click|stopPropagation={() => toggleStar(row.entry.cid)}
+                      title={row.starred ? 'Starred — click to unstar' : 'Star this model (community trust signal)'}>
+                <span class="text-sm leading-none">{row.starred ? '★' : '☆'}</span>{row.star_count ?? 0}
+              </button>
+              <span class="text-ink-500" title="Orbs hosting this model across the network — wider adoption means faster, more resilient downloads">⬡ {row.host_count ?? row.hosts.length} {(row.host_count ?? row.hosts.length) === 1 ? 'orb' : 'orbs'}</span>
             </div>
 
             <div class="mt-auto pt-1 flex items-center gap-2 text-xs">
