@@ -11,7 +11,9 @@
 FROM debian:bookworm-slim
 
 ARG TARGETARCH
-ARG KUBO_VERSION=v0.32.1
+# Keep in lockstep with the Pi image bake (image-builder .../02-services/03-run.sh)
+# so every release track runs the same IPFS version.
+ARG KUBO_VERSION=v0.42.0
 
 # Runtime deps for the cross-platform surface: openssh-client + rsync (Agent
 # Dashboard, terminal, model push over SSH), python3 (storage/nas helpers),

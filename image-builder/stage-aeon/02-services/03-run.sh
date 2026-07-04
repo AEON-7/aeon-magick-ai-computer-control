@@ -12,6 +12,20 @@ THIS_DIR="$(dirname "$0")"
 install -m 0755 "${THIS_DIR}/files/aeon-orbnet.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-orbnet"
 install -m 0755 "${THIS_DIR}/files/aeon-onions.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-onions"
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs"
+# Pre-package kubo (the IPFS implementation). IPFS is core now — Model Share and
+# the whole decentralized model network ride on it, and it's default-on — so bake
+# the binary straight into the image instead of downloading it on the first
+# `aeon-ipfs up`. That first boot then needs NO internet round-trip (the failure
+# mode we hit in the field), and aeon-ipfs.sh's ensure_bin() sees /usr/local/bin/
+# ipfs already present and skips the download. arm64 covers both Pi 4 and Pi 5.
+KUBO_VERSION="${KUBO_VERSION:-v0.42.0}"
+_kubo_tmp="$(mktemp -d)"
+echo "baking kubo ${KUBO_VERSION} into the image…"
+curl -fsSL --retry 3 --max-time 300 \
+  "https://dist.ipfs.tech/kubo/${KUBO_VERSION}/kubo_${KUBO_VERSION}_linux-arm64.tar.gz" \
+  | tar -xz -C "${_kubo_tmp}"
+install -m 0755 "${_kubo_tmp}/kubo/ipfs" "${ROOTFS_DIR}/usr/local/bin/ipfs"
+rm -rf "${_kubo_tmp}"
 # External USB/SSD storage helper (detect / prepare / adopt a data drive).
 install -m 0755 "${THIS_DIR}/files/aeon-storage.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-storage"
 # Optional LAN NAS (Samba) helper — installs samba on first enable, off by default.
