@@ -31,6 +31,7 @@ mod hailo;
 mod i2p;
 mod ipfs;
 mod lockdown;
+mod publisher;
 mod macros;
 mod mcp;
 mod mysterium;

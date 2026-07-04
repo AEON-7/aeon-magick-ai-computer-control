@@ -42,6 +42,9 @@ need_root(){ [ "$(id -u)" = 0 ] || die "must run as root (sudo)"; }
 # datastore) is naturally excluded. Non-existent paths are skipped at pack time.
 PATHS=(
   # --- all aeon config + per-service secrets (small) ---
+  # (also carries etc/aeon/publisher-accounts.json — the Model Share publisher
+  #  identities: password-encrypted ed25519 seeds. Double-protected in the
+  #  encrypted backup, and recoverable independently via the written seed phrase.)
   etc/aeon
   # --- Mysterium: THE registered node identity (highest stakes) ---
   var/lib/mysterium-node/keystore

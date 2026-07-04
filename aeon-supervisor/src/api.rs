@@ -521,6 +521,11 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/models",          get(crate::ipfs::models))
         .route("/ipfs/models/registry", get(crate::ipfs::models_registry))
         .route("/ipfs/models/karma",    get(crate::ipfs::models_karma))
+        // Publisher identity — self-sovereign accounts (keypair = identity).
+        .route("/publisher/accounts", get(crate::publisher::list_accounts).post(crate::publisher::create_account))
+        .route("/publisher/unlock", post(crate::publisher::unlock_account))
+        .route("/publisher/lock",   post(crate::publisher::lock_account))
+        .route("/publisher/seed",   post(crate::publisher::export_seed))
         .route("/ipfs/models/star",     post(crate::ipfs::star_model))
         .route("/ipfs/models/card",     get(crate::ipfs::model_card))
         .route("/ipfs/models/file",     get(crate::ipfs::model_file))
