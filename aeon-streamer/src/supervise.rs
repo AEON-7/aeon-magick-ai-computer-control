@@ -484,7 +484,13 @@ fn spawn_ffmpeg(state: &SharedState, pipeline: &Pipeline) -> Result<Child> {
     // v4l2m2m scaler — saves ~300–500 mA vs the CPU-bound software scaler
     // on a Pi 4 actively streaming. Falls back to software if disabled in
     // config (default) or if the m2m device isn't available.
-    let scale_part = if out.hw_accel {
+    // Pi-4-only: the Pi 5 dropped the bcm2835-codec block, so scale_v4l2m2m
+    // doesn't exist there — ignore hw_accel instead of wedging ffmpeg in a
+    // respawn loop over a filter that can't be created.
+    if out.hw_accel && cfg.platform != Platform::Pi4 {
+        info!("hw_accel=true ignored — no v4l2m2m scaler on this platform (Pi 4 only)");
+    }
+    let scale_part = if out.hw_accel && cfg.platform == Platform::Pi4 {
         info!("hw_accel=true — using scale_v4l2m2m (Pi GPU scaler)");
         // scale_v4l2m2m doesn't take a flags= option; quality is implicit.
         format!("scale_v4l2m2m={w}:{h}", w = out_w, h = out_h)
@@ -757,7 +763,8 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
         // change is a cheap way to attach the range conversion; h264
         // conventionally carries limited (tv) range.
         format!("scale=in_range=full:out_range=tv")
-    } else if out.hw_accel {
+    } else if out.hw_accel && cfg.platform == Platform::Pi4 {
+        // Pi-4-only — the Pi 5 has no v4l2m2m scaler (see the MJPEG path).
         format!("scale_v4l2m2m={out_w}:{out_h}")
     } else {
         // See the MJPEG path for why in_range=full matters. h264 carries
