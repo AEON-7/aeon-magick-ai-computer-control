@@ -4,6 +4,20 @@
 /* wm8960-mic — drop-in replacement for the stock `wm8960-soundcard` overlay
  * that ALSO powers the WM8960's mic-bias supply during capture.
  *
+ * ── CAPTURE STATUS ON PI 5 / KERNEL 6.18 (July 2026) ────────────────────
+ * PLAYBACK works. CAPTURE returns exact digital zeros on the 6.18 rpt
+ * kernel with EVERYTHING else proven good on a real BrainCraft: analog
+ * mic path verified live end-to-end (mics audible through the codec's
+ * analog bypass to the speaker), all codec power/routing/clock registers
+ * verified via regmap debugfs, ADCLRC tied to DACLRC on the PCB, MCLK
+ * oscillator running, pads/pinmux/IE correct, RX DMA runs — and the same
+ * zeros persist under the vendor (HinTak/seeed) forked codec driver with
+ * its forced-PLL clocking active. Community record: identical stack
+ * captures fine on the 6.12.75 rpt kernel (HinTak/seeed-voicecard PR #42),
+ * broken/unanswered on 6.18 (issue #44) — i.e. a 6.18 RP1/DW-I2S RX
+ * regression is the remaining suspect. Retest after kernel updates, or
+ * boot linux-image-6.12.75+rpt-rpi-2712 (still in the trixie repo).
+ *
  * WHY: mainline sound/soc/codecs/wm8960.c declares the MICB DAPM supply
  *   (SND_SOC_DAPM_SUPPLY("MICB", WM8960_POWER1, 1, 0, NULL, 0)) but ships ZERO
  *   dapm routes referencing "MICB", so DAPM never powers it — R25/0x19 bit1
@@ -24,7 +38,12 @@
 / {
     compatible = "brcm,bcm2835";
 
-    /* Enable the RP1 I2S clock-producer interface (Pi 5). */
+    /* Enable the RP1 I2S clock-producer interface (Pi 5): RP1 drives
+     * BCLK/LRCLK, codec is slave. Codec-master via &i2s_clk_consumer was
+     * tried and is a dead end — the RP1 DW I2S consumer instance never
+     * locks externally-driven clocks (community-confirmed, e.g. rpi forum
+     * t=396534; S16 streams die with EIO, S32 streams run but read zeros
+     * even with the codec's BCLK/LRCLK verified toggling on the pins). */
     fragment@0 {
         target = <&i2s_clk_producer>;
         __overlay__ {
@@ -59,6 +78,14 @@
                 DVDD-supply = <&vdd_3v3_reg>;
                 clocks = <&wm8960_mclk>;
                 clock-names = "mclk";
+                /* The BrainCraft PCB ties ADCLRC to DACLRC (one LRCLK line
+                 * from the Pi feeds both — verified from the Eagle schematic
+                 * netlist). shared-lrclk sets the matching LRCM mode so the
+                 * common frame clock isn't gated off when only one direction
+                 * runs. Correct for all tied-LRC WM8960 boards; the seeed
+                 * fork sets the same. (Note: this alone does NOT fix Pi 5
+                 * capture — see the capture status note at the top.) */
+                wlf,shared-lrclk;
             };
         };
     };
@@ -92,7 +119,7 @@
             simple-audio-card,cpu {
                 sound-dai = <&i2s_clk_producer>;
             };
-            simple-audio-card,codec {
+            wm8960_dai: simple-audio-card,codec {
                 sound-dai = <&wm8960>;
             };
         };
