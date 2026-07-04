@@ -91,7 +91,16 @@ cd ~/pi-gen
 cat > config <<'EOF'
 IMG_NAME=aeon-magick
 IMG_DATE="v65"          # → deploy/image_${IMG_DATE}-aeon-magick.img.xz; bump each build
+# This config bakes the Pi 4 flavor (Pi OS Bookworm, USB Cam Link capture,
+# hardware H.264). The Pi 5 flavor is a separate bake on Pi OS TRIXIE —
+# RELEASE=trixie + the matching pi-gen branch — carrying the Pi 5 suite
+# (Hailo AI HAT super-app, CSI capture, voice, UPS); see the
+# feat/pi5-vision-voice-ups-av track. The stage-aeon scripts are shared
+# between both bakes and never hardcode the codename.
 RELEASE=bookworm
+# Explicit arm64: the daemons are aarch64 binaries (and the Pi 5 requires
+# arm64 anyway). Don't rely on pi-gen's default.
+ARM64=1
 TARGET_HOSTNAME=aeon-magick
 ENABLE_SSH=1
 DISABLE_FIRST_BOOT_USER_RENAME=1

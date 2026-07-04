@@ -115,8 +115,9 @@ pub struct ConfigPatch {
 /// restart aeon-streamer so the new values take effect.
 ///
 /// Only those two are exposed for now — width/height/format require
-/// matching changes to the Cam Link source format (and on Pi 5 the
-/// h264 encoder isn't available at all). We'll surface those later
+/// matching changes to the Cam Link source format. (The encoder itself
+/// is platform-detected by aeon-streamer: hardware h264_v4l2m2m on the
+/// Pi 4, software libx264 on the Pi 5.) We'll surface those later
 /// once the H.264-over-WebSocket pipe lands.
 pub async fn put_config(
     State(_state): State<AppState>,

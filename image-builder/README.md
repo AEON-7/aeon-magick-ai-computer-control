@@ -10,7 +10,7 @@ git clone https://github.com/RPi-Distro/pi-gen.git ~/pi-gen
 cd ~/pi-gen
 # Copy our overlay in as stage-aeon
 cp -R /path/to/aeon-magick-ai-computer-control/image-builder/stage-aeon .
-echo IMG_NAME=aeon-magick > config
+printf 'IMG_NAME=aeon-magick\nARM64=1\n' > config   # Pi 4 flavor (Bookworm); Pi 5 flavor bakes with RELEASE=trixie
 # Skip the heavy desktop stages
 touch stage3/SKIP stage4/SKIP stage5/SKIP
 touch stage3/SKIP_IMAGES stage4/SKIP_IMAGES stage5/SKIP_IMAGES
@@ -20,6 +20,18 @@ sudo ./build-docker.sh
 
 Output: `deploy/<date>-aeon-magick.img.xz`. Flash with `rpi-imager`,
 `dd`, or BalenaEtcher.
+
+**Two flavors share this overlay.** The **Pi 4 image** bakes on Pi OS
+**Bookworm** (this branch's default config); the **Pi 5 image** bakes on
+Pi OS **Trixie** (`RELEASE=trixie` + matching pi-gen branch) and carries
+the Pi 5 suite — the Hailo AI HAT super-app, HDMI-to-CSI capture, voice,
+UPS (`feat/pi5-vision-voice-ups-av` track). The stage scripts never
+hardcode the codename. Model-specific behavior is auto-detected at
+runtime either way: `aeon-hid` reads the UDC from `/sys/class/udc`
+(`fe980000.usb` vs `1000480000.usb`), the streamer picks the encoder per
+platform (Pi 4 hardware `h264_v4l2m2m`, Pi 5 software `libx264`), and
+config.txt carries a `[pi5]`-scoped `usb_max_current_enable=1` so a
+target-powered Pi 5 still feeds a USB capture stick full current.
 
 ## What goes into the image
 

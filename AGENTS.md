@@ -17,7 +17,9 @@ look at [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 1. Flash `aeon-magick.img.xz` to an SD card (Raspberry Pi Imager — no
    customization). Don't decompress first; Imager handles `.xz` natively.
-2. Put the SD into a Raspberry Pi 4.
+2. Put the SD into a Raspberry Pi 4 or Pi 5 — flash the matching image
+   flavor (Pi 4: Bookworm; Pi 5: Trixie, which adds the Hailo/vision/voice
+   suite). The Pi 4 image will boot a Pi 5 in a pinch.
 3. Plug the Pi's **USB-C** into the target computer (this is where you
    control). Plug an **Elgato Cam Link 4K** (or MS2109 dongle) into any
    USB-3 port on the Pi. Run the target's HDMI out into the Cam Link.
@@ -61,7 +63,7 @@ table is at the end ("API + MCP endpoint reference").
 
 | Piece | Notes |
 |---|---|
-| **Raspberry Pi 4** | 2 GB RAM minimum; 4 GB recommended. Pi 5 also works but H.264 falls back to software. |
+| **Raspberry Pi 4 or Pi 5** | 2 GB RAM minimum; 4 GB recommended. **Two image flavors:** Pi 4 → Pi OS Bookworm (this track; USB Cam Link capture, hardware `h264_v4l2m2m` H.264); Pi 5 → Pi OS Trixie (`feat/pi5-vision-voice-ups-av` track; Hailo AI HAT support — AI Kit 8/8L + AI HAT+ 2 Hailo-10H — plus HDMI-to-CSI capture, voice, UPS; software `libx264` encode, which the faster cores keep up with). Model quirks are auto-detected (UDC name, encoder). **Pi 5 cabling:** use target-USB-A → Pi-USB-C; a kernel bug (≥6.6.42) breaks C-to-C gadget enumeration. |
 | **Power supply** | Official 27 W USB-C PSU. Cam Link 4K is power-hungry; weaker PSUs cause USB drops. |
 | **MicroSD card** | 16 GB+ class 10. Larger if you plan to keep frame history. |
 | **HDMI capture** | Elgato Cam Link 4K (recommended), or a generic MS2109-chipset USB capture stick (~$15, common on Amazon). Both auto-detected via udev. |
@@ -216,7 +218,7 @@ curl -sk -u admin:$PW \
 
 Returns the current JPEG. 1920×1080 by default; with `match_source` enabled it
 mirrors the source's native resolution (capped at 1080p). 4K sources downscale to fit.
-Pi 4 hardware JPEG encoding keeps frame latency around 40-80 ms on LAN.
+Frame latency stays around 40-80 ms on LAN (Pi 4 and Pi 5 alike).
 
 ### Live MJPEG stream
 
