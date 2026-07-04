@@ -491,6 +491,15 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/unpin",   post(crate::ipfs::unpin))
         .route("/ipfs/pins",    get(crate::ipfs::pins))
         .route("/ipfs/add",     post(crate::ipfs::add_path))
+        // IPFS AI-model sharing — upload streams to disk (body limit disabled,
+        // models are GB-scale), then `ipfs add` pins it and the catalog rides
+        // the fleet heartbeat so every Orb sees the federated model index.
+        .route("/ipfs/models",        get(crate::ipfs::models))
+        .route("/ipfs/models/upload",
+            post(crate::ipfs::upload_model)
+                .layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/ipfs/models/fetch",  post(crate::ipfs::fetch_model))
+        .route("/ipfs/models/remove", post(crate::ipfs::remove_model))
         // Mysterium — bandwidth-sharing dVPN node (admin-only; wallet/payout off-device on mystnodes.co)
         .route("/mysterium/status",  get(crate::mysterium::status))
         .route("/mysterium/enable",  post(crate::mysterium::enable))

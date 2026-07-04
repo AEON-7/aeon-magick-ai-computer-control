@@ -115,6 +115,9 @@ cmd_pin()   { ipfs_cmd pin add "${1:-}" 2>&1; }
 cmd_unpin() { ipfs_cmd pin rm "${1:-}" 2>&1; }
 cmd_pins()  { ipfs_cmd pin ls --type=recursive 2>/dev/null | awk '{print $1}'; }
 cmd_add()   { ipfs_cmd add -rQ "${1:-}" 2>/dev/null; }
+# Best-effort direct swarm connection (multiaddr), used before pinning a
+# fleet peer's model so LAN/tailnet fetches don't wait on DHT routing.
+cmd_connect() { ipfs_cmd swarm connect "${1:-}" 2>&1 || true; }
 
 case "${1:-}" in
   up)      cmd_up ;;
@@ -125,6 +128,7 @@ case "${1:-}" in
   unpin)   shift; cmd_unpin "$@" ;;
   pins)    cmd_pins ;;
   add)     shift; cmd_add "$@" ;;
+  connect) shift; cmd_connect "$@" ;;
   gateway) echo "$GATEWAY_PORT" ;;
-  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|gateway}" >&2; exit 1 ;;
+  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|connect <multiaddr>|gateway}" >&2; exit 1 ;;
 esac

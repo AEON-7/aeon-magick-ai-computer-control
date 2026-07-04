@@ -383,8 +383,9 @@ pub async fn upload(
 type Response = axum::response::Response;
 
 /// Parse a Content-Disposition `filename="..."` parameter. Returns
-/// None if the header doesn't include one.
-fn parse_cd_filename(cd: &str) -> Option<String> {
+/// None if the header doesn't include one. (Shared with the IPFS model
+/// upload, which uses the same raw-body + Content-Disposition contract.)
+pub(crate) fn parse_cd_filename(cd: &str) -> Option<String> {
     for part in cd.split(';') {
         let p = part.trim();
         if let Some(rest) = p.strip_prefix("filename=") {

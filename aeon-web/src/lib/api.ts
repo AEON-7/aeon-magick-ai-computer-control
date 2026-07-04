@@ -216,6 +216,21 @@ export const setAudioVolume = (p: { playback?: number; capture?: number; capture
 // Offline peers come back as { online:false, addr } stubs — the rich fields
 // are only present for Orbs that answered their heartbeat, so all but `online`
 // are optional.
+/// One AI model shared over IPFS by an Orb. origin_* = the fleet identity of
+/// the Orb that FIRST shared it (provenance survives mirroring).
+export interface IpfsModel {
+  cid: string;
+  name: string;
+  size_bytes: number;
+  sha256?: string;
+  kind?: string;             // llm | vlm | vision | stt | tts | other
+  desc?: string;
+  license?: string;
+  added_at_ms?: number;
+  origin_id?: string;
+  origin_label?: string;
+}
+
 export interface FleetOrb {
   online: boolean;
   addr?: string;
@@ -225,6 +240,7 @@ export interface FleetOrb {
   label?: string;
   model?: string;            // pi5 | pi4 | other
   lan_ip?: string;
+  addrs?: string[];
   sources?: string[];
   view_source?: string;
   webcam?: { enabled: boolean; source: string };
@@ -237,6 +253,9 @@ export interface FleetOrb {
     mem_available_kb: number;
   };
   version?: string;
+  /// Shared-model catalog + kubo PeerID, riding the fleet heartbeat — the
+  /// federated model index is the union of this field across the roster.
+  ipfs_models?: { enabled: boolean; peer_id?: string; models?: IpfsModel[] };
 }
 export interface FleetRoster {
   ok: boolean;

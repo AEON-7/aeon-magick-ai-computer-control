@@ -179,7 +179,18 @@ fn self_status(cfg: &FleetCfg) -> Value {
         "health": crate::system::snapshot(),
         "version": env!("CARGO_PKG_VERSION"),
         "seeds": cfg.seeds,
+        // Shared AI-model catalog + kubo PeerID (ipfs.rs). Rides the heartbeat
+        // so every fleet peer sees a federated model index with zero extra
+        // protocol — fetch_peer() forwards unknown fields wholesale.
+        "ipfs_models": crate::ipfs::shared_models(),
     })
+}
+
+/// This Orb's fleet identity (id, label) — provenance stamp for content it
+/// publishes (e.g. shared IPFS models).
+pub fn identity() -> (String, String) {
+    let cfg = load_cfg();
+    (cfg.id, cfg.label)
 }
 
 /// Constant-time string compare for the shared fleet token.

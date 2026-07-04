@@ -129,11 +129,18 @@
                 <div class="text-ink-400">version</div>
                 <div class="text-ink-200 text-right">{o.version ?? '—'}</div>
               </div>
-              {#if o.sources?.length}
+              {#if o.sources?.length || o.ipfs_models?.models?.length}
                 <div class="mt-2 flex flex-wrap gap-1">
-                  {#each o.sources as s}
+                  {#each o.sources ?? [] as s}
                     <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-800 text-ink-300">{s}</span>
                   {/each}
+                  {#if o.ipfs_models?.models?.length}
+                    <a href="/orbnet/ipfs"
+                       class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cursed-900/50 text-cursed-300 hover:bg-cursed-900"
+                       title="AI models this Orb shares over IPFS — see the fleet model index">
+                      {o.ipfs_models.models.length} model{o.ipfs_models.models.length === 1 ? '' : 's'} 📦
+                    </a>
+                  {/if}
                 </div>
               {/if}
             {:else}
