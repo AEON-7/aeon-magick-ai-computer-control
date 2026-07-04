@@ -16,6 +16,7 @@
     cid: string; name: string; file?: string; size_bytes: number;
     sha256?: string; card?: Card; added_at_ms?: number;
     origin_id?: string; origin_label?: string;
+    verified?: boolean; source?: string;
   };
   type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[] };
   type Row = { entry: Entry; hosts: Host[]; local: boolean };
@@ -59,6 +60,36 @@
   let detail: Row | null = null;
   let detailReadme = '';       // fetched README text for the open detail
   let detailReadmeLoaded = '';  // cid whose readme we've fetched
+
+  // IPFS toggle + HuggingFace import
+  let toggling = false;
+  let hfUrl = '';
+  let hfBusy = false;
+
+  async function toggleIpfs() {
+    if (!node) return;
+    toggling = true; err = '';
+    try {
+      await api(node.enabled ? '/disable' : '/enable', { method: 'POST' });
+    } catch (e: any) { err = e?.message ?? 'toggle failed'; }
+    // enabling installs kubo on first run — give it a moment, then reload.
+    setTimeout(async () => { toggling = false; await load(); }, 1500);
+  }
+
+  async function importHf() {
+    const url = hfUrl.trim();
+    if (!url) return;
+    hfBusy = true; err = '';
+    try {
+      const r = await api('/models/import-hf', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      if (r && r.ok === false) err = r.err || 'import failed';
+      else hfUrl = '';
+    } catch (e: any) { err = e?.message ?? 'import failed'; }
+    hfBusy = false; await load();
+  }
 
   const api = (path: string, opts: RequestInit = {}) =>
     fetch(`/api/ipfs${path}`, { credentials: 'same-origin', ...opts }).then((r) => r.json());
@@ -313,17 +344,47 @@
       <div class="rounded border border-red-700 bg-red-950/40 text-red-300 px-3 py-2 text-sm">{err}</div>
     {/if}
 
-    <!-- toolbar -->
-    <div class="flex items-center gap-3 flex-wrap">
-      <button class="btn-primary text-sm px-4 py-2 rounded-md" on:click={pickFile} disabled={uploadPct >= 0}>+ Share a model</button>
-      <input type="file" bind:this={fileInput} class="hidden" on:change={onFile} />
-      <input class="flex-1 min-w-[12rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm"
-             bind:value={query} placeholder="Search models, base model, tags…" />
-      <select bind:value={kindFilter} class="bg-ink-800 border border-ink-700 rounded px-2 py-2 text-ink-100 text-sm font-mono">
-        {#each KINDS as k}<option value={k}>{k}</option>{/each}
-      </select>
-      <span class="text-ink-500 text-xs font-mono whitespace-nowrap">{filtered.length} model{filtered.length === 1 ? '' : 's'} · {peerCount} peer{peerCount === 1 ? '' : 's'}</span>
+    <!-- IPFS node status + on/off toggle -->
+    <div class="rounded-lg border border-ink-700 bg-ink-900 p-3 flex items-center gap-3 flex-wrap">
+      <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-1 rounded {node?.daemon === 'active' ? 'bg-emerald-900/50 text-emerald-300' : node?.enabled ? 'bg-amber-900/50 text-amber-300' : 'bg-ink-800 text-ink-400'}">
+        {node?.daemon === 'active' ? 'IPFS running' : node?.enabled ? 'IPFS starting' : 'IPFS off'}
+      </span>
+      {#if node?.daemon === 'active'}
+        <span class="text-ink-500 text-xs font-mono">{node.peers} swarm peers · {fmtBytes(node.repo_bytes)} / {node.storage_max}</span>
+      {/if}
+      <div class="flex-1"></div>
+      <!-- on/off switch -->
+      <button
+        class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {node?.enabled ? 'bg-cursed-600' : 'bg-ink-700'} disabled:opacity-50"
+        on:click={toggleIpfs} disabled={toggling} title={node?.enabled ? 'Disable IPFS (leave the Model Share network)' : 'Enable IPFS (join the Model Share network)'}>
+        <span class="inline-block h-5 w-5 transform rounded-full bg-white transition-transform {node?.enabled ? 'translate-x-5' : 'translate-x-0.5'}"></span>
+      </button>
+      <span class="text-xs font-mono text-ink-400 w-16">{toggling ? '…' : node?.enabled ? 'enabled' : 'disabled'}</span>
     </div>
+
+    {#if node?.enabled}
+      <!-- toolbar -->
+      <div class="flex items-center gap-3 flex-wrap">
+        <button class="btn-primary text-sm px-4 py-2 rounded-md" on:click={pickFile} disabled={uploadPct >= 0}>+ Share a model</button>
+        <input type="file" bind:this={fileInput} class="hidden" on:change={onFile} />
+        <input class="flex-1 min-w-[12rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm"
+               bind:value={query} placeholder="Search models, base model, tags…" />
+        <select bind:value={kindFilter} class="bg-ink-800 border border-ink-700 rounded px-2 py-2 text-ink-100 text-sm font-mono">
+          {#each KINDS as k}<option value={k}>{k}</option>{/each}
+        </select>
+        <span class="text-ink-500 text-xs font-mono whitespace-nowrap">{filtered.length} model{filtered.length === 1 ? '' : 's'} · {peerCount} peer{peerCount === 1 ? '' : 's'}</span>
+      </div>
+
+      <!-- import straight from HuggingFace -->
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-lg">🤗</span>
+        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+               bind:value={hfUrl} placeholder="Import from HuggingFace — paste a model URL (huggingface.co/org/model)"
+               on:keydown={(e) => e.key === 'Enter' && importHf()} />
+        <button class="btn text-sm px-4 py-2 rounded-md" on:click={importHf} disabled={hfBusy || !hfUrl.trim()}>{hfBusy ? 'Starting…' : 'Import'}</button>
+      </div>
+      <p class="text-[11px] text-ink-600 -mt-2">Pulls the weights, the README + author image, and verifies each file's SHA-256 against the hash HuggingFace publishes.</p>
+    {/if}
 
     {#if uploadPct >= 0}
       <div class="rounded-lg border border-cursed-700/50 bg-ink-900 p-4 space-y-1">
@@ -342,11 +403,13 @@
     {/each}
 
     <!-- model grid -->
-    {#if node?.daemon !== 'active'}
-      <div class="text-ink-500 text-sm text-center py-10">Connecting to the IPFS network… (first boot downloads kubo, ~30 MB)</div>
+    {#if !node?.enabled}
+      <div class="text-ink-500 text-sm text-center py-10">IPFS is off — flip the switch above to join the Model Share network.</div>
+    {:else if node?.daemon !== 'active'}
+      <div class="text-ink-500 text-sm text-center py-10">Connecting to the IPFS network… (first run downloads kubo, ~30 MB)</div>
     {:else if filtered.length === 0}
       <div class="text-ink-500 text-sm text-center py-10">
-        {rows.length ? 'No models match your filter.' : 'No models shared on the network yet — be the first: + Share a model.'}
+        {rows.length ? 'No models match your filter.' : 'No models shared on the network yet — be the first: + Share a model, or import one from HuggingFace.'}
       </div>
     {:else}
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -354,15 +417,20 @@
           {@const c = row.entry.card ?? {}}
           {@const busy = tasks[row.entry.cid]}
           <div class="rounded-lg border bg-ink-900 p-3.5 flex flex-col gap-2 transition {row.local ? 'border-emerald-500/40' : 'border-ink-700 hover:border-ink-600'}">
-            {#if c.image}
-              <button class="block -mx-3.5 -mt-3.5 mb-1 h-24 overflow-hidden rounded-t-lg bg-ink-950" on:click={() => (detail = row)}>
-                <img src={imageSrc(row.entry.cid, c.image)} alt="" class="w-full h-full object-cover" loading="lazy" />
+            <div class="flex items-start gap-2.5">
+              <!-- circular avatar, HuggingFace-style -->
+              <button class="shrink-0" on:click={() => (detail = row)}>
+                {#if c.image}
+                  <img src={imageSrc(row.entry.cid, c.image)} alt="" class="w-11 h-11 rounded-full object-cover border border-ink-700 bg-ink-950" loading="lazy" />
+                {:else}
+                  <div class="w-11 h-11 rounded-full bg-ink-800 border border-ink-700 flex items-center justify-center text-xl">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
+                {/if}
               </button>
-            {/if}
-            <div class="flex items-start gap-2">
-              <div class="text-xl leading-none mt-0.5">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
               <div class="min-w-0 flex-1">
-                <button class="font-mono text-sm text-ink-100 truncate hover:text-cursed-300 text-left w-full" on:click={() => (detail = row)} title={row.entry.name}>{row.entry.name}</button>
+                <div class="flex items-center gap-1.5">
+                  <button class="font-mono text-sm text-ink-100 truncate hover:text-cursed-300 text-left" on:click={() => (detail = row)} title={row.entry.name}>{row.entry.name}</button>
+                  {#if row.entry.verified}<span class="shrink-0 text-cursed-300" title="Verified — every file's SHA-256 matches the hash HuggingFace published">✓</span>{/if}
+                </div>
                 <div class="text-[11px] text-ink-500 font-mono flex flex-wrap gap-x-2">
                   {#if c.params}<span>{c.params}</span>{/if}
                   {#if c.quant}<span>{c.quant}</span>{/if}
@@ -420,7 +488,7 @@
       <!-- image + name row -->
       <div class="flex gap-3">
         <div class="shrink-0">
-          <div class="w-24 h-24 rounded-lg border border-ink-700 bg-ink-950 overflow-hidden flex items-center justify-center">
+          <div class="w-24 h-24 rounded-full border border-ink-700 bg-ink-950 overflow-hidden flex items-center justify-center">
             {#if imageB64}<img src={imageB64} alt="" class="w-full h-full object-cover" />
             {:else if existingImageUrl}<img src={existingImageUrl} alt="" class="w-full h-full object-cover" />
             {:else}<span class="text-ink-600 text-3xl">🖼️</span>{/if}
@@ -480,14 +548,23 @@
   <div class="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" on:click={() => (detail = null)}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <div class="w-full max-w-lg rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
-      {#if c.image}
-        <img src={imageSrc(detail.entry.cid, c.image)} alt="" class="w-full max-h-48 object-cover rounded-lg border border-ink-800" />
-      {/if}
-      <div class="flex items-start gap-3">
-        <div class="text-2xl">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
+      <div class="flex items-start gap-4">
+        {#if c.image}
+          <img src={imageSrc(detail.entry.cid, c.image)} alt="" class="w-20 h-20 rounded-full object-cover border border-ink-700 bg-ink-950 shrink-0" />
+        {:else}
+          <div class="w-20 h-20 rounded-full bg-ink-800 border border-ink-700 flex items-center justify-center text-3xl shrink-0">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
+        {/if}
         <div class="min-w-0 flex-1">
-          <div class="font-mono text-lg text-ink-100">{detail.entry.name}</div>
+          <div class="flex items-center gap-2">
+            <div class="font-mono text-lg text-ink-100 truncate">{detail.entry.name}</div>
+            {#if detail.entry.verified}
+              <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cursed-500/15 text-cursed-300 border border-cursed-500/40" title="Every file's SHA-256 matches the hash HuggingFace published">✓ verified</span>
+            {/if}
+          </div>
           <div class="text-xs text-ink-500 font-mono">{fmtBytes(detail.entry.size_bytes)} · {c.kind || 'model'}{c.format ? ' · ' + c.format : ''}</div>
+          {#if detail.entry.source}
+            <a href={detail.entry.source} target="_blank" rel="noreferrer" class="text-xs text-cursed-300 hover:underline font-mono break-all">{detail.entry.source.replace('https://', '')}</a>
+          {/if}
         </div>
         {#if detail.local}<button class="text-xs text-cursed-300 hover:underline shrink-0" on:click={() => detail && editModel(detail)}>edit</button>{/if}
       </div>

@@ -514,6 +514,7 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/models/edit",
             post(crate::ipfs::edit_model)
                 .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/ipfs/models/import-hf", post(crate::ipfs::import_hf))
         .route("/ipfs/models/fetch",  post(crate::ipfs::fetch_model))
         .route("/ipfs/models/remove", post(crate::ipfs::remove_model))
         // Mysterium — bandwidth-sharing dVPN node (admin-only; wallet/payout off-device on mystnodes.co)

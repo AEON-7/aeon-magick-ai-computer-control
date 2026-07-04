@@ -343,6 +343,13 @@ pub struct ModelEntry {
     pub origin_id: String,
     #[serde(default)]
     pub origin_label: String,
+    /// True when every LFS weight file's sha256 matched the hash HuggingFace
+    /// published for it (imported models only) — an integrity signature.
+    #[serde(default)]
+    pub verified: bool,
+    /// Provenance URL for imported models (e.g. the HuggingFace repo).
+    #[serde(default)]
+    pub source: String,
 }
 
 fn epoch_ms() -> i64 {
@@ -547,6 +554,8 @@ pub async fn upload_model(
         added_at_ms: epoch_ms(),
         origin_id,
         origin_label,
+        verified: false,
+        source: String::new(),
     };
 
     task_set(&display, "adding to IPFS…");
@@ -1019,6 +1028,7 @@ pub async fn publish_model(State(_s): State<AppState>, Json(req): Json<PublishRe
                 catalog_add(ModelEntry {
                     cid: cid.clone(), name: req.name, file, size_bytes, sha256,
                     card, added_at_ms: epoch_ms(), origin_id, origin_label,
+                    verified: false, source: String::new(),
                 });
                 let _ = std::fs::remove_dir_all(&dir);
                 let _ = std::fs::remove_file(&meta_path);
@@ -1160,6 +1170,7 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
             cid: new_cid.clone(), name: req.name, file: old.file, size_bytes: old.size_bytes,
             sha256: old.sha256, card, added_at_ms: old.added_at_ms,
             origin_id: old.origin_id, origin_label: old.origin_label,
+            verified: old.verified, source: old.source,
         });
         let _ = write_catalog(&entries);
         let _ = run_script(&["unpin", &req.cid]);
@@ -1169,4 +1180,402 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "edit task failed"}));
     Json(v)
+}
+
+// ── HuggingFace import ──────────────────────────────────────────────────────
+
+fn hf_agent() -> ureq::Agent {
+    ureq::builder()
+        .redirects(10)
+        .timeout_connect(std::time::Duration::from_secs(20))
+        .user_agent("aeon-magick-orb/modelshare")
+        .build()
+}
+
+fn hf_get_json(url: &str) -> Result<Value, String> {
+    let resp = hf_agent().get(url).call().map_err(|e| match e {
+        ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+            "model is gated/private on HuggingFace (needs a token) — not supported".to_string()
+        }
+        ureq::Error::Status(404, _) => "repo not found on HuggingFace".to_string(),
+        other => format!("HF request failed: {other}"),
+    })?;
+    resp.into_json::<Value>().map_err(|e| format!("bad HF json: {e}"))
+}
+
+/// Parse a HuggingFace URL / id into (repo_id, optional specific file path).
+/// Accepts: https://huggingface.co/org/model[/tree/main][/blob|resolve/main/<file>]
+/// or a bare "org/model".
+fn parse_hf(input: &str) -> Result<(String, Option<String>), String> {
+    let s = input.trim();
+    let rest = s
+        .strip_prefix("https://huggingface.co/")
+        .or_else(|| s.strip_prefix("http://huggingface.co/"))
+        .or_else(|| s.strip_prefix("huggingface.co/"))
+        .unwrap_or(s);
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return Err("expected a huggingface.co/<org>/<model> URL".into());
+    }
+    // Reject anything that isn't a plausible repo segment.
+    let ok = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    if !ok(parts[0]) || !ok(parts[1]) {
+        return Err("invalid repo id".into());
+    }
+    let repo = format!("{}/{}", parts[0], parts[1]);
+    // /blob/main/<file> or /resolve/main/<file> → a specific file.
+    if parts.len() >= 5 && (parts[2] == "blob" || parts[2] == "resolve") {
+        let file = parts[4..].join("/");
+        if file.contains("..") {
+            return Err("invalid file path".into());
+        }
+        return Ok((repo, Some(file)));
+    }
+    Ok((repo, None))
+}
+
+fn is_weight(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    [".safetensors", ".gguf", ".bin", ".onnx", ".pt", ".pth", ".ot", ".gduf"]
+        .iter()
+        .any(|e| p.ends_with(e))
+}
+
+/// Free bytes on the filesystem holding `path` (via `df`, avoiding a libc dep).
+fn free_bytes(path: &str) -> u64 {
+    std::process::Command::new("df")
+        .args(["-Pk", path])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.lines().nth(1).and_then(|l| l.split_whitespace().nth(3).map(String::from))
+        })
+        .and_then(|kb| kb.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+        .unwrap_or(u64::MAX)
+}
+
+/// Pick a token like "8B" / "0.5B" / "70B" out of a model name, for the card.
+fn parse_params(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'B' || bytes[i] == b'b' || bytes[i] == b'M' || bytes[i] == b'm') {
+                // require it to be a size suffix, not part of a longer word
+                let next_ok = bytes.get(i + 1).map(|c| !c.is_ascii_alphanumeric()).unwrap_or(true);
+                if next_ok {
+                    return format!("{}{}", &name[start..i], (bytes[i] as char).to_ascii_uppercase());
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    String::new()
+}
+
+fn kind_from_pipeline(pt: &str) -> &'static str {
+    match pt {
+        "text-generation" | "text2text-generation" => "llm",
+        "image-text-to-text" | "visual-question-answering" | "image-to-text" | "video-text-to-text" => "vlm",
+        "automatic-speech-recognition" | "audio-classification" => "stt",
+        "text-to-speech" | "text-to-audio" => "tts",
+        "feature-extraction" | "sentence-similarity" => "embedding",
+        "image-classification" | "object-detection" | "image-segmentation" | "depth-estimation"
+        | "zero-shot-image-classification" => "vision",
+        _ => "other",
+    }
+}
+
+/// Stream a URL to `dest`, hashing as we go; drives overall progress via the
+/// task phase string. Returns (sha256_hex, bytes_written).
+fn hf_download(
+    url: &str,
+    dest: &std::path::Path,
+    key: &str,
+    label: &str,
+    grand_total: u64,
+    prior_done: u64,
+) -> Result<(String, u64), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    let resp = hf_agent().get(url).call().map_err(|e| format!("download {label}: {e}"))?;
+    let mut reader = resp.into_reader();
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("create {label}: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut done: u64 = 0;
+    let mut last_pct: i64 = -1;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("read {label}: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n]).map_err(|e| format!("write {label}: {e}"))?;
+        done += n as u64;
+        if grand_total > 0 {
+            let pct = ((prior_done + done) * 100 / grand_total) as i64;
+            if pct != last_pct {
+                last_pct = pct;
+                task_set(key, &format!("downloading {label} — {pct}%"));
+            }
+        }
+    }
+    file.flush().ok();
+    Ok((hex::encode(hasher.finalize()), done))
+}
+
+#[derive(Deserialize)]
+pub struct ImportHfReq {
+    pub url: String,
+}
+
+/// POST /api/ipfs/models/import-hf — import a model straight from HuggingFace:
+/// pull the weight file(s), the README (model card) and the author avatar,
+/// verify each weight's sha256 against the hash HuggingFace publishes (LFS
+/// oid), wrap it all in an IPFS directory, pin + catalog + announce it. Runs in
+/// the background; progress shows in /models tasks.
+pub async fn import_hf(State(_s): State<AppState>, Json(req): Json<ImportHfReq>) -> Json<Value> {
+    if !read_config().enabled {
+        return Json(json!({"ok": false, "err": "IPFS is off — enable it first"}));
+    }
+    let (repo, only_file) = match parse_hf(&req.url) {
+        Ok(v) => v,
+        Err(e) => return Json(json!({"ok": false, "err": e})),
+    };
+    let model_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+    let key = model_name.clone();
+    let importing = key.clone();
+    task_set(&key, "fetching model info…");
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = do_import_hf(&repo, only_file, &model_name, &key) {
+            task_set(&key, &format!("error: {e}"));
+        } else {
+            task_clear(&key);
+            announce();
+        }
+    });
+    Json(json!({"ok": true, "importing": importing}))
+}
+
+fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &str) -> Result<(), String> {
+    let meta = hf_get_json(&format!("https://huggingface.co/api/models/{repo}"))?;
+    let tree = hf_get_json(&format!("https://huggingface.co/api/models/{repo}/tree/main"))?;
+    let files = tree.as_array().cloned().unwrap_or_default();
+
+    // (path, size, lfs_sha256)
+    let mut weights: Vec<(String, u64, Option<String>)> = Vec::new();
+    let get = |f: &Value, k: &str| f.get(k).and_then(|v| v.as_str()).map(String::from);
+    let lfs_oid = |f: &Value| f.get("lfs").and_then(|l| l.get("oid")).and_then(|v| v.as_str()).map(String::from);
+    let size_of = |f: &Value| f.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    if let Some(one) = &only_file {
+        let f = files.iter().find(|f| get(f, "path").as_deref() == Some(one.as_str()));
+        let (sz, oid) = f.map(|f| (size_of(f), lfs_oid(f))).unwrap_or((0, None));
+        weights.push((one.clone(), sz, oid));
+    } else {
+        let paths: Vec<String> = files.iter().filter_map(|f| get(f, "path")).collect();
+        let has = |ext: &str| paths.iter().any(|p| p.to_ascii_lowercase().ends_with(ext));
+        if has(".safetensors") {
+            for f in &files {
+                if let Some(p) = get(f, "path") {
+                    let pl = p.to_ascii_lowercase();
+                    if pl.ends_with(".safetensors") || p == "config.json" || p == "generation_config.json" {
+                        weights.push((p, size_of(f), lfs_oid(f)));
+                    }
+                }
+            }
+        } else if has(".gguf") {
+            // one GGUF — prefer a common balanced quant, else the smallest.
+            let prefs = ["q4_k_m", "q4_0", "q5_k_m", "q8_0", "q6_k", "q3_k_m"];
+            let ggufs: Vec<&Value> = files.iter().filter(|f| get(f, "path").map(|p| p.to_ascii_lowercase().ends_with(".gguf")).unwrap_or(false)).collect();
+            let pick = prefs.iter().find_map(|q| ggufs.iter().find(|f| get(f, "path").map(|p| p.to_ascii_lowercase().contains(q)).unwrap_or(false)).copied())
+                .or_else(|| ggufs.iter().min_by_key(|f| size_of(f)).copied());
+            if let Some(f) = pick {
+                if let Some(p) = get(f, "path") {
+                    weights.push((p, size_of(f), lfs_oid(f)));
+                }
+            }
+        } else {
+            for f in &files {
+                if let Some(p) = get(f, "path") {
+                    if is_weight(&p) || p == "config.json" {
+                        weights.push((p, size_of(f), lfs_oid(f)));
+                    }
+                }
+            }
+        }
+    }
+    if weights.is_empty() {
+        return Err("no weight files found in the repo".into());
+    }
+    let total: u64 = weights.iter().map(|(_, s, _)| *s).sum();
+    let dir = staging_root().join(format!("hf-{}", new_draft_id()));
+    let free = free_bytes(MODELS_DIR);
+    if total > 0 && total + 512 * 1024 * 1024 > free {
+        return Err(format!(
+            "not enough disk: model is {} but only {} free",
+            human(total), human(free)
+        ));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Download weights, verifying each against HF's published sha256.
+    let mut prior = 0u64;
+    let mut all_verified = true;
+    let mut any_verifiable = false;
+    let mut primary_sha = String::new();
+    let mut primary_file = String::new();
+    for (path, size, oid) in &weights {
+        let leaf = path.rsplit('/').next().unwrap_or(path).to_string();
+        let url = format!("https://huggingface.co/{repo}/resolve/main/{path}");
+        let (sha, n) = hf_download(&url, &dir.join(&leaf), key, &leaf, total, prior)?;
+        prior += n;
+        if primary_file.is_empty() && is_weight(path) {
+            primary_file = leaf.clone();
+            primary_sha = sha.clone();
+        }
+        if let Some(expected) = oid {
+            any_verifiable = true;
+            if !expected.eq_ignore_ascii_case(&sha) {
+                all_verified = false;
+            }
+        }
+        let _ = size; // (size was only for the disk/total estimate)
+    }
+    let verified = any_verifiable && all_verified;
+
+    // README (the model card) + author avatar — best-effort.
+    task_set(key, "fetching README + image…");
+    if let Ok(resp) = hf_agent().get(&format!("https://huggingface.co/{repo}/resolve/main/README.md")).call() {
+        if let Ok(text) = resp.into_string() {
+            let _ = std::fs::write(dir.join("README.md"), text);
+        }
+    }
+    let mut image_name = String::new();
+    if let Ok(resp) = hf_agent().get(&format!("https://huggingface.co/{repo}")).call() {
+        if let Ok(html) = resp.into_string() {
+            if let Some(url) = find_avatar_url(&html) {
+                let ext = url.rsplit('.').next().filter(|e| e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("jpg");
+                let name = format!("card-image.{}", safe_img_ext(ext));
+                if let Ok(r) = hf_agent().get(&url).call() {
+                    let mut bytes = Vec::new();
+                    use std::io::Read;
+                    if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
+                        if std::fs::write(dir.join(&name), &bytes).is_ok() {
+                            image_name = name;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the card from HF metadata.
+    let card_data = meta.get("cardData").cloned().unwrap_or_else(|| json!({}));
+    let pipeline = meta.get("pipeline_tag").and_then(|v| v.as_str())
+        .or_else(|| card_data.get("pipeline_tag").and_then(|v| v.as_str())).unwrap_or("");
+    let license = card_data.get("license").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let base_model = card_data.get("base_model").and_then(|v| v.as_str()).map(String::from)
+        .or_else(|| card_data.get("base_model").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default();
+    let tags: Vec<String> = meta.get("tags").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).filter(|t| !t.contains(':') && t.len() < 24).take(8).collect())
+        .unwrap_or_default();
+    let format = if primary_file.to_ascii_lowercase().ends_with(".gguf") { "gguf" }
+        else if primary_file.to_ascii_lowercase().ends_with(".safetensors") { "safetensors" }
+        else if primary_file.to_ascii_lowercase().ends_with(".onnx") { "onnx" }
+        else { "" };
+    let quant = if format == "gguf" {
+        // e.g. "qwen2.5-0.5b-instruct-q4_k_m.gguf" → "q4_k_m": the last dash/dot
+        // token starting with q<digit>.
+        let low = primary_file.to_ascii_lowercase();
+        let stem = low.strip_suffix(".gguf").unwrap_or(&low);
+        stem.split(|c| c == '-' || c == '.')
+            .rev()
+            .find(|p| {
+                let b = p.as_bytes();
+                b.first() == Some(&b'q') && b.get(1).map(|c| c.is_ascii_digit()).unwrap_or(false)
+            })
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let card = ModelCard {
+        kind: kind_from_pipeline(pipeline).to_string(),
+        base_model,
+        params: parse_params(model_name),
+        quant,
+        license,
+        description: format!("Imported from HuggingFace: {repo}"),
+        intended_use: String::new(),
+        tags,
+        format: format.to_string(),
+        image: image_name,
+        readme: dir.join("README.md").exists(),
+    };
+    let (origin_id, origin_label) = crate::fleet::identity();
+    let source = format!("https://huggingface.co/{repo}");
+    let card_doc = json!({
+        "schema": "aeon-model-card/1", "name": model_name, "file": primary_file,
+        "size_bytes": total, "sha256": primary_sha, "card": card,
+        "verified": verified, "source": source,
+        "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
+    });
+    std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default())
+        .map_err(|e| format!("write card: {e}"))?;
+
+    task_set(key, "adding to IPFS…");
+    let cid = run_script(&["add", &dir.to_string_lossy()])?;
+    if cid.is_empty() {
+        return Err("ipfs add produced no CID".into());
+    }
+    catalog_add(ModelEntry {
+        cid, name: model_name.to_string(), file: primary_file, size_bytes: total,
+        sha256: primary_sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
+        verified, source,
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// First `cdn-avatars.huggingface.co/...` URL in the page HTML — the author's
+/// avatar (the circular image HF shows on the model card). HF embeds this
+/// inside JSON in the HTML, so slashes may be escaped (`\/` or `/`);
+/// unescape a window first, then cut at the first real delimiter.
+fn find_avatar_url(html: &str) -> Option<String> {
+    let needle = "cdn-avatars.huggingface.co/";
+    let idx = html.find(needle)?;
+    let window = &html[idx..(idx + 400).min(html.len())];
+    let unescaped = window.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/");
+    // `&` terminates the URL when it's in an HTML-entity-encoded attribute
+    // (`…jpeg&quot;`); `?` drops any query string.
+    let end = unescaped
+        .find(|c: char| matches!(c, '"' | '\'' | ' ' | '<' | '>' | ')' | '\\' | '\n' | '?' | '&'))
+        .unwrap_or(unescaped.len());
+    let path = &unescaped[..end];
+    if path.len() < needle.len() + 4 {
+        return None;
+    }
+    Some(format!("https://{path}"))
+}
+
+fn human(b: u64) -> String {
+    let u = ["B", "KB", "MB", "GB", "TB"];
+    let mut x = b as f64;
+    let mut i = 0;
+    while x >= 1024.0 && i < u.len() - 1 {
+        x /= 1024.0;
+        i += 1;
+    }
+    format!("{x:.1} {}", u[i])
 }
