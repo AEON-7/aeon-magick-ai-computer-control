@@ -1776,9 +1776,18 @@
             <span class:spin={metricsLoading}>↻</span> {metricsLoading ? 'refreshing' : 'refresh'}
           </button>
         </div>
-        {#if !systems.length}
-          <p class="text-zinc-500 text-xs">No systems yet — add them in the
-            <button class="underline text-cursed-300" on:click={() => (tab = 'systems')}>Connected Systems</button> tab.</p>
+        {#if !systems.length && !loading}
+          <div class="rounded-xl border border-cursed-800/60 bg-cursed-950/20 p-8 text-center space-y-4">
+            <div class="text-4xl">🛰️</div>
+            <div>
+              <p class="text-ink-100 font-mono">No connected systems yet</p>
+              <p class="text-zinc-400 text-sm mt-1 max-w-md mx-auto">Link a DGX Spark, an agent gateway, or any
+                box you can SSH to. Then this dashboard watches its GPU/CPU/RAM and tokens, deploys models to it,
+                pushes from Model Share, and runs benchmarks on it.</p>
+            </div>
+            <button class="inline-block bg-cursed-600 hover:bg-cursed-500 text-white font-mono text-sm px-5 py-2.5 rounded-lg transition-colors"
+                    on:click={() => (tab = 'systems')}>↳ Connect your first system</button>
+          </div>
         {/if}
 
         <div class="sys-grid">

@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import StorageManager from '$lib/components/StorageManager.svelte';
+  import Icon from '$lib/components/Icon.svelte';
 
-  // Model Share — a friendly, fleet-FREE marketplace of AI models shared over
-  // IPFS. Every Orb auto-enrolls at boot and gossips its catalog on a pubsub
+  // Intergalactic Model Share — a decentralized, censorship-resistant network of
+  // AI models shared over IPFS (the InterPlanetary File System — we think
+  // bigger). Every Orb auto-enrolls at boot and gossips its catalog on a pubsub
   // topic, so this console shows models from every Orb on the network with no
   // token or fleet enrollment. Upload a model (with a model card), browse what
-  // others share, and download (pin) any of them to host it here too.
+  // others share, and download (pin) any of them to host it here too — every
+  // holder helps serve it, so popular models download faster.
 
   type Card = {
     kind?: string; base_model?: string; params?: string; quant?: string;
@@ -416,11 +419,11 @@
 <div class="min-h-screen bg-ink-950 text-ink-100">
   <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
     <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
-    <h1 class="font-mono text-lg text-cursed-300">🛰️ Model Share</h1>
+    <h1 class="font-mono text-lg text-cursed-300 flex items-center gap-2"><Icon name="aether" class="w-5 h-5" /> Intergalactic <span class="text-ink-400">Model Share</span></h1>
     <div class="w-28 text-right">
       {#if node?.daemon === 'active'}
         <span class="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded bg-emerald-900/50 text-emerald-300"
-              title="This Orb is enrolled in the IPFS Model Share network">on-network</span>
+              title="This Orb is enrolled in the Intergalactic Model Share network (IPFS)">on-network</span>
       {:else}
         <span class="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded bg-amber-900/50 text-amber-300">connecting…</span>
       {/if}
@@ -428,11 +431,15 @@
   </header>
 
   <main class="max-w-5xl mx-auto px-5 py-6 space-y-5">
+    <p class="text-ink-400 text-xs leading-relaxed -mt-1">
+      Built on <span class="text-cursed-300">IPFS — the InterPlanetary File System</span>. We just think bigger.
+    </p>
     <p class="text-ink-300 text-sm leading-relaxed">
-      A shared library of AI models across every Aeon Orb — no fleet, no accounts. Every Orb auto-joins the
-      IPFS network at boot and announces the models it hosts, so what you see below is contributed by Orbs
-      everywhere. <span class="text-cursed-300">Share</span> a model to publish it with a model card;
-      <span class="text-cursed-300">download</span> anyone's to run it locally (and help host it).
+      A decentralized, censorship-resistant network for AI models — no fleet, no accounts, no central server to
+      take down. Every Aeon Orb auto-joins at boot and announces the models it hosts, so the library below is
+      contributed by Orbs everywhere, and each model is served by everyone who holds it — the more popular a
+      model, the faster it downloads. <span class="text-cursed-300">Share</span> a model to publish it with a
+      model card; <span class="text-cursed-300">download</span> anyone's to run it locally (and help host it).
     </p>
 
     {#if err}
@@ -453,7 +460,7 @@
       <!-- on/off switch -->
       <button
         class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {node?.enabled ? 'bg-cursed-600' : 'bg-ink-700'} disabled:opacity-50"
-        on:click={toggleIpfs} disabled={toggling} title={node?.enabled ? 'Disable IPFS (leave the Model Share network)' : 'Enable IPFS (join the Model Share network)'}>
+        on:click={toggleIpfs} disabled={toggling} title={node?.enabled ? 'Disable IPFS (leave Model Share)' : 'Enable IPFS (join Model Share)'}>
         <span class="inline-block h-5 w-5 transform rounded-full bg-white transition-transform {node?.enabled ? 'translate-x-5' : 'translate-x-0.5'}"></span>
       </button>
       <span class="text-xs font-mono text-ink-400 w-16">{toggling ? '…' : node?.enabled ? 'enabled' : 'disabled'}</span>
@@ -511,7 +518,7 @@
 
     <!-- model grid -->
     {#if !node?.enabled}
-      <div class="text-ink-500 text-sm text-center py-10">IPFS is off — flip the switch above to join the Model Share network.</div>
+      <div class="text-ink-500 text-sm text-center py-10">IPFS is off — flip the switch above to join Model Share.</div>
     {:else if node?.daemon === 'failed'}
       <div class="text-red-300 text-sm text-center py-10">IPFS daemon failed to start — SSH into the Orb and check <code class="font-mono">journalctl -u aeon-ipfs</code>.</div>
     {:else if node?.daemon !== 'active'}
@@ -739,8 +746,12 @@
       </div>
 
       {#if !systems.length}
-        <p class="text-sm text-ink-400">No connected systems yet. Add a DGX / gateway in the
-          <a href="/agent" class="text-cursed-300 hover:underline">Agent Dashboard</a> first.</p>
+        <div class="text-center py-4 space-y-3">
+          <p class="text-sm text-ink-300">Pushing a model needs a server to push it to — a DGX, an agent
+            gateway, or any box you've SSH-linked. You don't have any connected yet.</p>
+          <a href="/agent" class="inline-block bg-cursed-600 hover:bg-cursed-500 text-white font-mono text-sm px-4 py-2 rounded-lg transition-colors">↳ Connect your first system</a>
+          <p class="text-xs text-ink-500">Set it up once in the Agent Dashboard, then come back and push.</p>
+        </div>
         <div class="flex justify-end"><button class="btn text-sm px-3 py-1.5 rounded" on:click={closePush}>Close</button></div>
       {:else}
         <!-- 1. target system -->

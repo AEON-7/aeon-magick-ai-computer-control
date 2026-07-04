@@ -25,6 +25,10 @@
     fleet: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
     // share-nodes — three peers linked in a mesh (Model Share / IPFS gossip).
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.6 15.4 6.4M8.6 13.4 15.4 17.6"/>',
+    // Aether — a central orb held in two crossing cosmic orbits, with peer-orbs
+    // riding them: the decentralized model network as a constellation. Orbits
+    // stroked, orbs filled (currentColor) so it reads sharp at any size.
+    aether: '<ellipse cx="12" cy="12" rx="9.3" ry="3.7" transform="rotate(28 12 12)"/><ellipse cx="12" cy="12" rx="9.3" ry="3.7" transform="rotate(-28 12 12)"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="19.4" cy="8.2" r="1.25" fill="currentColor" stroke="none"/><circle cx="4.6" cy="15.8" r="1.25" fill="currentColor" stroke="none"/>',
     power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
     zap: '<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>',
     reboot: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',

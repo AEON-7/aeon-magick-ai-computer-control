@@ -14,7 +14,7 @@
   const SUPER_APPS: (NavItem & { color: 'cursed' | 'sky' | 'amber' | 'emerald' | 'flame' | 'violet' })[] = [
     { href: '/orbnet', label: 'OrbNet',     icon: 'orbnet', color: 'cursed', title: 'Decentralized services hub — Tor hidden services, IPFS, Mysterium dVPN, private chat' },
     { href: '/fleet',  label: 'Fleet',      icon: 'fleet',  color: 'emerald', title: 'Manage every Orb as one fleet — live roster, health + sources of each peer over the tailnet/LAN' },
-    { href: '/model-share', label: 'Model Share', icon: 'share', color: 'cursed', title: 'Fleet-free AI model marketplace over IPFS — browse, share + download models with model cards from every Orb on the network' },
+    { href: '/model-share', label: 'Model Share', icon: 'aether', color: 'cursed', title: 'Intergalactic Model Share — a decentralized, censorship-resistant network for sharing and downloading AI models, built on IPFS. Browse, share + download models with model cards from every Orb.' },
     { href: '/agent',  label: 'Agent Dash', icon: 'braces', color: 'sky',    title: 'Connected gateways + DGX Sparks, per-agent provisioning' },
     { href: '/gpio',   label: 'GPIO',       icon: 'chip',   color: 'amber',  title: 'GPIO pins, HATs, power + IO — live hardware state' },
     { href: '/hailo',  label: 'Hailo AI',   icon: 'spark',  color: 'flame',  title: 'AI HAT+ (Hailo) — install, live NPU stats, deploy/unload models' },
