@@ -497,9 +497,22 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/models",          get(crate::ipfs::models))
         .route("/ipfs/models/registry", get(crate::ipfs::models_registry))
         .route("/ipfs/models/card",     get(crate::ipfs::model_card))
+        .route("/ipfs/models/file",     get(crate::ipfs::model_file))
         .route("/ipfs/models/upload",
             post(crate::ipfs::upload_model)
                 .layer(axum::extract::DefaultBodyLimit::disable()))
+        // Rich share: stream weights (limit disabled), then publish/edit carry
+        // the card + README + base64 image as JSON (raise the limit to ~8 MB
+        // for the image; the default 2 MB would reject it).
+        .route("/ipfs/models/upload-weights",
+            post(crate::ipfs::upload_weights)
+                .layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/ipfs/models/publish",
+            post(crate::ipfs::publish_model)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/ipfs/models/edit",
+            post(crate::ipfs::edit_model)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/ipfs/models/fetch",  post(crate::ipfs::fetch_model))
         .route("/ipfs/models/remove", post(crate::ipfs::remove_model))
         // Mysterium — bandwidth-sharing dVPN node (admin-only; wallet/payout off-device on mystnodes.co)

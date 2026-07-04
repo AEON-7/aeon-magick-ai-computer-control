@@ -10,7 +10,7 @@
   type Card = {
     kind?: string; base_model?: string; params?: string; quant?: string;
     license?: string; description?: string; intended_use?: string;
-    tags?: string[]; format?: string;
+    tags?: string[]; format?: string; image?: string; readme?: boolean;
   };
   type Entry = {
     cid: string; name: string; file?: string; size_bytes: number;
@@ -42,14 +42,23 @@
 
   // upload / share form
   let fileInput: HTMLInputElement;
-  let pendingFile: File | null = null;
-  let form = { name: '', kind: 'llm', base_model: '', params: '', quant: '', format: '', license: '', description: '', intended_use: '', tags: '' };
+  let imageInput: HTMLInputElement;
+  let pendingFile: File | null = null;      // weights (null when editing metadata only)
+  let editingCid: string | null = null;      // set when editing an existing model
+  let form = { name: '', kind: 'llm', base_model: '', params: '', quant: '', format: '', license: '', description: '', intended_use: '', tags: '', readme: '' };
+  let imageB64 = '';   // data URL of a newly picked image (share or replace)
+  let imageExt = '';
+  let existingImageUrl = '';  // gateway URL of the current image when editing
+  let removeImage = false;
   let uploadPct = -1;
   let uploadName = '';
   let showShare = false;
+  let saving = false;
 
   // detail modal
   let detail: Row | null = null;
+  let detailReadme = '';       // fetched README text for the open detail
+  let detailReadmeLoaded = '';  // cid whose readme we've fetched
 
   const api = (path: string, opts: RequestInit = {}) =>
     fetch(`/api/ipfs${path}`, { credentials: 'same-origin', ...opts }).then((r) => r.json());
@@ -95,7 +104,14 @@
       .filter(Boolean).join(' ').toLowerCase().includes(q);
   });
 
-  function pickFile() { fileInput?.click(); }
+  function resetForm() {
+    pendingFile = null; editingCid = null; imageB64 = ''; imageExt = '';
+    existingImageUrl = ''; removeImage = false; saving = false;
+    form = { name: '', kind: 'llm', base_model: '', params: '', quant: '', format: '', license: '', description: '', intended_use: '', tags: '', readme: '' };
+  }
+
+  // ── Share (new model) ──
+  function pickFile() { resetForm(); fileInput?.click(); }
   function onFile() {
     const f = fileInput?.files?.[0];
     if (!f) return;
@@ -107,37 +123,127 @@
     if (fileInput) fileInput.value = '';
   }
 
-  function submitShare() {
-    if (!pendingFile) return;
-    const f = pendingFile;
-    const card: Card = {
+  // ── Edit (existing model — metadata / image / README only) ──
+  async function editModel(row: Row) {
+    resetForm();
+    editingCid = row.entry.cid;
+    const c = row.entry.card ?? {};
+    form = {
+      name: row.entry.name, kind: c.kind || 'other', base_model: c.base_model || '',
+      params: c.params || '', quant: c.quant || '', format: c.format || '',
+      license: c.license || '', description: c.description || '', intended_use: c.intended_use || '',
+      tags: (c.tags || []).join(', '), readme: '',
+    };
+    if (c.image) existingImageUrl = `${gatewayBase}/ipfs/${row.entry.cid}/${c.image}`;
+    showShare = true;
+    detail = null;
+    // pull the existing README so the editor is prefilled
+    if (c.readme) {
+      try {
+        const r = await api(`/models/file?cid=${row.entry.cid}&name=README.md`);
+        if (r?.ok) form.readme = r.text ?? '';
+      } catch {}
+    }
+  }
+
+  function onImage() {
+    const f = imageInput?.files?.[0];
+    if (!f) return;
+    if (f.size > 4 * 1024 * 1024) { err = 'image too large (max 4 MB)'; return; }
+    imageExt = (f.name.split('.').pop() || 'png').toLowerCase();
+    removeImage = false;
+    const reader = new FileReader();
+    reader.onload = () => { imageB64 = String(reader.result || ''); };
+    reader.readAsDataURL(f);
+    if (imageInput) imageInput.value = '';
+  }
+  function clearImage() { imageB64 = ''; existingImageUrl = ''; removeImage = true; }
+
+  function cardFromForm(): Card {
+    return {
       kind: form.kind, base_model: form.base_model.trim(), params: form.params.trim(),
       quant: form.quant.trim(), format: form.format.trim(), license: form.license.trim(),
       description: form.description.trim(), intended_use: form.intended_use.trim(),
       tags: form.tags.split(',').map((t) => t.trim()).filter(Boolean),
     };
-    const q = new URLSearchParams({ name: form.name.trim() || f.name, card: JSON.stringify(card) });
+  }
+
+  // Publish a new model: stream the weights (progress), then finalize with the
+  // card + README + image as JSON.
+  function submitShare() {
+    if (editingCid) return submitEdit();
+    if (!pendingFile) return;
+    const f = pendingFile;
     uploadName = form.name || f.name;
-    uploadPct = 0;
-    err = '';
+    uploadPct = 0; err = '';
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/ipfs/models/upload?${q}`);
+    xhr.open('POST', '/api/ipfs/models/upload-weights');
     xhr.setRequestHeader('Content-Disposition', `attachment; filename="${f.name}"`);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.withCredentials = true;
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) uploadPct = Math.floor((e.loaded / e.total) * 100);
     });
-    xhr.addEventListener('load', () => {
+    xhr.addEventListener('load', async () => {
+      let draft: any = {};
+      try { draft = JSON.parse(xhr.responseText); } catch {}
+      if (!draft.ok) { uploadPct = -1; err = draft.err || `HTTP ${xhr.status}`; return; }
+      uploadPct = 100;
+      const r = await api('/models/publish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          draft_id: draft.draft_id, name: form.name.trim() || f.name, card: cardFromForm(),
+          readme: form.readme, image_b64: imageB64, image_ext: imageExt,
+        }),
+      });
       uploadPct = -1;
-      try { const r = JSON.parse(xhr.responseText); if (!r.ok) err = r.err || `HTTP ${xhr.status}`; }
-      catch { err = `HTTP ${xhr.status}`; }
-      pendingFile = null; showShare = false;
-      form = { name: '', kind: 'llm', base_model: '', params: '', quant: '', format: '', license: '', description: '', intended_use: '', tags: '' };
-      load();
+      if (r && r.ok === false) err = r.err || 'publish failed';
+      showShare = false; resetForm(); await load();
     });
     xhr.addEventListener('error', () => { uploadPct = -1; err = 'upload failed (network)'; });
     xhr.send(f);
+  }
+
+  // Edit an existing model's metadata/image/README — rebuilds the IPFS
+  // directory on the Orb reusing the weights (no re-upload).
+  async function submitEdit() {
+    if (!editingCid) return;
+    saving = true; err = '';
+    const body: any = { cid: editingCid, name: form.name.trim(), card: cardFromForm(), readme: form.readme };
+    if (imageB64) { body.image_b64 = imageB64; body.image_ext = imageExt; }
+    else if (removeImage) body.remove_image = true;
+    try {
+      const r = await api('/models/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (r && r.ok === false) err = r.err || 'edit failed';
+    } catch (e: any) { err = e?.message ?? 'edit failed'; }
+    saving = false; showShare = false; resetForm(); await load();
+  }
+
+  // Minimal, XSS-safe markdown → HTML for READMEs from untrusted Orbs: escape
+  // ALL html first, then re-introduce only a fixed, safe tag set. Links are
+  // autolinked http(s) only.
+  function renderMd(src: string): string {
+    let s = src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    s = s.replace(/```([\s\S]*?)```/g, (_m, c) => `<pre class="bg-ink-950 border border-ink-800 rounded p-2 overflow-x-auto text-[11px]">${c.trim()}</pre>`);
+    s = s.replace(/`([^`]+)`/g, '<code class="text-cursed-300">$1</code>');
+    s = s.replace(/^###\s+(.*)$/gm, '<h3 class="font-mono text-ink-100 mt-3 mb-1">$1</h3>');
+    s = s.replace(/^##\s+(.*)$/gm, '<h2 class="font-mono text-ink-100 text-base mt-3 mb-1">$1</h2>');
+    s = s.replace(/^#\s+(.*)$/gm, '<h1 class="font-mono text-ink-100 text-lg mt-3 mb-1">$1</h1>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong class="text-ink-100">$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+    s = s.replace(/^[-*]\s+(.*)$/gm, '<li class="ml-4 list-disc">$1</li>');
+    s = s.replace(/\bhttps?:\/\/[^\s<)]+/g, (u) => `<a href="${u}" target="_blank" rel="noreferrer" class="text-cursed-300 hover:underline">${u}</a>`);
+    return s.replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>');
+  }
+
+  // Lazy-load the README when a detail modal opens for a model that has one.
+  $: if (detail && detail.entry.card?.readme && detailReadmeLoaded !== detail.entry.cid) {
+    const cid = detail.entry.cid;
+    detailReadmeLoaded = cid;
+    detailReadme = '';
+    api(`/models/file?cid=${cid}&name=README.md`).then((r) => { if (r?.ok && detail?.entry.cid === cid) detailReadme = r.text ?? ''; }).catch(() => {});
   }
 
   async function download(row: Row) {
@@ -242,6 +348,11 @@
           {@const c = row.entry.card ?? {}}
           {@const busy = tasks[row.entry.cid]}
           <div class="rounded-lg border bg-ink-900 p-3.5 flex flex-col gap-2 transition {row.local ? 'border-emerald-500/40' : 'border-ink-700 hover:border-ink-600'}">
+            {#if c.image}
+              <button class="block -mx-3.5 -mt-3.5 mb-1 h-24 overflow-hidden rounded-t-lg bg-ink-950" on:click={() => (detail = row)}>
+                <img src="{gatewayBase}/ipfs/{row.entry.cid}/{c.image}" alt="" class="w-full h-full object-cover" loading="lazy" />
+              </button>
+            {/if}
             <div class="flex items-start gap-2">
               <div class="text-xl leading-none mt-0.5">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
               <div class="min-w-0 flex-1">
@@ -271,7 +382,8 @@
                 <span class="text-amber-300 font-mono">{busy}</span>
               {:else if row.local}
                 <span class="text-emerald-400 font-mono">✓ hosted here</span>
-                <a href={downloadUrl(row.entry)} class="ml-auto text-ink-400 hover:text-cursed-300" title="Download the file from your gateway">save</a>
+                <button class="ml-auto text-ink-400 hover:text-cursed-300" on:click={() => editModel(row)} title="Edit this model's card, image + README">edit</button>
+                <a href={downloadUrl(row.entry)} class="text-ink-400 hover:text-cursed-300" title="Download the file from your gateway">save</a>
                 <button class="{confirmRemove === row.entry.cid ? 'text-red-400' : 'text-ink-500 hover:text-red-400'}" on:click={() => unshare(row.entry.cid)}>{confirmRemove === row.entry.cid ? 'sure?' : 'unshare'}</button>
               {:else}
                 <button class="btn text-xs py-1 px-2.5 rounded" on:click={() => download(row)}>↓ Download</button>
@@ -285,19 +397,41 @@
   </main>
 </div>
 
-<!-- ── Share form modal ─────────────────────────────────────────────────── -->
-{#if showShare && pendingFile}
+<!-- ── Share / Edit form modal ──────────────────────────────────────────── -->
+{#if showShare && (pendingFile || editingCid)}
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" on:click={() => (showShare = false)}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <div class="w-full max-w-lg rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
       <div class="flex items-center justify-between">
-        <h2 class="font-mono text-cursed-300">Share “{pendingFile.name}”</h2>
-        <span class="text-xs text-ink-500 font-mono">{fmtBytes(pendingFile.size)}</span>
+        <h2 class="font-mono text-cursed-300">{editingCid ? 'Edit model card' : `Share “${pendingFile?.name}”`}</h2>
+        {#if pendingFile}<span class="text-xs text-ink-500 font-mono">{fmtBytes(pendingFile.size)}</span>{/if}
       </div>
-      <p class="text-[11px] text-ink-500">Fill the model card — it's published inside the IPFS directory alongside the weights so anyone can read it before downloading.</p>
-      <label class="block text-xs font-mono text-ink-400">Name
-        <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.name} placeholder="Qwen3-VL 8B Instruct" /></label>
+      <p class="text-[11px] text-ink-500">
+        {#if editingCid}Editing the card, image + README rebuilds the model's IPFS entry — the weights are reused, never re-uploaded.{:else}Fill the model card — it's published inside the IPFS directory alongside the weights so anyone can read it before downloading.{/if}
+      </p>
+
+      <!-- image + name row -->
+      <div class="flex gap-3">
+        <div class="shrink-0">
+          <div class="w-24 h-24 rounded-lg border border-ink-700 bg-ink-950 overflow-hidden flex items-center justify-center">
+            {#if imageB64}<img src={imageB64} alt="" class="w-full h-full object-cover" />
+            {:else if existingImageUrl}<img src={existingImageUrl} alt="" class="w-full h-full object-cover" />
+            {:else}<span class="text-ink-600 text-3xl">🖼️</span>{/if}
+          </div>
+          <div class="flex items-center justify-center gap-2 mt-1">
+            <button class="text-[11px] text-cursed-300 hover:underline" on:click={() => imageInput?.click()}>{imageB64 || existingImageUrl ? 'replace' : 'add image'}</button>
+            {#if imageB64 || existingImageUrl}<button class="text-[11px] text-ink-500 hover:text-red-400" on:click={clearImage}>remove</button>{/if}
+          </div>
+          <input type="file" accept="image/*" bind:this={imageInput} class="hidden" on:change={onImage} />
+        </div>
+        <label class="flex-1 block text-xs font-mono text-ink-400">Name
+          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.name} placeholder="Qwen3-VL 8B Instruct" />
+          <span class="block mt-2">Base model</span>
+          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.base_model} placeholder="Qwen/Qwen3-VL-8B" />
+        </label>
+      </div>
+
       <div class="grid grid-cols-2 gap-2">
         <label class="block text-xs font-mono text-ink-400">Kind
           <select class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.kind}>
@@ -310,8 +444,6 @@
         <label class="block text-xs font-mono text-ink-400">Quantization
           <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.quant} placeholder="int4 / q4_k_m" /></label>
       </div>
-      <label class="block text-xs font-mono text-ink-400">Base model
-        <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.base_model} placeholder="Qwen/Qwen3-VL-8B" /></label>
       <label class="block text-xs font-mono text-ink-400">Description
         <textarea rows="2" class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.description} placeholder="What it is, how it was trained/tuned, notable strengths."></textarea></label>
       <label class="block text-xs font-mono text-ink-400">Intended use
@@ -322,9 +454,14 @@
         <label class="block text-xs font-mono text-ink-400">Tags (comma-sep)
           <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.tags} placeholder="grounding, agent, vision" /></label>
       </div>
+      <label class="block text-xs font-mono text-ink-400">README (markdown)
+        <textarea rows="5" class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm font-mono" bind:value={form.readme} placeholder="# Usage&#10;How to run it, prompt format, benchmarks, credits…"></textarea></label>
+
       <div class="flex justify-end gap-2 pt-1">
         <button class="btn text-sm px-3 py-1.5 rounded" on:click={() => (showShare = false)}>Cancel</button>
-        <button class="btn-primary text-sm px-4 py-1.5 rounded" on:click={submitShare}>Publish to network</button>
+        <button class="btn-primary text-sm px-4 py-1.5 rounded disabled:opacity-50" on:click={submitShare} disabled={saving || uploadPct >= 0}>
+          {editingCid ? (saving ? 'Saving…' : 'Save changes') : 'Publish to network'}
+        </button>
       </div>
     </div>
   </div>
@@ -337,12 +474,16 @@
   <div class="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" on:click={() => (detail = null)}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <div class="w-full max-w-lg rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
+      {#if c.image}
+        <img src="{gatewayBase}/ipfs/{detail.entry.cid}/{c.image}" alt="" class="w-full max-h-48 object-cover rounded-lg border border-ink-800" />
+      {/if}
       <div class="flex items-start gap-3">
         <div class="text-2xl">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
         <div class="min-w-0 flex-1">
           <div class="font-mono text-lg text-ink-100">{detail.entry.name}</div>
           <div class="text-xs text-ink-500 font-mono">{fmtBytes(detail.entry.size_bytes)} · {c.kind || 'model'}{c.format ? ' · ' + c.format : ''}</div>
         </div>
+        {#if detail.local}<button class="text-xs text-cursed-300 hover:underline shrink-0" on:click={() => detail && editModel(detail)}>edit</button>{/if}
       </div>
       {#if c.description}<p class="text-sm text-ink-300 leading-relaxed">{c.description}</p>{/if}
       <div class="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs font-mono">
@@ -357,6 +498,16 @@
       {#if c.tags?.length}
         <div class="flex flex-wrap gap-1">
           {#each c.tags as t}<span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-800 text-ink-300">{t}</span>{/each}
+        </div>
+      {/if}
+      {#if c.readme}
+        <div class="border-t border-ink-800 pt-3">
+          <div class="text-[11px] font-mono text-ink-500 uppercase tracking-wider mb-1">README</div>
+          {#if detailReadme}
+            <div class="text-sm text-ink-300 leading-relaxed">{@html renderMd(detailReadme)}</div>
+          {:else}
+            <div class="text-xs text-ink-600">loading…</div>
+          {/if}
         </div>
       {/if}
       <div class="text-[11px] text-ink-500 font-mono">

@@ -86,6 +86,31 @@ fn run_script(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Like `run_script` but pipes `input` to the child's stdin (for `mfs-write`,
+/// which writes stdin into an MFS file).
+fn run_script_stdin(args: &[&str], input: &[u8]) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(SCRIPT)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn {SCRIPT}: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "no stdin".to_string())?
+        .write_all(input)
+        .map_err(|e| format!("write stdin: {e}"))?;
+    let out = child.wait_with_output().map_err(|e| format!("wait: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{SCRIPT} {args:?}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 fn script_status() -> Value {
     run_script(&["status"])
         .ok()
@@ -275,6 +300,13 @@ pub struct ModelCard {
     pub tags: Vec<String>,
     #[serde(default)]
     pub format: String, // gguf | safetensors | onnx | hef | …
+    /// Card image filename inside the shared dir (e.g. "card-image.png"), or
+    /// empty. Rendered from <gateway>/ipfs/<cid>/<image>.
+    #[serde(default)]
+    pub image: String,
+    /// True when a README.md is present in the shared dir.
+    #[serde(default)]
+    pub readme: bool,
 }
 
 /// One shared model = one IPFS directory CID. `origin_*` is the identity of the
@@ -699,5 +731,386 @@ pub async fn model_card(
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "card task failed"}));
+    Json(v)
+}
+
+/// GET /api/ipfs/models/file?cid=<dir>&name=README.md — fetch a text file from
+/// a shared model dir through the local node (`ipfs cat`), whitelisted to the
+/// known sidecar files so this can't be used to read arbitrary paths.
+pub async fn model_file(
+    State(_s): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let cid = q.get("cid").cloned().unwrap_or_default();
+    let name = q.get("name").cloned().unwrap_or_default();
+    if !valid_cid(&cid) || !matches!(name.as_str(), "README.md" | "model-card.json") {
+        return Json(json!({"ok": false, "err": "invalid request"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        match run_script(&["cat", &format!("{cid}/{name}")]) {
+            Ok(s) => json!({"ok": true, "text": s}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "file task failed"}));
+    Json(v)
+}
+
+// ── Rich share (weights + card + README + image) & metadata EDIT ─────────────
+
+static DRAFT_CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn new_draft_id() -> String {
+    let n = DRAFT_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", epoch_ms())
+}
+
+fn staging_root() -> std::path::PathBuf {
+    std::path::Path::new(MODELS_DIR).join("staging")
+}
+
+/// Keep image extensions to a safe known set; default png.
+fn safe_img_ext(ext: &str) -> String {
+    match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "jpg".into(),
+        "webp" => "webp".into(),
+        "gif" => "gif".into(),
+        "svg" => "svg".into(),
+        _ => "png".into(),
+    }
+}
+
+const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Decode a base64 card image, enforcing the size cap. Returns (bytes, ext).
+fn decode_image(image_b64: &str, image_ext: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+    let b64 = image_b64.trim();
+    if b64.is_empty() {
+        return Ok(None);
+    }
+    // Accept a data: URL or bare base64.
+    let raw = b64.rsplit(',').next().unwrap_or(b64);
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .map_err(|e| format!("bad image base64: {e}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!("image too large ({} KB, max {} KB)", bytes.len() / 1024, MAX_IMAGE_BYTES / 1024));
+    }
+    Ok(Some((bytes, safe_img_ext(image_ext))))
+}
+
+/// POST /api/ipfs/models/upload-weights — phase 1 of a rich share. Streams the
+/// weights (Content-Disposition filename, raw body, body-limit disabled) to a
+/// per-draft staging dir and returns a draft_id. The console then finalizes
+/// with /models/publish, carrying the card + README + image as JSON — so
+/// arbitrary-size metadata and a binary image don't have to ride a query
+/// string. sha256 is computed in-stream.
+pub async fn upload_weights(
+    State(_s): State<AppState>,
+    request: axum::extract::Request<axum::body::Body>,
+) -> Json<Value> {
+    use axum::http::header;
+    use futures::StreamExt;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let filename = request
+        .headers()
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::storage::parse_cd_filename)
+        .unwrap_or_else(|| format!("model-{}", epoch_ms()));
+    let safe_file: String = filename
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    let draft_id = new_draft_id();
+    let dir = staging_root().join(&draft_id);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Json(json!({"ok": false, "err": format!("mkdir draft: {e}")}));
+    }
+    let file_path = dir.join(&safe_file);
+    let tmp_path = dir.join(format!("{safe_file}.partial"));
+    let mut file = match tokio::fs::File::create(&tmp_path).await {
+        Ok(f) => f,
+        Err(e) => return Json(json!({"ok": false, "err": format!("create draft: {e}")})),
+    };
+    let mut hasher = Sha256::new();
+    let mut n: u64 = 0;
+    let mut stream = request.into_body().into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                return Json(json!({"ok": false, "err": format!("stream: {e}")}));
+            }
+        };
+        hasher.update(&bytes);
+        if let Err(e) = file.write_all(&bytes).await {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Json(json!({"ok": false, "err": format!("write: {e}")}));
+        }
+        n += bytes.len() as u64;
+    }
+    let _ = file.flush().await;
+    drop(file);
+    if let Err(e) = tokio::fs::rename(&tmp_path, &file_path).await {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        return Json(json!({"ok": false, "err": format!("rename: {e}")}));
+    }
+    // Sidecar (OUTSIDE the dir so it isn't added to IPFS) recording the weights
+    // filename for the publish step.
+    let sha = hex::encode(hasher.finalize());
+    let meta = json!({"file": safe_file, "size_bytes": n, "sha256": sha, "created_ms": epoch_ms()});
+    let _ = std::fs::write(staging_root().join(format!("{draft_id}.meta.json")), meta.to_string());
+
+    Json(json!({"ok": true, "draft_id": draft_id, "file": safe_file, "size_bytes": n, "sha256": sha}))
+}
+
+/// Prune draft dirs + sidecars older than ~2h (uploads never finalized).
+fn prune_stale_drafts() {
+    let root = staging_root();
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            if let Ok(md) = e.metadata() {
+                if md.modified().map(|m| m < cutoff).unwrap_or(false) {
+                    let p = e.path();
+                    if md.is_dir() { let _ = std::fs::remove_dir_all(&p); }
+                    else { let _ = std::fs::remove_file(&p); }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PublishReq {
+    pub draft_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub card: ModelCard,
+    #[serde(default)]
+    pub readme: String,
+    #[serde(default)]
+    pub image_b64: String,
+    #[serde(default)]
+    pub image_ext: String,
+}
+
+/// POST /api/ipfs/models/publish — phase 2: finalize a draft into a shared
+/// model dir. Writes model-card.json + optional README.md + optional
+/// card-image into the draft dir, `ipfs add -r` (pins) the whole directory so
+/// one CID carries weights + card + readme + image, catalogs it, cleans up, and
+/// announces to the network.
+pub async fn publish_model(State(_s): State<AppState>, Json(req): Json<PublishReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        prune_stale_drafts();
+        // draft_id is a server-minted "<ms>-<n>" — reject anything else so this
+        // can't be steered outside the staging root.
+        if req.draft_id.is_empty() || !req.draft_id.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            return json!({"ok": false, "err": "bad draft id"});
+        }
+        let dir = staging_root().join(&req.draft_id);
+        let meta_path = staging_root().join(format!("{}.meta.json", req.draft_id));
+        let meta: Value = std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| json!({}));
+        let file = meta.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if file.is_empty() || !dir.join(&file).exists() {
+            return json!({"ok": false, "err": "draft not found (expired?)"});
+        }
+        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let sha256 = meta.get("sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        // Decode image → write into the dir; set card.image.
+        let mut card = req.card;
+        match decode_image(&req.image_b64, &req.image_ext) {
+            Ok(Some((bytes, ext))) => {
+                let img_name = format!("card-image.{ext}");
+                if std::fs::write(dir.join(&img_name), &bytes).is_ok() {
+                    card.image = img_name;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return json!({"ok": false, "err": e}),
+        }
+        card.readme = !req.readme.trim().is_empty();
+        if card.readme {
+            if std::fs::write(dir.join("README.md"), &req.readme).is_err() {
+                card.readme = false;
+            }
+        }
+
+        let (origin_id, origin_label) = crate::fleet::identity();
+        let card_doc = json!({
+            "schema": "aeon-model-card/1", "name": req.name, "file": file,
+            "size_bytes": size_bytes, "sha256": sha256, "card": card,
+            "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
+        });
+        if std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default()).is_err() {
+            return json!({"ok": false, "err": "write card failed"});
+        }
+
+        let dir_str = dir.to_string_lossy().to_string();
+        match run_script(&["add", &dir_str]) {
+            Ok(cid) if !cid.is_empty() => {
+                catalog_add(ModelEntry {
+                    cid: cid.clone(), name: req.name, file, size_bytes, sha256,
+                    card, added_at_ms: epoch_ms(), origin_id, origin_label,
+                });
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&meta_path);
+                announce();
+                json!({"ok": true, "cid": cid})
+            }
+            Ok(_) => json!({"ok": false, "err": "add produced no CID"}),
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "publish task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct EditReq {
+    pub cid: String, // the model dir CID being edited
+    pub name: String,
+    #[serde(default)]
+    pub card: ModelCard,
+    /// None = keep the existing README; Some("") = remove it; Some(text) = set.
+    #[serde(default)]
+    pub readme: Option<String>,
+    #[serde(default)]
+    pub image_b64: String,
+    #[serde(default)]
+    pub image_ext: String,
+    #[serde(default)]
+    pub remove_image: bool,
+}
+
+/// POST /api/ipfs/models/edit — edit a model this Orb hosts WITHOUT re-uploading
+/// the weights. Copies the existing dir into MFS by CID reference (weights +
+/// any kept image are shared, not re-transferred), rewrites model-card.json,
+/// sets/keeps/clears README.md, replaces/keeps/removes the card image, then
+/// pins the new dir CID, unpins + de-catalogs the old one, and re-announces.
+/// Provenance (origin, first-shared time) is preserved.
+pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) -> Json<Value> {
+    if !valid_cid(&req.cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        // Must be a model this Orb hosts (in the local catalog) to edit it.
+        let old = match read_catalog().into_iter().find(|e| e.cid == req.cid) {
+            Some(e) => e,
+            None => return json!({"ok": false, "err": "not a locally-hosted model"}),
+        };
+        let img = match decode_image(&req.image_b64, &req.image_ext) {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+
+        // Flat top-level MFS path: `files cp` needs the destination's parent to
+        // exist, and `/` always does (a nested /aeon-build/<id> would need an
+        // explicit mkdir of the parent first).
+        let base = format!("/aeon-build-{}", new_draft_id());
+        let _ = run_script(&["mfs-rm", &base]);
+        // Seed from the existing dir — weights + current files reused by ref.
+        if let Err(e) = run_script(&["mfs-cp", &format!("/ipfs/{}", req.cid), &base]) {
+            return json!({"ok": false, "err": format!("mfs seed: {e}")});
+        }
+
+        let mut card = req.card;
+        // README: keep / set / clear.
+        let readme_present = match &req.readme {
+            None => old.card.readme, // keep existing
+            Some(md) if md.trim().is_empty() => {
+                let _ = run_script(&["mfs-rm", &format!("{base}/README.md")]);
+                false
+            }
+            Some(md) => {
+                if let Err(e) = run_script_stdin(&["mfs-write", &format!("{base}/README.md")], md.as_bytes()) {
+                    let _ = run_script(&["mfs-rm", &base]);
+                    return json!({"ok": false, "err": format!("write readme: {e}")});
+                }
+                true
+            }
+        };
+        card.readme = readme_present;
+
+        // Image: replace / remove / keep.
+        let old_img = old.card.image.clone();
+        if let Some((bytes, ext)) = img {
+            if !old_img.is_empty() {
+                let _ = run_script(&["mfs-rm", &format!("{base}/{old_img}")]);
+            }
+            let tmp = staging_root().join(format!("img-{}.{ext}", new_draft_id()));
+            let _ = std::fs::create_dir_all(staging_root());
+            let img_name = format!("card-image.{ext}");
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                match run_script(&["add", &tmp.to_string_lossy()]) {
+                    Ok(icid) if !icid.is_empty() => {
+                        let _ = run_script(&["mfs-cp", &format!("/ipfs/{icid}"), &format!("{base}/{img_name}")]);
+                        card.image = img_name;
+                    }
+                    _ => {}
+                }
+            }
+            let _ = std::fs::remove_file(&tmp);
+        } else if req.remove_image {
+            if !old_img.is_empty() {
+                let _ = run_script(&["mfs-rm", &format!("{base}/{old_img}")]);
+            }
+            card.image = String::new();
+        } else {
+            card.image = old_img; // keep
+        }
+
+        // Rewrite model-card.json.
+        let card_doc = json!({
+            "schema": "aeon-model-card/1", "name": req.name, "file": old.file,
+            "size_bytes": old.size_bytes, "sha256": old.sha256, "card": card,
+            "shared_by": {"id": old.origin_id, "label": old.origin_label},
+            "created_ms": old.added_at_ms,
+        });
+        let card_bytes = serde_json::to_vec_pretty(&card_doc).unwrap_or_default();
+        let _ = run_script(&["mfs-rm", &format!("{base}/model-card.json")]);
+        if let Err(e) = run_script_stdin(&["mfs-write", &format!("{base}/model-card.json")], &card_bytes) {
+            let _ = run_script(&["mfs-rm", &base]);
+            return json!({"ok": false, "err": format!("write card: {e}")});
+        }
+
+        let new_cid = match run_script(&["mfs-hash", &base]) {
+            Ok(c) if !c.is_empty() => c,
+            _ => { let _ = run_script(&["mfs-rm", &base]); return json!({"ok": false, "err": "no new CID"}); }
+        };
+        let _ = run_script(&["mfs-rm", &base]);
+
+        if new_cid == req.cid {
+            return json!({"ok": true, "cid": new_cid, "unchanged": true});
+        }
+        if let Err(e) = run_script(&["pin", &new_cid]) {
+            return json!({"ok": false, "err": format!("pin new: {e}")});
+        }
+        // Swap catalog entry (preserve provenance + first-shared time).
+        let mut entries: Vec<ModelEntry> = read_catalog().into_iter().filter(|e| e.cid != req.cid).collect();
+        entries.push(ModelEntry {
+            cid: new_cid.clone(), name: req.name, file: old.file, size_bytes: old.size_bytes,
+            sha256: old.sha256, card, added_at_ms: old.added_at_ms,
+            origin_id: old.origin_id, origin_label: old.origin_label,
+        });
+        let _ = write_catalog(&entries);
+        let _ = run_script(&["unpin", &req.cid]);
+        announce();
+        json!({"ok": true, "cid": new_cid})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "edit task failed"}));
     Json(v)
 }

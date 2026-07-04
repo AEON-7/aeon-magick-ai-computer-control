@@ -132,6 +132,15 @@ cmd_id()      { ipfs_cmd id -f='<id>' 2>/dev/null; }
 #   sub <topic>    stream messages on a pubsub topic (one per line, blocks)
 cmd_pub() { ipfs_cmd pubsub pub "${1:-}" 2>/dev/null; }
 cmd_sub() { ipfs_cmd pubsub sub "${1:-}" 2>/dev/null; }
+# MFS (mutable filesystem) primitives — used to build/EDIT a model directory
+# while reusing the (multi-GB) weights by CID reference, so editing a model's
+# card/readme/image never re-uploads or re-downloads the weights. All paths are
+# MFS paths (e.g. /aeon-build/<id>) except cp's /ipfs/<cid> source.
+cmd_mfs_mkdir() { ipfs_cmd files mkdir -p "${1:-}" 2>&1; }
+cmd_mfs_cp()    { ipfs_cmd files cp "${1:-}" "${2:-}" 2>&1; }
+cmd_mfs_rm()    { ipfs_cmd files rm -r "${1:-}" 2>/dev/null || true; }
+cmd_mfs_write() { ipfs_cmd files write --create --truncate "${1:-}" 2>&1; }  # stdin → file
+cmd_mfs_hash()  { ipfs_cmd files stat --hash "${1:-}" 2>/dev/null; }
 
 case "${1:-}" in
   up)      cmd_up ;;
@@ -147,6 +156,11 @@ case "${1:-}" in
   id)      cmd_id ;;
   pub)     shift; cmd_pub "$@" ;;
   sub)     shift; cmd_sub "$@" ;;
+  mfs-mkdir) shift; cmd_mfs_mkdir "$@" ;;
+  mfs-cp)    shift; cmd_mfs_cp "$@" ;;
+  mfs-rm)    shift; cmd_mfs_rm "$@" ;;
+  mfs-write) shift; cmd_mfs_write "$@" ;;
+  mfs-hash)  shift; cmd_mfs_hash "$@" ;;
   gateway) echo "$GATEWAY_PORT" ;;
-  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|cat <path>|connect <multiaddr>|id|pub <topic>|sub <topic>|gateway}" >&2; exit 1 ;;
+  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|cat <path>|connect <multiaddr>|id|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
 esac
