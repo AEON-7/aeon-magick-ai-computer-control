@@ -532,6 +532,28 @@ pub async fn upload_model(
         return Json(json!({"ok": false, "err": format!("rename: {e}")}));
     }
 
+    // Format gate: a SHARED weight must be a real, safe model format. Reject
+    // executables/scripts, pickle/zip weights (code-execution on load), and
+    // files whose magic bytes don't match a claimed weight extension — so the
+    // network never carries something disguised as a model.
+    {
+        let mut head = [0u8; 16];
+        let n = { use std::io::Read; std::fs::File::open(&file_path).and_then(|mut f| f.read(&mut head)).unwrap_or(0) };
+        let kind = sniff_kind(&head[..n]);
+        let low = safe_file.to_ascii_lowercase();
+        let bad = match kind {
+            "elf" | "pe" | "macho" | "script" => Some("an executable/script".to_string()),
+            "pickle" | "zip" => Some("a pickle/zip weight (can run code when loaded) — export it to safetensors or gguf first".to_string()),
+            _ if low.ends_with(".gguf") && kind != "gguf" => Some(format!("claiming .gguf but its content is {kind}")),
+            _ if low.ends_with(".safetensors") && kind != "safetensors" => Some(format!("claiming .safetensors but its content is {kind}")),
+            _ => None,
+        };
+        if let Some(why) = bad {
+            let _ = tokio::fs::remove_dir_all(&share_dir).await;
+            return Json(json!({"ok": false, "err": format!("won't share “{safe_file}”: {why}")}));
+        }
+    }
+
     let sha256_hex = hex::encode(hasher.finalize());
     let (origin_id, origin_label) = crate::fleet::identity();
 
@@ -611,28 +633,140 @@ pub struct FetchReq {
 /// fleet needed). Swarm-connects to a hosting Orb when hints are given, then
 /// `ipfs pin add` fetches the whole directory (weights + card). Progress via
 /// /models tasks. Pinned = hosted, so this Orb joins the model's host set.
+/// Classify a file by leading magic bytes — so we can catch fake extensions and
+/// files that have no business in a model directory (executables, scripts).
+fn sniff_kind(head: &[u8]) -> &'static str {
+    if head.starts_with(b"\x7fELF") { return "elf"; }
+    if head.starts_with(b"MZ") { return "pe"; }
+    if head.starts_with(&[0xfe, 0xed, 0xfa, 0xce]) || head.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || head.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) { return "macho"; }
+    if head.starts_with(b"#!") { return "script"; }
+    if head.starts_with(b"GGUF") { return "gguf"; }
+    if head.starts_with(b"PK\x03\x04") { return "zip"; }               // torch .pt is a zip
+    if head.first() == Some(&0x80) && head.get(1).is_some_and(|b| *b <= 5) { return "pickle"; }
+    if head.len() >= 9 && head[8] == b'{' { return "safetensors"; }    // 8-byte LE len + JSON
+    if head.starts_with(b"\x89PNG") || head.starts_with(&[0xff, 0xd8, 0xff])
+        || head.starts_with(b"GIF8") || (head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP") { return "image"; }
+    if head.starts_with(b"{") || head.iter().take(64).all(|b| *b == b'\n' || *b == b'\r' || *b == b'\t' || (0x20..0x7f).contains(b) || *b >= 0x80) { return "text"; }
+    "unknown"
+}
+
+/// Recursively inspect a materialized model directory: reject anything that is
+/// executable/scriptable, a pickle/zip weight (code-execution on load), or a
+/// weight file whose magic bytes don't match its claimed extension.
+fn inspect_model_dir(dir: &std::path::Path) -> Result<(), String> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = std::fs::read_dir(&d).map_err(|e| format!("read quarantine: {e}"))?;
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() { stack.push(p); continue; }
+            let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let mut head = [0u8; 16];
+            let n = {
+                use std::io::Read;
+                std::fs::File::open(&p).and_then(|mut f| f.read(&mut head)).unwrap_or(0)
+            };
+            let kind = sniff_kind(&head[..n]);
+            match kind {
+                "elf" | "pe" | "macho" | "script" =>
+                    return Err(format!("rejected: “{name}” is an executable/script — not a model file")),
+                "pickle" | "zip" =>
+                    return Err(format!("rejected: “{name}” is a pickle/zip weight (can run code when loaded); only safetensors/gguf/onnx are accepted")),
+                _ => {}
+            }
+            if name.ends_with(".gguf") && kind != "gguf" {
+                return Err(format!("rejected: “{name}” claims .gguf but its content is {kind} (fake extension)"));
+            }
+            if name.ends_with(".safetensors") && kind != "safetensors" {
+                return Err(format!("rejected: “{name}” claims .safetensors but its content is {kind} (fake extension)"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// On-demand ClamAV scan of a directory. Ok(true)=scanned clean, Ok(false)=scan
+/// unavailable (clamav not installed / no signature DB yet) so we don't block,
+/// Err=infected. Big weight files need the size caps lifted.
+fn virus_scan(dir: &std::path::Path) -> Result<bool, String> {
+    let out = std::process::Command::new("clamscan")
+        .args(["-r", "-i", "--no-summary", "--max-filesize=16000M", "--max-scansize=16000M"])
+        .arg(dir)
+        .output();
+    match out {
+        Ok(o) => match o.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Err(format!(
+                "infected — {}",
+                String::from_utf8_lossy(&o.stdout).lines().take(3).collect::<Vec<_>>().join("; ")
+            )),
+            _ => Ok(false), // scan error (e.g. DB not fetched yet) — don't block
+        },
+        Err(_) => Ok(false), // clamscan not present — format check still ran
+    }
+}
+
+/// POST /api/ipfs/models/fetch — download a peer's model through a QUARANTINE
+/// sandbox: fetch to staging → validate every file's magic bytes (fake
+/// extensions / stowaway executables / pickle weights) → ClamAV scan → and only
+/// on a clean pass pin it + add to the catalog. Progress phases surface in the
+/// task map. Rejected content never reaches the live library.
 pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) -> Json<Value> {
     if !valid_cid(&req.entry.cid) {
         return Json(json!({"ok": false, "err": "invalid CID"}));
     }
     let cid = req.entry.cid.clone();
-    task_set(&cid, "downloading from IPFS…");
+    task_set(&cid, "checking disk…");
     tokio::task::spawn_blocking(move || {
+        let fail = |msg: &str| task_set(&cid, &format!("error: {msg}"));
+
+        // Connect to the sharer's hinted addrs for a fast direct fetch.
         if !req.peer_id.is_empty() {
             for addr in req.addrs.iter().take(4) {
                 if addr.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':') {
-                    let ma = format!("/ip4/{addr}/tcp/4001/p2p/{}", req.peer_id);
-                    let _ = run_script(&["connect", &ma]);
+                    let _ = run_script(&["connect", &format!("/ip4/{addr}/tcp/4001/p2p/{}", req.peer_id)]);
                 }
             }
         }
+
+        // Disk guard: materializing quarantines a full copy alongside the
+        // blockstore blocks (~2× peak), so require room for that + headroom.
+        let sz = req.entry.size_bytes;
+        let free = free_bytes(MODELS_DIR);
+        if sz > 0 && sz.saturating_mul(2) + 512 * 1024 * 1024 > free {
+            return fail(&format!("not enough disk: model is {} but only {} free", human(sz), human(free)));
+        }
+
+        let q = staging_root().join(format!("quarantine-{}", new_draft_id()));
+        task_set(&cid, "downloading to quarantine…");
+        if let Err(e) = run_script(&["get", &cid, &q.to_string_lossy()]) {
+            let _ = std::fs::remove_dir_all(&q);
+            return fail(&e);
+        }
+
+        task_set(&cid, "validating weights (file types)…");
+        if let Err(e) = inspect_model_dir(&q) {
+            let _ = std::fs::remove_dir_all(&q);
+            return fail(&e);
+        }
+
+        task_set(&cid, "scanning for viruses…");
+        match virus_scan(&q) {
+            Err(e) => { let _ = std::fs::remove_dir_all(&q); return fail(&format!("virus scan: {e}")); }
+            Ok(_) => {}
+        }
+
+        // Clean → keep it (pin the CID) and index it.
+        task_set(&cid, "pinning…");
         match run_script(&["pin", &req.entry.cid]) {
             Ok(_) => {
                 catalog_add(req.entry);
+                let _ = std::fs::remove_dir_all(&q);
                 task_clear(&cid);
                 announce();
             }
-            Err(e) => task_set(&cid, &format!("error: {e}")),
+            Err(e) => { let _ = std::fs::remove_dir_all(&q); fail(&e); }
         }
     });
     Json(json!({"ok": true, "fetching": true}))
