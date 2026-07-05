@@ -1637,7 +1637,10 @@ fn hf_agent() -> ureq::Agent {
         .build()
 }
 
-fn hf_get_json(url: &str) -> Result<Value, String> {
+/// GET a HuggingFace URL as JSON using the stored HF token (if any). Public so
+/// sibling modules (e.g. `bench`, to preview a model's serve recipe) can read
+/// model metadata without duplicating the token/agent plumbing.
+pub(crate) fn hf_get_json(url: &str) -> Result<Value, String> {
     http_get_json(url, source_token("huggingface").as_deref())
 }
 

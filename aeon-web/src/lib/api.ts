@@ -363,6 +363,22 @@ export const benchStatus = (target: string) =>
   req<BenchStatus>('GET', `/bench/status?target=${encodeURIComponent(target)}`);
 export const benchStop = (target: string) =>
   req<{ ok: boolean; err?: string }>('POST', '/bench/stop', { target });
+export interface BenchModelInfo {
+  ok: boolean;
+  id?: string;
+  quant?: string | null; // e.g. "AWQ" / "GPTQ" / "FP8" / null = full precision
+  native_ctx?: number | null;
+  effective_ctx?: number | null;
+  gated?: boolean;
+  is_gguf?: boolean;
+  params_b?: number | null;
+  dtype?: string | null;
+  arch?: string | null;
+  warnings?: string[];
+  err?: string;
+}
+export const benchModelInfo = (hfLink: string) =>
+  req<BenchModelInfo>('GET', `/bench/model-info?hf_link=${encodeURIComponent(hfLink)}`);
 // Devices discovered on the Pi's tailnet (for "+ Add device from Tailscale").
 // `address` is the stable 100.x Tailscale IP we add the system by.
 export interface TailscaleDevice {

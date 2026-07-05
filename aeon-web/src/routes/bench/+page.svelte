@@ -17,8 +17,10 @@
     benchDeploy,
     benchStatus,
     benchStop,
+    benchModelInfo,
     type ConnectedSystem,
     type BenchStatus,
+    type BenchModelInfo,
   } from '$lib/api';
 
   let systems: ConnectedSystem[] = [];
@@ -33,6 +35,32 @@
   let deploying = false;
   let lastTarget = '';
   let poll: ReturnType<typeof setInterval>;
+
+  // Auto-detect the serve recipe (quant/context/params/gated) from the HF id as
+  // the user types — a preview of what the pod's derive_recipe() will apply.
+  let info: BenchModelInfo | null = null;
+  let infoLoading = false;
+  let infoTimer: ReturnType<typeof setTimeout>;
+  $: detectModel(hfLink);
+  function detectModel(link: string) {
+    clearTimeout(infoTimer);
+    const id = link.trim();
+    if (!/^[\w.\-]+\/[\w.\-]+$/.test(id)) {
+      info = null;
+      infoLoading = false;
+      return;
+    }
+    infoLoading = true;
+    infoTimer = setTimeout(async () => {
+      try {
+        const r = await benchModelInfo(id);
+        info = r?.ok ? r : null;
+      } catch {
+        info = null;
+      }
+      infoLoading = false;
+    }, 600);
+  }
 
   // Valid deploy targets are GPU servers. On the headless Orb-server build the
   // host itself can serve (if it has a GPU), so "local" is offered there; on the
@@ -191,6 +219,29 @@
             <input bind:value={hfToken} type="password" placeholder="hf_… (for gated models)" autocomplete="off" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
           </label>
         </div>
+
+        <!-- auto-detected serve recipe -->
+        {#if infoLoading || info}
+          <div class="rounded-lg border border-ink-800 bg-ink-950/60 px-3.5 py-2.5 text-[12px] space-y-1.5">
+            {#if infoLoading}
+              <span class="text-ink-500 font-mono inline-flex items-center gap-2"><span class="inline-block h-3 w-3 rounded-full border-2 border-ink-600 border-t-transparent animate-spin"></span>reading model config…</span>
+            {:else if info}
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-ink-300">
+                <span class="text-ink-500 uppercase tracking-wider text-[10px]">detected</span>
+                {#if info.params_b}<span class="text-ink-100">{info.params_b}B</span>{/if}
+                <span>quant <span class="text-rose-300">{info.quant ?? 'none · fp16/bf16'}</span></span>
+                {#if info.effective_ctx}<span>context <span class="text-ink-100">{Math.round(info.effective_ctx / 1024)}k</span></span>{/if}
+                {#if info.dtype}<span class="text-ink-500">{info.dtype}</span>{/if}
+                {#if info.arch}<span class="text-ink-500 truncate max-w-[10rem]">{info.arch}</span>{/if}
+                {#if info.gated}<span class="text-amber-300">🔒 gated</span>{/if}
+              </div>
+              {#each info.warnings ?? [] as w}
+                <div class="text-amber-300/90 flex gap-1.5"><span aria-hidden="true">⚠</span><span>{w}</span></div>
+              {/each}
+              <div class="text-[10.5px] text-ink-600">The pod applies the quantization automatically from the model config — leave it be, or force one under Advanced.</div>
+            {/if}
+          </div>
+        {/if}
 
         <button type="button" class="text-[12px] text-ink-400 hover:text-cursed-300 font-mono" on:click={() => (showAdvanced = !showAdvanced)}>
           {showAdvanced ? '▾' : '▸'} Advanced options

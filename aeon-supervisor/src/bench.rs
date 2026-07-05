@@ -258,6 +258,125 @@ pub async fn status(State(_s): State<AppState>, Query(q): Query<TargetQuery>) ->
     Json(v)
 }
 
+#[derive(Deserialize)]
+pub struct ModelInfoQuery {
+    pub hf_link: String,
+}
+
+/// Map a HuggingFace `quantization_config.quant_method` to the label we show
+/// (and, if ever forced, what vLLM accepts). We only DISPLAY this — the pod's
+/// derive_recipe() picks the actual (often marlin-accelerated) kernel from the
+/// same config, so we don't override AEON_QUANT and risk a slower path in a
+/// benchmark that measures throughput.
+fn norm_quant(m: &str) -> String {
+    match m.to_lowercase().replace('-', "_").as_str() {
+        "awq" => "AWQ".into(),
+        "gptq" => "GPTQ".into(),
+        "fp8" => "FP8".into(),
+        "bitsandbytes" => "bitsandbytes".into(),
+        "compressed_tensors" => "compressed-tensors".into(),
+        "marlin" => "Marlin".into(),
+        "gguf" => "GGUF".into(),
+        _ => m.to_string(),
+    }
+}
+
+/// GET /api/bench/model-info?hf_link= — preview the serve recipe the pod will
+/// derive for a model: quantization, context (native + rope-scaled), params,
+/// dtype/arch, gated status, and any warnings (gated → token; context < 64k →
+/// below what Hermes needs; GGUF → vLLM caveat). Uses the stored HF token.
+pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQuery>) -> Json<Value> {
+    let id = q.hf_link.trim().trim_end_matches('/').to_string();
+    if !valid_hf_link(&id) {
+        return Json(json!({"ok": false, "err": "expected a model id like \"org/model\""}));
+    }
+    let v = tokio::task::spawn_blocking(move || {
+        let api = match crate::ipfs::hf_get_json(&format!("https://huggingface.co/api/models/{id}")) {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "err": format!("HuggingFace: {e}")}),
+        };
+        // config.json is absent on GGUF-only / non-transformers repos — tolerate that.
+        let cfg = crate::ipfs::hf_get_json(&format!("https://huggingface.co/{id}/resolve/main/config.json"))
+            .unwrap_or(Value::Null);
+
+        let mut warnings: Vec<String> = Vec::new();
+
+        let gated = match api.get("gated") {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => s != "false",
+            _ => false,
+        };
+        if gated {
+            warnings.push("Gated model — add a HuggingFace token to pull the weights.".into());
+        }
+
+        let is_gguf = api
+            .get("siblings")
+            .and_then(|s| s.as_array())
+            .map(|a| a.iter().any(|f| f.get("rfilename").and_then(|r| r.as_str()).is_some_and(|n| n.ends_with(".gguf"))))
+            .unwrap_or(false);
+        if is_gguf {
+            warnings.push("GGUF weights — vLLM's GGUF path is experimental; a safetensors build benchmarks more reliably.".into());
+        }
+
+        let quant = cfg
+            .get("quantization_config")
+            .and_then(|qc| qc.get("quant_method"))
+            .and_then(|m| m.as_str())
+            .map(norm_quant)
+            .or_else(|| is_gguf.then(|| "GGUF".to_string()));
+
+        let native_ctx = cfg.get("max_position_embeddings").and_then(|c| c.as_u64());
+        let rope_factor = cfg
+            .get("rope_scaling")
+            .and_then(|r| r.get("factor").or_else(|| r.get("original_max_position_embeddings")))
+            .and_then(|f| f.as_f64());
+        let effective_ctx = match (native_ctx, rope_factor) {
+            (Some(n), Some(f)) if f > 1.0 => Some((n as f64 * f) as u64),
+            (Some(n), _) => Some(n),
+            _ => None,
+        };
+        if let Some(ec) = effective_ctx {
+            if ec < 65536 {
+                warnings.push(format!(
+                    "This model tops out near {}k context — below the 64k the agentic Hermes harness needs, so those scores may be capped.",
+                    (ec + 512) / 1024
+                ));
+            }
+        }
+
+        let dtype = cfg.get("torch_dtype").and_then(|d| d.as_str()).map(String::from);
+        let arch = cfg
+            .get("architectures")
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .and_then(|a| a.as_str())
+            .map(String::from);
+        let params_b = api
+            .get("safetensors")
+            .and_then(|s| s.get("total"))
+            .and_then(|t| t.as_u64())
+            .map(|p| (p as f64 / 1e9 * 10.0).round() / 10.0);
+
+        json!({
+            "ok": true,
+            "id": id,
+            "quant": quant,               // display label, or null = full-precision
+            "native_ctx": native_ctx,
+            "effective_ctx": effective_ctx,
+            "gated": gated,
+            "is_gguf": is_gguf,
+            "params_b": params_b,
+            "dtype": dtype,
+            "arch": arch,
+            "warnings": warnings,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "model-info task failed"}));
+    Json(v)
+}
+
 /// POST /api/bench/stop — `docker compose down` the pod on the target.
 pub async fn stop(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
