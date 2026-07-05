@@ -23,14 +23,14 @@ ambiguity in audit logs.
 
 ## Tools (agent-facing, grouped)
 
-The server's full catalog is **79 tools**. You won't see all 79: the MCP
+The server's full catalog is **84 tools**. You won't see all 84: the MCP
 handler enforces **per-tool scope**, so `tools/list` returns — and `tools/call`
 permits — only the tools your token's tier allows. A **read** token sees the
 read-only tools (`state`, `snapshot`, `screen_text`, and the observability +
 `*_state` / `*_status` queries); a **full** token additionally sees the
 interactive surface (HID input + network config + `screen_find` /
 `describe_screen`). The admin-only tools (see *Not exposed to agents* below) are
-in the 79 but are never listed or callable for any agent token.
+in the 84 but are never listed or callable for any agent token.
 
 Each tool has the same shape as the curl endpoint in the matching reference;
 the linked file has the detail.
@@ -152,6 +152,15 @@ the `aeon-webcam` skill.
 | `bench_updates` | is a newer Aeon-Bench-Pod build available? (deployed commit vs GitHub latest) — read-only |
 | `bench_update` | hot-update the pod in place — fetch latest + rebuild, keep the model config (backgrounded; poll `bench_status`) |
 
+### System / OS updates — keep the Orb current + patched
+| Tool | What it does |
+|---|---|
+| `system_image_updates` | is a newer Orb **image** published for this hardware track? (stamped version vs the GitHub manifest) — notify-only; re-flash is a manual Patreon download. Read-only |
+| `os_update_check` | refresh apt + count upgradable / security OS packages. Read-only |
+| `os_update_apply` | apply all pending OS package upgrades (backgrounded; poll `os_update_status`; sets `reboot_required` on a kernel/firmware change) |
+| `os_update_status` | progress of an in-flight (or last) OS update. Read-only |
+| `os_auto_updates` | automatic security patching (unattended-upgrades) — no args reads state, `{enable}` turns it on/off |
+
 ### Read-only observability
 | Tool | What it does |
 |---|---|
@@ -177,7 +186,7 @@ resource picker can browse them with no filesystem mount.
 
 ## REST-only capabilities (no MCP tool — use curl)
 
-A handful of capabilities have **no tool in the 79-tool catalog** and must be
+A handful of capabilities have **no tool in the 84-tool catalog** and must be
 driven over HTTP even from an MCP session:
 
 | Capability | Endpoint | Reference |

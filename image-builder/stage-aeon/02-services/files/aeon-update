@@ -22,13 +22,20 @@ mkdir -p /run/aeon 2>/dev/null || true
 phase() { echo "PHASE $1 ${2:-}" >> "$LOG"; }
 
 cmd_check() {
-    apt-get update -qq >/dev/null 2>&1
-    # `apt-get -s upgrade` simulates; each package to install shows as an `Inst`
-    # line, whose parenthetical origin names the suite (…bookworm-security…).
+    # A failed refresh must NOT report a stale/empty all-clear — surface it.
+    if ! apt-get update -qq >/dev/null 2>&1; then
+        printf '{"ok":false,"err":"apt-get update failed (check network/DNS)","count":0,"security":0,"packages":""}\n'
+        return
+    fi
+    # Simulate the SAME op cmd_upgrade applies (dist-upgrade) so the count reflects
+    # what will actually install — including ABI-bump kernels that plain `upgrade`
+    # holds back. Each package shows as `Inst pkg [old] (new Origin:suite [arch])`.
     local inst count sec pkgs
-    inst="$(apt-get -s upgrade 2>/dev/null | grep '^Inst ')"
+    inst="$(apt-get -s dist-upgrade 2>/dev/null | grep '^Inst ')"
     count="$(printf '%s\n' "$inst" | grep -c '^Inst ')"
-    sec="$(printf '%s\n' "$inst" | grep -ciE 'security')"
+    # Security count from the parenthetical ORIGIN suite (…-security) ONLY — never
+    # a package whose NAME merely contains "security" (e.g. libapache2-mod-security2).
+    sec="$(printf '%s\n' "$inst" | awk -F'[()]' 'NF>1{print $2}' | grep -ciE 'security')"
     pkgs="$(printf '%s\n' "$inst" | awk '{print $2}' | grep -v '^$' | head -40 | paste -sd, -)"
     printf '{"ok":true,"count":%s,"security":%s,"packages":"%s"}\n' "${count:-0}" "${sec:-0}" "$pkgs"
 }
@@ -48,10 +55,13 @@ cmd_upgrade() {
         exit 1
     fi
     phase upgrading 35
+    # dist-upgrade (not plain `upgrade`) so ABI-bump kernel/firmware SECURITY
+    # updates that introduce a new package name are actually installed, not
+    # silently held back. Held-back security CVEs are the whole point of patching.
     if apt-get -y \
         -o Dpkg::Options::=--force-confold \
         -o Dpkg::Options::=--force-confdef \
-        upgrade >> "$LOG" 2>&1; then
+        dist-upgrade >> "$LOG" 2>&1; then
         phase cleaning 92
         apt-get -y autoremove --purge >> "$LOG" 2>&1 || true
         apt-get -y clean >> "$LOG" 2>&1 || true

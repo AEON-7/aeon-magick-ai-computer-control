@@ -44,8 +44,21 @@ fn set_task(k: &str, s: TaskState) {
 fn get_task(k: &str) -> Option<TaskState> {
     tasks().lock().ok().and_then(|m| m.get(k).cloned())
 }
-fn task_running(k: &str) -> bool {
-    get_task(k).map(|t| !t.done).unwrap_or(false)
+/// Atomically claim the task slot: returns true iff it was free (and marks it
+/// `starting` in the same lock hold). Closes the check-then-set TOCTOU where two
+/// concurrent apply() calls (web + MCP, or two tabs) both pass a separate
+/// `task_running` check and launch racing apt runs.
+fn try_begin(key: &str) -> bool {
+    match tasks().lock() {
+        Ok(mut m) => {
+            if m.get(key).map(|t| !t.done).unwrap_or(false) {
+                return false;
+            }
+            m.insert(key.to_string(), TaskState { phase: "starting".into(), ..Default::default() });
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn run_script(args: &[&str]) -> Result<String, String> {
@@ -121,11 +134,16 @@ pub async fn apply(State(state): State<AppState>, headers: HeaderMap) -> Json<Va
     let actor = crate::auth::identify(&state.auth, &headers)
         .map(|id| crate::audit::actor_for(&id))
         .unwrap_or_else(|| "anonymous".into());
-    if task_running("apt") {
+    // Atomic single-flight claim (see try_begin) — no check-then-set gap.
+    if !try_begin("apt") {
         return Json(json!({"ok": false, "started": false, "err": "an update is already in progress"}));
     }
     crate::audit::log(&actor, "os_update", "apply", "ok", None);
-    set_task("apt", TaskState { phase: "starting".into(), ..Default::default() });
+    // Clear any prior run's log BEFORE spawning, so if the script fails to spawn
+    // (missing/non-exec) the status can't read a stale "PHASE done 100" and report
+    // a phantom success. The script re-truncates it once it actually runs.
+    let _ = std::fs::create_dir_all("/run/aeon");
+    let _ = std::fs::write(APT_LOG, "");
     tokio::task::spawn_blocking(|| {
         let res = run_script(&["upgrade"]);
         let (phase, percent) = parse_progress(APT_LOG);

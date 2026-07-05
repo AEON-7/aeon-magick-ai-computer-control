@@ -15,6 +15,7 @@
   import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
+  import { serverMode } from '$lib/mode';
 
   let info: api.SystemInfo | null = null;
   let loading = true;
@@ -371,7 +372,18 @@
     upgradeBusy = false;
   }
   function goPatreon() {
-    const u = img?.patreon_url || 'https://www.patreon.com/AeonForge7';
+    // Defense in depth: the backend already sanitizes patreon_url, but never feed
+    // an unvalidated (manifest-controlled) URL to window.open — only https +
+    // patreon.com, else the hardcoded creator page.
+    const FALLBACK = 'https://www.patreon.com/AeonForge7';
+    let u = img?.patreon_url || FALLBACK;
+    try {
+      const p = new URL(u);
+      const okHost = p.hostname === 'patreon.com' || p.hostname.endsWith('.patreon.com');
+      if (p.protocol !== 'https:' || !okHost) u = FALLBACK;
+    } catch {
+      u = FALLBACK;
+    }
     window.open(u, '_blank', 'noopener');
     showUpgrade = false;
   }
@@ -425,9 +437,9 @@
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Health
             </h2>
-            {#if info.image_version != null || info.track}
+            {#if info.image_version != null}
               <p class="text-[11px] font-mono text-zinc-500">
-                Image {info.image_version != null ? `v${info.image_version}` : 'unstamped'}{#if info.track} · {info.track}{/if}{#if info.codename} · {info.codename}{/if}
+                Image v{info.image_version}{#if info.track && info.track !== 'other'} · {info.track}{/if}{#if info.codename} · {info.codename}{/if}
               </p>
             {/if}
             <p class="text-xs text-zinc-500">
@@ -471,7 +483,8 @@
         </section>
       {/if}
 
-      <!-- ─── System update (OS packages) ─── -->
+      <!-- ─── System update (OS packages) — Pi appliance only, not the container ─── -->
+      {#if !$serverMode}
       <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
@@ -560,6 +573,7 @@
           </button>
         </div>
       </section>
+      {/if}
 
       <!-- ─── Stream tuning (v63) ─── -->
       {#if streamerCfg}

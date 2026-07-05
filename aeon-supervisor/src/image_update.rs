@@ -22,6 +22,23 @@ const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/AEON-7/aeon-magick-ai-computer-control/main/image-manifest.json";
 const FALLBACK_PATREON: &str = "https://www.patreon.com/AeonForge7";
 
+/// Only surface a Patreon URL the manifest can't weaponize: it must be `https://`
+/// with a `patreon.com` host. The frontend feeds this straight into `window.open`,
+/// so a poisoned/compromised manifest must never be able to redirect the operator
+/// to an arbitrary (phishing) page — anything that doesn't validate falls back to
+/// the hardcoded creator page.
+fn safe_patreon(url: &str) -> String {
+    let ok = url.trim().strip_prefix("https://").map(|rest| {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        // Drop any userinfo (`user@host`) and port so `patreon.com@evil.com` and
+        // `evil.com:443` can't masquerade as the real host.
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let host = host.split(':').next().unwrap_or(host);
+        host == "patreon.com" || host == "www.patreon.com" || host.ends_with(".patreon.com")
+    }).unwrap_or(false);
+    if ok { url.trim().to_string() } else { FALLBACK_PATREON.to_string() }
+}
+
 /// Runtime hardware track from the board model (mirrors `fleet::pi_model()`).
 fn board_track() -> &'static str {
     match std::fs::read_to_string("/proc/device-tree/model") {
@@ -126,11 +143,11 @@ pub async fn image_updates(State(_s): State<AppState>) -> Json<Value> {
         let latest_name = t.and_then(|x| x.get("name")).and_then(|v| v.as_str()).map(String::from);
         let published = t.and_then(|x| x.get("published")).and_then(|v| v.as_str()).map(String::from);
         let notes = t.and_then(|x| x.get("notes")).and_then(|v| v.as_str()).map(String::from);
-        let patreon_url = t
-            .and_then(|x| x.get("patreon_url"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(top_patreon)
-            .to_string();
+        let patreon_url = safe_patreon(
+            t.and_then(|x| x.get("patreon_url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(top_patreon),
+        );
         let update_available = matches!((installed, latest), (Some(i), Some(l)) if l > i);
         json!({
             "ok": true,
