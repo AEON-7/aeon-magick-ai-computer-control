@@ -229,6 +229,27 @@ fn tools_catalog() -> Value {
             tool("model_push_status",
                  "Progress of model pushes to a connected system (keyed by model slug): phase, percent, and any error. Poll after model_push.",
                  json!({"type":"object","required":["system_id"],"properties":{"system_id":{"type":"string"}}})),
+            tool("model_import",
+                 "Import a model into the Model Share network from an external registry — HuggingFace, Ollama, or Civitai — verifying it (SHA-256 / layer digest) and publishing it as a shareable IPFS model. Runs in the BACKGROUND; poll model_list (it appears under `library`/`catalog`). `source` = huggingface | ollama | civitai; `reference` = the model id / URL / tag.",
+                 json!({"type":"object","required":["source","reference"],"properties":{
+                            "source":{"type":"string","enum":["huggingface","ollama","civitai"],"description":"the registry to import from"},
+                            "reference":{"type":"string","description":"HF \"org/model\" (or full URL), an Ollama tag like \"llama3.2:3b\", or a Civitai model URL/id"}}})),
+            // ── Aeon Bench: deploy the LLM-benchmarking pod to a GPU server + monitor it ──
+            tool("bench_model_info",
+                 "Preview the serve recipe the bench pod will derive for a HuggingFace model before you deploy: quantization, params, native + rope-scaled context, dtype, architecture, gated flag, and warnings (gated needs a token; context < 64k limits the Hermes agentic harness; GGUF caveat). `hf_link` = \"org/model\".",
+                 json!({"type":"object","required":["hf_link"],"properties":{"hf_link":{"type":"string","description":"HuggingFace model id, e.g. \"org/Model\""}}})),
+            tool("bench_deploy",
+                 "Deploy the Aeon Bench Pod (pull → verify → serve → benchmark → ed25519-sign → submit to the aeon-bench.com leaderboard) onto a GPU server. The pod serves the model AND benchmarks it co-located, so `target` must be a connected system with an NVIDIA GPU (see connected_systems). Context defaults to 64k (what the Hermes harness needs). Runs in the BACKGROUND — poll bench_status.",
+                 json!({"type":"object","required":["target","hf_link"],"properties":{
+                            "target":{"type":"string","description":"connected system id (see connected_systems) — a GPU server"},
+                            "hf_link":{"type":"string","description":"HuggingFace model id, e.g. \"org/Model\""},
+                            "hf_token":{"type":"string","description":"optional HuggingFace token for gated weights"}}})),
+            tool("bench_status",
+                 "Progress of the bench pod on a target: phase (cloning → building → running / failed), a log tail, running-state, and the dashboard host+port — open it in a browser at http://<host>:<dash_port>. Poll after bench_deploy.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) used for bench_deploy"}}})),
+            tool("bench_stop",
+                 "Stop the bench pod on a target (docker compose down).",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
             // NOTE: SSH key management is intentionally NOT exposed over MCP.
             // Granting/listing SSH access to the device is a human-admin-only
             // action (web UI + admin session). Agents must never manage SSH.
@@ -691,6 +712,86 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 .ok_or("model_push_status needs a `system_id`")?
                 .to_string();
             let v = crate::agent_connect::push_status(axum::extract::Path(system_id)).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "model_import" => {
+            let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let reference = args
+                .get("reference")
+                .and_then(|v| v.as_str())
+                .ok_or("model_import needs a `reference` (an org/model, Ollama tag, or Civitai URL)")?
+                .to_string();
+            let st = axum::extract::State(state.clone());
+            let v = match source.as_str() {
+                "huggingface" | "hf" => {
+                    crate::ipfs::import_hf(st, axum::Json(crate::ipfs::ImportHfReq { url: reference })).await
+                }
+                "ollama" => {
+                    crate::ipfs::import_ollama(st, axum::Json(crate::ipfs::ImportOllamaReq { reference })).await
+                }
+                "civitai" => {
+                    crate::ipfs::import_civitai(st, axum::Json(crate::ipfs::ImportCivitaiReq { reference })).await
+                }
+                _ => axum::Json(json!({"ok": false, "err": "source must be huggingface | ollama | civitai"})),
+            };
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_model_info" => {
+            let hf_link = args
+                .get("hf_link")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_model_info needs `hf_link` (\"org/model\")")?
+                .to_string();
+            let v = crate::bench::model_info(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::bench::ModelInfoQuery { hf_link }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_deploy" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_deploy needs a `target` — a GPU server id from connected_systems")?
+                .to_string();
+            let hf_link = args
+                .get("hf_link")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_deploy needs `hf_link` (\"org/model\")")?
+                .to_string();
+            let hf_token = args.get("hf_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let v = crate::bench::deploy(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::bench::DeployReq { target, hf_link, hf_token, env: Default::default() }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_status" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_status needs a `target`")?
+                .to_string();
+            let v = crate::bench::status(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::bench::TargetQuery { target }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_stop" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_stop needs a `target`")?
+                .to_string();
+            let v = crate::bench::stop(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::bench::TargetQuery { target }),
+            )
+            .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
         "security_metrics" => {
@@ -1186,7 +1287,8 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         | "dns_sources" | "audit_log" | "target_info" | "get_clipboard" | "list_files"
         | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"
         | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
-        | "vpn_provider_state" | "blocked_log" | "hidden_service_list" | "ipfs_status" => Read,
+        | "vpn_provider_state" | "blocked_log" | "hidden_service_list" | "ipfs_status"
+        | "bench_status" | "bench_model_info" => Read,
         _ => Full,
     }
 }

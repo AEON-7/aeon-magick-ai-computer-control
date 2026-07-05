@@ -9,6 +9,10 @@
 //! Auth: HTTP Basic against an argon2 hash stored in /etc/aeon/auth.toml.
 //! Sessions: signed cookie issued on POST /api/login.
 
+// The MCP tools catalog is one large `json!` array; each added tool deepens the
+// macro expansion, so lift the recursion limit above the 128 default.
+#![recursion_limit = "512"]
+
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;

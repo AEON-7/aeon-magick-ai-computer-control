@@ -133,6 +133,23 @@ the `aeon-webcam` skill.
 | `ipfs_pin` | pin a CID |
 | `ipfs_add` | add content to IPFS |
 
+### Model Share — the decentralized AI-model network
+| Tool | What it does |
+|---|---|
+| `connected_systems` | list the DGX / gateway systems this Orb manages over SSH (targets for push + bench) |
+| `model_list` | catalog / network / library models (cid + name + size + card) |
+| `model_import` | import from HuggingFace / Ollama / Civitai (SHA-256 / digest-verified) into the network |
+| `model_pull` | materialize a shared model into this Orb's library |
+| `model_push` / `model_push_status` | rsync a library model onto a connected system + poll progress |
+
+### Aeon Bench — benchmark a model on a GPU server
+| Tool | What it does |
+|---|---|
+| `bench_model_info` | preview a model's serve recipe — quant, params, context, gated, warnings |
+| `bench_deploy` | deploy the benchmarking pod onto a connected GPU server (co-located serve + bench) |
+| `bench_status` | poll deploy phase + log tail + the dashboard `http://<host>:8080` |
+| `bench_stop` | tear the pod down |
+
 ### Read-only observability
 | Tool | What it does |
 |---|---|

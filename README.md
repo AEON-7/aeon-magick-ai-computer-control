@@ -22,6 +22,8 @@ One small box you can hold in a pocket, and you can:
 
 > **All it takes:** a **Raspberry Pi 4 or Pi 5**, any HDMI capture device, and a data-capable USB-C cable. Add a Hailo AI HAT+, a UPS, and an NVMe/SSD to unlock on-device vision and a shareable model library. [Full hardware list ↓](#hardware-youll-need)
 
+> 🛠️ **Don't want to build it from source?** Premade **Raspberry Pi images — ready to flash** are available to [**AeonForge Patreon members**](https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493). A **3D-print STL enclosure** and a **full build guide** are **coming soon** to members too.
+
 This isn't just Agentic AI. It's **_Robo_-Agentic AI** — the disembodied, given a body.
 
 ```
@@ -447,11 +449,12 @@ building → running) with a live log, and `stop` tears the stack back down.
 ## Get the hardware — join the build
 
 Want the whole thing in your hands? The **[AeonForge Patreon](https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493)**
-has everything to build your own Orb:
+is where you get it:
 
-- **Full compiled image files** — flash straight to your Raspberry Pi, no build step.
-- **Complete build instructions** — the full walkthrough, start to finish.
-- **A 3D-print enclosure** — the STL for the full-build case.
+- **Full compiled image files — available now.** Premade Pi 4 (Bookworm) and Pi 5
+  (Trixie) images, ready to flash straight to your Raspberry Pi — no build step.
+- **A 3D-print STL enclosure — coming soon** to members: the case for the full build.
+- **A full build guide — coming soon** to members: the complete walkthrough, start to finish.
 
 ---
 
