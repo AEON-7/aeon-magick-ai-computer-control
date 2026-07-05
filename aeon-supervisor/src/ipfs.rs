@@ -341,7 +341,7 @@ pub struct ModelCard {
 /// One shared model = one IPFS directory CID. `origin_*` is the identity of the
 /// Orb that FIRST shared it; it travels with the entry when peers mirror it, so
 /// provenance survives replication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub cid: String, // directory CID
     pub name: String, // display name
@@ -366,6 +366,19 @@ pub struct ModelEntry {
     /// Provenance URL for imported models (e.g. the HuggingFace repo).
     #[serde(default)]
     pub source: String,
+    /// Publisher provenance (Phase 1b) — set when an unlocked publisher identity
+    /// signs this model at share/import time. `pub_key` = the ed25519 signer
+    /// pubkey (hex, the canonical identity), `pub_name` = the signer's local
+    /// display petname, `pub_sig` = base64 signature over
+    /// publisher::publication_digest(cid, name, sha256, added_at_ms). Empty =
+    /// unsigned. Gossiped with the entry and re-verified on receipt — the name
+    /// is decorative, the pubkey/fingerprint is what's cryptographically real.
+    #[serde(default)]
+    pub pub_key: String,
+    #[serde(default)]
+    pub pub_name: String,
+    #[serde(default)]
+    pub pub_sig: String,
 }
 
 fn epoch_ms() -> i64 {
@@ -390,12 +403,40 @@ fn write_catalog(entries: &[ModelEntry]) -> std::io::Result<()> {
 }
 
 /// Append an entry unless the CID is already cataloged (idempotent mirror).
-fn catalog_add(entry: ModelEntry) {
+/// Write an entry to the catalog verbatim — no signing. Used ONLY on the fetch
+/// path, where the entry is a PEER's (its publisher signature, if any, must be
+/// preserved, never overwritten with ours).
+fn catalog_add_raw(entry: ModelEntry) {
     let mut entries = read_catalog();
     if !entries.iter().any(|e| e.cid == entry.cid) {
         entries.push(entry);
         let _ = write_catalog(&entries);
     }
+}
+
+/// Sign a model this Orb ORIGINATES (share / publish / import) with the unlocked
+/// publisher identity, if one is unlocked and the entry isn't already signed.
+/// Best-effort: no identity → the model is published unsigned. The name is a
+/// decorative petname; the pubkey/signature is the cryptographic provenance.
+fn sign_entry(entry: &mut ModelEntry) {
+    if !entry.pub_sig.is_empty() {
+        return;
+    }
+    let digest =
+        crate::publisher::publication_digest(&entry.cid, &entry.name, &entry.sha256, entry.added_at_ms);
+    if let Ok((pubkey, sig)) = crate::publisher::sign(&digest) {
+        entry.pub_name = crate::publisher::username_for(&pubkey);
+        entry.pub_key = pubkey;
+        entry.pub_sig = sig;
+    }
+}
+
+/// Add a model this Orb originates — signs it (if an identity is unlocked) then
+/// catalogs it. Every origination path (share/publish/import) flows through here;
+/// only the fetch path bypasses it via `catalog_add_raw`.
+fn catalog_add(mut entry: ModelEntry) {
+    sign_entry(&mut entry);
+    catalog_add_raw(entry);
 }
 
 // ── Per-source auth tokens (optional; for gated / mature-content pulls) ──────
@@ -746,6 +787,7 @@ pub async fn upload_model(
         origin_label,
         verified: false,
         source: String::new(),
+        ..Default::default()
     };
 
     task_set(&display, "adding to IPFS…");
@@ -943,7 +985,7 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
         task_set(&cid, "pinning…");
         match run_script(&["pin", &req.entry.cid]) {
             Ok(_) => {
-                catalog_add(req.entry);
+                catalog_add_raw(req.entry); // a peer's model — keep its publisher signature, never re-sign
                 let _ = std::fs::remove_dir_all(&q);
                 task_clear(&cid);
                 announce();
@@ -1138,10 +1180,23 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
             .map(|(cid, (entry, hosts))| {
                 let host_count = hosts.len();
                 let star_count = starrers.get(&cid).map(|s| s.len()).unwrap_or(0);
+                // Verify-on-receive: re-check the publisher signature against the
+                // digest so a peer can't forge a valid-looking one. `ok=true` means
+                // the pubkey (fp) really signed this cid/name/sha256/time.
+                let signature = if entry.pub_sig.is_empty() {
+                    Value::Null
+                } else {
+                    let digest = crate::publisher::publication_digest(&entry.cid, &entry.name, &entry.sha256, entry.added_at_ms);
+                    json!({
+                        "ok": crate::publisher::verify(&entry.pub_key, &digest, &entry.pub_sig),
+                        "name": entry.pub_name,
+                        "fp": entry.pub_key.get(..12).unwrap_or(&entry.pub_key),
+                    })
+                };
                 json!({
                     "entry": entry, "hosts": hosts, "local": local_cids.contains(&cid),
                     "host_count": host_count, "star_count": star_count,
-                    "starred": my_stars.contains(&cid),
+                    "starred": my_stars.contains(&cid), "signature": signature,
                 })
             })
             .collect();
@@ -1474,6 +1529,7 @@ pub async fn publish_model(State(_s): State<AppState>, Json(req): Json<PublishRe
                     cid: cid.clone(), name: req.name, file, size_bytes, sha256,
                     card, added_at_ms: epoch_ms(), origin_id, origin_label,
                     verified: false, source: String::new(),
+                    ..Default::default()
                 });
                 let _ = std::fs::remove_dir_all(&dir);
                 let _ = std::fs::remove_file(&meta_path);
@@ -1611,12 +1667,15 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
         }
         // Swap catalog entry (preserve provenance + first-shared time).
         let mut entries: Vec<ModelEntry> = read_catalog().into_iter().filter(|e| e.cid != req.cid).collect();
-        entries.push(ModelEntry {
+        let mut edited = ModelEntry {
             cid: new_cid.clone(), name: req.name, file: old.file, size_bytes: old.size_bytes,
             sha256: old.sha256, card, added_at_ms: old.added_at_ms,
             origin_id: old.origin_id, origin_label: old.origin_label,
             verified: old.verified, source: old.source,
-        });
+            ..Default::default()
+        };
+        sign_entry(&mut edited); // re-signed: editing rebuilds the model (new CID)
+        entries.push(edited);
         let _ = write_catalog(&entries);
         let _ = run_script(&["unpin", &req.cid]);
         announce();
@@ -2023,6 +2082,7 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
         cid, name: model_name.to_string(), file: primary_file, size_bytes: total,
         sha256: primary_sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
         verified, source,
+        ..Default::default()
     });
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
@@ -2159,6 +2219,7 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
         cid, name: model_name.to_string(), file: leaf, size_bytes: size,
         sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
         verified, source,
+        ..Default::default()
     });
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
@@ -2358,6 +2419,7 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
         cid, name: m_name, file: leaf, size_bytes: size,
         sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
         verified, source,
+        ..Default::default()
     });
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())

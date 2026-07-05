@@ -3,6 +3,7 @@
   import StorageManager from '$lib/components/StorageManager.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
+  import { toast } from '$lib/toast';
 
   // Intergalactic Model Share — a decentralized, censorship-resistant network of
   // AI models shared over IPFS (the InterPlanetary File System — we think
@@ -25,7 +26,8 @@
     verified?: boolean; source?: string;
   };
   type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[] };
-  type Row = { entry: Entry; hosts: Host[]; local: boolean; host_count?: number; star_count?: number; starred?: boolean };
+  type Sig = { ok: boolean; name: string; fp: string };
+  type Row = { entry: Entry; hosts: Host[]; local: boolean; host_count?: number; star_count?: number; starred?: boolean; signature?: Sig | null };
   type Karma = { served_bytes: number; downloaded_bytes: number; ratio: number };
   type NodeStatus = {
     enabled: boolean; daemon: string; peers: number; gateway_port: number;
@@ -264,6 +266,51 @@
 
   const api = (path: string, opts: RequestInit = {}) =>
     fetch(`/api/ipfs${path}`, { credentials: 'same-origin', ...opts }).then((r) => r.json());
+  // Publisher identity lives at /api/publisher (not /api/ipfs).
+  const papi = (path: string, opts: RequestInit = {}) =>
+    fetch(`/api/publisher${path}`, { credentials: 'same-origin', ...opts }).then((r) => r.json());
+
+  // ── Publisher identity — an ed25519 keypair that signs the models you share ──
+  let pubAccounts: { pubkey: string; username: string; fingerprint: string }[] = [];
+  let pubUnlocked = ''; // pubkey of the currently-unlocked identity (signs shares)
+  $: pubName = pubAccounts.find((a) => a.pubkey === pubUnlocked)?.username ?? '';
+  $: pubFp = pubUnlocked.slice(0, 12);
+  let showPub = false;
+  let pubMode: 'create' | 'unlock' = 'create';
+  let pubUser = '';
+  let pubPass = '';
+  let pubSel = '';
+  let seedWords: string[] = []; // shown ONCE after create — the user must write it down
+
+  async function loadPublisher() {
+    try {
+      const r = await papi('/accounts');
+      if (r?.ok) { pubAccounts = r.accounts ?? []; pubUnlocked = r.unlocked ?? ''; }
+    } catch {}
+  }
+  function openPublisher() {
+    pubMode = pubAccounts.length ? 'unlock' : 'create';
+    pubSel = pubAccounts[0]?.pubkey ?? '';
+    pubUser = ''; pubPass = ''; seedWords = []; showPub = true;
+  }
+  async function pubCreate() {
+    if (!pubUser.trim() || pubPass.length < 6) { toast('Pick a username and a password of at least 6 characters.', 'error'); return; }
+    const pw = pubPass;
+    const r = await papi('/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: pubUser.trim(), password: pw }) });
+    if (!r?.ok) { toast('Create failed: ' + (r?.err ?? 'error'), 'error'); return; }
+    seedWords = String(r.seed_phrase ?? '').split(/\s+/).filter(Boolean);
+    await papi('/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: r.pubkey, password: pw }) });
+    await loadPublisher();
+    pubPass = ''; // modal stays open to display the seed
+  }
+  async function pubUnlock() {
+    const r = await papi('/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: pubSel, password: pubPass }) });
+    if (!r?.ok) { toast('Unlock failed — ' + (r?.err ?? 'wrong password'), 'error'); return; }
+    await loadPublisher();
+    showPub = false; pubPass = '';
+    toast('Identity unlocked — the models you share are now signed.', 'success');
+  }
+  async function pubLock() { await papi('/lock', { method: 'POST' }); await loadPublisher(); }
 
   async function load() {
     try {
@@ -531,7 +578,7 @@
     }, busyNow ? 1200 : 5000);
   }
   onMount(() => {
-    load(); loadSystems(); loadKarma(); loadTokens(); loadView();
+    load(); loadSystems(); loadKarma(); loadTokens(); loadView(); loadPublisher();
     scheduleTick();
   });
 
@@ -648,6 +695,17 @@
         </summary>
         <div class="p-3 pt-0"><StorageManager /></div>
       </details>
+
+      <!-- publisher identity — signs the models you share -->
+      <div class="flex items-center gap-2 text-[12px] font-mono">
+        {#if pubUnlocked}
+          <span class="inline-flex items-center gap-1 text-emerald-300" title="Models you share are signed with this ed25519 identity — the network can verify you published them">🔏 signing as @{pubName}·<span class="text-emerald-400/70">{pubFp}</span></span>
+          <button class="text-ink-500 hover:text-red-400" on:click={pubLock}>lock</button>
+        {:else}
+          <span class="text-ink-500">Shared models are <span class="text-amber-300/80">unsigned</span>.</span>
+          <button class="text-cursed-300 hover:text-cursed-200" on:click={openPublisher}>{pubAccounts.length ? '🔑 Unlock a publisher identity' : '＋ Create a publisher identity'} →</button>
+        {/if}
+      </div>
 
       <!-- toolbar -->
       <div class="flex items-center gap-3 flex-wrap">
@@ -802,6 +860,12 @@
                 <span class="text-sm leading-none">{row.starred ? '★' : '☆'}</span>{row.star_count ?? 0}
               </button>
               <span class="text-ink-500" title="Orbs hosting this model across the network — wider adoption means faster, more resilient downloads">⬡ {row.host_count ?? row.hosts.length} {(row.host_count ?? row.hosts.length) === 1 ? 'orb' : 'orbs'}</span>
+              {#if row.signature}
+                <span class="{row.signature.ok ? 'text-emerald-300' : 'text-red-400'}"
+                      title={row.signature.ok ? `Signed by @${row.signature.name || 'anon'} (key ${row.signature.fp}) — signature verified against this model` : 'Signature does NOT verify — the claimed author is not proven'}>
+                  {row.signature.ok ? '🔏' : '⚠'} {row.signature.name || 'anon'}·{row.signature.fp}
+                </span>
+              {/if}
             </div>
 
             <div class="mt-auto pt-1 flex items-center gap-2 text-xs">
@@ -1080,6 +1144,51 @@
           </button>
         </div>
         <p class="text-[10px] text-ink-600 leading-snug">Pulls the model down to this Orb (if it isn't already), then rsyncs it to the chosen system over its SSH key.</p>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+<!-- ── Publisher identity: create / unlock + one-time seed display ────────── -->
+{#if showPub}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" on:click={() => (showPub = false)}>
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+    <div class="bg-ink-900 border border-cursed-700/50 rounded-xl w-full max-w-md p-5 space-y-4" on:click|stopPropagation>
+      {#if seedWords.length}
+        <h2 class="font-mono text-cursed-300 flex items-center gap-2">🔏 Write down your recovery phrase</h2>
+        <p class="text-[12px] text-ink-300 leading-relaxed">These 24 words are the <strong>only</strong> way to recover your publisher identity — shown once, never stored in plain text. Write them down and keep them safe (they're also included in the Orb's encrypted config backup).</p>
+        <div class="grid grid-cols-3 gap-1.5 text-[12px] font-mono bg-ink-950 border border-ink-800 rounded p-3">
+          {#each seedWords as w, i}
+            <div class="flex gap-1"><span class="text-ink-600 w-5 text-right">{i + 1}</span><span class="text-ink-100">{w}</span></div>
+          {/each}
+        </div>
+        <div class="flex justify-end">
+          <button class="btn-primary text-sm px-4 py-2 rounded" on:click={() => { seedWords = []; showPub = false; }}>I've written it down</button>
+        </div>
+      {:else if pubMode === 'create'}
+        <h2 class="font-mono text-cursed-300">Create a publisher identity</h2>
+        <p class="text-[12px] text-ink-400 leading-relaxed">An anonymous <span class="text-cursed-300">ed25519</span> keypair — no email, no PII. The public key <em>is</em> your identity; a 24-word seed is your only backup. Models you share while it's unlocked get signed, so the network can verify you published them.</p>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Display name (a petname)</span>
+          <input bind:value={pubUser} placeholder="e.g. mageworks" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Password — encrypts the key (6+ chars)</span>
+          <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+        <div class="flex items-center justify-between pt-1">
+          {#if pubAccounts.length}<button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => (pubMode = 'unlock')}>have one? unlock →</button>{:else}<span></span>{/if}
+          <button class="btn-primary text-sm px-4 py-2 rounded" on:click={pubCreate}>Create identity</button>
+        </div>
+      {:else}
+        <h2 class="font-mono text-cursed-300">Unlock publisher identity</h2>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Identity</span>
+          <select bind:value={pubSel} class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none">
+            {#each pubAccounts as a}<option value={a.pubkey}>@{a.username} · {a.fingerprint}</option>{/each}
+          </select></label>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Password</span>
+          <input bind:value={pubPass} type="password" autocomplete="current-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+        <div class="flex items-center justify-between pt-1">
+          <button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => { pubMode = 'create'; pubUser = ''; pubPass = ''; }}>＋ new identity</button>
+          <button class="btn-primary text-sm px-4 py-2 rounded" on:click={pubUnlock}>Unlock</button>
+        </div>
       {/if}
     </div>
   </div>
