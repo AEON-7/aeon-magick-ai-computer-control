@@ -559,6 +559,7 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/models/view", get(crate::ipfs::get_view_settings).post(crate::ipfs::set_view_settings))
         .route("/ipfs/models/fetch",  post(crate::ipfs::fetch_model))
         .route("/ipfs/models/remove", post(crate::ipfs::remove_model))
+        .route("/ipfs/models/purge",  post(crate::ipfs::purge_download))
         // Model LIBRARY: pull a shared model DOWN to this Orb as plain files
         // (re-pushable to connected systems); list what's materialized locally.
         .route("/ipfs/models/library", get(crate::ipfs::models_library))

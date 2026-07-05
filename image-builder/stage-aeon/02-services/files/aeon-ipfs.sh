@@ -337,6 +337,24 @@ cmd_get() {
   du -sb "$dest" 2>/dev/null | awk '{print $1}'
 }
 
+# gc — reclaim unpinned blocks (failed/partial downloads, unshared models) up to
+# the storage cap. Pinned (shared) models are always kept.
+cmd_gc() { ipfs_cmd repo gc >/dev/null 2>&1; echo ok; }
+
+# purge <cid> — recover from a failed/stuck download of <cid>: kill any in-flight
+# client still fetching it, drop the pin if one exists, then GC to reclaim the
+# orphaned blocks. Successfully-shared (pinned) models are otherwise untouched.
+cmd_purge() {
+  local cid="${1:-}"
+  case "$cid" in ''|*[!A-Za-z0-9]*) : ;; *)
+    pkill -f "pin add $cid" 2>/dev/null || true
+    pkill -f "get $cid"     2>/dev/null || true
+    ipfs_cmd pin rm "$cid" >/dev/null 2>&1 || true ;;
+  esac
+  ipfs_cmd repo gc >/dev/null 2>&1 || true
+  echo ok
+}
+
 case "${1:-}" in
   up)      cmd_up ;;
   down)    cmd_down ;;
@@ -345,6 +363,8 @@ case "${1:-}" in
   storage) shift; cmd_storage "$@" ;;
   pin)     shift; cmd_pin "$@" ;;
   unpin)   shift; cmd_unpin "$@" ;;
+  gc)      cmd_gc ;;
+  purge)   shift; cmd_purge "$@" ;;
   pins)    cmd_pins ;;
   add)     shift; cmd_add "$@" ;;
   cat)     shift; cmd_cat "$@" ;;
@@ -361,5 +381,5 @@ case "${1:-}" in
   mfs-hash)  shift; cmd_mfs_hash "$@" ;;
   get)     shift; cmd_get "$@" ;;
   gateway) echo "$GATEWAY_PORT" ;;
-  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|add <path>|cat <path>|get <cid> <dest>|connect <multiaddr>|id|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
+  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|gc|purge <cid>|add <path>|cat <path>|get <cid> <dest>|connect <multiaddr>|id|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
 esac

@@ -909,6 +909,65 @@ fn virus_scan(dir: &std::path::Path) -> Result<bool, String> {
     }
 }
 
+/// Parse a kubo storage-size string ("10GB", "512MB", "2TB") to bytes. kubo uses
+/// SI multipliers (GB = 10^9), so match that. 0 = unparseable/unset.
+fn parse_size(s: &str) -> u64 {
+    let up = s.trim().to_ascii_uppercase();
+    let (num, mult): (&str, u64) =
+        if let Some(n) = up.strip_suffix("TB").or_else(|| up.strip_suffix('T')) { (n, 1_000_000_000_000) }
+        else if let Some(n) = up.strip_suffix("GB").or_else(|| up.strip_suffix('G')) { (n, 1_000_000_000) }
+        else if let Some(n) = up.strip_suffix("MB").or_else(|| up.strip_suffix('M')) { (n, 1_000_000) }
+        else if let Some(n) = up.strip_suffix("KB").or_else(|| up.strip_suffix('K')) { (n, 1_000) }
+        else if let Some(n) = up.strip_suffix('B') { (n, 1) }
+        else { (up.as_str(), 1) };
+    num.trim().parse::<f64>().ok().map(|f| (f * mult as f64) as u64).unwrap_or(0)
+}
+
+/// (repo_bytes, storage_max_bytes) from `aeon-ipfs status`. Either may be 0 when
+/// unknown (status unavailable / repo-stat slow) — callers treat 0 as "can't tell".
+fn ipfs_repo_usage() -> (u64, u64) {
+    let v = run_script(&["status"])
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null);
+    let repo = v.get("repo_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+    let smax = v.get("storage_max").and_then(|x| x.as_str()).map(parse_size).unwrap_or(0);
+    (repo, smax)
+}
+
+/// Remove orphaned `quarantine-*` dirs left by a fetch whose process was killed
+/// (e.g. a supervisor restart) — only ones older than `min_age`, so a concurrent
+/// in-flight fetch's quarantine is never touched. Best-effort.
+fn sweep_stale_quarantine(min_age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    if let Ok(rd) = std::fs::read_dir(staging_root()) {
+        for ent in rd.flatten() {
+            if !ent.file_name().to_string_lossy().starts_with("quarantine-") {
+                continue;
+            }
+            let old = ent.metadata().ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mt| now.duration_since(mt).ok())
+                .map(|age| age >= min_age)
+                .unwrap_or(false);
+            if old {
+                let _ = std::fs::remove_dir_all(ent.path());
+            }
+        }
+    }
+}
+
+/// Append actionable guidance to a fetch error — the download is resumable, and
+/// storage-cap failures are the common cause.
+fn storage_hint(e: &str) -> String {
+    let l = e.to_lowercase();
+    if l.contains("storage") || l.contains("disk") || l.contains("space") || l.contains("datastore") {
+        format!("{e} — raise the IPFS storage limit (Storage settings), then retry: the download resumes from what's already fetched.")
+    } else {
+        format!("{e} — retry to resume from what's already downloaded, or purge to reclaim it and start fresh.")
+    }
+}
+
 /// POST /api/ipfs/models/fetch — download a peer's model through a QUARANTINE
 /// sandbox: fetch to staging → validate every file's magic bytes (fake
 /// extensions / stowaway executables / pickle weights) → ClamAV scan → and only
@@ -932,24 +991,40 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
             }
         }
 
-        // Disk guard: materializing quarantines a full copy alongside the
-        // blockstore blocks (~2× peak), so require room for that + headroom.
+        // Clean up any quarantine dirs orphaned by an earlier killed fetch (only
+        // ones >30 min old, so a concurrent fetch's quarantine is left alone).
+        sweep_stale_quarantine(std::time::Duration::from_secs(1800));
+
         let sz = req.entry.size_bytes;
+
+        // Disk guard 1 — filesystem: pinned blocks + a full quarantine copy for
+        // scanning (~2× peak) + headroom.
         let free = free_bytes(MODELS_DIR);
         if sz > 0 && sz.saturating_mul(2) + 512 * 1024 * 1024 > free {
             return fail(&format!("not enough disk: model is {} but only {} free", human(sz), human(free)));
         }
+        // Disk guard 2 — IPFS storage cap: check UP FRONT so we fail with clear
+        // guidance instead of the old mid-stream failure (auto-GC evicting the
+        // in-flight blocks the moment the repo crossed StorageMax).
+        let (repo, smax) = ipfs_repo_usage();
+        if sz > 0 && smax > 0 && repo.saturating_add(sz) > smax {
+            return fail(&format!(
+                "won't fit under the IPFS storage limit — this model needs ~{}, the limit is {} and {} is already used. Raise the IPFS storage limit (Storage settings) to at least {}, then retry.",
+                human(sz), human(smax), human(repo),
+                human(repo.saturating_add(sz).saturating_add(512 * 1024 * 1024))
+            ));
+        }
 
-        let q = staging_root().join(format!("quarantine-{}", new_draft_id()));
-        task_progress(&cid, "downloading to quarantine…", 0, sz);
-
-        // `ipfs get` blocks until the whole directory has materialized, so a
-        // sibling thread polls the quarantine dir as it fills to drive a real
-        // byte-level progress bar. The download bytes land on disk here, so the
-        // dir size is an honest gauge against the entry's known total.
+        // Fetch via `pin add`, NOT `ipfs get`: pin holds kubo's pin lock for the
+        // whole fetch, so `--enable-gc` can't evict the in-flight blocks when the
+        // repo crosses StorageMax (the reported bug), AND re-running after any
+        // interruption RESUMES from the blocks already cached. Progress is gauged
+        // from bytes landing on disk (cheap statvfs delta — no repo-stat lock).
+        task_progress(&cid, "downloading…", 0, sz);
+        let free0 = free_bytes(MODELS_DIR);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let monitor = {
-            let (stop, qm, cidm) = (stop.clone(), q.clone(), cid.clone());
+            let (stop, cidm) = (stop.clone(), cid.clone());
             std::thread::spawn(move || {
                 use std::sync::atomic::Ordering;
                 while !stop.load(Ordering::Relaxed) {
@@ -957,41 +1032,48 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    task_progress(&cidm, "downloading to quarantine…", dir_size(&qm), sz);
+                    let done = free0.saturating_sub(free_bytes(MODELS_DIR));
+                    task_progress(&cidm, "downloading…", done, sz);
                 }
             })
         };
-        let got = run_script(&["get", &cid, &q.to_string_lossy()]);
+        let pinned = run_script(&["pin", &cid]);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = monitor.join();
-        if let Err(e) = got {
-            let _ = std::fs::remove_dir_all(&q);
-            return fail(&e);
+        if let Err(e) = pinned {
+            // Partial blocks stay cached (unpinned) so a retry resumes; the errored
+            // task is purge-able from the UI (GCs them + starts fresh).
+            return fail(&storage_hint(&e));
         }
 
+        // Now fully local + pinned. Materialize a copy to quarantine for scanning
+        // (a LOCAL read — fast, no network, no eviction risk). On any rejection,
+        // purge (unpin + GC) so the bad content never lingers pinned/hosted.
+        let q = staging_root().join(format!("quarantine-{}", new_draft_id()));
         task_set(&cid, "validating weights (file types)…");
+        if let Err(e) = run_script(&["get", &cid, &q.to_string_lossy()]) {
+            let _ = std::fs::remove_dir_all(&q);
+            let _ = run_script(&["purge", &cid]);
+            return fail(&e);
+        }
         if let Err(e) = inspect_model_dir(&q) {
             let _ = std::fs::remove_dir_all(&q);
+            let _ = run_script(&["purge", &cid]);
             return fail(&e);
         }
 
         task_set(&cid, "scanning for viruses…");
-        match virus_scan(&q) {
-            Err(e) => { let _ = std::fs::remove_dir_all(&q); return fail(&format!("virus scan: {e}")); }
-            Ok(_) => {}
+        if let Err(e) = virus_scan(&q) {
+            let _ = std::fs::remove_dir_all(&q);
+            let _ = run_script(&["purge", &cid]);
+            return fail(&format!("virus scan: {e}"));
         }
 
-        // Clean → keep it (pin the CID) and index it.
-        task_set(&cid, "pinning…");
-        match run_script(&["pin", &req.entry.cid]) {
-            Ok(_) => {
-                catalog_add_raw(req.entry); // a peer's model — keep its publisher signature, never re-sign
-                let _ = std::fs::remove_dir_all(&q);
-                task_clear(&cid);
-                announce();
-            }
-            Err(e) => { let _ = std::fs::remove_dir_all(&q); fail(&e); }
-        }
+        // Clean → already pinned (hosted); index it and drop the scan copy.
+        catalog_add_raw(req.entry); // a peer's model — keep its publisher signature, never re-sign
+        let _ = std::fs::remove_dir_all(&q);
+        task_clear(&cid);
+        announce();
     });
     Json(json!({"ok": true, "fetching": true}))
 }
@@ -1011,6 +1093,34 @@ pub async fn remove_model(State(_s): State<AppState>, Json(req): Json<CidReq>) -
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "remove task failed"}));
     Json(v)
+}
+
+/// POST /api/ipfs/models/purge — recover from a FAILED or stuck download: clear
+/// its error, kill any hung fetch of the CID, unpin any partial data, and GC the
+/// orphaned blocks so the space is reclaimed. Then the user can retry from
+/// scratch. Refuses a CID that's a fully-shared model (use /remove to unshare).
+pub async fn purge_download(State(_s): State<AppState>, Json(req): Json<CidReq>) -> Json<Value> {
+    if !valid_cid(&req.cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
+    // Don't let purge unshare a model that actually finished + is in the catalog —
+    // that's what /remove is for. (Small file read; fast.)
+    if read_catalog().iter().any(|e| e.cid == req.cid) {
+        return Json(json!({"ok": false, "err": "that model is fully downloaded and shared — use Remove to unshare it, not purge"}));
+    }
+    // Clear the error task NOW so the UI resets instantly. The heavy part — killing
+    // a hung fetch, unpinning, and `ipfs repo gc` to reclaim the orphaned blocks —
+    // can take minutes on a large datastore, so run it DETACHED and return right
+    // away rather than holding the request open.
+    task_clear(&req.cid);
+    let cid = req.cid.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = run_script(&["purge", &cid]); // pkill + pin rm + repo gc
+    });
+    Json(json!({
+        "ok": true,
+        "message": "Failed download cleared; reclaiming its disk space in the background."
+    }))
 }
 
 /// One Orb's gossiped presence in registry.json (written by aeon-modelshare).
@@ -2670,7 +2780,7 @@ pub async fn pull_model(State(_s): State<AppState>, Json(req): Json<PullReq>) ->
         task_clear(&format!("pull:{slug}"));
         match out {
             Ok(sz) => json!({"ok": true, "slug": slug, "name": name, "cid": cid, "size_bytes": sz, "size": human(sz)}),
-            Err(e) => json!({"ok": false, "err": e}),
+            Err(e) => json!({"ok": false, "err": storage_hint(&e)}),
         }
     })
     .await

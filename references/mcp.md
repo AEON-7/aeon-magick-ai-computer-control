@@ -23,14 +23,14 @@ ambiguity in audit logs.
 
 ## Tools (agent-facing, grouped)
 
-The server's full catalog is **84 tools**. You won't see all 84: the MCP
+The server's full catalog is **85 tools**. You won't see all 85: the MCP
 handler enforces **per-tool scope**, so `tools/list` returns — and `tools/call`
 permits — only the tools your token's tier allows. A **read** token sees the
 read-only tools (`state`, `snapshot`, `screen_text`, and the observability +
 `*_state` / `*_status` queries); a **full** token additionally sees the
 interactive surface (HID input + network config + `screen_find` /
 `describe_screen`). The admin-only tools (see *Not exposed to agents* below) are
-in the 84 but are never listed or callable for any agent token.
+in the 85 but are never listed or callable for any agent token.
 
 Each tool has the same shape as the curl endpoint in the matching reference;
 the linked file has the detail.
@@ -141,6 +141,7 @@ the `aeon-webcam` skill.
 | `model_import` | import from HuggingFace / Ollama / Civitai (SHA-256 / digest-verified) into the network |
 | `model_pull` | materialize a shared model into this Orb's library |
 | `model_push` / `model_push_status` | rsync a library model onto a connected system + poll progress |
+| `model_purge` | recover from a FAILED/stuck download — clear the error, kill the hung fetch, unpin the partial + GC to reclaim the space (a retry, by contrast, resumes) |
 
 ### Aeon Bench — benchmark a model on a GPU server
 | Tool | What it does |
@@ -186,7 +187,7 @@ resource picker can browse them with no filesystem mount.
 
 ## REST-only capabilities (no MCP tool — use curl)
 
-A handful of capabilities have **no tool in the 84-tool catalog** and must be
+A handful of capabilities have **no tool in the 85-tool catalog** and must be
 driven over HTTP even from an MCP session:
 
 | Capability | Endpoint | Reference |

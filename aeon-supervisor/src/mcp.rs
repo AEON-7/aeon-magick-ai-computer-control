@@ -234,6 +234,9 @@ fn tools_catalog() -> Value {
                  json!({"type":"object","required":["source","reference"],"properties":{
                             "source":{"type":"string","enum":["huggingface","ollama","civitai"],"description":"the registry to import from"},
                             "reference":{"type":"string","description":"HF \"org/model\" (or full URL), an Ollama tag like \"llama3.2:3b\", or a Civitai model URL/id"}}})),
+            tool("model_purge",
+                 "Recover from a FAILED or stuck model download: clears its error, kills any hung fetch of the CID, unpins partial data, and garbage-collects the orphaned IPFS blocks to reclaim the space — so you can retry from scratch. Refuses a CID that's a fully-shared model (use the remove/unshare path for those). Returns freed bytes.",
+                 json!({"type":"object","required":["cid"],"properties":{"cid":{"type":"string","description":"the model directory CID whose failed download to purge"}}})),
             // ── Aeon Bench: deploy the LLM-benchmarking pod to a GPU server + monitor it ──
             tool("bench_model_info",
                  "Preview the serve recipe the bench pod will derive for a HuggingFace model before you deploy: quantization, params, native + rope-scaled context, dtype, architecture, gated flag, and warnings (gated needs a token; context < 64k limits the Hermes agentic harness; GGUF caveat). `hf_link` = \"org/model\".",
@@ -755,6 +758,19 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
                 }
                 _ => axum::Json(json!({"ok": false, "err": "source must be huggingface | ollama | civitai"})),
             };
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "model_purge" => {
+            let cid = args
+                .get("cid")
+                .and_then(|v| v.as_str())
+                .ok_or("model_purge needs a `cid`")?
+                .to_string();
+            let v = crate::ipfs::purge_download(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::ipfs::CidReq { cid }),
+            )
+            .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
         "bench_model_info" => {

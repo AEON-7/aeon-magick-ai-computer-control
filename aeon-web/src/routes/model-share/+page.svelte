@@ -550,6 +550,28 @@
     scheduleTick(); // pick up the fast cadence now that a fetch is in flight
   }
 
+  // Purge a FAILED download: reclaim its partial (orphaned) IPFS blocks + clear
+  // the error, so the card resets to a clean "host" state. (Retry, by contrast,
+  // re-runs the download and RESUMES from whatever's already cached.)
+  async function purgeDownload(cid: string) {
+    err = '';
+    try {
+      const p = await api('/models/purge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cid }),
+      });
+      if (p && p.ok === false) { err = p.err || 'purge failed'; return; }
+      // Drop the local task at once (the server already cleared it) so the card
+      // flips back to the download button without waiting for the next poll.
+      const { [cid]: _drop, ...rest } = tasks;
+      tasks = rest;
+      toast(p?.message || 'Purged the failed download.', 'info');
+    } catch (e: any) {
+      err = e?.message ?? 'purge failed';
+    }
+    await load();
+  }
+
   let confirmRemove = '';
   async function unshare(cid: string) {
     if (confirmRemove !== cid) {
@@ -870,7 +892,18 @@
 
             <div class="mt-auto pt-1 flex items-center gap-2 text-xs">
               {#if busy}
-                <DownloadProgress task={busy} />
+                {@const isErr = String(busy.phase ?? '').startsWith('error')}
+                <div class="flex flex-col gap-1 w-full">
+                  <DownloadProgress task={busy} />
+                  {#if isErr}
+                    <div class="flex items-center gap-3 text-[11px]">
+                      <button class="text-cursed-300 hover:text-cursed-200" on:click={() => download(row)}
+                              title="Retry — resumes from what's already downloaded">↻ retry</button>
+                      <button class="text-ink-500 hover:text-red-400" on:click={() => purgeDownload(row.entry.cid)}
+                              title="Purge the partial download, reclaim its disk space, and clear the error">✕ purge</button>
+                    </div>
+                  {/if}
+                </div>
               {:else}
                 <!-- Primary action on every model: push it to a connected system. -->
                 <button class="btn-primary text-xs py-1 px-2.5 rounded inline-flex items-center gap-1"
