@@ -276,11 +276,12 @@
   $: pubName = pubAccounts.find((a) => a.pubkey === pubUnlocked)?.username ?? '';
   $: pubFp = pubUnlocked.slice(0, 12);
   let showPub = false;
-  let pubMode: 'create' | 'unlock' = 'create';
+  let pubMode: 'create' | 'unlock' | 'restore' = 'create';
   let pubUser = '';
   let pubPass = '';
   let pubSel = '';
   let seedWords: string[] = []; // shown ONCE after create — the user must write it down
+  let seedInput = ''; // 24-word phrase pasted in when restoring on a new Orb
 
   async function loadPublisher() {
     try {
@@ -291,7 +292,7 @@
   function openPublisher() {
     pubMode = pubAccounts.length ? 'unlock' : 'create';
     pubSel = pubAccounts[0]?.pubkey ?? '';
-    pubUser = ''; pubPass = ''; seedWords = []; showPub = true;
+    pubUser = ''; pubPass = ''; seedWords = []; seedInput = ''; showPub = true;
   }
   async function pubCreate() {
     if (!pubUser.trim() || pubPass.length < 6) { toast('Pick a username and a password of at least 6 characters.', 'error'); return; }
@@ -302,6 +303,21 @@
     await papi('/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: r.pubkey, password: pw }) });
     await loadPublisher();
     pubPass = ''; // modal stays open to display the seed
+  }
+  // Restore an existing identity from its 24-word seed on a fresh Orb. The key is
+  // DERIVED from the phrase, so the pubkey (and reputation) come back identical;
+  // the password just re-encrypts it locally and can differ from the original.
+  async function pubRestore() {
+    const words = seedInput.trim().split(/\s+/).filter(Boolean);
+    if (!pubUser.trim() || pubPass.length < 6) { toast('Enter a display name and a password of at least 6 characters.', 'error'); return; }
+    if (words.length !== 24) { toast(`Enter your 24-word recovery phrase (you have ${words.length} word${words.length === 1 ? '' : 's'}).`, 'error'); return; }
+    const pw = pubPass;
+    const r = await papi('/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: pubUser.trim(), password: pw, seed_phrase: words.join(' ') }) });
+    if (!r?.ok) { toast('Restore failed — ' + (r?.err ?? 'check the recovery phrase'), 'error'); return; }
+    await papi('/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: r.pubkey, password: pw }) });
+    await loadPublisher();
+    showPub = false; pubPass = ''; seedInput = '';
+    toast(`Restored @${pubUser.trim()} · ${String(r.pubkey).slice(0, 12)} — signing as your original identity.`, 'success');
   }
   async function pubUnlock() {
     const r = await papi('/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: pubSel, password: pubPass }) });
@@ -1207,8 +1223,29 @@
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Password — encrypts the key (6+ chars)</span>
           <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <div class="flex items-center justify-between pt-1">
-          {#if pubAccounts.length}<button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => (pubMode = 'unlock')}>have one? unlock →</button>{:else}<span></span>{/if}
+          <div class="flex items-center gap-3">
+            <button class="text-[12px] text-cursed-400 hover:text-cursed-300 font-mono" on:click={() => (pubMode = 'restore')}>↩ restore a backup</button>
+            {#if pubAccounts.length}<button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => (pubMode = 'unlock')}>unlock →</button>{/if}
+          </div>
           <button class="btn-primary text-sm px-4 py-2 rounded" on:click={pubCreate}>Create identity</button>
+        </div>
+      {:else if pubMode === 'restore'}
+        <h2 class="font-mono text-cursed-300">Restore signing identity</h2>
+        <p class="text-[12px] text-ink-400 leading-relaxed">Recover a publisher identity from its <span class="text-cursed-300">24-word recovery phrase</span> — your public key and reputation come back <em>exactly</em> as before (the key is derived from the phrase). Set a password to encrypt it on this Orb; it can differ from the original.</p>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Display name (a petname)</span>
+          <input bind:value={pubUser} placeholder="e.g. mageworks" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Recovery phrase — 24 words</span>
+          <textarea bind:value={seedInput} rows="3" spellcheck="false" autocomplete="off" placeholder="word1 word2 word3 … word24"
+                    class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none resize-none"></textarea>
+          <span class="text-[10px] font-mono {seedInput.trim().split(/\s+/).filter(Boolean).length === 24 ? 'text-emerald-400' : 'text-ink-600'}">{seedInput.trim() ? seedInput.trim().split(/\s+/).filter(Boolean).length : 0}/24 words</span></label>
+        <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">New password — encrypts the key here (6+ chars)</span>
+          <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+        <div class="flex items-center justify-between pt-1">
+          <div class="flex items-center gap-3">
+            <button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => (pubMode = 'create')}>＋ new instead</button>
+            {#if pubAccounts.length}<button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => (pubMode = 'unlock')}>unlock →</button>{/if}
+          </div>
+          <button class="btn-primary text-sm px-4 py-2 rounded" on:click={pubRestore}>Restore identity</button>
         </div>
       {:else}
         <h2 class="font-mono text-cursed-300">Unlock publisher identity</h2>
@@ -1219,7 +1256,10 @@
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Password</span>
           <input bind:value={pubPass} type="password" autocomplete="current-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <div class="flex items-center justify-between pt-1">
-          <button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => { pubMode = 'create'; pubUser = ''; pubPass = ''; }}>＋ new identity</button>
+          <div class="flex items-center gap-3">
+            <button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => { pubMode = 'create'; pubUser = ''; pubPass = ''; }}>＋ new</button>
+            <button class="text-[12px] text-cursed-400 hover:text-cursed-300 font-mono" on:click={() => { pubMode = 'restore'; pubUser = ''; pubPass = ''; seedInput = ''; }}>↩ restore</button>
+          </div>
           <button class="btn-primary text-sm px-4 py-2 rounded" on:click={pubUnlock}>Unlock</button>
         </div>
       {/if}
