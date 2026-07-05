@@ -124,17 +124,25 @@ fn build_env_file(req: &DeployReq) -> String {
         lines.push(format!("HF_TOKEN={}", clean_val(&req.hf_token)));
     }
     let mut have_port = false;
+    let mut have_maxlen = false;
     for (k, v) in &req.env {
         if !env_key_ok(k) || matches!(k.as_str(), "AEON_HF_LINK" | "HF_TOKEN") {
             continue;
         }
-        if k == "AEON_DASH_PORT" {
-            have_port = true;
+        match k.as_str() {
+            "AEON_DASH_PORT" => have_port = true,
+            "AEON_MAX_MODEL_LEN" => have_maxlen = true,
+            _ => {}
         }
         lines.push(format!("{}={}", k, clean_val(v)));
     }
     if !have_port {
         lines.push(format!("AEON_DASH_PORT={DEFAULT_DASH_PORT}"));
+    }
+    // The agentic Hermes harness needs a 64k context; the pod itself refuses
+    // anything under 65536 — so default it, never leaving it unset.
+    if !have_maxlen {
+        lines.push("AEON_MAX_MODEL_LEN=65536".to_string());
     }
     lines.join("\n") + "\n"
 }
