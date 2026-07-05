@@ -76,6 +76,35 @@ echo PHASE=stopped > "$WORK/.aeon-bench.status"
 echo STOPPED
 "#;
 
+/// In-place hot-update worker: fetch the latest Aeon-Bench-Pod and rebuild,
+/// KEEPING the current model `.env` (only the pod code changes). Shallow-clone
+/// safe (`fetch --depth 1` + `reset --hard FETCH_HEAD`, since `pull --ff-only`
+/// can't fast-forward a depth-1 clone). Backgrounded; drives the same status file.
+const UPDATE_SCRIPT: &str = r#"#!/bin/bash
+WORK="$HOME/aeon-bench-pod"; REPO="$WORK/repo"
+S="$WORK/.aeon-bench.status"; L="$WORK/.aeon-bench.log"; : > "$L"
+[ -d "$REPO/.git" ] || { echo "no pod is deployed here yet — deploy first, then update" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+echo PHASE=updating > "$S"
+git -C "$REPO" fetch -q --depth 1 origin main >> "$L" 2>&1 \
+  || { echo "git fetch failed — the target needs network access to github.com" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+git -C "$REPO" reset -q --hard FETCH_HEAD >> "$L" 2>&1 \
+  || { echo "git reset failed" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+D="$REPO/deploy/pod"
+[ -f "$D/.env" ] || { echo "pod .env missing — re-deploy to set the model config" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+DC="docker compose"; docker compose version >/dev/null 2>&1 || DC="docker-compose"
+cd "$D" || { echo PHASE=failed > "$S"; exit 1; }
+echo PHASE=building > "$S"
+if $DC up -d --build >> "$L" 2>&1; then
+  echo PHASE=running > "$S"
+else
+  echo "docker compose up failed after the update — see the log above" >> "$L"
+  echo PHASE=failed > "$S"
+fi
+"#;
+
+/// The deployed pod's current commit on the target (empty if none deployed).
+const DEPLOYED_SHA_SCRIPT: &str = r#"git -C "$HOME/aeon-bench-pod/repo" rev-parse HEAD 2>/dev/null || true"#;
+
 #[derive(Deserialize)]
 pub struct DeployReq {
     /// "local" (this Orb) or a connected-system id from the Agent Dashboard.
@@ -193,6 +222,35 @@ fn section<'a>(out: &'a str, marker: &str, next: &[&str]) -> &'a str {
         .min()
         .unwrap_or(after.len());
     after[..end].trim_matches(['\n', '\r'].as_ref())
+}
+
+/// Outer bootstrap for a hot-update: refuse (NO_POD) if nothing is deployed,
+/// else drop the update worker + nohup it, same as deploy.
+fn update_bootstrap(run_b64: &str) -> String {
+    format!(
+        r#"set -e
+WORK="$HOME/aeon-bench-pod"
+[ -d "$WORK/repo/.git" ] || {{ echo "NO_POD"; exit 0; }}
+printf '%s' '{run_b64}' | base64 -d > "$WORK/.aeon-bench-update.sh"
+printf 'PHASE=updating\n' > "$WORK/.aeon-bench.status"
+nohup bash "$WORK/.aeon-bench-update.sh" >/dev/null 2>&1 &
+echo STARTED"#
+    )
+}
+
+/// Latest commit on the Aeon-Bench-Pod default branch. Uses GitHub's `.sha`
+/// media type, which returns the bare 40-char SHA as plain text — no JSON parse,
+/// no auth for a public repo (GitHub does require a User-Agent header).
+fn github_latest_sha() -> Option<String> {
+    let resp = ureq::get("https://api.github.com/repos/AEON-7/Aeon-Bench-Pod/commits/main")
+        .set("User-Agent", "aeon-magick-orb")
+        .set("Accept", "application/vnd.github.sha")
+        .timeout(std::time::Duration::from_secs(12))
+        .call()
+        .ok()?;
+    let s = resp.into_string().ok()?;
+    let s = s.trim();
+    (s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit())).then(|| s.to_string())
 }
 
 /// POST /api/bench/deploy — kick a (backgrounded) pod deploy on the target.
@@ -386,5 +444,49 @@ pub async fn stop(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Jso
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "stop task failed"}));
+    Json(v)
+}
+
+/// GET /api/bench/updates?target= — is a newer Aeon-Bench-Pod build available for
+/// the pod deployed on this target? Compares the deployed commit (git HEAD on the
+/// target) against the latest on GitHub. `update_available` is true only when a
+/// pod IS deployed and the two commits differ, so the UI can show/hide the button.
+pub async fn updates(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -> Json<Value> {
+    let target = q.target.clone();
+    let v = tokio::task::spawn_blocking(move || {
+        let deployed = run_on_target(&target, DEPLOYED_SHA_SCRIPT)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let deployed_ok = deployed.len() >= 7 && deployed.chars().all(|c| c.is_ascii_hexdigit());
+        let latest = github_latest_sha().unwrap_or_default();
+        let update_available = deployed_ok && !latest.is_empty() && deployed != latest;
+        let short = |s: &str| s.chars().take(12).collect::<String>();
+        json!({
+            "ok": true,
+            "deployed": if deployed_ok { Some(short(&deployed)) } else { None },
+            "latest": if latest.is_empty() { None } else { Some(short(&latest)) },
+            "update_available": update_available,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "updates task failed"}));
+    Json(v)
+}
+
+/// POST /api/bench/update — hot-update the pod on the target: fetch the latest
+/// Aeon-Bench-Pod and rebuild in place, keeping the current model .env.
+/// Backgrounded like deploy; the UI polls /api/bench/status through the phases.
+pub async fn update(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Json<Value> {
+    let target = q.target.clone();
+    let script = update_bootstrap(&b64(UPDATE_SCRIPT.as_bytes()));
+    let v = tokio::task::spawn_blocking(move || match run_on_target(&target, &script) {
+        Ok(out) if out.contains("NO_POD") => {
+            json!({"ok": false, "err": "no pod is deployed on this target yet — deploy one first"})
+        }
+        Ok(out) => json!({"ok": true, "target": target, "out": out.trim()}),
+        Err(e) => json!({"ok": false, "err": e}),
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "update task failed"}));
     Json(v)
 }

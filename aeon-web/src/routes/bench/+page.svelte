@@ -18,9 +18,12 @@
     benchStatus,
     benchStop,
     benchModelInfo,
+    benchUpdates,
+    benchUpdate,
     type ConnectedSystem,
     type BenchStatus,
     type BenchModelInfo,
+    type BenchUpdates,
   } from '$lib/api';
 
   let systems: ConnectedSystem[] = [];
@@ -35,6 +38,13 @@
   let deploying = false;
   let lastTarget = '';
   let poll: ReturnType<typeof setInterval>;
+
+  // "Update Pod" — is the deployed pod behind the latest Aeon-Bench-Pod on GitHub?
+  // Checked once per target when the pod is first seen running (GitHub's API is
+  // rate-limited, so we don't poll it every tick); re-checked after an update.
+  let upd: BenchUpdates | null = null;
+  let updating = false;
+  let checkedTarget = '';
 
   // Auto-detect the serve recipe (quant/context/params/gated) from the HF id as
   // the user types — a preview of what the pod's derive_recipe() will apply.
@@ -75,6 +85,8 @@
   $: if (target && target !== lastTarget) {
     lastTarget = target;
     st = null;
+    upd = null;
+    checkedTarget = '';
     refresh();
   }
 
@@ -96,7 +108,38 @@
     try {
       const r = await benchStatus(target);
       if (r?.ok) st = r;
+      // Once the pod is running, check GitHub for a newer build (once per target).
+      if (r?.running && checkedTarget !== target) {
+        checkedTarget = target;
+        checkUpdates();
+      }
     } catch {}
+  }
+
+  async function checkUpdates() {
+    try {
+      const r = await benchUpdates(target);
+      if (r?.ok) upd = r;
+    } catch {}
+  }
+
+  async function updatePod() {
+    updating = true;
+    try {
+      const r = await benchUpdate(target);
+      if (!r?.ok) {
+        toast('Update failed: ' + (r?.err ?? 'unknown error'), 'error');
+      } else {
+        toast(`Updating the pod on ${targetLabel}…`, 'success');
+        upd = null;
+        checkedTarget = ''; // re-check after it rebuilds
+        await refresh();
+        startPolling();
+      }
+    } catch (e: any) {
+      toast('Update failed: ' + (e?.message ?? 'error'), 'error');
+    }
+    updating = false;
   }
   function startPolling() {
     clearInterval(poll);
@@ -290,6 +333,20 @@
               <a href={dashUrl} target="_blank" rel="noopener" class="btn-primary text-sm py-1.5 px-3 rounded inline-flex items-center gap-1">Open Dashboard <span aria-hidden="true">↗</span></a>
               <a href={dashUrl} target="_blank" rel="noopener" class="text-[12px] text-cursed-300 hover:text-cursed-200 font-mono break-all">{dashUrl}</a>
             </div>
+            <!-- Update Pod — only when the deployed pod is behind the latest on GitHub -->
+            {#if upd?.update_available}
+              <div class="flex flex-wrap items-center gap-2 rounded-lg border border-amber-600/40 bg-amber-900/10 px-3 py-2">
+                <button on:click={updatePod} disabled={updating || busy}
+                        class="text-sm py-1.5 px-3 rounded inline-flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-ink-950 font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                  {updating ? 'Updating…' : 'Update Pod'} <span aria-hidden="true">↑</span>
+                </button>
+                <span class="text-[11px] text-amber-200/90 font-mono">
+                  new Aeon-Bench-Pod build available{#if upd.deployed && upd.latest} · {upd.deployed} → {upd.latest}{/if}
+                </span>
+              </div>
+            {:else if upd && upd.deployed}
+              <p class="text-[11px] text-ink-500 font-mono">Pod up to date ✓ · {upd.deployed}</p>
+            {/if}
           {/if}
 
           {#if st.log}

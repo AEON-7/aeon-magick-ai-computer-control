@@ -76,10 +76,33 @@ minutes on the first run. When running, the **dashboard** (launch runs, keys,
 live progress) is a browser page at **`http://<host>:<dash_port>`** — surface
 that URL to the user; it's reachable from a browser or via the Orb console.
 
-## 5. stop — **`bench_stop`**
+## 5. keep it current — **`bench_updates`** / **`bench_update`**
+
+The pod tracks the [Aeon-Bench-Pod](https://github.com/AEON-7/Aeon-Bench-Pod)
+repo (it's a git checkout on the target). Check whether a newer build shipped,
+then hot-update in place — the model config (`.env`) is preserved, only the pod
+code changes:
+
+```bash
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
+  "https://$AEON_HOST/api/bench/updates?target=<system-id>"
+# → {deployed:"<sha>", latest:"<sha>", update_available:true|false}
+
+curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
+  -d '{"target":"<system-id>"}' "https://$AEON_HOST/api/bench/update"
+```
+
+`bench_update` fetches the latest and rebuilds in the **background** (`git fetch`
+→ `reset --hard` → `docker compose up -d --build`), driving the same phases —
+poll **`bench_status`** through `updating → building → running`. In the console,
+an **Update Pod** button appears on the Bench page whenever `update_available` is
+true. (Updating with no pod deployed is a no-op error — deploy first.)
+
+## 6. stop — **`bench_stop`**
 
 `{"target":"<system-id>"}` → `docker compose down` on the target.
 
 **Flow:** **`connected_systems`** (pick a GPU box) → **`bench_model_info`** (sanity-
 check the recipe + warnings) → **`bench_deploy`** → poll **`bench_status`** to
-`running` → hand off `http://<host>:8080` → **`bench_stop`** when done.
+`running` → hand off `http://<host>:8080` → **`bench_updates`**/**`bench_update`**
+to stay current → **`bench_stop`** when done.

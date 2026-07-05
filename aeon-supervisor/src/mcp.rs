@@ -250,6 +250,12 @@ fn tools_catalog() -> Value {
             tool("bench_stop",
                  "Stop the bench pod on a target (docker compose down).",
                  json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
+            tool("bench_updates",
+                 "Check whether a newer Aeon-Bench-Pod build is available for the pod deployed on a target: compares the deployed commit against the latest on GitHub. Returns {deployed, latest, update_available}. Read-only.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) whose pod to check"}}})),
+            tool("bench_update",
+                 "Hot-update the bench pod on a target to the latest Aeon-Bench-Pod: fetch the newest code and rebuild in place, keeping the current model config. Runs in the BACKGROUND — poll bench_status through updating → building → running. Use bench_updates first to see if one is available.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) whose pod to update"}}})),
             // NOTE: SSH key management is intentionally NOT exposed over MCP.
             // Granting/listing SSH access to the device is a human-admin-only
             // action (web UI + admin session). Agents must never manage SSH.
@@ -794,6 +800,32 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
+        "bench_updates" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_updates needs a `target`")?
+                .to_string();
+            let v = crate::bench::updates(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::bench::TargetQuery { target }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_update" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_update needs a `target`")?
+                .to_string();
+            let v = crate::bench::update(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::bench::TargetQuery { target }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
         "security_metrics" => {
             let m = crate::security_metrics::get_metrics(axum::extract::State(state.clone())).await;
             Ok(text_result(&serde_json::to_string_pretty(&m.0).unwrap_or_default()))
@@ -1288,7 +1320,7 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"
         | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
         | "vpn_provider_state" | "blocked_log" | "hidden_service_list" | "ipfs_status"
-        | "bench_status" | "bench_model_info" => Read,
+        | "bench_status" | "bench_model_info" | "bench_updates" => Read,
         _ => Full,
     }
 }

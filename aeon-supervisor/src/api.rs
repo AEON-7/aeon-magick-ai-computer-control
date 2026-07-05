@@ -511,6 +511,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/bench/status", get(crate::bench::status))
         .route("/bench/stop",   post(crate::bench::stop))
         .route("/bench/model-info", get(crate::bench::model_info))
+        .route("/bench/updates", get(crate::bench::updates))
+        .route("/bench/update",  post(crate::bench::update))
         // IPFS — local kubo node + gateway (admin-only over REST; agent pin/add via MCP)
         .route("/ipfs/status",  get(crate::ipfs::status))
         .route("/ipfs/enable",  post(crate::ipfs::enable))

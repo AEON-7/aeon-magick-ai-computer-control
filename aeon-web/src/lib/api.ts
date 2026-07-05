@@ -363,6 +363,21 @@ export const benchStatus = (target: string) =>
   req<BenchStatus>('GET', `/bench/status?target=${encodeURIComponent(target)}`);
 export const benchStop = (target: string) =>
   req<{ ok: boolean; err?: string }>('POST', '/bench/stop', { target });
+export interface BenchUpdates {
+  ok: boolean;
+  deployed?: string | null; // short commit deployed on the target
+  latest?: string | null; // short commit available on GitHub
+  update_available?: boolean;
+  err?: string;
+}
+// Is a newer Aeon-Bench-Pod build available for the pod deployed on this target?
+export const benchUpdates = (target: string) =>
+  req<BenchUpdates>('GET', `/bench/updates?target=${encodeURIComponent(target)}`);
+// Hot-update the pod in place (fetch latest + rebuild, keep the model config).
+export const benchUpdate = (target: string) =>
+  req<{ ok: boolean; target?: string; out?: string; err?: string }>('POST', '/bench/update', {
+    target,
+  });
 export interface BenchModelInfo {
   ok: boolean;
   id?: string;
