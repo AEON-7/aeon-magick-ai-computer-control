@@ -123,9 +123,12 @@
   onMount(() => {
     refresh();
     refreshStreamer();
+    loadImageUpdates();
+    loadAuto();
+    primeOsStatus();
     poll = setInterval(refresh, 5000);
   });
-  onDestroy(() => { if (poll) clearInterval(poll); });
+  onDestroy(() => { if (poll) clearInterval(poll); if (osPoll) clearInterval(osPoll); });
 
   function fmtUptime(s: number): string {
     const d = Math.floor(s / 86400);
@@ -258,6 +261,120 @@
       bkOk = false; bkMsg = `✗ ${e?.message ?? 'restore failed'}`;
     } finally { bkBusy = ''; }
   }
+
+  // ── OS updates + new-image notifier ──
+  // Two separate things: (1) keep the underlying Pi OS patched (apt), (2) notice
+  // when a whole new Orb IMAGE has been published (v111/v112 → …) and guide the
+  // user to back up + re-flash from Patreon. The Orb never self-flashes.
+  let img: api.ImageUpdates | null = null;
+
+  let osCheck: api.OsUpdateCheck | null = null;
+  let osStatus: api.OsUpdateStatus | null = null;
+  let osChecking = false;
+  let osPoll: ReturnType<typeof setInterval> | null = null;
+
+  let autoOn: boolean | null = null;
+  let autoBusy = false;
+
+  // Guided image upgrade: back up (encrypted, password) → then open Patreon.
+  let showUpgrade = false;
+  let upgradeStage: 'backup' | 'done' = 'backup';
+  let upgradePw = '';
+  let upgradeBusy = false;
+  let upgradeMsg = '';
+
+  $: osBusy = !!osStatus && !osStatus.done && osStatus.phase !== 'idle';
+
+  async function loadImageUpdates() {
+    try { img = await api.imageUpdates(); } catch { img = null; }
+  }
+  async function loadAuto() {
+    try { const r = await api.autoUpdatesGet(); if (r.ok) autoOn = !!r.enabled; } catch {}
+  }
+  // If an apt upgrade was already running when the page opened, resume polling.
+  async function primeOsStatus() {
+    try {
+      osStatus = await api.osUpdateStatus();
+      if (osStatus && !osStatus.done) startOsPoll();
+    } catch {}
+  }
+
+  async function doOsCheck() {
+    osChecking = true;
+    try { osCheck = await api.osUpdateCheck(); }
+    catch (e: any) { osCheck = { ok: false, err: e?.message ?? 'check failed' }; }
+    osChecking = false;
+  }
+
+  function startOsPoll() {
+    if (osPoll) clearInterval(osPoll);
+    osPoll = setInterval(async () => {
+      try {
+        osStatus = await api.osUpdateStatus();
+        if (osStatus.done && osPoll) {
+          clearInterval(osPoll); osPoll = null;
+          if (osStatus.ok) osCheck = { ok: true, count: 0, security: 0 };
+        }
+      } catch {}
+    }, 2500);
+  }
+
+  async function doOsApply() {
+    if (!(await confirmRite({
+      title: 'Install OS updates',
+      body:
+        'Download + install all pending Raspberry Pi OS package updates now. ' +
+        'The Orb keeps running through it; if a kernel or firmware package is ' +
+        'updated you\'ll be prompted to reboot afterward to apply it.',
+      confirmLabel: 'install updates',
+    }))) return;
+    error = ''; msg = '';
+    try {
+      const r = await api.osUpdateApply();
+      if (!r.ok) { error = 'Update failed: ' + (r.err ?? 'unknown'); return; }
+      osStatus = { phase: 'starting', percent: 0, done: false, ok: false, log: '', reboot_required: false };
+      startOsPoll();
+    } catch (e: any) { error = 'Update failed: ' + (e?.message ?? 'unknown'); }
+  }
+
+  async function toggleAuto() {
+    autoBusy = true; error = '';
+    try {
+      const r = await api.autoUpdatesSet(!autoOn);
+      if (r.ok) autoOn = !!r.enabled; else error = r.err ?? 'toggle failed';
+    } catch (e: any) { error = e?.message ?? 'toggle failed'; }
+    autoBusy = false;
+  }
+
+  function openUpgrade() {
+    showUpgrade = true; upgradeStage = 'backup'; upgradePw = ''; upgradeMsg = '';
+  }
+  async function upgradeBackup() {
+    if (!upgradePw) return;
+    upgradeBusy = true; upgradeMsg = '';
+    try {
+      const res = await fetch('/api/system/config/export', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: upgradePw }),
+      });
+      if (!res.ok) { upgradeMsg = `✗ backup failed (${res.status})`; upgradeBusy = false; return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'aeon-config-backup.aeonbackup';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      upgradeMsg = `✓ backup saved (${(blob.size / 1024).toFixed(1)} kB) — keep the file + password safe`;
+      upgradeStage = 'done';
+    } catch (e: any) { upgradeMsg = `✗ ${e?.message ?? 'backup failed'}`; }
+    upgradeBusy = false;
+  }
+  function goPatreon() {
+    const u = img?.patreon_url || 'https://www.patreon.com/AeonForge7';
+    window.open(u, '_blank', 'noopener');
+    showUpgrade = false;
+  }
 </script>
 
 <div class="h-full flex flex-col">
@@ -270,6 +387,37 @@
       {#if error}<p class="text-red-400 text-sm">{error}</p>{/if}
       {#if msg}<p class="text-live-400 text-sm">{msg}</p>{/if}
 
+      <!-- ─── New Orb image available ─── -->
+      {#if img?.update_available}
+        <section class="rounded-xl border border-amber-500/50 bg-amber-500/10 p-5 space-y-3">
+          <div class="flex items-start gap-3">
+            <span class="text-2xl leading-none" aria-hidden="true">✨</span>
+            <div class="space-y-1">
+              <h2 class="font-mono text-sm uppercase tracking-wider text-amber-200">
+                New Orb image available — {img.latest_name ?? `v${img.latest}`}
+              </h2>
+              <p class="text-xs text-amber-100/80 leading-relaxed">
+                You're running {img.installed != null ? `v${img.installed}` : 'an unversioned image'}{#if img.published} · published {img.published}{/if}.
+                Re-flash for the most complete set of features and the latest security.
+                {#if img.notes}<br /><span class="text-amber-100/60">{img.notes}</span>{/if}
+              </p>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 pt-1">
+            <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
+                    on:click={openUpgrade}>
+              ↑ Back up &amp; get {img.latest_name ?? `v${img.latest}`}
+            </button>
+            <span class="text-[11px] text-amber-100/60">Backs up your config first, then opens Patreon to download.</span>
+          </div>
+        </section>
+      {:else if img && img.installed_known === false && img.latest != null}
+        <p class="text-[11px] text-zinc-500">
+          Couldn't read this device's image version (legacy image). Latest published is
+          {img.latest_name ?? `v${img.latest}`} — consider re-flashing for the newest features + security.
+        </p>
+      {/if}
+
       <!-- ─── Health ─── -->
       {#if info}
         <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
@@ -277,6 +425,11 @@
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Health
             </h2>
+            {#if info.image_version != null || info.track}
+              <p class="text-[11px] font-mono text-zinc-500">
+                Image {info.image_version != null ? `v${info.image_version}` : 'unstamped'}{#if info.track} · {info.track}{/if}{#if info.codename} · {info.codename}{/if}
+              </p>
+            {/if}
             <p class="text-xs text-zinc-500">
               Pi-side resource state. Polls every 5 s. CPU temp above 80°C
               triggers Pi thermal throttling — usually fine to ignore on a
@@ -317,6 +470,96 @@
           </div>
         </section>
       {/if}
+
+      <!-- ─── System update (OS packages) ─── -->
+      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+        <header class="space-y-1">
+          <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
+            System update
+          </h2>
+          <p class="text-xs text-zinc-500 leading-relaxed">
+            Keep the underlying Raspberry Pi OS patched — <strong>operating-system packages</strong>
+            (security + bug fixes). This is separate from re-flashing a whole new Orb <em>image</em>
+            (that's the banner up top when one's published).
+          </p>
+        </header>
+
+        <div class="space-y-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <button class="btn-primary text-sm" on:click={doOsCheck} disabled={osChecking || osBusy}>
+              {osChecking ? 'checking…' : 'Check for updates'}
+            </button>
+            {#if osCheck}
+              {#if osCheck.ok}
+                {#if (osCheck.count ?? 0) > 0}
+                  <span class="text-sm text-amber-300 font-mono">
+                    {osCheck.count} update{(osCheck.count ?? 0) === 1 ? '' : 's'}{#if (osCheck.security ?? 0) > 0} · {osCheck.security} security{/if}
+                  </span>
+                {:else}
+                  <span class="text-sm text-live-300 font-mono">✓ up to date</span>
+                {/if}
+              {:else}
+                <span class="text-sm text-red-300 font-mono">✗ {osCheck.err ?? 'check failed'}</span>
+              {/if}
+            {/if}
+            <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40"
+                    on:click={doOsApply}
+                    disabled={osBusy || (osCheck?.ok === true && (osCheck.count ?? 0) === 0)}>
+              {osBusy ? 'installing…' : '↓ Install updates'}
+            </button>
+          </div>
+
+          {#if osCheck?.packages}
+            <p class="text-[10.5px] text-zinc-600 font-mono break-words leading-relaxed">
+              {osCheck.packages.split(',').join(' · ')}
+            </p>
+          {/if}
+
+          {#if osStatus && osStatus.phase !== 'idle'}
+            <div class="space-y-1.5">
+              <div class="flex justify-between text-[11px] font-mono">
+                <span class="{osStatus.phase === 'failed' ? 'text-red-300' : osStatus.done ? 'text-live-300' : 'text-amber-300'}">
+                  {#if osStatus.done && osStatus.ok}✓ updates installed{:else if osStatus.phase === 'failed'}✗ update failed{:else}{osStatus.phase}…{/if}
+                </span>
+                <span class="text-zinc-500 tabular-nums">{Math.round(osStatus.percent)}%</span>
+              </div>
+              <div class="h-2 rounded-full bg-ink-800 overflow-hidden">
+                <div class="h-full rounded-full bg-gradient-to-r from-cursed-600 to-cursed-400 transition-all duration-500"
+                     style="width:{osStatus.percent}%"></div>
+              </div>
+              {#if osStatus.log}
+                <details class="text-[10.5px]">
+                  <summary class="cursor-pointer text-zinc-500 hover:text-zinc-300 font-mono">apt log</summary>
+                  <pre class="mt-1 whitespace-pre-wrap break-all font-mono text-[10px] leading-snug text-zinc-500 bg-ink-950 border border-ink-800 rounded p-2 max-h-48 overflow-y-auto">{osStatus.log}</pre>
+                </details>
+              {/if}
+              {#if osStatus.done && osStatus.reboot_required}
+                <div class="flex flex-wrap items-center gap-2 pt-1">
+                  <span class="text-[11px] text-amber-300">A kernel/firmware update needs a reboot to apply.</span>
+                  <button class="btn-primary text-xs hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40" on:click={onPiReboot}>⟳ Reboot now</button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <div class="flex items-center justify-between gap-3 pt-3 border-t border-ink-800">
+          <div class="space-y-0.5">
+            <p class="text-sm text-zinc-300">Automatic security updates</p>
+            <p class="text-[11px] text-zinc-500 leading-relaxed">
+              Install security patches automatically in the background. Never auto-reboots —
+              you reboot on your own schedule.
+            </p>
+          </div>
+          <button type="button" role="switch" aria-checked={autoOn === true}
+                  on:click={toggleAuto} disabled={autoBusy || autoOn === null}
+                  class="shrink-0 relative inline-flex h-6 w-11 items-center rounded-full transition
+                         {autoOn ? 'bg-live-500/70' : 'bg-ink-700'} disabled:opacity-50">
+            <span class="inline-block h-4 w-4 transform rounded-full bg-white transition
+                         {autoOn ? 'translate-x-6' : 'translate-x-1'}"></span>
+          </button>
+        </div>
+      </section>
 
       <!-- ─── Stream tuning (v63) ─── -->
       {#if streamerCfg}
@@ -563,4 +806,58 @@
       </section>
     </div>
   </main>
+
+  <!-- ─── Guided image upgrade: back up → Patreon ─── -->
+  {#if showUpgrade}
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+         role="presentation" on:click|self={() => (showUpgrade = false)}>
+      <div class="w-full max-w-md rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-4 shadow-2xl">
+        <header class="space-y-1">
+          <h2 class="font-mono text-sm uppercase tracking-wider text-amber-200">
+            Get {img?.latest_name ?? 'the new image'}
+          </h2>
+          <p class="text-xs text-zinc-500 leading-relaxed">
+            Re-flashing wipes the SD card. <strong>Back up your config first</strong> — device +
+            network settings, identities, keys, macros, and your Model Share library — then download
+            the new image from Patreon and restore the backup after flashing.
+          </p>
+        </header>
+
+        {#if upgradeStage === 'backup'}
+          <div class="space-y-2">
+            <div class="text-[11px] uppercase tracking-wider text-zinc-500">Backup password</div>
+            <input type="password" bind:value={upgradePw} placeholder="choose a strong password"
+                   autocomplete="new-password"
+                   class="w-full rounded-md border border-ink-800 bg-ink-950/40 px-3 py-2 text-sm font-mono text-zinc-200 placeholder-zinc-600" />
+            <p class="text-[11px] text-zinc-600 leading-relaxed">
+              You'll need this exact password to restore after flashing — it's the only way to decrypt
+              the backup. Store it safely.
+            </p>
+          </div>
+          {#if upgradeMsg}<p class="text-xs font-mono text-red-300">{upgradeMsg}</p>{/if}
+          <div class="flex items-center justify-end gap-2 pt-1">
+            <button class="text-sm text-zinc-400 hover:text-zinc-200 px-3 py-1.5" on:click={() => (showUpgrade = false)}>Cancel</button>
+            <button class="btn-primary text-sm" on:click={upgradeBackup} disabled={!upgradePw || upgradeBusy}>
+              {upgradeBusy ? 'backing up…' : '↓ Back up &amp; continue'}
+            </button>
+          </div>
+        {:else}
+          <div class="rounded-lg border border-live-600/30 bg-live-500/5 p-3">
+            <p class="text-sm text-live-300 font-mono">{upgradeMsg}</p>
+          </div>
+          <p class="text-xs text-zinc-500 leading-relaxed">
+            Now grab {img?.latest_name ?? 'the latest image'} from Patreon, flash it with Raspberry Pi
+            Imager, boot the Orb, and restore your backup from the <strong>Configuration backup</strong>
+            section on this page.
+          </p>
+          <div class="flex items-center justify-end gap-2 pt-1">
+            <button class="text-sm text-zinc-400 hover:text-zinc-200 px-3 py-1.5" on:click={() => (showUpgrade = false)}>Close</button>
+            <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40" on:click={goPatreon}>
+              Open Patreon ↗
+            </button>
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </div>

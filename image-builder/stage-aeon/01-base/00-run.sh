@@ -38,7 +38,8 @@ apt-get install -y --no-install-recommends \
     obfs4proxy \
     i2pd \
     clamav \
-    clamav-freshclam
+    clamav-freshclam \
+    unattended-upgrades
 # Tailscale via their official repo. Derive the suite from THIS image's
 # /etc/os-release (in-chroot) so the same stage works for a Bookworm (pi4) or a
 # Trixie (pi5) bake — don't hardcode the codename (it would break the other track).

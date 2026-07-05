@@ -1632,9 +1632,58 @@ export interface SystemInfo {
   cpu_count: number;
   mem_total_kb: number;
   mem_available_kb: number;
+  image_version?: number | null; // flashed image version (null on a legacy image)
+  track?: string; // pi4 | pi5 | other
+  codename?: string | null; // bookworm | trixie
 }
 
 export const getSystemInfo = () => req<SystemInfo>('GET', '/system/info');
+
+// ── Image-version notifier — is a newer Orb image published for this track? ──
+export interface ImageUpdates {
+  ok: boolean;
+  track?: string;
+  installed?: number | null;
+  installed_known?: boolean;
+  latest?: number | null;
+  latest_name?: string | null;
+  update_available?: boolean;
+  published?: string | null;
+  notes?: string | null;
+  patreon_url?: string;
+  err?: string;
+}
+export const imageUpdates = () => req<ImageUpdates>('GET', '/system/image-updates');
+
+// ── OS package updates (apt) ──
+export interface OsUpdateCheck {
+  ok: boolean;
+  count?: number;
+  security?: number;
+  packages?: string; // comma-joined package names (first 40)
+  err?: string;
+}
+export interface OsUpdateStatus {
+  phase: string; // idle | starting | refreshing | upgrading | cleaning | done | failed
+  percent: number;
+  done: boolean;
+  ok: boolean;
+  log: string;
+  reboot_required: boolean;
+}
+export interface AutoUpdates {
+  ok: boolean;
+  enabled?: boolean;
+  installed?: boolean;
+  err?: string;
+}
+export const osUpdateCheck = () => req<OsUpdateCheck>('GET', '/system/update/check');
+export const osUpdateApply = () =>
+  req<{ ok: boolean; started: boolean; err?: string }>('POST', '/system/update', {});
+export const osUpdateStatus = () => req<OsUpdateStatus>('GET', '/system/update/status');
+export const autoUpdatesGet = () => req<AutoUpdates>('GET', '/system/auto-updates');
+export const autoUpdatesSet = (enable: boolean) =>
+  req<AutoUpdates>('POST', '/system/auto-updates', { enable });
 
 // ── Pi-side controls (rarely needed — Pi is meant to stay up) ───────────
 // Renamed in v53 from rebootSystem/poweroffSystem so callers don't

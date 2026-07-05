@@ -122,6 +122,11 @@ pub fn snapshot() -> Value {
         .map(|n| n.get())
         .unwrap_or(0);
 
+    // Flashed image version + track + codename (from the /etc/aeon-image-version
+    // stamp; null on a legacy unstamped image). Cheap file read — lets the /system
+    // page and the fleet heartbeat show "Image v112 (pi5 · trixie)".
+    let stamp = crate::image_update::read_stamp();
+
     json!({
         "uptime_seconds": uptime_s,
         "loadavg": { "1m": loadavg.0, "5m": loadavg.1, "15m": loadavg.2 },
@@ -129,6 +134,9 @@ pub fn snapshot() -> Value {
         "cpu_count": cpu_count,
         "mem_total_kb": mem_total_kb,
         "mem_available_kb": mem_avail_kb,
+        "image_version": stamp.version,
+        "track": stamp.track,
+        "codename": stamp.codename,
     })
 }
 
@@ -165,7 +173,12 @@ pub async fn info(State(_state): State<AppState>) -> Json<Value> {
 
 /// Paths (relative to `/`) included in a config backup. Each is skipped if
 /// absent so a fresh device still produces a valid (smaller) archive.
-const BACKUP_LIST: &str = "etc/aeon etc/NetworkManager/system-connections home/admin/.ssh var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/tailscale/tailscaled.state var/lib/mysterium-node/keystore var/lib/mysterium-node/nodeui-pass etc/mysterium-node var/lib/aeon/orbnet/tor/hs var/lib/aeon/orbnet/tls var/lib/aeon/orbnet/db var/lib/aeon/orbnet/owner.json var/lib/aeon/orbnet/personas.json var/lib/aeon/orbnet/persona-since var/lib/aeon/orbnet/reg-token var/lib/aeon/orbnet/conduit.toml var/lib/aeon/onions/hs var/lib/aeon/onions/services.d var/lib/aeon/ipfs/config var/lib/aeon/ipfs/keystore var/lib/aeon/ipfs/datastore_spec";
+// NOTE: the model-catalog metadata `var/lib/aeon/ipfs-models` (catalog.json,
+// registry.json, stars.json — small, high-value: your curated library + stars +
+// signed provenance) IS included, so a reflash keeps your Model Share library.
+// The raw model blobs (`var/lib/aeon/model-library`) are NOT — they're bulk and
+// re-fetchable from IPFS by the CIDs in the preserved catalog.
+const BACKUP_LIST: &str = "etc/aeon etc/NetworkManager/system-connections home/admin/.ssh var/lib/aeon/agent-connect var/lib/aeon/agent-tokens var/lib/aeon/dns-sources var/lib/aeon/ipfs-models var/lib/tailscale/tailscaled.state var/lib/mysterium-node/keystore var/lib/mysterium-node/nodeui-pass etc/mysterium-node var/lib/aeon/orbnet/tor/hs var/lib/aeon/orbnet/tls var/lib/aeon/orbnet/db var/lib/aeon/orbnet/owner.json var/lib/aeon/orbnet/personas.json var/lib/aeon/orbnet/persona-since var/lib/aeon/orbnet/reg-token var/lib/aeon/orbnet/conduit.toml var/lib/aeon/onions/hs var/lib/aeon/onions/services.d var/lib/aeon/ipfs/config var/lib/aeon/ipfs/keystore var/lib/aeon/ipfs/datastore_spec";
 
 #[derive(Deserialize)]
 pub struct ExportReq {

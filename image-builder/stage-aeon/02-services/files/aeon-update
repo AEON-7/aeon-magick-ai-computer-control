@@ -1,0 +1,121 @@
+#!/bin/bash
+# aeon-update — OS package updates for the Aeon Orb.
+#
+# Keeps the underlying Raspberry Pi OS patched. Invoked by aeon-supervisor (which
+# runs as root); never interactive. Emits `PHASE <name> <pct>` progress lines that
+# the supervisor's update.rs polls, mirroring the aeon-hailo install convention.
+#
+#   aeon-update check         → JSON: {ok,count,security,packages}  (refresh + count)
+#   aeon-update upgrade       → apply all upgrades (PHASE progress to the log)
+#   aeon-update auto-status   → JSON: {ok,enabled,installed}
+#   aeon-update auto-enable   → turn on automatic security patching (no auto-reboot)
+#   aeon-update auto-disable  → turn it off
+set -o pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+LOG=/run/aeon/apt-update.log
+LOCK=/run/aeon/apt-update.lock
+AUTO_CONF=/etc/apt/apt.conf.d/20auto-upgrades
+AEON_CONF=/etc/apt/apt.conf.d/52aeon-unattended
+mkdir -p /run/aeon 2>/dev/null || true
+
+phase() { echo "PHASE $1 ${2:-}" >> "$LOG"; }
+
+cmd_check() {
+    apt-get update -qq >/dev/null 2>&1
+    # `apt-get -s upgrade` simulates; each package to install shows as an `Inst`
+    # line, whose parenthetical origin names the suite (…bookworm-security…).
+    local inst count sec pkgs
+    inst="$(apt-get -s upgrade 2>/dev/null | grep '^Inst ')"
+    count="$(printf '%s\n' "$inst" | grep -c '^Inst ')"
+    sec="$(printf '%s\n' "$inst" | grep -ciE 'security')"
+    pkgs="$(printf '%s\n' "$inst" | awk '{print $2}' | grep -v '^$' | head -40 | paste -sd, -)"
+    printf '{"ok":true,"count":%s,"security":%s,"packages":"%s"}\n' "${count:-0}" "${sec:-0}" "$pkgs"
+}
+
+cmd_upgrade() {
+    # Single-flight — never let two apt runs collide (or race the auto timer).
+    exec 9>"$LOCK"
+    if ! flock -n 9; then
+        echo "another apt operation is already running" >&2
+        exit 3
+    fi
+    : > "$LOG"
+    phase refreshing 8
+    if ! apt-get update >> "$LOG" 2>&1; then
+        echo "apt-get update failed — check network/DNS" >> "$LOG"
+        phase failed 100
+        exit 1
+    fi
+    phase upgrading 35
+    if apt-get -y \
+        -o Dpkg::Options::=--force-confold \
+        -o Dpkg::Options::=--force-confdef \
+        upgrade >> "$LOG" 2>&1; then
+        phase cleaning 92
+        apt-get -y autoremove --purge >> "$LOG" 2>&1 || true
+        apt-get -y clean >> "$LOG" 2>&1 || true
+        # A kernel / firmware / bootloader change needs a reboot to take effect.
+        if grep -qiE 'linux-image|linux-headers|raspi-firmware|raspberrypi-kernel|raspberrypi-bootloader' "$LOG"; then
+            echo "REBOOT_RECOMMENDED" >> "$LOG"
+        fi
+        phase done 100
+    else
+        echo "apt-get upgrade failed — see the log above" >> "$LOG"
+        phase failed 100
+        exit 1
+    fi
+}
+
+cmd_auto_status() {
+    local en=false pkg=false
+    command -v unattended-upgrade >/dev/null 2>&1 && pkg=true
+    if [ -f "$AUTO_CONF" ] && grep -qE 'Unattended-Upgrade[[:space:]]+"1"' "$AUTO_CONF" 2>/dev/null; then
+        en=true
+    fi
+    printf '{"ok":true,"enabled":%s,"installed":%s}\n' "$en" "$pkg"
+}
+
+cmd_auto_enable() {
+    if ! command -v unattended-upgrade >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1
+        if ! apt-get install -y unattended-upgrades >/dev/null 2>&1; then
+            echo "could not install unattended-upgrades" >&2
+            exit 1
+        fi
+    fi
+    cat > "$AUTO_CONF" <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+    # Aeon policy: patch automatically, but NEVER auto-reboot — an appliance
+    # shouldn't reboot under the operator mid-session. They reboot on their own
+    # schedule (the console flags "reboot recommended" after a kernel patch).
+    # The package's default 50unattended-upgrades already scopes to the security
+    # origin, so we only override the reboot + cleanup policy here.
+    cat > "$AEON_CONF" <<'EOF'
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+EOF
+    systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+    printf '{"ok":true,"enabled":true,"installed":true}\n'
+}
+
+cmd_auto_disable() {
+    cat > "$AUTO_CONF" <<'EOF'
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+    systemctl disable --now apt-daily-upgrade.timer >/dev/null 2>&1 || true
+    printf '{"ok":true,"enabled":false}\n'
+}
+
+case "${1:-}" in
+    check)        cmd_check ;;
+    upgrade)      cmd_upgrade ;;
+    auto-status)  cmd_auto_status ;;
+    auto-enable)  cmd_auto_enable ;;
+    auto-disable) cmd_auto_disable ;;
+    *) echo "usage: aeon-update {check|upgrade|auto-status|auto-enable|auto-disable}" >&2; exit 2 ;;
+esac

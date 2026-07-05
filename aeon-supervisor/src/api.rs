@@ -591,6 +591,13 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/system/poweroff",    post(crate::system::poweroff))
         .route("/system/config/export", post(crate::system::config_export))
         .route("/system/config/import", post(crate::system::config_import))
+        // Image-version notifier — is a newer Orb image published for this track?
+        .route("/system/image-updates", get(crate::image_update::image_updates))
+        // OS package updates — on-demand apt upgrade (backgrounded) + auto toggle.
+        .route("/system/update",         post(crate::update::apply))
+        .route("/system/update/check",   get(crate::update::check))
+        .route("/system/update/status",  get(crate::update::status))
+        .route("/system/auto-updates",   get(crate::update::auto_status).post(crate::update::auto_set))
 
         // Target (USB-connected machine) power controls. Soft tap +
         // forced hold via HID Consumer Power button; wake via WoL

@@ -256,6 +256,21 @@ fn tools_catalog() -> Value {
             tool("bench_update",
                  "Hot-update the bench pod on a target to the latest Aeon-Bench-Pod: fetch the newest code and rebuild in place, keeping the current model config. Runs in the BACKGROUND — poll bench_status through updating → building → running. Use bench_updates first to see if one is available.",
                  json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) whose pod to update"}}})),
+            tool("system_image_updates",
+                 "Is a newer Aeon Orb IMAGE published for this Orb's hardware track? Compares the flashed image version (stamped on device) against the published manifest on GitHub. Returns {track, installed, latest, latest_name, update_available, notes, patreon_url}. Notify-only — flashing a new image is a manual Patreon download. Read-only.",
+                 json!({"type":"object","properties":{}})),
+            tool("os_update_check",
+                 "Refresh the OS package lists and count how many system packages can be upgraded (how many are security). Returns {count, security, packages}. Read-only.",
+                 json!({"type":"object","properties":{}})),
+            tool("os_update_apply",
+                 "Apply all pending OS package upgrades on the Pi (apt update && apt upgrade). Runs in the BACKGROUND — poll os_update_status through refreshing → upgrading → cleaning → done. Sets reboot_required when a kernel/firmware package changed.",
+                 json!({"type":"object","properties":{}})),
+            tool("os_update_status",
+                 "Progress of an in-flight (or the last) OS update: phase, percent, done, ok, a log tail, and reboot_required. Poll after os_update_apply. Read-only.",
+                 json!({"type":"object","properties":{}})),
+            tool("os_auto_updates",
+                 "Automatic OS security patching (unattended-upgrades). Call with no args to READ the current state {enabled, installed}; pass {\"enable\": true|false} to turn it on (installs unattended-upgrades, security-only, never auto-reboots) or off.",
+                 json!({"type":"object","properties":{"enable":{"type":"boolean","description":"omit to read state; true/false to set it"}}})),
             // NOTE: SSH key management is intentionally NOT exposed over MCP.
             // Granting/listing SSH access to the device is a human-admin-only
             // action (web UI + admin session). Agents must never manage SSH.
@@ -826,6 +841,39 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
         }
+        "system_image_updates" => {
+            let v = crate::image_update::image_updates(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "os_update_check" => {
+            let v = crate::update::check(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "os_update_apply" => {
+            // Audit actor comes from HeaderMap; MCP dispatch has none in scope, so
+            // pass an empty one (logs as "anonymous") — same as reboot/create_token.
+            let v = crate::update::apply(axum::extract::State(state.clone()), axum::http::HeaderMap::new()).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "os_update_status" => {
+            let v = crate::update::status(axum::extract::State(state.clone())).await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "os_auto_updates" => {
+            // No `enable` arg → read state; with it → set it.
+            let v = match args.get("enable").and_then(|v| v.as_bool()) {
+                None => crate::update::auto_status(axum::extract::State(state.clone())).await,
+                Some(enable) => {
+                    crate::update::auto_set(
+                        axum::extract::State(state.clone()),
+                        axum::http::HeaderMap::new(),
+                        axum::Json(crate::update::AutoReq { enable }),
+                    )
+                    .await
+                }
+            };
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
         "security_metrics" => {
             let m = crate::security_metrics::get_metrics(axum::extract::State(state.clone())).await;
             Ok(text_result(&serde_json::to_string_pretty(&m.0).unwrap_or_default()))
@@ -1320,7 +1368,8 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         | "read_file" | "dnscrypt_state" | "i2p_status" | "pi_system_info" | "wifi_state"
         | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
         | "vpn_provider_state" | "blocked_log" | "hidden_service_list" | "ipfs_status"
-        | "bench_status" | "bench_model_info" | "bench_updates" => Read,
+        | "bench_status" | "bench_model_info" | "bench_updates"
+        | "system_image_updates" | "os_update_check" | "os_update_status" => Read,
         _ => Full,
     }
 }
