@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { confirmRite } from '$lib/confirm';
 
   let state: api.AuditState | null = null;
   let loading = true;
@@ -33,7 +35,12 @@
   onDestroy(() => { if (poll_iv) clearInterval(poll_iv); });
 
   async function clearLog() {
-    if (!confirm('Clear the entire audit log?\n\nThis cannot be undone — entries are not stored anywhere else.')) {
+    if (!(await confirmRite({
+      title: 'Clear audit log',
+      body: 'Clear the entire audit log?\n\nThis cannot be undone — entries are not stored anywhere else.',
+      danger: true,
+      confirmLabel: 'clear log',
+    }))) {
       return;
     }
     try {
@@ -85,18 +92,12 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">audit log</span>
-    </div>
+  <PageHeader title="audit log">
     <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
             on:click={clearLog}>
       clear log
     </button>
-  </header>
+  </PageHeader>
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-5xl mx-auto w-full space-y-6">

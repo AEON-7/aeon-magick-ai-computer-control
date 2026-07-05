@@ -41,6 +41,22 @@
     // BrainCraft HAT: a small TFT screen wearing a friendly face — the Orb's
     // 240x240 display as its "face" (two eyes + a smile), on a stand.
     braincraft: '<rect x="3" y="4" width="18" height="14" rx="2"/><circle cx="9.5" cy="10" r="1"/><circle cx="14.5" cy="10" r="1"/><path d="M9 13.2a3.2 3.2 0 0 0 6 0"/><path d="M9 21h6M12 18v3"/>',
+    // Action glyphs (v100) — replace the raw-Unicode buttons (⏏ ⌨ ⛶ ● ☰ …)
+    // that rendered differently on every OS. Same 24-grid, currentColor.
+    capture: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M6 14h.01M9 14h6"/><circle cx="18" cy="13" r="1.5" fill="currentColor" stroke="none"/>',
+    release: '<path d="M12 5l7 7H5l7-7z"/><path d="M5 17h14"/>',
+    fullscreen: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
+    record: '<circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/>',
+    stop: '<rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" stroke="none"/>',
+    menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+    close: '<path d="M6 6l12 12M18 6L6 18"/>',
+    lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+    logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+    refresh: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+    enter: '<path d="M20 5v6a3 3 0 0 1-3 3H5"/><path d="M9 10l-4 4 4 4"/>',
+    backspace: '<path d="M8 5h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-6-7 6-7z"/><path d="M12 10l4 4M16 10l-4 4"/>',
+    esc: '<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
+    tab: '<path d="M3 12h14"/><path d="M13 8l4 4-4 4"/><path d="M21 6v12"/>',
   };
   $: inner = P[name] ?? '';
 </script>

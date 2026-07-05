@@ -17,6 +17,7 @@
 
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
+  import { confirmRite } from '$lib/confirm';
 
   let rules: api.FirewallRule[] = [];
   let systemRules: api.SystemFirewallRule[] = [];
@@ -149,7 +150,12 @@
   }
 
   async function removeRule(id: string) {
-    if (!confirm('Delete this rule?')) return;
+    if (!(await confirmRite({
+      title: 'Delete firewall rule',
+      body: 'Delete this rule?',
+      danger: true,
+      confirmLabel: 'delete',
+    }))) return;
     try {
       await api.deleteFirewallRule(id);
       await refresh();

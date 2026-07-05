@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
 
@@ -64,7 +66,12 @@
   }
 
   async function onDelete(name: string) {
-    if (!confirm(`Delete ${name}?`)) return;
+    if (!(await confirmRite({
+      title: 'Delete file',
+      body: `Delete ${name}?`,
+      danger: true,
+      confirmLabel: 'delete',
+    }))) return;
     try { await api.deleteFile(name); await refresh(); }
     catch (e: any) { error = e?.message ?? 'delete failed'; }
   }
@@ -80,7 +87,12 @@
     }
   }
   async function clearClip() {
-    if (!confirm('Clear the shared clipboard?')) return;
+    if (!(await confirmRite({
+      title: 'Clear clipboard',
+      body: 'Clear the shared clipboard?',
+      danger: true,
+      confirmLabel: 'clear',
+    }))) return;
     try { await api.clearClipboard(); clipText = ''; await refresh(); }
     catch (e: any) { error = e?.message ?? 'clear failed'; }
   }
@@ -147,14 +159,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">files + clipboard</span>
-    </div>
-  </header>
+  <PageHeader title="files + clipboard" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">

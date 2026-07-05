@@ -11,6 +11,7 @@
   //
   // The legacy VPN provider radio on /network points users here.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
   import VpnLogo from '$lib/components/VpnLogo.svelte';
@@ -293,16 +294,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/network" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← NETWORK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">
-        VPN provider setup
-      </span>
-    </div>
-  </header>
+  <PageHeader title="VPN provider setup" backHref="/network" backLabel="NETWORK" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
@@ -589,7 +581,7 @@
                       {#if state.mode === m.id && g}<span class="text-[10px] text-cursed-300 font-mono">active</span>{/if}
                       <button class="btn text-xs ml-auto" disabled={busy || !state.selected_server}
                               on:click={() => generateConfig(m.id)}>
-                        {busy ? '…' : (g ? '↻ re-generate' : '⚡ generate')}
+                        {busy ? '…' : (g ? '↻ re-generate' : '⚡︎ generate')}
                       </button>
                     </div>
                     <p class="text-[11px] text-zinc-500 leading-snug mt-1">{m.note}</p>

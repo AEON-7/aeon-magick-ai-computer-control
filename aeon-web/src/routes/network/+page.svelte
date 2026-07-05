@@ -5,6 +5,8 @@
   // ethernet on/off, pick an isolation mode. The "Advanced" expander
   // hides DNSCrypt and VPN controls so the main page stays uncluttered.
 
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api';
   import TipJar from '$lib/components/TipJar.svelte';
@@ -642,11 +644,13 @@
     }
     if (
       usbEnabled !== usbState.enabled &&
-      !confirm(
-        `${usbEnabled ? 'Enable' : 'Disable'} USB ethernet?\n\n` +
-        `This rebuilds the USB gadget composite — the connected host ` +
-        `will see a brief USB disconnect/reconnect (~1 second).`,
-      )
+      !(await confirmRite({
+        title: `${usbEnabled ? 'Enable' : 'Disable'} USB ethernet`,
+        body:
+          `This rebuilds the USB gadget composite — the connected host ` +
+          `will see a brief USB disconnect/reconnect (~1 second).`,
+        confirmLabel: usbEnabled ? 'enable' : 'disable',
+      }))
     ) {
       usbEnabled = usbState.enabled;
       return;
@@ -654,13 +658,16 @@
     if (
       usbMode === 'restricted' &&
       usbState.mode !== 'restricted' &&
-      !confirm(
-        `Switch to RESTRICTED mode?\n\n` +
-        `In restricted mode the connected host has WAN access only — ` +
-        `it CANNOT reach this Pi's web UI, SSH, or any other service ` +
-        `over the USB-C link. You will need WiFi or LAN access to ` +
-        `manage this device from now on.`,
-      )
+      !(await confirmRite({
+        title: 'Switch to RESTRICTED mode',
+        body:
+          `In restricted mode the connected host has WAN access only — ` +
+          `it CANNOT reach this Pi's web UI, SSH, or any other service ` +
+          `over the USB-C link. You will need WiFi or LAN access to ` +
+          `manage this device from now on.`,
+        danger: true,
+        confirmLabel: 'restrict',
+      }))
     ) {
       usbMode = usbState.mode;
       return;
@@ -793,15 +800,18 @@
     if (
       vpnKillSwitch &&
       !vpnState?.kill_switch &&
-      !confirm(
-        `Enable VPN kill-switch?\n\n` +
-        `Non-VPN outbound traffic will be DROPPED whenever the tunnel is ` +
-        `down or stalled. Loopback and the LAN bypass subnet ` +
-        `(${vpnLanBypass || 'none'}) stay reachable so you can still ` +
-        `manage this device from your LAN.\n\n` +
-        `If you change network providers or the tunnel fails to come up, ` +
-        `the device will appear offline from anything outside ${vpnLanBypass || 'the LAN'}.`,
-      )
+      !(await confirmRite({
+        title: 'Enable VPN kill-switch',
+        body:
+          `Non-VPN outbound traffic will be DROPPED whenever the tunnel is ` +
+          `down or stalled. Loopback and the LAN bypass subnet ` +
+          `(${vpnLanBypass || 'none'}) stay reachable so you can still ` +
+          `manage this device from your LAN.\n\n` +
+          `If you change network providers or the tunnel fails to come up, ` +
+          `the device will appear offline from anything outside ${vpnLanBypass || 'the LAN'}.`,
+        danger: true,
+        confirmLabel: 'enable kill-switch',
+      }))
     ) {
       vpnKillSwitch = vpnState?.kill_switch ?? false;
       return;
@@ -866,14 +876,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">network</span>
-    </div>
-  </header>
+  <PageHeader title="network" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">

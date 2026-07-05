@@ -54,8 +54,10 @@ height = 1080
 # at 30, ~1 core at 60 (720p source). 30 is the balanced default; 60 for
 # smoother motion (≈2× CPU); 15 to minimise bandwidth + CPU.
 fps = 30
-# format: "h264" (default) streams via the Pi 4 hardware H.264 encoder over a
-# WebSocket to the browser's WebCodecs decoder — low latency + low CPU.
+# format: "h264" (default) streams H.264 over a WebSocket to the browser's
+# WebCodecs decoder — low latency + low CPU. The encoder is picked per
+# platform at runtime: Pi 4 → hardware h264_v4l2m2m; Pi 5 (no HW encoder)
+# → software libx264 ultrafast/zerolatency, which its cores handle at 1080p30.
 # Browsers without WebCodecs auto-fall-back to the MJPEG <img> (the snapshot
 # served at a few fps); agents always have /snapshot. "mjpeg" forces the
 # legacy software-MJPEG path (no HW JPEG encoder exists on this ustreamer
@@ -66,6 +68,7 @@ snapshot_path = "/run/aeon/snapshots/live.jpg"
 mjpeg_tcp_port = 8002
 
 # Use Pi 4 GPU hardware scaler (scale_v4l2m2m) instead of CPU scale.
+# Pi 4 ONLY — the Pi 5 has no v4l2m2m scaler, so this flag is ignored there.
 # Saves ~300-500 mA under active streaming. Default false — flip to true
 # after confirming basic streaming works; if frames stop arriving, flip
 # back. (Some pixel formats aren't supported by the m2m scaler on every

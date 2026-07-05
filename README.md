@@ -599,10 +599,10 @@ Pick a track, grab the bare minimum, then add from the recommended list to unloc
 
 | Part | What / why | Notes |
 |---|---|---|
-| **Raspberry Pi 4** (2 GB+) | The appliance. Its USB-C port runs **USB-OTG gadget mode** to emulate a keyboard + mouse + trackpad to the target. | The classic build. |
-| **microSD card** (16 GB+) | Boots the Aeon Magick Orb image. | A fast A1/A2 card helps stream latency; go bigger to host a model library (see the Aether below). |
-| **HDMI video-capture device** | The "eyes" — pipes the target's HDMI into the Pi as a USB camera. | **Elgato Cam Link 4K** or any **~$10 MS2109-based HDMI→USB stick**. Auto-detected (UVC), no drivers. |
-| **USB-C data cable** | Pi-C → target-C — carries the emulated keyboard/mouse and can **power the Pi from the target**. | Must be **data-capable**; a charge-only cable powers the Pi but enumerates no HID. |
+| **Raspberry Pi 4 or Pi 5** (2 GB+) | The appliance. Its USB-C port runs **USB-OTG gadget mode** to emulate a keyboard + mouse + trackpad to the target. | **Two flavors.** The **Pi 4 image (Pi OS Bookworm)** is this branch — USB capture (Cam Link), hardware H.264, longest-tested. The **Pi 5 image (Pi OS Trixie)** — the `feat/pi5-vision-voice-ups-av` track — adds the Pi 5 suite: **built-in Hailo AI HAT support** (AI Kit Hailo-8/8L *and* AI HAT+ 2 Hailo-10H; the right runtime installs chip-aware from the Hailo super-app), on-device **screen OCR + VLM grounding**, HDMI-to-CSI capture, voice, and UPS power. Everything model-specific is auto-detected either way (UDC name; H.264 encoder: Pi 4 hardware `h264_v4l2m2m`, Pi 5 software `libx264`), so the Bookworm image will boot a Pi 5 in a pinch. **Pi 5 cabling:** a kernel bug (≥6.6.42) breaks gadget enumeration over C-to-C cables — connect the Pi 5's USB-C to a **USB-A port** on the target (A-to-C cable). |
+| **microSD card** (16 GB+) | Boots the Aeon Magick Orb image. | A fast A1/A2 card helps stream latency. |
+| **HDMI video-capture device** | The "eyes" — pipes the target's HDMI into the Pi as a USB camera. | **Elgato Cam Link 4K** (rock-solid 1080p60 / 4K30) **or any ~$10 MS2109-based HDMI→USB stick**. Both auto-detected (UVC) — no drivers. |
+| **USB-C data cable** | Pi-C → target-C — carries the emulated keyboard/mouse and **powers the Pi from the target.** | Must be **data-capable**; a charge-only cable powers the Pi but enumerates no HID. **Pi 5: use an A-to-C cable** (target USB-A → Pi USB-C) — C-to-C enumeration is broken by an upstream kernel bug. |
 | **HDMI cable** | Target's HDMI-out → the capture device. | |
 
 **Raspberry Pi 5 track** — same idea, a couple of hardware differences:
@@ -651,8 +651,9 @@ OOBE). The Pi can be powered over the USB-C link by the target, via its GPIO 5V 
    `xzcat image_vNN-aeon-magick.img.xz | sudo dd of=/dev/diskN bs=4M status=progress`
 2. **First boot → join WiFi.** On first power-up the Pi becomes its own WiFi access
    point (**`aeon-setup`**). Connect to it from a laptop/phone; a captive-portal wizard
-   opens — pick your home WiFi + password. *(WiFi beats Ethernet for stream latency on
-   the Pi 4 — its Ethernet sits behind a USB bridge while WiFi is on a PCIe lane.)*
+   opens — pick your home WiFi + password. *(On the Pi 4, WiFi beats Ethernet for
+   stream latency — its Ethernet sits behind a USB bridge while WiFi is on a PCIe
+   lane. On the Pi 5 both are fast; use whichever is convenient.)*
 3. **Open the web UI.** The Pi joins your network at `https://<pi-ip>/` (or
    `https://aeon-magick.local/`). Accept the self-signed cert and set/confirm the
    **admin password** — a random one is generated at first boot and written to

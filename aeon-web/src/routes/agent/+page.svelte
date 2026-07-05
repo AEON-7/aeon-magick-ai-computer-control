@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
+  import { toast } from '$lib/toast';
+  import { confirmRite } from '$lib/confirm';
   import { onMount, onDestroy, tick } from 'svelte';
   import { browser } from '$app/environment';
   import * as api from '$lib/api';
@@ -796,7 +799,7 @@
     try {
       const res = await api.addSystem({ label, address, ssh_user: sshUser, port, roles: rolesArr() });
       if (!res.ok) {
-        alert(res.err ?? 'add failed');
+        toast.error(res.err ?? 'add failed');
         return;
       }
       label = address = '';
@@ -915,7 +918,12 @@
     }
   }
   async function onRemove(s: api.ConnectedSystem) {
-    if (!confirm(`Remove ${s.label}?`)) return;
+    if (!(await confirmRite({
+      title: 'Remove system',
+      body: `Remove ${s.label}?`,
+      danger: true,
+      confirmLabel: 'remove',
+    }))) return;
     await api.removeSystem(s.id);
     await refresh();
   }
@@ -924,12 +932,17 @@
   async function doPower(s: api.ConnectedSystem, action: 'shutdown' | 'reboot' | 'wake') {
     if (action !== 'wake') {
       const verb = action === 'reboot' ? 'Reboot' : 'Shut down';
-      if (!confirm(`${verb} ${s.label}? This SSHes in and runs systemctl ${action === 'reboot' ? 'reboot' : 'poweroff'}.`)) return;
+      if (!(await confirmRite({
+        title: `${verb} ${s.label}`,
+        body: `This SSHes in and runs systemctl ${action === 'reboot' ? 'reboot' : 'poweroff'}.`,
+        danger: true,
+        confirmLabel: verb.toLowerCase(),
+      }))) return;
     }
     powerBusy = s.id;
     try {
       const r = await api.powerSystem(s.id, action, action === 'wake' ? lastMac[s.id] ?? '' : '');
-      if (!r.ok) alert(r.err ?? 'power action failed');
+      if (!r.ok) toast.error(r.err ?? 'power action failed');
       setTimeout(loadMetrics, 3500);
     } finally {
       powerBusy = '';
@@ -977,23 +990,33 @@
     }
   }
   async function doContainerAction(name: string, action: 'start' | 'stop' | 'restart') {
-    if (action === 'stop' && !confirm(`Stop container "${name}"?`)) return;
+    if (action === 'stop' && !(await confirmRite({
+      title: 'Stop container',
+      body: `Stop container "${name}"?`,
+      danger: true,
+      confirmLabel: 'stop',
+    }))) return;
     cBusy = name;
     try {
       const r = await api.containerAction(cSys, name, action);
-      if (!r.ok) alert(r.err ?? `${action} failed`);
+      if (!r.ok) toast.error(r.err ?? `${action} failed`);
       await loadContainers(true);
     } finally {
       cBusy = '';
     }
   }
   async function doComposeAction(path: string, action: 'up' | 'down') {
-    if (action === 'down' && !confirm(`Bring DOWN the compose project at\n${path}?`)) return;
+    if (action === 'down' && !(await confirmRite({
+      title: 'Compose down',
+      body: `Bring DOWN the compose project at\n${path}?`,
+      danger: true,
+      confirmLabel: 'bring down',
+    }))) return;
     composeBusy = path;
     composeMsg = '';
     try {
       const r = await api.composeAction(cSys, path, action);
-      if (!r.ok) alert(r.err ?? `compose ${action} failed`);
+      if (!r.ok) toast.error(r.err ?? `compose ${action} failed`);
       else composeMsg = (r.out || `${action} ok`).slice(0, 400);
       await loadContainers(true);
     } finally {
@@ -1006,7 +1029,7 @@
     try {
       const r = await api.getComposeFile(cSys, path);
       if (r.ok) composeEdit = { path, content: r.content ?? '' };
-      else alert(r.err ?? 'could not read compose file');
+      else toast.error(r.err ?? 'could not read compose file');
     } finally {
       composeBusy = '';
     }
@@ -1018,7 +1041,7 @@
     try {
       const r = await api.putComposeFile(cSys, composeEdit.path, composeEdit.content);
       if (r.ok) composeMsg = 'saved';
-      else alert(r.err ?? 'save failed');
+      else toast.error(r.err ?? 'save failed');
     } finally {
       composeSaving = false;
     }
@@ -1139,10 +1162,13 @@
     const entry = deployEntries[deploySel];
     if (!entry || !deployName.trim()) return;
     if (
-      !confirm(
-        `Deploy "${entry.model}"?\n\nThis writes a compose to ~/aeon-deploy/${deployName}/ on ` +
-          `${cSysObj?.label} and PULLS ${entry.container_image} (can be multi-GB), then starts it.\n\nContinue?`,
-      )
+      !(await confirmRite({
+        title: 'Deploy model',
+        body:
+          `Deploy "${entry.model}"?\n\nThis writes a compose to ~/aeon-deploy/${deployName}/ on ` +
+          `${cSysObj?.label} and PULLS ${entry.container_image} (can be multi-GB), then starts it.`,
+        confirmLabel: 'deploy',
+      }))
     )
       return;
     deployBusy = true;
@@ -1362,7 +1388,12 @@
   }
   async function deleteCorpusFile(path: string) {
     if (!detailAgent || corpusBusyPath) return;
-    if (!confirm(`Delete corpus file “${path}”? This cannot be undone.`)) return;
+    if (!(await confirmRite({
+      title: 'Delete corpus file',
+      body: `Delete corpus file “${path}”? This cannot be undone.`,
+      danger: true,
+      confirmLabel: 'delete',
+    }))) return;
     corpusBusyPath = path;
     corpusMsg = '';
     try {
@@ -1556,7 +1587,7 @@
     try {
       const r = await api.addAgentSkill(detailSys, detailAgent.id, name, 'existing');
       skillResult = r;
-      if (!r.ok) alert(r.err ?? 'add skill failed');
+      if (!r.ok) toast.error(r.err ?? 'add skill failed');
     } catch (e) {
       skillResult = { ok: false, err: (e as any)?.message ?? String(e) };
     } finally {
@@ -1590,7 +1621,7 @@
         // refresh the detail so available_skills picks up the new dir
         detail = await api.getAgentDetail(detailSys, detailAgent.id);
       } else {
-        alert(r.err ?? 'upload failed');
+        toast.error(r.err ?? 'upload failed');
       }
     } catch (e) {
       skillResult = { ok: false, err: (e as any)?.message ?? String(e) };
@@ -1654,14 +1685,20 @@
             : '';
         detail = await api.getAgentDetail(detailSys, detailAgent.id);
       } else {
-        alert(r.err ?? 'provision failed');
+        toast.error(r.err ?? 'provision failed');
       }
     } finally {
       provisioning = false;
     }
   }
   async function doRevoke() {
-    if (!detailAgent || !confirm("Revoke this agent's API key + remove its access file?")) return;
+    if (!detailAgent) return;
+    if (!(await confirmRite({
+      title: 'Revoke API key',
+      body: "Revoke this agent's API key + remove its access file?",
+      danger: true,
+      confirmLabel: 'revoke',
+    }))) return;
     provisioning = true;
     try {
       await api.deprovisionAgent(detailSys, detailAgent.id);
@@ -1672,10 +1709,18 @@
     }
   }
   const SUDO_WARN =
-    'Enabling sudo grants this agent FULL ADMIN (passwordless root) on the Pi. Only do this if absolutely necessary. Continue?';
+    'Enabling sudo grants this agent FULL ADMIN (passwordless root) on the Pi. Only do this if absolutely necessary.';
+  const sudoRite = () =>
+    confirmRite({
+      title: 'Grant sudo to agent',
+      body: SUDO_WARN,
+      danger: true,
+      phrase: 'SUDO',
+      confirmLabel: 'grant sudo',
+    });
   async function doGrantSsh() {
     if (!detailAgent) return;
-    if (grantSudo && !confirm(SUDO_WARN)) return;
+    if (grantSudo && !(await sudoRite())) return;
     sshBusy = true;
     try {
       const r = await api.grantSsh(detailSys, detailAgent.id, grantSudo);
@@ -1689,7 +1734,7 @@
             : '';
         detail = await api.getAgentDetail(detailSys, detailAgent.id);
       } else {
-        alert(r.err ?? 'grant failed');
+        toast.error(r.err ?? 'grant failed');
       }
     } finally {
       sshBusy = false;
@@ -1701,7 +1746,7 @@
   }
   async function doToggleSudo(on: boolean) {
     if (!detailAgent) return;
-    if (on && !confirm(SUDO_WARN)) {
+    if (on && !(await sudoRite())) {
       detail = await api.getAgentDetail(detailSys, detailAgent.id); // revert the checkbox
       return;
     }
@@ -1714,7 +1759,13 @@
     }
   }
   async function doRevokeSsh() {
-    if (!detailAgent || !confirm("Revoke this agent's SSH access (delete the aeon-agent user + key)?")) return;
+    if (!detailAgent) return;
+    if (!(await confirmRite({
+      title: 'Revoke SSH access',
+      body: "Revoke this agent's SSH access (delete the aeon-agent user + key)?",
+      danger: true,
+      confirmLabel: 'revoke SSH',
+    }))) return;
     sshBusy = true;
     try {
       await api.revokeSsh(detailSys, detailAgent.id);
@@ -1744,12 +1795,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">Agent Dash</span>
-    </div>
-  </header>
+  <PageHeader title="Agent Dash" />
 
   <div class="flex gap-1 px-5 pt-2 border-b border-ink-800 bg-ink-900/40">
     <button class="px-3 py-1.5 text-xs font-mono rounded-t {tabCls(tab, 'overview')}"

@@ -8,6 +8,7 @@
   // no network round-trip, no third-party scan service.
 
   import qrcodeGenerator from 'qrcode-generator';
+  import { toast } from '$lib/toast';
 
   type Wallet = {
     id: string;
@@ -128,7 +129,7 @@
     } catch (e) {
       // Older browsers / non-secure contexts — fall back to a manual
       // hint instead of silently failing.
-      alert('Couldn\'t copy automatically. Address:\n\n' + addr);
+      toast.error('Couldn\'t copy automatically. Address:\n' + addr, 12000);
     }
   }
 

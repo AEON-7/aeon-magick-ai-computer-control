@@ -1,6 +1,8 @@
 <script lang="ts">
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount } from 'svelte';
   import * as api from '$lib/api';
+  import { confirmRite } from '$lib/confirm';
 
   let keys: api.SshKey[] = [];
   let loading = true;
@@ -41,7 +43,12 @@
   }
 
   async function remove(id: string, fp: string) {
-    if (!confirm(`Delete this key (${fp})?\n\nDevices using this key will lose passwordless SSH access.`)) {
+    if (!(await confirmRite({
+      title: 'Delete SSH key',
+      body: `Delete this key (${fp})?\n\nDevices using this key will lose passwordless SSH access.`,
+      danger: true,
+      confirmLabel: 'delete key',
+    }))) {
       return;
     }
     try {
@@ -62,14 +69,7 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">
-        ← AEON MAGICK
-      </a>
-      <span class="text-zinc-400 font-mono text-xs uppercase tracking-wider">SSH key trust store</span>
-    </div>
-  </header>
+  <PageHeader title="SSH key trust store" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">

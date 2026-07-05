@@ -11,9 +11,28 @@ if [ -f "${CONFIG_TXT}" ]; then
     if ! grep -q "^dtoverlay=dwc2,dr_mode=peripheral$" "${CONFIG_TXT}"; then
         cat >> "${CONFIG_TXT}" <<'EOF'
 
-# aeon-magick: enable USB OTG peripheral mode for HID gadget
+# aeon-magick: enable USB OTG peripheral mode for HID gadget.
+# Works on Pi 4 (fe980000.usb) and Pi 5 (1000480000.usb) alike — both
+# route their USB-C connector to a dwc2 OTG controller. aeon-hid
+# auto-detects the UDC name from /sys/class/udc at startup.
 [all]
 dtoverlay=dwc2,dr_mode=peripheral
+EOF
+    fi
+
+    # ── Pi 5: full USB current without a 5 A PD supply ──
+    # The Orb is powered by the TARGET over the USB-C data cable, so the
+    # Pi 5 never sees a 5 V/5 A PD negotiation and would cap its USB-A
+    # ports at 600 mA total — not enough for a Cam Link 4K (~400-500 mA)
+    # plus anything else. This flag restores the full 1.6 A budget. It is
+    # ignored on the Pi 4 ([pi5] section) which has no such firmware cap.
+    if ! grep -q "^# aeon-magick pi5 usb current" "${CONFIG_TXT}"; then
+        cat >> "${CONFIG_TXT}" <<'EOF'
+
+# aeon-magick pi5 usb current
+[pi5]
+usb_max_current_enable=1
+[all]
 EOF
     fi
 

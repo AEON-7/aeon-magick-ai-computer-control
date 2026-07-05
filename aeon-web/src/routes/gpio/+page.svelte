@@ -2,6 +2,7 @@
   // GPIO / Hardware dashboard — a live 40-pin J8 header + HAT identification, a
   // stack planner (overlay multiple HATs, detect pin/address collisions), power,
   // IO and bus state. Read-only; pin control / buses / CSI camera arrive with v97.
+  import PageHeader from '$lib/components/PageHeader.svelte';
   import { onMount, onDestroy } from 'svelte';
 
   type Pin = {
@@ -188,13 +189,9 @@
 </script>
 
 <div class="h-full flex flex-col bg-ink-950">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
-    <div class="flex items-center gap-3">
-      <a href="/" class="text-zinc-500 hover:text-cursed-300 font-mono text-xs">← back</a>
-      <span class="text-zinc-300 font-mono text-sm uppercase tracking-wider">GPIO / Hardware</span>
-    </div>
-    {#if state}<span class="text-[11px] font-mono text-zinc-500 truncate max-w-[50%]">{state.model}</span>{/if}
-  </header>
+  <PageHeader title="GPIO / Hardware">
+    {#if state}<span class="text-[11px] font-mono text-zinc-500 truncate max-w-[40vw]">{state.model}</span>{/if}
+  </PageHeader>
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-5xl mx-auto w-full space-y-6">

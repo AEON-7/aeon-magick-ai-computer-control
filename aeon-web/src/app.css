@@ -21,11 +21,15 @@
 @layer components {
   .btn {
     @apply inline-flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium
-           bg-ink-700 hover:bg-ink-600 active:bg-ink-800 transition-colors
+           bg-ink-700 hover:bg-ink-600 active:bg-ink-800
+           border border-transparent hover:border-cursed-500/30
+           transition-colors motion-safe:transition-[transform,background-color,border-color]
+           motion-safe:duration-150 motion-safe:active:scale-[0.98]
            focus:outline-none focus:ring-2 focus:ring-cursed-500 focus:ring-offset-2 focus:ring-offset-ink-900;
   }
   .btn-primary {
-    @apply btn bg-cursed-600 hover:bg-cursed-500 active:bg-cursed-700 text-white;
+    @apply btn bg-cursed-600 hover:bg-cursed-500 active:bg-cursed-700 text-white
+           hover:shadow-[0_0_18px_-6px_rgb(139_92_246/0.55)];
   }
   .pill {
     @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium;
@@ -42,6 +46,95 @@
     @apply pill bg-cursed-500/15 text-cursed-300 border border-cursed-500/40
            font-mono uppercase tracking-wider hover:bg-cursed-500/25 transition;
   }
+}
+
+/* ── Ambient frame glow ──────────────────────────────────────────────
+ *
+ * A pointer-events-none sibling of the video canvas whose inner glow
+ * encodes who owns the keyboard right now: faint violet at rest, green
+ * while streaming, red while input is captured, near-black when offline.
+ * The captured pulse animates ONLY opacity — animating box-shadow would
+ * repaint the full viewport every frame. That rule is load-bearing. */
+.aeon-frame {
+  box-shadow:
+    inset 0 0 0 1px rgb(139 92 246 / 0.10),
+    inset 0 0 90px -50px rgb(139 92 246 / 0.30);
+  opacity: 0.7;
+}
+.aeon-frame-live {
+  box-shadow:
+    inset 0 0 0 1px rgb(52 211 153 / 0.10),
+    inset 0 0 90px -55px rgb(52 211 153 / 0.22);
+}
+.aeon-frame-captured {
+  box-shadow:
+    inset 0 0 0 1px rgb(248 113 113 / 0.35),
+    inset 0 0 110px -45px rgb(248 113 113 / 0.35);
+  opacity: 1;
+}
+.aeon-frame-off {
+  opacity: 0.25;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .aeon-frame-captured {
+    animation: aeon-frame-pulse 3s ease-in-out infinite;
+  }
+}
+@keyframes aeon-frame-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+/* Faint CSS scanline static for the signal-lost veil. Pure CSS texture,
+ * no assets. */
+.aeon-static {
+  background: repeating-linear-gradient(
+    0deg,
+    rgb(196 181 253 / 0.035) 0 1px,
+    transparent 1px 3px
+  );
+}
+
+/* ── Boot ritual ─────────────────────────────────────────────────────
+ *
+ * Decorates the REAL auth-probe wait in +layout.svelte — never pads it.
+ * The reduced-motion fallback is mandatory: .aeon-rite starts at
+ * opacity 0, so without it those users would see a blank loading
+ * screen. */
+@media (prefers-reduced-motion: no-preference) {
+  .aeon-summon {
+    stroke-dasharray: 100;
+    stroke-dashoffset: 100;
+    animation: aeon-summon 0.7s ease-out forwards;
+  }
+  @keyframes aeon-summon {
+    to { stroke-dashoffset: 0; }
+  }
+  .aeon-rite {
+    opacity: 0;
+    animation: aeon-rite 0.4s ease-out forwards;
+  }
+  @keyframes aeon-rite {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aeon-rite { opacity: 1; }
+}
+
+/* ── The Ward ────────────────────────────────────────────────────────
+ *
+ * While input is captured the page chrome recedes — everything you do
+ * now belongs to the target machine. Applied to header/footer ONLY:
+ * filter creates a containing block + compositing layer, so it must
+ * never wrap the video canvas. */
+.aeon-wardable {
+  @apply motion-safe:transition-[opacity,filter] motion-safe:duration-[400ms];
+}
+.aeon-warded {
+  opacity: 0.55;
+  filter: saturate(0.5);
 }
 
 /* ── Pseudo-fullscreen for iPhone Safari ─────────────────────────────
