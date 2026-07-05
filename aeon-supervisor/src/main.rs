@@ -19,6 +19,7 @@ mod api;
 mod audit;
 mod audio;
 mod auth;
+mod bench;
 mod blocked_log;
 mod braincraft;
 mod captive;

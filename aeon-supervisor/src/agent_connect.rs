@@ -123,6 +123,17 @@ pub fn ssh_target(id: &str) -> Option<SshTarget> {
     })
 }
 
+/// Run a shell command on a registered system over the agent-connect key and
+/// return its stdout. Public wrapper so sibling modules (e.g. `bench`) can
+/// deploy/manage on a connected box without re-implementing the SSH plumbing.
+pub fn run_remote(id: &str, remote: &str) -> Result<String, String> {
+    let sys = load_systems()
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "no such connected system".to_string())?;
+    ssh_capture(&sys, remote)
+}
+
 fn save_systems(v: &[System]) -> Result<(), String> {
     let _ = std::fs::create_dir_all(DIR);
     let text = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;

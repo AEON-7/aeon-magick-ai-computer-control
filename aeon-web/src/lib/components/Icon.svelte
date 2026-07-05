@@ -29,6 +29,9 @@
     // riding them: the decentralized model network as a constellation. Orbits
     // stroked, orbs filled (currentColor) so it reads sharp at any size.
     aether: '<ellipse cx="12" cy="12" rx="9.3" ry="3.7" transform="rotate(28 12 12)"/><ellipse cx="12" cy="12" rx="9.3" ry="3.7" transform="rotate(-28 12 12)"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="19.4" cy="8.2" r="1.25" fill="currentColor" stroke="none"/><circle cx="4.6" cy="15.8" r="1.25" fill="currentColor" stroke="none"/>',
+    // Aeon Bench — a speedometer/gauge (arc + needle + hub + ticks): performance
+    // benchmarking, models raced against the AEON Bench suite for the leaderboard.
+    bench: '<path d="M3.5 18a8.5 8.5 0 0 1 17 0"/><path d="M12 18l4.5-4"/><circle cx="12" cy="18" r="1.4" fill="currentColor" stroke="none"/><path d="M12 9.5V11M5 17.4l1.1 .3M19 17.4l-1.1 .3"/>',
     power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
     zap: '<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>',
     reboot: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',

@@ -414,6 +414,44 @@ batch** (`--max-num-batched-tokens`), and **max concurrent sessions**
 
 ---
 
+## Aeon Bench — benchmark any model, from the console
+
+**Aeon Bench** deploys the [**Aeon Bench Pod**](https://github.com/AEON-7/Aeon-Bench-Pod)
+— an open LLM-benchmarking pipeline — straight from the Orb Console. Point it at a
+HuggingFace model and it runs the whole flow: **pull → verify weights → serve →
+benchmark** (text · agentic across three harnesses · vision · audio · arena · perf)
+**→ ed25519-sign → submit** an attested run to the global leaderboard.
+
+![Aeon Bench — pick a deploy target (this Orb or a connected GPU server), a HuggingFace model + optional token, and deploy the benchmarking pod; the dashboard opens from the console or a browser](docs/images/aeon-bench.png)
+
+**Deploy it wherever the compute is.** Pick a target — **this Orb** or any **GPU
+server linked in your [Agent Dashboard](#agent-dashboard--token-telemetry)** (a DGX
+Spark, a gateway) — punch in the model (and an optional HuggingFace token for gated
+weights), and hit deploy. The Orb writes the pod's `.env` and brings the
+docker-compose stack up on the target over the same outbound SSH key it uses for
+model push; Docker is installed on first run if it's missing. Serving + the full
+benchmark need an **NVIDIA GPU**, so real runs target a GPU box — a GPU-less Orb still
+hosts the dashboard, verification, and orchestration.
+
+**Reach the dashboard your way.** Once the pod is up, its dashboard (port 8080 —
+launch runs, manage signing keys, watch live progress) is one click from the console,
+or open it **directly in any browser** at `http://<host>:8080`. The console polls the
+deploy through its phases (cloning → building → running) with a live log, and
+`stop` tears the stack back down.
+
+---
+
+## Get the hardware — join the build
+
+Want the whole thing in your hands? The **[AeonForge Patreon](https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493)**
+has everything to build your own Orb:
+
+- **Full compiled image files** — flash straight to your Raspberry Pi, no build step.
+- **Complete build instructions** — the full walkthrough, start to finish.
+- **A 3D-print enclosure** — the STL for the full-build case.
+
+---
+
 ## Container orchestration + monitoring
 
 See **every** registered docker-compose project and container across your connected

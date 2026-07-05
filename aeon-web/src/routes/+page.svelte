@@ -32,6 +32,7 @@
     emerald: 'border-emerald-500/50 bg-emerald-600/15 text-emerald-100 hover:bg-emerald-600/25',
     flame:   'border-orange-500/50 bg-orange-600/15 text-orange-100 hover:bg-orange-600/25',
     violet:  'border-violet-500/50 bg-violet-600/15 text-violet-100 hover:bg-violet-600/25',
+    rose:    'border-rose-500/50 bg-rose-600/15 text-rose-100 hover:bg-rose-600/25',
   };
   const APP_ICON: Record<string, string> = {
     cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300', emerald: 'text-emerald-300', flame: 'text-orange-300', violet: 'text-violet-300',

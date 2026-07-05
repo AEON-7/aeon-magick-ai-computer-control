@@ -337,6 +337,32 @@ export const registerSystem = (id: string, password: string) =>
   );
 export const testSystem = (id: string) =>
   req<{ ok: boolean; status?: string }>('POST', `/agent/systems/${id}/test`);
+
+// ── Aeon Bench — deploy the benchmarking pod (this Orb or a connected server) ──
+export interface BenchStatus {
+  ok: boolean;
+  phase?: string; // queued|cloning|building|installing-docker|running|failed|stopped|idle
+  log?: string;
+  running?: boolean;
+  dash_port?: number;
+  host?: string | null; // remote target address; null → use the browser's own host
+  err?: string;
+}
+export const benchDeploy = (body: {
+  target: string; // 'local' or a connected-system id
+  hf_link: string;
+  hf_token?: string;
+  env?: Record<string, string>;
+}) =>
+  req<{ ok: boolean; target?: string; dash_port?: number; out?: string; err?: string }>(
+    'POST',
+    '/bench/deploy',
+    body,
+  );
+export const benchStatus = (target: string) =>
+  req<BenchStatus>('GET', `/bench/status?target=${encodeURIComponent(target)}`);
+export const benchStop = (target: string) =>
+  req<{ ok: boolean; err?: string }>('POST', '/bench/stop', { target });
 // Devices discovered on the Pi's tailnet (for "+ Add device from Tailscale").
 // `address` is the stable 100.x Tailscale IP we add the system by.
 export interface TailscaleDevice {

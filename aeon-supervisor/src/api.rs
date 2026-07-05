@@ -506,6 +506,10 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/onions/disable", post(crate::onions::disable))
         .route("/onions/create",  post(crate::onions::create))
         .route("/onions/remove",  post(crate::onions::remove))
+        // Aeon Bench — deploy the LLM-benchmarking pod locally or on a connected GPU server
+        .route("/bench/deploy", post(crate::bench::deploy))
+        .route("/bench/status", get(crate::bench::status))
+        .route("/bench/stop",   post(crate::bench::stop))
         // IPFS — local kubo node + gateway (admin-only over REST; agent pin/add via MCP)
         .route("/ipfs/status",  get(crate::ipfs::status))
         .route("/ipfs/enable",  post(crate::ipfs::enable))
