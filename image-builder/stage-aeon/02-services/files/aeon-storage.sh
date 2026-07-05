@@ -149,13 +149,20 @@ cmd_use() {
   grep -q " $MNT " /etc/fstab || echo "UUID=$uuid $MNT $fst defaults,nofail,noatime 0 2" >> /etc/fstab
   mountpoint -q "$MNT" || mount "$MNT" 2>/dev/null || mount "UUID=$uuid" "$MNT" \
     || { log "mount failed"; return 1; }
+  # Transient scratch (download quarantine + import drafts) must NOT migrate — it
+  # can be tens of GB of orphaned junk that would slow the copy for no reason.
+  # Prune it from the source first (aeon-ipfs is stopped; it's recreated on demand).
+  rm -rf "$DATA/ipfs-models/staging" 2>/dev/null || true
   for d in $BOUND_DIRS; do
     install -d "$MNT/$d" "$DATA/$d"
     # First adoption: copy existing internal data onto the drive (once).
     if [ -z "$(ls -A "$MNT/$d" 2>/dev/null)" ] && [ -n "$(ls -A "$DATA/$d" 2>/dev/null)" ]; then
       cp -a "$DATA/$d/." "$MNT/$d/" 2>/dev/null || true
     fi
-    grep -q " $DATA/$d " /etc/fstab || echo "$MNT/$d $DATA/$d none bind,nofail 0 0" >> /etc/fstab
+    # `x-systemd.requires-mounts-for=$MNT` makes the bind WAIT for the (slow USB)
+    # drive at boot instead of being silently skipped by `nofail` — otherwise a
+    # reboot could expose the empty SD dir underneath and look like data loss.
+    grep -q " $DATA/$d " /etc/fstab || echo "$MNT/$d $DATA/$d none bind,nofail,x-systemd.requires-mounts-for=$MNT 0 0" >> /etc/fstab
     mountpoint -q "$DATA/$d" || mount --bind "$MNT/$d" "$DATA/$d"
   done
   id aeon-ipfs >/dev/null 2>&1 && chown -R aeon-ipfs:aeon-ipfs "$DATA/ipfs" 2>/dev/null || true

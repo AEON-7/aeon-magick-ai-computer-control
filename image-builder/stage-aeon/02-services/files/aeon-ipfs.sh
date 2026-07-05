@@ -137,6 +137,12 @@ ensure_units() {
 Description=Aeon Magick — IPFS (kubo) node + gateway
 After=network-online.target
 Wants=network-online.target
+# When an external drive is adopted, /var/lib/aeon/ipfs is a BIND MOUNT of the
+# drive. Require + wait for it so the daemon can NEVER start on the stale SD repo
+# underneath if the USB drive is slow or absent at boot — that would silently run
+# a months-old empty repo and look like total data loss. On a non-adopted Orb this
+# path is on the root fs, so the dependency is always already satisfied.
+RequiresMountsFor=/var/lib/aeon/ipfs
 # Bound the crash-loop: if the daemon fails 5x in 10 min (e.g. a stale lock we
 # somehow can't clear, a corrupt repo, a port collision) give up and land in
 # 'failed' — a state the status endpoint surfaces — instead of retrying forever
