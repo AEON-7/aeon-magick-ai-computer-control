@@ -350,7 +350,7 @@ export interface BenchStatus {
 }
 export const benchDeploy = (body: {
   target: string; // 'local' or a connected-system id
-  hf_link: string;
+  hf_link?: string; // optional — pre-load a model; the dashboard can also pick one
   hf_token?: string;
   env?: Record<string, string>;
 }) =>

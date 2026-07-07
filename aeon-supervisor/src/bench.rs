@@ -1,17 +1,22 @@
 //! Aeon Bench — deploy the **Aeon Bench Pod** (open LLM benchmarking:
 //! pull → verify → serve → benchmark → ed25519-sign → submit to the
-//! aeon-bench.com leaderboard) either on **this Orb** (local docker) or on a
-//! **GPU server linked in the Agent Dashboard** (over the agent-connect SSH
-//! key), then reach the pod dashboard (:8080) from the console or a browser.
+//! aeon-bench.com leaderboard) onto a **GPU server linked in the Agent
+//! Dashboard** (over the agent-connect SSH key), then reach the pod dashboard
+//! (:8091) from the console or a browser.
 //!
-//! The pod is a docker-compose stack (`deploy/pod/docker-compose.yml`): a vLLM
-//! `model-under-test`, a `pull` verifier, harness builders, an orchestrator,
-//! and `pod-dashboard`. Only `AEON_HF_LINK` is required. Serving + the full
-//! benchmark need an NVIDIA GPU, so real runs target a connected GPU box; a
-//! GPU-less Orb still hosts the dashboard/verification. The whole deploy is
-//! backgrounded (clone/pull → write .env → `docker compose up -d --build`),
-//! with phases surfaced through a status file the UI polls — same shape as the
-//! Agent-Dashboard Easy Deploy flow.
+//! The pod now ships as a **prebuilt GHCR container** (`ghcr.io/aeon-7/aeon-pod`)
+//! rather than a from-source docker-compose build: deploy = `docker pull` + a
+//! single `docker run` (Docker-out-of-Docker — the pod mounts the host docker
+//! socket to launch its own vLLM engine + harness sibling containers). It
+//! co-locates the model server, so it needs an NVIDIA GPU (`--gpus all`) +
+//! `--network host`. A model can be pre-loaded (`AEON_HF_LINK`) but is optional —
+//! the dashboard lets you pick/scan models. The whole deploy is backgrounded
+//! (pull → run), with phases surfaced through a status file the UI polls.
+//!
+//! Update = `docker pull` the newest image + recreate the container. Docker run
+//! flags DON'T persist across a recreate, so the exact `docker run` command is
+//! persisted to `.aeon-pod-run.sh` on the target at deploy time and re-executed
+//! verbatim on update.
 
 use crate::api::AppState;
 use axum::{extract::Query, extract::State, Json};
@@ -20,101 +25,89 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
 
-const DEFAULT_DASH_PORT: u16 = 8080;
+/// Dashboard port the pod listens on by default (override with AEON_PORT).
+const DEFAULT_DASH_PORT: u16 = 8091;
+const POD_IMAGE: &str = "ghcr.io/aeon-7/aeon-pod:latest";
+const POD_NAME: &str = "aeon-pod";
 
-/// The heavy worker, decoded + nohup-run on the target. Static (the repo URL is
-/// inline) so it carries no untrusted interpolation; the model config arrives
-/// separately as a base64 `.env`. Writes `PHASE=…` to a status file the UI polls.
+/// The deploy worker, decoded + nohup-run on the target: ensure docker, pull the
+/// prebuilt image, drop any old container, then exec the persisted `docker run`
+/// command (`.aeon-pod-run.sh`). Writes `PHASE=…` to a status file the UI polls.
 const RUN_SCRIPT: &str = r#"#!/bin/bash
-WORK="$HOME/aeon-bench-pod"; REPO="$WORK/repo"
+WORK="$HOME/aeon-bench-pod"
 S="$WORK/.aeon-bench.status"; L="$WORK/.aeon-bench.log"; : > "$L"
-if ! command -v git >/dev/null 2>&1; then
-  (apt-get update -y && apt-get install -y git) >> "$L" 2>&1 || { echo "git is not installed" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-fi
-if [ -d "$REPO/.git" ]; then
-  echo PHASE=updating > "$S"; git -C "$REPO" pull --ff-only >> "$L" 2>&1 || true
-else
-  echo PHASE=cloning > "$S"; rm -rf "$REPO"
-  git clone --depth 1 https://github.com/AEON-7/Aeon-Bench-Pod.git "$REPO" >> "$L" 2>&1 \
-    || { echo "git clone failed — need network access to github.com" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-fi
-D="$REPO/deploy/pod"
-[ -d "$D" ] || { echo "deploy/pod not found in the repo layout" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-base64 -d "$WORK/.aeon-bench.envb64" > "$D/.env" 2>> "$L"
 if ! command -v docker >/dev/null 2>&1; then
   echo PHASE=installing-docker > "$S"
   (apt-get update -y && apt-get install -y docker.io) >> "$L" 2>&1 \
-    || { echo "Docker is not installed and could not be auto-installed — install Docker, or deploy to a connected GPU server instead." >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+    || { echo "Docker is not installed and could not be auto-installed — install Docker on the target, or pick a different GPU server." >> "$L"; echo PHASE=failed > "$S"; exit 1; }
   command -v systemctl >/dev/null 2>&1 && systemctl start docker >> "$L" 2>&1 || true
 fi
-DC="docker compose"; docker compose version >/dev/null 2>&1 || DC="docker-compose"
-cd "$D" || { echo PHASE=failed > "$S"; exit 1; }
-echo PHASE=building > "$S"
-if $DC up -d --build >> "$L" 2>&1; then
+mkdir -p "$HOME/aeon-models"
+echo PHASE=pulling > "$S"
+docker pull ghcr.io/aeon-7/aeon-pod:latest >> "$L" 2>&1 \
+  || { echo "docker pull failed — the target needs network access to ghcr.io" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+docker rm -f aeon-pod >> "$L" 2>&1 || true
+echo PHASE=starting > "$S"
+if bash "$WORK/.aeon-pod-run.sh" >> "$L" 2>&1; then
   echo PHASE=running > "$S"
 else
-  echo "docker compose up failed — see the log above (a GPU is required to serve the model)" >> "$L"
+  echo "docker run failed — the pod serves the model co-located, so the target needs an NVIDIA GPU + nvidia-container-toolkit (for --gpus all). See the log above." >> "$L"
   echo PHASE=failed > "$S"
 fi
 "#;
 
-/// Report the current phase + a log tail + whether the dashboard container is up
-/// + the dashboard port (read back from the deployed .env). Markers delimit the
-/// sections so we can parse a single round-trip.
-const STATUS_SCRIPT: &str = r#"WORK="$HOME/aeon-bench-pod"; D="$WORK/repo/deploy/pod"
+/// Report the current phase + a log tail + whether the pod container is up + the
+/// dashboard port (persisted at deploy). Markers delimit the sections for a
+/// single round-trip.
+const STATUS_SCRIPT: &str = r#"WORK="$HOME/aeon-bench-pod"
 echo '@PHASE@'; cat "$WORK/.aeon-bench.status" 2>/dev/null
-echo '@PORT@'; grep -E '^AEON_DASH_PORT=' "$D/.env" 2>/dev/null | tail -1 | cut -d= -f2
-echo '@PS@'; (docker ps --filter name=pod-dashboard --format '{{.Names}} {{.Status}}' 2>/dev/null || true)
+echo '@PORT@'; cat "$WORK/.aeon-bench.port" 2>/dev/null
+echo '@PS@'; (docker ps --filter name=aeon-pod --format '{{.Names}} {{.Status}}' 2>/dev/null || true)
 echo '@LOG@'; tail -n 40 "$WORK/.aeon-bench.log" 2>/dev/null
 true
 "#;
 
-const STOP_SCRIPT: &str = r#"WORK="$HOME/aeon-bench-pod"; D="$WORK/repo/deploy/pod"
-DC="docker compose"; docker compose version >/dev/null 2>&1 || DC="docker-compose"
-if cd "$D" 2>/dev/null; then $DC down >> "$WORK/.aeon-bench.log" 2>&1; fi
+const STOP_SCRIPT: &str = r#"WORK="$HOME/aeon-bench-pod"
+docker rm -f aeon-pod >> "$WORK/.aeon-bench.log" 2>&1 || true
 echo PHASE=stopped > "$WORK/.aeon-bench.status"
 echo STOPPED
 "#;
 
-/// In-place hot-update worker: fetch the latest Aeon-Bench-Pod and rebuild,
-/// KEEPING the current model `.env` (only the pod code changes). Shallow-clone
-/// safe (`fetch --depth 1` + `reset --hard FETCH_HEAD`, since `pull --ff-only`
-/// can't fast-forward a depth-1 clone). Backgrounded; drives the same status file.
+/// Hot-update worker: pull the newest image + recreate the container from the
+/// PERSISTED run command (docker run flags don't survive a recreate). Same status
+/// file as deploy.
 const UPDATE_SCRIPT: &str = r#"#!/bin/bash
-WORK="$HOME/aeon-bench-pod"; REPO="$WORK/repo"
+WORK="$HOME/aeon-bench-pod"
 S="$WORK/.aeon-bench.status"; L="$WORK/.aeon-bench.log"; : > "$L"
-[ -d "$REPO/.git" ] || { echo "no pod is deployed here yet — deploy first, then update" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-echo PHASE=updating > "$S"
-git -C "$REPO" fetch -q --depth 1 origin main >> "$L" 2>&1 \
-  || { echo "git fetch failed — the target needs network access to github.com" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-git -C "$REPO" reset -q --hard FETCH_HEAD >> "$L" 2>&1 \
-  || { echo "git reset failed" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-D="$REPO/deploy/pod"
-[ -f "$D/.env" ] || { echo "pod .env missing — re-deploy to set the model config" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
-DC="docker compose"; docker compose version >/dev/null 2>&1 || DC="docker-compose"
-cd "$D" || { echo PHASE=failed > "$S"; exit 1; }
-echo PHASE=building > "$S"
-if $DC up -d --build >> "$L" 2>&1; then
+[ -f "$WORK/.aeon-pod-run.sh" ] || { echo "no pod is deployed here yet — deploy first, then update" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+echo PHASE=pulling > "$S"
+docker pull ghcr.io/aeon-7/aeon-pod:latest >> "$L" 2>&1 \
+  || { echo "docker pull failed — the target needs network access to ghcr.io" >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+docker rm -f aeon-pod >> "$L" 2>&1 || true
+echo PHASE=starting > "$S"
+if bash "$WORK/.aeon-pod-run.sh" >> "$L" 2>&1; then
   echo PHASE=running > "$S"
 else
-  echo "docker compose up failed after the update — see the log above" >> "$L"
+  echo "docker run failed after the update — see the log above" >> "$L"
   echo PHASE=failed > "$S"
 fi
 "#;
 
-/// The deployed pod's current commit on the target (empty if none deployed).
-const DEPLOYED_SHA_SCRIPT: &str = r#"git -C "$HOME/aeon-bench-pod/repo" rev-parse HEAD 2>/dev/null || true"#;
+/// The pulled pod image's digest on the target (empty if never pulled).
+const DEPLOYED_DIGEST_SCRIPT: &str = r#"docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/aeon-7/aeon-pod:latest 2>/dev/null | sed 's/.*@//'; true"#;
 
 #[derive(Deserialize)]
 pub struct DeployReq {
     /// "local" (this Orb) or a connected-system id from the Agent Dashboard.
     pub target: String,
-    /// HuggingFace model id, e.g. "org/Model" — becomes AEON_HF_LINK.
+    /// OPTIONAL HuggingFace model id, e.g. "org/Model" — pre-loads AEON_HF_LINK.
+    /// Empty is fine: the dashboard lets you pick/scan models after deploy.
+    #[serde(default)]
     pub hf_link: String,
     #[serde(default)]
     pub hf_token: String,
-    /// Extra AEON_* / HF_* env overrides (mothership, judge, max tokens, dash
-    /// port, quant, …). Keys are validated; values are newline-stripped.
+    /// Extra `-e` env overrides for the pod (AEON_PORT, AEON_SYSTEM,
+    /// AEON_PAUSE_CONTAINERS, …). Keys are validated; values are shell-quoted.
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -144,46 +137,66 @@ fn clean_val(v: &str) -> String {
     v.chars().filter(|c| *c != '\n' && *c != '\r').take(500).collect()
 }
 
-/// Build the pod `.env` from the request. Only whitelisted-shape keys pass, and
-/// AEON_HF_LINK / HF_TOKEN come from the dedicated fields so they can't be
-/// overridden or duplicated by the free-form map.
-fn build_env_file(req: &DeployReq) -> String {
-    let mut lines = vec![format!("AEON_HF_LINK={}", req.hf_link)];
-    if !req.hf_token.is_empty() {
-        lines.push(format!("HF_TOKEN={}", clean_val(&req.hf_token)));
-    }
-    let mut have_port = false;
-    let mut have_maxlen = false;
-    for (k, v) in &req.env {
-        if !env_key_ok(k) || matches!(k.as_str(), "AEON_HF_LINK" | "HF_TOKEN") {
-            continue;
-        }
-        match k.as_str() {
-            "AEON_DASH_PORT" => have_port = true,
-            "AEON_MAX_MODEL_LEN" => have_maxlen = true,
-            _ => {}
-        }
-        lines.push(format!("{}={}", k, clean_val(v)));
-    }
-    if !have_port {
-        lines.push(format!("AEON_DASH_PORT={DEFAULT_DASH_PORT}"));
-    }
-    // The agentic Hermes harness needs a 64k context; the pod itself refuses
-    // anything under 65536 — so default it, never leaving it unset.
-    if !have_maxlen {
-        lines.push("AEON_MAX_MODEL_LEN=65536".to_string());
-    }
-    lines.join("\n") + "\n"
+/// Single-quote a value for a POSIX shell command line (escaping embedded quotes),
+/// so an env value can't break out into shell — every user-supplied `-e` value is
+/// wrapped with this.
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// The outer bootstrap: drop the env + worker to disk (base64, so no quoting or
-/// heredoc hazards over SSH) and nohup the worker so it survives the session.
-fn deploy_script(env_b64: &str, run_b64: &str) -> String {
+/// The exact `docker run` command for the GHCR pod, persisted to the target and
+/// re-executed verbatim on update (flags don't survive a container recreate).
+/// `$HOME` is left for the TARGET shell to expand; user values are shell-quoted.
+/// Dedicated keys (models dir / port / token / hf link) can't be overridden or
+/// duplicated by the free-form env map.
+fn docker_run_command(req: &DeployReq, port: u16) -> String {
+    let mut parts: Vec<String> = vec![
+        "docker run -d".into(),
+        format!("--name {POD_NAME}"),
+        // Host networking (dashboard on the host port) + GPU passthrough — the
+        // pod serves the model co-located.
+        "--network host".into(),
+        "--gpus all".into(),
+        // Docker-out-of-Docker: the pod launches its engine + harness containers.
+        "-v /var/run/docker.sock:/var/run/docker.sock".into(),
+        // Persistent ed25519 device key + run history.
+        "-v aeon-pod-state:/root/.aeon".into(),
+        // Validated model weights, shared with sibling containers.
+        "-v \"$HOME/aeon-models:/models\"".into(),
+        "-e AEON_MODELS_HOST_DIR=\"$HOME/aeon-models\"".into(),
+        format!("-e AEON_PORT={port}"),
+    ];
+    if !req.hf_token.trim().is_empty() {
+        parts.push(format!("-e HF_TOKEN={}", shq(&clean_val(&req.hf_token))));
+    }
+    // Optional pre-loaded model for the headless pipeline.
+    if !req.hf_link.trim().is_empty() {
+        parts.push(format!("-e AEON_HF_LINK={}", shq(req.hf_link.trim())));
+    }
+    // Free-form AEON_* overrides (system label, pause-containers, …). Dedicated
+    // keys are excluded so they can't be set twice.
+    for (k, v) in &req.env {
+        if !env_key_ok(k)
+            || matches!(k.as_str(), "HF_TOKEN" | "AEON_HF_LINK" | "AEON_MODELS_HOST_DIR" | "AEON_PORT")
+        {
+            continue;
+        }
+        parts.push(format!("-e {}={}", k, shq(&clean_val(v))));
+    }
+    parts.push(POD_IMAGE.into());
+    parts.join(" ")
+}
+
+/// The outer bootstrap: persist the `docker run` command (re-used on update) +
+/// the dashboard port + the deploy worker to disk (base64, so no quoting/heredoc
+/// hazards over SSH), then nohup the worker so it survives the session.
+fn deploy_script(run_cmd_b64: &str, worker_b64: &str, port: u16) -> String {
     format!(
         r#"set -e
 WORK="$HOME/aeon-bench-pod"; mkdir -p "$WORK"
-printf '%s' '{env_b64}' > "$WORK/.aeon-bench.envb64"
-printf '%s' '{run_b64}' | base64 -d > "$WORK/.aeon-bench-run.sh"
+printf '%s' '{run_cmd_b64}' | base64 -d > "$WORK/.aeon-pod-run.sh"
+printf '%s' '{worker_b64}' | base64 -d > "$WORK/.aeon-bench-run.sh"
+printf '{port}' > "$WORK/.aeon-bench.port"
 printf 'PHASE=queued\n' > "$WORK/.aeon-bench.status"
 nohup bash "$WORK/.aeon-bench-run.sh" >/dev/null 2>&1 &
 echo STARTED"#
@@ -224,38 +237,53 @@ fn section<'a>(out: &'a str, marker: &str, next: &[&str]) -> &'a str {
     after[..end].trim_matches(['\n', '\r'].as_ref())
 }
 
-/// Outer bootstrap for a hot-update: refuse (NO_POD) if nothing is deployed,
-/// else drop the update worker + nohup it, same as deploy.
-fn update_bootstrap(run_b64: &str) -> String {
+/// Outer bootstrap for a hot-update: refuse (NO_POD) if nothing is deployed
+/// (no persisted run command), else drop the update worker + nohup it.
+fn update_bootstrap(worker_b64: &str) -> String {
     format!(
         r#"set -e
 WORK="$HOME/aeon-bench-pod"
-[ -d "$WORK/repo/.git" ] || {{ echo "NO_POD"; exit 0; }}
-printf '%s' '{run_b64}' | base64 -d > "$WORK/.aeon-bench-update.sh"
-printf 'PHASE=updating\n' > "$WORK/.aeon-bench.status"
+[ -f "$WORK/.aeon-pod-run.sh" ] || {{ echo "NO_POD"; exit 0; }}
+printf '%s' '{worker_b64}' | base64 -d > "$WORK/.aeon-bench-update.sh"
+printf 'PHASE=pulling\n' > "$WORK/.aeon-bench.status"
 nohup bash "$WORK/.aeon-bench-update.sh" >/dev/null 2>&1 &
 echo STARTED"#
     )
 }
 
-/// Latest commit on the Aeon-Bench-Pod default branch. Uses GitHub's `.sha`
-/// media type, which returns the bare 40-char SHA as plain text — no JSON parse,
-/// no auth for a public repo (GitHub does require a User-Agent header).
-fn github_latest_sha() -> Option<String> {
-    let resp = ureq::get("https://api.github.com/repos/AEON-7/Aeon-Bench-Pod/commits/main")
+/// The latest published digest of the GHCR pod image. GHCR needs a (free,
+/// anonymous) bearer token even for a public image; with it, the manifest
+/// request returns the `Docker-Content-Digest` header without pulling the image.
+fn ghcr_latest_digest() -> Option<String> {
+    let tok: Value = ureq::get(
+        "https://ghcr.io/token?service=ghcr.io&scope=repository:aeon-7/aeon-pod:pull",
+    )
+    .set("User-Agent", "aeon-magick-orb")
+    .timeout(std::time::Duration::from_secs(12))
+    .call()
+    .ok()?
+    .into_json()
+    .ok()?;
+    let token = tok.get("token").and_then(|v| v.as_str())?;
+    let resp = ureq::get("https://ghcr.io/v2/aeon-7/aeon-pod/manifests/latest")
+        .set("Authorization", &format!("Bearer {token}"))
+        .set(
+            "Accept",
+            "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json",
+        )
         .set("User-Agent", "aeon-magick-orb")
-        .set("Accept", "application/vnd.github.sha")
         .timeout(std::time::Duration::from_secs(12))
         .call()
         .ok()?;
-    let s = resp.into_string().ok()?;
-    let s = s.trim();
-    (s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit())).then(|| s.to_string())
+    resp.header("docker-content-digest")
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("sha256:"))
 }
 
-/// POST /api/bench/deploy — kick a (backgrounded) pod deploy on the target.
+/// POST /api/bench/deploy — kick a (backgrounded) pod deploy on the target: pull
+/// the GHCR image + `docker run` it. `hf_link` is optional (pre-load a model).
 pub async fn deploy(State(_s): State<AppState>, Json(req): Json<DeployReq>) -> Json<Value> {
-    if !valid_hf_link(&req.hf_link) {
+    if !req.hf_link.trim().is_empty() && !valid_hf_link(req.hf_link.trim()) {
         return Json(json!({"ok": false, "err": "invalid model id — expected \"org/model\""}));
     }
     if req.target != "local" && crate::agent_connect::ssh_target(&req.target).is_none() {
@@ -263,10 +291,12 @@ pub async fn deploy(State(_s): State<AppState>, Json(req): Json<DeployReq>) -> J
     }
     let dash_port: u16 = req
         .env
-        .get("AEON_DASH_PORT")
+        .get("AEON_PORT")
         .and_then(|v| v.trim().parse().ok())
+        .filter(|p| *p > 0)
         .unwrap_or(DEFAULT_DASH_PORT);
-    let script = deploy_script(&b64(build_env_file(&req).as_bytes()), &b64(RUN_SCRIPT.as_bytes()));
+    let run_cmd = docker_run_command(&req, dash_port);
+    let script = deploy_script(&b64(run_cmd.as_bytes()), &b64(RUN_SCRIPT.as_bytes()), dash_port);
     let target = req.target.clone();
     let v = tokio::task::spawn_blocking(move || match run_on_target(&target, &script) {
         Ok(out) => json!({"ok": true, "target": target, "dash_port": dash_port, "out": out.trim()}),
@@ -435,7 +465,7 @@ pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQue
     Json(v)
 }
 
-/// POST /api/bench/stop — `docker compose down` the pod on the target.
+/// POST /api/bench/stop — `docker rm -f` the pod container on the target.
 pub async fn stop(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let v = tokio::task::spawn_blocking(move || match run_on_target(&target, STOP_SCRIPT) {
@@ -447,24 +477,25 @@ pub async fn stop(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Jso
     Json(v)
 }
 
-/// GET /api/bench/updates?target= — is a newer Aeon-Bench-Pod build available for
-/// the pod deployed on this target? Compares the deployed commit (git HEAD on the
-/// target) against the latest on GitHub. `update_available` is true only when a
-/// pod IS deployed and the two commits differ, so the UI can show/hide the button.
+/// GET /api/bench/updates?target= — is a newer pod IMAGE published than the one
+/// pulled on this target? Compares the pulled image's digest (docker inspect on
+/// the target) against GHCR's latest. `update_available` is true only when an
+/// image IS pulled and the digests differ, so the UI can show/hide the button.
 pub async fn updates(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let v = tokio::task::spawn_blocking(move || {
-        let deployed = run_on_target(&target, DEPLOYED_SHA_SCRIPT)
+        let deployed = run_on_target(&target, DEPLOYED_DIGEST_SCRIPT)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        let deployed_ok = deployed.len() >= 7 && deployed.chars().all(|c| c.is_ascii_hexdigit());
-        let latest = github_latest_sha().unwrap_or_default();
-        let update_available = deployed_ok && !latest.is_empty() && deployed != latest;
-        let short = |s: &str| s.chars().take(12).collect::<String>();
+        let deployed_ok = deployed.starts_with("sha256:");
+        let latest = ghcr_latest_digest().unwrap_or_default();
+        let update_available = deployed_ok && latest.starts_with("sha256:") && deployed != latest;
+        // Show the 12 hex chars after "sha256:" — recognizable, like a short SHA.
+        let short = |s: &str| s.trim_start_matches("sha256:").chars().take(12).collect::<String>();
         json!({
             "ok": true,
             "deployed": if deployed_ok { Some(short(&deployed)) } else { None },
-            "latest": if latest.is_empty() { None } else { Some(short(&latest)) },
+            "latest": if latest.starts_with("sha256:") { Some(short(&latest)) } else { None },
             "update_available": update_available,
         })
     })
@@ -473,9 +504,9 @@ pub async fn updates(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -
     Json(v)
 }
 
-/// POST /api/bench/update — hot-update the pod on the target: fetch the latest
-/// Aeon-Bench-Pod and rebuild in place, keeping the current model .env.
-/// Backgrounded like deploy; the UI polls /api/bench/status through the phases.
+/// POST /api/bench/update — hot-update the pod on the target: pull the newest
+/// GHCR image and recreate the container from the persisted run command (same
+/// model config). Backgrounded; the UI polls /api/bench/status through the phases.
 pub async fn update(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let script = update_bootstrap(&b64(UPDATE_SCRIPT.as_bytes()));

@@ -30,9 +30,11 @@
   let target = '';
   let hfLink = '';
   let hfToken = '';
-  let maxLen = '65536'; // 64k — the Hermes agentic harness needs it; the pod won't go lower
   let showAdvanced = false;
-  let adv = { AEON_QUANT: '', AEON_MAX_TOKENS: '', AEON_DASH_PORT: '', AEON_MOTHERSHIP: '' };
+  // Pod `-e` env overrides. AEON_PORT = dashboard port (default 8091);
+  // AEON_SYSTEM = hardware label on results; AEON_PAUSE_CONTAINERS = a running
+  // container to auto-stop during a bench (frees the GPU/port).
+  let adv = { AEON_PORT: '', AEON_SYSTEM: '', AEON_PAUSE_CONTAINERS: '' };
 
   let st: BenchStatus | null = null;
   let deploying = false;
@@ -90,17 +92,17 @@
     refresh();
   }
 
-  const ACTIVE = ['queued', 'cloning', 'updating', 'installing-docker', 'building'];
+  const ACTIVE = ['queued', 'pulling', 'installing-docker', 'starting', 'updating'];
   $: phase = st?.phase ?? 'idle';
   $: busy = deploying || ACTIVE.includes(phase);
   $: running = !!st?.running || phase === 'running';
-  $: dashPort = st?.dash_port ?? (Number(adv.AEON_DASH_PORT) || 8080);
+  $: dashPort = st?.dash_port ?? (Number(adv.AEON_PORT) || 8091);
   $: dashHost = st?.host ?? (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
   $: dashUrl = `http://${dashHost}:${dashPort}`;
   $: targetLabel = targetOptions.find((o) => o.id === target)?.label ?? target;
 
   const PHASE_PCT: Record<string, number> = {
-    queued: 5, cloning: 15, updating: 15, 'installing-docker': 30, building: 65, running: 100, failed: 100, stopped: 0, idle: 0,
+    queued: 5, pulling: 45, 'installing-docker': 20, starting: 80, updating: 45, running: 100, failed: 100, stopped: 0, idle: 0,
   };
 
   async function refresh() {
@@ -147,20 +149,16 @@
   }
 
   async function deploy() {
-    if (!/^[\w.\-]+\/[\w.\-]+$/.test(hfLink.trim())) {
-      toast('Enter a HuggingFace model id like "org/model".', 'error');
-      return;
-    }
-    const len = Number(maxLen) || 65536;
-    if (len < 65536) {
-      toast('Context length must be at least 64k (65536) for the Hermes harness.', 'error');
+    const hf = hfLink.trim();
+    if (hf && !/^[\w.\-]+\/[\w.\-]+$/.test(hf)) {
+      toast('That doesn\'t look like a model id — use "org/model", or leave it blank and pick one in the dashboard.', 'error');
       return;
     }
     deploying = true;
-    const env: Record<string, string> = { AEON_MAX_MODEL_LEN: String(len) };
+    const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(adv)) if (v.trim()) env[k] = v.trim();
     try {
-      const r = await benchDeploy({ target, hf_link: hfLink.trim(), hf_token: hfToken.trim() || undefined, env });
+      const r = await benchDeploy({ target, hf_link: hf, hf_token: hfToken.trim() || undefined, env });
       if (!r?.ok) {
         toast('Deploy failed: ' + (r?.err ?? 'unknown error'), 'error');
         deploying = false;
@@ -176,7 +174,7 @@
   }
 
   async function stop() {
-    if (!(await confirmRite({ title: 'Stop the bench pod?', body: `This runs "docker compose down" on ${targetLabel}.`, confirmLabel: 'Stop pod', danger: true }))) return;
+    if (!(await confirmRite({ title: 'Stop the bench pod?', body: `This removes the pod container (docker rm -f) on ${targetLabel}.`, confirmLabel: 'Stop pod', danger: true }))) return;
     try {
       const r = await benchStop(target);
       if (r?.ok) { toast('Pod stopped.', 'info'); await refresh(); }
@@ -212,8 +210,8 @@
       <div class="text-sm text-ink-300 leading-relaxed">
         Race any open model through the <span class="text-rose-300 font-mono">AEON Bench</span> suite —
         <span class="text-ink-200">pull → verify weights → serve → benchmark (text · agentic · vision · audio · arena · perf) → ed25519-sign → submit</span>
-        to the global leaderboard. The pod deploys onto a <span class="text-ink-200">GPU server</span> in your Agent Dashboard; this Orb is your
-        gateway to its dashboard — open it here or straight in a browser.
+        to the global leaderboard. Deploys the prebuilt <span class="font-mono text-ink-200">aeon-pod</span> container onto a
+        <span class="text-ink-200">GPU server</span> in your Agent Dashboard, then hands you its dashboard — <span class="text-ink-200">pick, scan, or paste models there</span>, or pre-load one below.
       </div>
     </div>
 
@@ -232,7 +230,7 @@
       <!-- GPU note -->
       <div class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-200/90 flex gap-2">
         <span aria-hidden="true">⚠</span>
-        <span>The pod serves the model + runs the benchmark <strong>co-located on the target</strong> — so the deploy target must be an <strong>NVIDIA-GPU</strong> server. Docker is installed there on first deploy.</span>
+        <span>The pod serves the model + runs the benchmark <strong>co-located on the target</strong> — so the deploy target must be an <strong>NVIDIA-GPU</strong> server (needs the nvidia-container-toolkit for <code>--gpus all</code>). The prebuilt container is pulled from ghcr.io; Docker is installed on first deploy.</span>
       </div>
 
       <!-- deploy form -->
@@ -247,16 +245,11 @@
             </select>
           </label>
           <label class="block space-y-1">
-            <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">Model — HuggingFace id</span>
-            <input bind:value={hfLink} placeholder="org/Model-Name" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
+            <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">Model to pre-load <span class="text-ink-600 normal-case">(optional)</span></span>
+            <input bind:value={hfLink} placeholder="org/Model-Name — or pick one in the dashboard" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
           </label>
         </div>
         <div class="grid gap-4 sm:grid-cols-2">
-          <label class="block space-y-1">
-            <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">Context length</span>
-            <input bind:value={maxLen} inputmode="numeric" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
-            <span class="text-[10.5px] text-ink-500">64k (65536) minimum — required for the Hermes agentic harness.</span>
-          </label>
           <label class="block space-y-1">
             <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">HuggingFace token <span class="text-ink-600 normal-case">(optional)</span></span>
             <input bind:value={hfToken} type="password" placeholder="hf_… (for gated models)" autocomplete="off" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
@@ -281,7 +274,7 @@
               {#each info.warnings ?? [] as w}
                 <div class="text-amber-300/90 flex gap-1.5"><span aria-hidden="true">⚠</span><span>{w}</span></div>
               {/each}
-              <div class="text-[10.5px] text-ink-600">The pod applies the quantization automatically from the model config — leave it be, or force one under Advanced.</div>
+              <div class="text-[10.5px] text-ink-600">Just a preview — the pod derives the quantization + serve recipe automatically from the model config.</div>
             {/if}
           </div>
         {/if}
@@ -291,7 +284,7 @@
         </button>
         {#if showAdvanced}
           <div class="grid gap-3 sm:grid-cols-2 pt-1">
-            {#each [['AEON_QUANT', 'Quantization', 'e.g. awq'], ['AEON_MAX_TOKENS', 'Max tokens', '2048'], ['AEON_DASH_PORT', 'Dashboard port', '8080'], ['AEON_MOTHERSHIP', 'Mothership URL', 'https://aeon-bench.com']] as [key, label, ph]}
+            {#each [['AEON_PORT', 'Dashboard port', '8091'], ['AEON_SYSTEM', 'Hardware label (on results)', 'e.g. DGX-Spark'], ['AEON_PAUSE_CONTAINERS', 'Pause a container during runs', 'container name']] as [key, label, ph]}
               <label class="block space-y-1">
                 <span class="text-[11px] text-ink-500 font-mono">{label}</span>
                 <input bind:value={adv[key]} placeholder={ph} class="w-full bg-ink-950 border border-ink-800 rounded px-2 py-1.5 text-[13px] font-mono focus:border-ink-600 outline-none" />
@@ -325,7 +318,7 @@
             <div class="h-2 rounded-full bg-ink-800 overflow-hidden">
               <div class="h-full rounded-full bg-gradient-to-r from-rose-600 to-rose-400 transition-all duration-500" style="width:{PHASE_PCT[phase] ?? 0}%"></div>
             </div>
-            <p class="text-[11px] text-ink-500">Building the pod images + pulling weights can take several minutes on the first run.</p>
+            <p class="text-[11px] text-ink-500">Pulling the pod image can take a minute or two on the first deploy; it then launches its engine + harness containers.</p>
           {/if}
 
           {#if running}
@@ -341,7 +334,7 @@
                   {updating ? 'Updating…' : 'Update Pod'} <span aria-hidden="true">↑</span>
                 </button>
                 <span class="text-[11px] text-amber-200/90 font-mono">
-                  new Aeon-Bench-Pod build available{#if upd.deployed && upd.latest} · {upd.deployed} → {upd.latest}{/if}
+                  newer pod image available{#if upd.deployed && upd.latest} · {upd.deployed} → {upd.latest}{/if}
                 </span>
               </div>
             {:else if upd && upd.deployed}

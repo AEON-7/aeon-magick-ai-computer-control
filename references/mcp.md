@@ -147,11 +147,11 @@ the `aeon-webcam` skill.
 | Tool | What it does |
 |---|---|
 | `bench_model_info` | preview a model's serve recipe — quant, params, context, gated, warnings |
-| `bench_deploy` | deploy the benchmarking pod onto a connected GPU server (co-located serve + bench) |
-| `bench_status` | poll deploy phase + log tail + the dashboard `http://<host>:8080` |
-| `bench_stop` | tear the pod down |
-| `bench_updates` | is a newer Aeon-Bench-Pod build available? (deployed commit vs GitHub latest) — read-only |
-| `bench_update` | hot-update the pod in place — fetch latest + rebuild, keep the model config (backgrounded; poll `bench_status`) |
+| `bench_deploy` | pull the prebuilt `ghcr.io/aeon-7/aeon-pod` container + `docker run` it on a connected GPU server (co-located serve + bench). `hf_link` optional — pick models in the dashboard |
+| `bench_status` | poll deploy phase + log tail + the dashboard `http://<host>:8091` |
+| `bench_stop` | tear the pod down (`docker rm -f`) |
+| `bench_updates` | is a newer pod image published? (pulled digest vs GHCR latest) — read-only |
+| `bench_update` | hot-update — pull the newest image + recreate the container, same config (backgrounded; poll `bench_status`) |
 
 ### System / OS updates — keep the Orb current + patched
 | Tool | What it does |
