@@ -15,13 +15,22 @@ against Waveshare's UPS_HAT_E demo `ups.py`):
 What this daemon does, every POLL_S seconds:
   * read the registers and publish /run/aeon/ups.json (atomic) for the
     supervisor's GET /api/ups + the dashboard + the AI agent;
-  * if any cell is below LOW_VOL and the pack isn't charging, count down and,
-    after GRACE_S of sustained low battery, write 0x55 and `systemctl poweroff`
-    — a clean shutdown before the cells are damaged / power is yanked.
+  * if the Orb is running ON BATTERY and the pack is genuinely low (fuel-gauge %
+    low AND a cell below LOW_VOL, from a SELF-CONSISTENT read), count down and,
+    after GRACE_S, write 0x55 and `systemctl poweroff` — a clean shutdown before
+    the cells are damaged / power is yanked.
+
+The low-battery trigger is HARDENED against spurious I2C misreads (the shared bus
+also carries the audio codec + other HATs): a reading that is inconsistent
+(pack ≠ Σ cells, or a cell out of Li-ion range), or that claims "low" while on
+external power or at a healthy %, is IGNORED — it's bad data, not a dying battery.
+Without this, one corrupt read of a single cell register could power the Orb off
+with a full battery.
 
 Self-disables (idles) if 0x2D isn't on the bus, so the image is harmless on a
 Pi without the HAT. Tunables come from the environment (set in the unit):
-  AEON_UPS_BUS (default 1), AEON_UPS_LOW_MV (3150), AEON_UPS_GRACE_S (60).
+  AEON_UPS_BUS (default 1), AEON_UPS_LOW_MV (3150), AEON_UPS_GRACE_S (60),
+  AEON_UPS_LOW_PCT (15).
 """
 import json
 import os
@@ -32,6 +41,7 @@ ADDR = 0x2D
 BUS = int(os.environ.get("AEON_UPS_BUS", "1"))
 LOW_VOL = int(os.environ.get("AEON_UPS_LOW_MV", "3150"))   # per-cell mV
 GRACE_S = int(os.environ.get("AEON_UPS_GRACE_S", "60"))    # sustained-low before poweroff
+LOW_PCT = int(os.environ.get("AEON_UPS_LOW_PCT", "15"))    # fuel-gauge % floor (misread guard)
 POLL_S = 2
 OUT = "/run/aeon/ups.json"
 
@@ -147,17 +157,38 @@ def main():
             "shutdown_pending_s": (GRACE_S - POLL_S * low) if low else None,
         })
 
-        # Low-battery safe-shutdown: any cell below threshold AND not pulling a
-        # meaningful charge current (mirrors the Waveshare `current < 50` gate).
-        if any(v < LOW_VOL for v in cell_mv) and bat_ma < 50:
+        # Low-battery safe-shutdown — HARDENED against spurious I2C misreads that
+        # were powering the Orb off with a full battery. Only act when the reading
+        # is SELF-CONSISTENT (real data, not garbage) AND every independent signal
+        # agrees the battery is genuinely dying on battery power:
+        #   * on_battery — no external input (you can't over-discharge while it's
+        #     charging, so a "low" reading on AC is necessarily bad data);
+        #   * fuel-gauge percent is low (a single corrupt cell read won't move it);
+        #   * a cell is actually below the floor.
+        pack_sum = sum(cell_mv)
+        consistent = (
+            all(2500 <= v <= 4400 for v in cell_mv)                 # cells in Li-ion range
+            and 0 <= percent <= 100
+            and (pack_sum == 0 or abs(bat_mv - pack_sum) <= 1500)   # pack ≈ Σ cells
+        )
+        if consistent and on_battery and percent <= LOW_PCT and min_cell < LOW_VOL:
             low += 1
+            sys.stderr.write(
+                f"aeon-ups: LOW on battery — pct={percent}% min_cell={min_cell}mV "
+                f"pack={bat_mv}mV — poweroff in {GRACE_S - POLL_S * low}s unless powered\n")
             if POLL_S * low >= GRACE_S:
                 poweroff(bus)
                 return
-            sys.stderr.write(
-                f"aeon-ups: LOW battery (min cell {min_cell}mV) — poweroff in "
-                f"{GRACE_S - POLL_S * low}s unless charged\n")
         else:
+            # Log WHY we're not shutting down when a cell looked low — this is the
+            # smoking gun for the spurious-shutdown bug (an ignored misread).
+            if any(v < LOW_VOL for v in cell_mv):
+                why = ("inconsistent read" if not consistent
+                       else "on external power" if not on_battery
+                       else f"fuel gauge {percent}% not low")
+                sys.stderr.write(
+                    f"aeon-ups: ignoring low cell — {why} "
+                    f"(cells={cell_mv} pack={bat_mv}mV pct={percent}% on_battery={on_battery})\n")
             low = 0
 
         time.sleep(POLL_S)
