@@ -65,12 +65,14 @@
   }
 
   async function revoke(id: string, name: string) {
-    if (!(await confirmRite({
-      title: 'Revoke token',
-      body: `Revoke token "${name}"? Any agent using it will lose access immediately.`,
-      danger: true,
-      confirmLabel: 'revoke',
-    }))) {
+    if (
+      !(await confirmRite({
+        title: 'Revoke token',
+        body: `Revoke token "${name}"? Any agent using it will lose access immediately.`,
+        danger: true,
+        confirmLabel: 'revoke',
+      }))
+    ) {
       return;
     }
     try {
@@ -101,156 +103,153 @@
         return scope;
     }
   }
+
+  function scopePill(scope: string): string {
+    switch (scope) {
+      case 'admin':
+        return 'pill-warn';
+      case 'full':
+        return 'pill-net';
+      case 'macros':
+        return 'pill-live';
+      default:
+        return 'pill-idle';
+    }
+  }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="API tokens" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="API tokens" subtitle="keys for agents · REST · MCP" index="07" />
 
-  <main class="flex-1 overflow-auto">
-    <div class="p-6 max-w-4xl mx-auto w-full space-y-6">
-      <LockdownPanel />
-    <!-- New token creation -->
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
-      <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-        Issue a new token
-      </h2>
+  <main class="page-main flex-1 overflow-auto">
+    <p class="rite-lead">
+      Mint scoped keys for every agent. Name them after the agent that will hold them —
+      the audit log will thank you. Plaintext is shown <strong class="text-zinc-300">once</strong>.
+    </p>
 
-      <form on:submit|preventDefault={create} class="flex flex-col gap-3">
-        <div class="flex gap-3 flex-wrap">
-          <label class="flex-1 min-w-[200px]">
-            <span class="text-xs uppercase tracking-wider text-zinc-500">name</span>
-            <input
-              type="text"
-              bind:value={newName}
-              placeholder="e.g. claude-desktop, cron-bot"
-              class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-                     focus:outline-none focus:ring-2 focus:ring-cursed-500"
-            />
-          </label>
+    <LockdownPanel />
 
-          <label class="min-w-[160px]">
-            <span class="text-xs uppercase tracking-wider text-zinc-500">scope</span>
-            <select
-              bind:value={newScope}
-              class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-                     focus:outline-none focus:ring-2 focus:ring-cursed-500"
-            >
-              <option value="full">full</option>
-              <option value="macros">macros</option>
-              <option value="read">read</option>
-              <option value="admin">admin</option>
-            </select>
-          </label>
+    <section class="rack-section">
+      <div class="status-strip-cursed" aria-hidden="true"></div>
+      <div class="rack-section-head">
+        <h2 class="rack-title">Issue a key</h2>
+        <span class="rack-label">once · then gone</span>
+      </div>
+      <div class="rack-section-body">
+        <form on:submit|preventDefault={create} class="flex flex-col gap-3">
+          <div class="flex gap-3 flex-wrap">
+            <label class="flex-1 min-w-[200px]">
+              <span class="field-label">name</span>
+              <input
+                type="text"
+                bind:value={newName}
+                placeholder="e.g. claude-desktop, cron-bot"
+                class="field"
+              />
+            </label>
 
-          <button
-            type="submit"
-            disabled={creating || !newName.trim()}
-            class="btn-primary self-end disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {creating ? 'issuing…' : 'issue token'}
-          </button>
-        </div>
+            <label class="min-w-[160px]">
+              <span class="field-label">scope</span>
+              <select bind:value={newScope} class="field">
+                <option value="full">full</option>
+                <option value="macros">macros</option>
+                <option value="read">read</option>
+                <option value="admin">admin</option>
+              </select>
+            </label>
 
-        <p class="text-xs text-zinc-500">
-          <strong class="text-zinc-300">{newScope}</strong> —
-          {scopeDescription(newScope)}
-        </p>
-      </form>
-
-      {#if lastCreated}
-        <div class="bg-cursed-900/30 border border-cursed-500/40 rounded-md p-4 space-y-2">
-          <p class="text-xs uppercase tracking-wider text-cursed-300">
-            new token — shown once, copy it now
-          </p>
-          <div class="flex items-center gap-2">
-            <code
-              class="flex-1 font-mono text-sm break-all text-zinc-100 bg-ink-950 px-3 py-2 rounded"
-              >{lastCreated.token}</code
-            >
             <button
-              type="button"
-              on:click={copyToken}
-              class="btn whitespace-nowrap"
+              type="submit"
+              disabled={creating || !newName.trim()}
+              class="btn-primary self-end"
             >
-              {copied ? 'copied!' : 'copy'}
+              {creating ? 'issuing…' : 'issue token'}
             </button>
           </div>
-          <p class="text-xs text-zinc-400">
-            id: {lastCreated.id} · scope: {lastCreated.scope} · name: {lastCreated.name}
-          </p>
-          <p class="text-xs text-zinc-500">
-            Use as <code>Authorization: Bearer {lastCreated.token.slice(0, 18)}…</code>
-            or <code>X-Aeon-Token</code> header.
-          </p>
-        </div>
-      {/if}
-    </section>
 
-    <!-- Existing tokens -->
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
-      <div class="flex items-center justify-between">
-        <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
-          Active tokens
-        </h2>
-        <button class="btn text-xs" on:click={refresh}>refresh</button>
+          <p class="text-xs text-zinc-500 font-mono">
+            <span class="text-cursed-300">{newScope}</span>
+            — {scopeDescription(newScope)}
+          </p>
+        </form>
+
+        {#if lastCreated}
+          <div class="callout-info space-y-2 !p-4">
+            <p class="text-2xs uppercase tracking-instrument text-cursed-300">
+              new token — shown once · copy it now
+            </p>
+            <div class="flex items-center gap-2">
+              <code class="code-well flex-1">{lastCreated.token}</code>
+              <button type="button" on:click={copyToken} class="btn whitespace-nowrap">
+                {copied ? 'copied!' : 'copy'}
+              </button>
+            </div>
+            <p class="text-2xs text-zinc-500">
+              id: {lastCreated.id} · scope: {lastCreated.scope} · name: {lastCreated.name}
+            </p>
+            <p class="text-2xs text-zinc-600">
+              Use as <code class="text-zinc-400">Authorization: Bearer …</code>
+              or <code class="text-zinc-400">X-Aeon-Token</code>.
+            </p>
+          </div>
+        {/if}
       </div>
-
-      {#if loading}
-        <p class="text-zinc-500 text-sm">loading…</p>
-      {:else if error}
-        <p class="text-red-400 text-sm">{error}</p>
-      {:else if tokens.length === 0}
-        <p class="text-zinc-500 text-sm italic">no tokens issued yet.</p>
-      {:else}
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead class="text-xs uppercase text-zinc-500 tracking-wider">
-              <tr class="border-b border-ink-700">
-                <th class="text-left py-2 pr-3 font-normal">name</th>
-                <th class="text-left py-2 pr-3 font-normal">id</th>
-                <th class="text-left py-2 pr-3 font-normal">scope</th>
-                <th class="text-left py-2 pr-3 font-normal">created</th>
-                <th class="text-left py-2 pr-3 font-normal">last used</th>
-                <th class="py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each tokens as t (t.id)}
-                <tr class="border-b border-ink-800 hover:bg-ink-800/40">
-                  <td class="py-2 pr-3 font-mono">{t.name}</td>
-                  <td class="py-2 pr-3 font-mono text-xs text-zinc-500">{t.id}</td>
-                  <td class="py-2 pr-3 font-mono text-xs">
-                    <span class="px-2 py-0.5 rounded bg-ink-800 border border-ink-700">
-                      {t.scope}
-                    </span>
-                  </td>
-                  <td class="py-2 pr-3 text-xs text-zinc-400">{fmtTime(t.created_at_ms)}</td>
-                  <td class="py-2 pr-3 text-xs text-zinc-400">{fmtTime(t.last_used_at_ms)}</td>
-                  <td class="py-2 text-right">
-                    <button
-                      class="text-red-400 hover:text-red-300 text-xs"
-                      on:click={() => revoke(t.id, t.name)}>revoke</button
-                    >
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
     </section>
 
-    <section class="text-xs text-zinc-500 space-y-1">
-      <p>Scopes:</p>
-      <ul class="ml-4 list-disc space-y-1">
-        <li><strong>admin</strong> — everything including issuing new tokens and changing passwords</li>
-        <li><strong>full</strong> — all HID input, macros, snapshots; cannot manage tokens</li>
-        <li><strong>macros</strong> — run pre-stored macros + read snapshots; no raw HID</li>
-        <li><strong>read</strong> — read-only: state, snapshots, list macros/prompts</li>
-      </ul>
+    <section class="rack-section">
+      <div class="rack-section-head">
+        <h2 class="rack-title">Active tokens</h2>
+        <button class="btn btn-xs" on:click={refresh}>refresh</button>
+      </div>
+      <div class="rack-section-body !pt-0 !px-0 !pb-0">
+        {#if loading}
+          <p class="text-zinc-500 text-sm font-mono px-5 py-6">loading…</p>
+        {:else if error}
+          <p class="callout-fault m-4">{error}</p>
+        {:else if tokens.length === 0}
+          <div class="void-empty m-4">
+            <p class="void-empty-title">no keys issued</p>
+            <p class="void-empty-body">
+              Mint a token above, name it after the agent, and hand it the Bearer secret once.
+            </p>
+          </div>
+        {:else}
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="text-2xs uppercase text-zinc-500 tracking-instrument font-mono">
+                <tr class="border-b border-steel-700">
+                  <th class="text-left py-2.5 px-4 font-normal">name</th>
+                  <th class="text-left py-2.5 pr-3 font-normal">id</th>
+                  <th class="text-left py-2.5 pr-3 font-normal">scope</th>
+                  <th class="text-left py-2.5 pr-3 font-normal">created</th>
+                  <th class="text-left py-2.5 pr-3 font-normal">last used</th>
+                  <th class="py-2.5 px-4"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each tokens as t (t.id)}
+                  <tr class="rack-row">
+                    <td class="py-2.5 px-4 font-mono text-zinc-200">{t.name}</td>
+                    <td class="py-2.5 pr-3 font-mono text-2xs text-zinc-500">{t.id}</td>
+                    <td class="py-2.5 pr-3">
+                      <span class={scopePill(t.scope)}>{t.scope}</span>
+                    </td>
+                    <td class="py-2.5 pr-3 font-mono text-2xs text-zinc-500">{fmtTime(t.created_at_ms)}</td>
+                    <td class="py-2.5 pr-3 font-mono text-2xs text-zinc-500">{fmtTime(t.last_used_ms)}</td>
+                    <td class="py-2.5 px-4 text-right">
+                      <button class="btn-danger btn-xs" on:click={() => revoke(t.id, t.name)}>
+                        revoke
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
     </section>
 
     <TipJar />
-    </div>
   </main>
 </div>

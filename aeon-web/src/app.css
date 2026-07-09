@@ -2,16 +2,47 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * AEON MAGICK — design language
+ *
+ * "Ritual instrument": cold void chassis, hard edges, one cursed-violet sigil,
+ * mono telemetry. Brutalist / industrial — not neon cyberpunk wallpaper.
+ * Prefer these primitives over ad-hoc rounded-xl SaaS cards.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
 @layer base {
   html {
-    @apply selection:bg-cursed-500/40 selection:text-white;
+    @apply selection:bg-cursed-500/35 selection:text-white;
   }
+
+  body {
+    @apply bg-ink-950 text-zinc-200 antialiased;
+  }
+
+  /* Instrument inputs — hard wells, not soft fields */
+  input[type='text'],
+  input[type='password'],
+  input[type='email'],
+  input[type='number'],
+  input[type='search'],
+  input[type='url'],
+  input:not([type]),
+  textarea,
+  select {
+    @apply rounded-sm bg-ink-800 border border-steel-700 text-zinc-200
+           placeholder:text-zinc-600
+           focus:outline-none focus:border-cursed-500/60 focus:ring-1 focus:ring-cursed-500/40;
+  }
+
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-ink-600 rounded-full;
+    @apply bg-steel-600 rounded-none;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-steel-500;
   }
   ::-webkit-scrollbar-track {
     @apply bg-transparent;
@@ -19,56 +50,380 @@
 }
 
 @layer components {
+  /* ── Plates / rack modules ───────────────────────────────────────────── */
+  .panel {
+    @apply bg-ink-900 border border-steel-700 rounded-sm shadow-plate;
+  }
+  .panel-raised {
+    @apply panel border-steel-600;
+  }
+  .panel-cursed {
+    @apply bg-ink-900 border border-cursed-500/35 rounded-sm shadow-plate-cursed;
+  }
+  .panel-danger {
+    @apply bg-ink-900 border border-red-500/40 rounded-sm;
+  }
+  .panel-live {
+    @apply bg-ink-900 border border-live-500/30 rounded-sm;
+  }
+
+  /* L-bracket corners (pure CSS) — optional flavor on hero panels */
+  .panel-bracket {
+    @apply panel relative;
+  }
+  .panel-bracket::before,
+  .panel-bracket::after {
+    content: '';
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    border-color: rgb(139 92 246 / 0.45);
+    pointer-events: none;
+  }
+  .panel-bracket::before {
+    top: -1px;
+    left: -1px;
+    border-top: 1px solid;
+    border-left: 1px solid;
+  }
+  .panel-bracket::after {
+    bottom: -1px;
+    right: -1px;
+    border-bottom: 1px solid;
+    border-right: 1px solid;
+  }
+
+  /* Section title: mono index + label */
+  .rack-label {
+    @apply font-mono text-2xs uppercase tracking-instrument text-zinc-500;
+  }
+  .rack-title {
+    @apply font-mono text-sm uppercase tracking-wider text-zinc-200;
+  }
+  .rack-divider {
+    @apply h-px w-full bg-steel-700;
+  }
+
+  /* Status strip on top of a panel (1–2px) */
+  .status-strip {
+    @apply h-0.5 w-full bg-steel-600;
+  }
+  .status-strip-live {
+    @apply status-strip bg-live-500/70;
+  }
+  .status-strip-cursed {
+    @apply status-strip bg-cursed-500/60;
+  }
+  .status-strip-warn {
+    @apply status-strip bg-rail-500/70;
+  }
+  .status-strip-fault {
+    @apply status-strip bg-red-500/70;
+  }
+
+  /* ── Buttons ─────────────────────────────────────────────────────────── */
   .btn {
-    @apply inline-flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium
-           bg-ink-700 hover:bg-ink-600 active:bg-ink-800
-           border border-transparent hover:border-cursed-500/30
-           transition-colors motion-safe:transition-[transform,background-color,border-color]
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5
+           rounded-sm text-sm font-medium font-sans
+           bg-ink-800 text-zinc-200
+           border border-steel-600
+           hover:bg-ink-700 hover:border-steel-500 hover:text-white
+           active:bg-ink-900
+           transition-colors motion-safe:transition-[transform,background-color,border-color,color]
            motion-safe:duration-150 motion-safe:active:scale-[0.98]
-           focus:outline-none focus:ring-2 focus:ring-cursed-500 focus:ring-offset-2 focus:ring-offset-ink-900;
+           focus:outline-none focus:ring-1 focus:ring-cursed-500/50 focus:border-cursed-500/40
+           disabled:opacity-45 disabled:pointer-events-none;
   }
   .btn-primary {
-    @apply btn bg-cursed-600 hover:bg-cursed-500 active:bg-cursed-700 text-white
-           hover:shadow-[0_0_18px_-6px_rgb(139_92_246/0.55)];
+    @apply btn bg-cursed-600 border-cursed-500/80 text-white
+           hover:bg-cursed-500 hover:border-cursed-400 hover:text-white
+           active:bg-cursed-700
+           shadow-plate hover:shadow-glow-cursed;
   }
+  .btn-ghost {
+    @apply btn bg-transparent border-transparent text-zinc-400
+           hover:bg-ink-800 hover:border-steel-700 hover:text-zinc-200;
+  }
+  .btn-danger {
+    @apply btn border-red-500/40 text-red-300 bg-red-950/30
+           hover:bg-red-900/40 hover:border-red-400/50 hover:text-red-200;
+  }
+  .btn-armed {
+    @apply btn border-red-500/50 text-red-200 bg-red-950/40
+           motion-safe:animate-ember;
+  }
+  .btn-xs {
+    @apply px-2 py-0.5 text-xs font-mono tracking-wide;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1 text-xs;
+  }
+
+  /* ── Pills / status ──────────────────────────────────────────────────── */
   .pill {
-    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium;
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-2xs
+           font-mono uppercase tracking-wider font-medium border;
   }
   .pill-live {
-    @apply pill bg-live-500/20 text-live-400 border border-live-500/40;
+    @apply pill bg-live-500/10 text-live-400 border-live-500/35;
   }
   .pill-offline {
-    @apply pill bg-red-500/20 text-red-400 border border-red-500/40;
+    @apply pill bg-red-500/10 text-red-400 border-red-500/35;
   }
-  /* Network status pill — used on the main page header to surface VPN /
-     Tor / DNSCrypt state at a glance. Click-target back to /network. */
   .pill-net {
-    @apply pill bg-cursed-500/15 text-cursed-300 border border-cursed-500/40
-           font-mono uppercase tracking-wider hover:bg-cursed-500/25 transition;
+    @apply pill bg-cursed-500/10 text-cursed-300 border-cursed-500/35
+           hover:bg-cursed-500/20 transition;
+  }
+  .pill-idle {
+    @apply pill bg-ink-800 text-zinc-400 border-steel-700;
+  }
+  .pill-warn {
+    @apply pill bg-rail-500/10 text-rail-400 border-rail-500/35;
+  }
+
+  /* Phosphor status dot */
+  .dot {
+    @apply h-1.5 w-1.5 rounded-full shrink-0;
+  }
+  .dot-live {
+    @apply dot bg-live-400 shadow-[0_0_6px_rgb(52_211_153/0.7)];
+  }
+  .dot-off {
+    @apply dot bg-red-400/80;
+  }
+  .dot-cursed {
+    @apply dot bg-cursed-400 shadow-[0_0_6px_rgb(167_139_250/0.6)];
+  }
+
+  /* Form labels */
+  .field-label {
+    @apply block text-2xs uppercase tracking-instrument text-zinc-500 font-mono mb-1;
+  }
+  .field {
+    @apply w-full px-3 py-2 rounded-sm bg-ink-800 border border-steel-700
+           text-sm text-zinc-200 placeholder:text-zinc-600
+           focus:outline-none focus:border-cursed-500/60 focus:ring-1 focus:ring-cursed-500/40;
+  }
+
+  /* App chrome header (console + subpages) */
+  .chrome-header {
+    @apply border-b border-steel-700 bg-ink-900 shrink-0;
+  }
+
+  /* Dense table / list row */
+  .rack-row {
+    @apply border-b border-ink-800 last:border-0 hover:bg-ink-800/50 transition-colors;
+  }
+
+  /* Super-app module buttons (console toolbar) */
+  .app-module {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-mono
+           tracking-wide border transition-colors
+           focus:outline-none focus:ring-1 focus:ring-cursed-500/40;
+  }
+
+  /* ── Page shells ─────────────────────────────────────────────────────── */
+  .page-void {
+    @apply min-h-full bg-ink-950 text-zinc-200 relative;
+  }
+  .page-void::before {
+    content: '';
+    @apply pointer-events-none fixed inset-0 z-0;
+    background-image: theme('backgroundImage.void-radial'), theme('backgroundImage.void-grid');
+    background-size: auto, 28px 28px;
+    opacity: 0.55;
+    mask-image: radial-gradient(ellipse 90% 70% at 50% 20%, black 20%, transparent 75%);
+  }
+  .page-void > * {
+    @apply relative z-[1];
+  }
+
+  .page-main {
+    @apply max-w-4xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6;
+  }
+  .page-main-wide {
+    @apply max-w-6xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6;
+  }
+  .page-main-narrow {
+    @apply max-w-2xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6;
+  }
+
+  /* Hero blurb under headers */
+  .rite-lead {
+    @apply text-sm text-zinc-400 leading-relaxed font-sans max-w-2xl;
+  }
+  .rite-kicker {
+    @apply rack-label text-cursed-500/70 mb-1;
+  }
+
+  /* Module tile (hub grids) — add class `group` in markup for group-hover icons */
+  .module-tile {
+    @apply panel flex items-start gap-3 p-4 transition
+           hover:border-cursed-500/45 hover:shadow-plate-cursed
+           focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cursed-500/50;
+  }
+  .module-tile-live {
+    @apply module-tile border-live-500/35 bg-live-500/5 hover:border-live-500/55;
+  }
+  .module-icon {
+    @apply inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-sm
+           border border-cursed-500/30 bg-cursed-600/10 text-cursed-300 transition;
+  }
+  .group:hover .module-icon {
+    @apply border-cursed-400/50 bg-cursed-600/15;
+  }
+  .module-icon-live {
+    @apply module-icon border-live-500/30 bg-live-500/10 text-live-400;
+  }
+
+  /* Status indicator row (compact rack) */
+  .status-cell {
+    @apply flex items-center gap-2.5 rounded-sm border px-3 py-2 transition
+           border-steel-700 bg-ink-950/50 hover:border-steel-500;
+  }
+  .status-cell-on {
+    @apply status-cell border-live-500/35 bg-live-500/5 hover:border-live-500/55;
+  }
+
+  /* Telemetry / key-value instrument */
+  .telem-grid {
+    @apply grid grid-cols-2 sm:grid-cols-4 gap-px bg-steel-700/60 border border-steel-700 rounded-sm overflow-hidden;
+  }
+  .telem-cell {
+    @apply bg-ink-900 px-3 py-2.5;
+  }
+  .telem-key {
+    @apply block font-mono text-2xs uppercase tracking-instrument text-zinc-500 mb-0.5;
+  }
+  .telem-val {
+    @apply font-mono text-sm text-zinc-100 tabular-nums tracking-wide;
+  }
+  .telem-val-live {
+    @apply telem-val text-live-400;
+  }
+  .telem-val-cursed {
+    @apply telem-val text-cursed-300;
+  }
+  .telem-val-warn {
+    @apply telem-val text-rail-400;
+  }
+  .telem-val-fault {
+    @apply telem-val text-red-400;
+  }
+
+  /* Empty / idle state */
+  .void-empty {
+    @apply border border-dashed border-steel-700/80 bg-ink-950/40 rounded-sm
+           px-5 py-10 text-center space-y-2;
+  }
+  .void-empty-title {
+    @apply font-mono text-xs uppercase tracking-instrument text-zinc-500;
+  }
+  .void-empty-body {
+    @apply text-xs text-zinc-600 max-w-sm mx-auto leading-relaxed;
+  }
+
+  /* Alert / callout plates */
+  .callout {
+    @apply rounded-sm border px-3 py-2.5 text-xs font-mono leading-relaxed;
+  }
+  .callout-info {
+    @apply callout border-cursed-500/30 bg-cursed-900/20 text-cursed-200;
+  }
+  .callout-ok {
+    @apply callout border-live-500/30 bg-live-500/5 text-live-400;
+  }
+  .callout-warn {
+    @apply callout border-rail-500/35 bg-rail-500/5 text-rail-400;
+  }
+  .callout-fault {
+    @apply callout border-red-500/35 bg-red-950/30 text-red-300;
+  }
+
+  /* Segmented control / tab rail */
+  .seg-rail {
+    @apply inline-flex p-0.5 rounded-sm border border-steel-700 bg-ink-950 gap-0.5;
+  }
+  .seg-btn {
+    @apply px-3 py-1 rounded-sm text-2xs font-mono uppercase tracking-wider
+           text-zinc-500 border border-transparent
+           hover:text-zinc-300 transition-colors;
+  }
+  .seg-btn-on {
+    @apply seg-btn bg-ink-800 text-cursed-200 border-steel-600 shadow-plate;
+  }
+
+  /* Mono code well */
+  .code-well {
+    @apply font-mono text-sm break-all text-zinc-100 bg-ink-950 border border-steel-700
+           px-3 py-2 rounded-sm;
+  }
+
+  /* Section plate with strip */
+  .rack-section {
+    @apply panel overflow-hidden;
+  }
+  .rack-section-body {
+    @apply p-4 sm:p-5 space-y-4;
+  }
+  .rack-section-head {
+    @apply flex items-center justify-between gap-3 px-4 sm:px-5 py-2.5
+           border-b border-steel-700/80 bg-ink-950/40;
   }
 }
 
-/* ── Ambient frame glow ──────────────────────────────────────────────
- *
- * A pointer-events-none sibling of the video canvas whose inner glow
- * encodes who owns the keyboard right now: faint violet at rest, green
- * while streaming, red while input is captured, near-black when offline.
- * The captured pulse animates ONLY opacity — animating box-shadow would
- * repaint the full viewport every frame. That rule is load-bearing. */
+/* Living header sigil line */
+.chrome-sigil {
+  @apply relative h-0.5 w-full overflow-hidden bg-steel-700/40;
+}
+.chrome-sigil::after {
+  content: '';
+  @apply absolute inset-y-0 left-0 w-1/3 bg-sigil-fade;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .chrome-sigil::after {
+    animation: sigil-sweep 5s ease-in-out infinite;
+  }
+}
+
+/* Corner ticks for rite surfaces */
+.void-frame {
+  @apply pointer-events-none fixed inset-4 sm:inset-6 border border-steel-700/35 z-0;
+}
+.void-frame::before,
+.void-frame::after {
+  content: '';
+  @apply absolute w-3.5 h-3.5 border-cursed-500/45;
+}
+.void-frame::before {
+  @apply top-0 left-0 border-t border-l;
+}
+.void-frame::after {
+  @apply bottom-0 right-0 border-b border-r;
+}
+.void-frame-tr {
+  @apply absolute top-0 right-0 w-3.5 h-3.5 border-t border-r border-cursed-500/45;
+}
+.void-frame-bl {
+  @apply absolute bottom-0 left-0 w-3.5 h-3.5 border-b border-l border-cursed-500/45;
+}
+
+/* ── Ambient frame glow (stream viewport) ───────────────────────────────
+ * Pointer-events-none sibling of the video canvas. Animate opacity only. */
 .aeon-frame {
   box-shadow:
-    inset 0 0 0 1px rgb(139 92 246 / 0.10),
-    inset 0 0 90px -50px rgb(139 92 246 / 0.30);
-  opacity: 0.7;
+    inset 0 0 0 1px rgb(139 92 246 / 0.14),
+    inset 0 0 90px -50px rgb(139 92 246 / 0.28);
+  opacity: 0.75;
 }
 .aeon-frame-live {
   box-shadow:
-    inset 0 0 0 1px rgb(52 211 153 / 0.10),
-    inset 0 0 90px -55px rgb(52 211 153 / 0.22);
+    inset 0 0 0 1px rgb(52 211 153 / 0.12),
+    inset 0 0 90px -55px rgb(52 211 153 / 0.2);
 }
 .aeon-frame-captured {
   box-shadow:
-    inset 0 0 0 1px rgb(248 113 113 / 0.35),
+    inset 0 0 0 1px rgb(248 113 113 / 0.4),
     inset 0 0 110px -45px rgb(248 113 113 / 0.35);
   opacity: 1;
 }
@@ -81,12 +436,24 @@
   }
 }
 @keyframes aeon-frame-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.65; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
 }
 
-/* Faint CSS scanline static for the signal-lost veil. Pure CSS texture,
- * no assets. */
+/* Hard KVM bezel around the stream */
+.aeon-bezel {
+  @apply relative border border-steel-700 bg-black rounded-sm overflow-hidden;
+  box-shadow:
+    inset 0 0 0 1px rgb(0 0 0 / 0.8),
+    0 0 0 1px rgb(26 28 38 / 1);
+}
+
+/* Faint CSS scanline static for signal-lost veil */
 .aeon-static {
   background: repeating-linear-gradient(
     0deg,
@@ -95,12 +462,7 @@
   );
 }
 
-/* ── Boot ritual ─────────────────────────────────────────────────────
- *
- * Decorates the REAL auth-probe wait in +layout.svelte — never pads it.
- * The reduced-motion fallback is mandatory: .aeon-rite starts at
- * opacity 0, so without it those users would see a blank loading
- * screen. */
+/* ── Boot ritual ──────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: no-preference) {
   .aeon-summon {
     stroke-dasharray: 100;
@@ -108,69 +470,53 @@
     animation: aeon-summon 0.7s ease-out forwards;
   }
   @keyframes aeon-summon {
-    to { stroke-dashoffset: 0; }
+    to {
+      stroke-dashoffset: 0;
+    }
   }
   .aeon-rite {
     opacity: 0;
     animation: aeon-rite 0.4s ease-out forwards;
   }
   @keyframes aeon-rite {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .aeon-rite { opacity: 1; }
+  .aeon-rite {
+    opacity: 1;
+  }
 }
 
-/* ── The Ward ────────────────────────────────────────────────────────
- *
- * While input is captured the page chrome recedes — everything you do
- * now belongs to the target machine. Applied to header/footer ONLY:
- * filter creates a containing block + compositing layer, so it must
- * never wrap the video canvas. */
+/* ── The Ward (input captured → chrome recedes) ───────────────────────── */
 .aeon-wardable {
   @apply motion-safe:transition-[opacity,filter] motion-safe:duration-[400ms];
 }
 .aeon-warded {
-  opacity: 0.55;
-  filter: saturate(0.5);
+  opacity: 0.4;
+  filter: saturate(0.35);
 }
 
-/* ── Pseudo-fullscreen for iPhone Safari ─────────────────────────────
- *
- * The standards-compliant Element.requestFullscreen() doesn't work on
- * iPhone Safari (only for <video> elements via the legacy webkit API).
- * When the fullscreen function detects that, it sets the .aeon-pseudo-fs
- * class on the page root. This CSS makes the root fill the *dynamic*
- * viewport (100dvh — Safari's toolbar gets included or excluded as it
- * shows/hides), pins to the top of the page over everything else, and
- * eliminates body scroll so swipes don't bounce the page.
- *
- * Inside this mode the <header> is hidden (we already use the class:
- * binding on it), and the canvas + overlay buttons take over the whole
- * viewport — that's what makes it look like fullscreen.
- *
- * Real fullscreen (`requestFullscreen()`) hides the browser chrome
- * entirely on Android Chrome and iPad Safari, so this class is a no-op
- * there. */
+/* ── Pseudo-fullscreen (iPhone Safari) ────────────────────────────────── */
 .aeon-pseudo-fs {
   position: fixed !important;
   inset: 0 !important;
   width: 100vw !important;
-  height: 100dvh !important;       /* dynamic viewport — Safari-friendly */
+  height: 100dvh !important;
   z-index: 9999 !important;
-  background: rgb(10 10 11);
-  /* iOS bounce-scroll mitigation. The fullscreen view shouldn't scroll
-     vertically anyway, but iOS will try if the user swipes. */
+  background: rgb(6 6 10);
   overflow: hidden !important;
   overscroll-behavior: none;
-  /* Help iOS realize the keyboard input is in a stable layout context
-     so it does open the soft keyboard on focus. */
   -webkit-overflow-scrolling: auto;
 }
 .aeon-pseudo-fs body,
 body:has(.aeon-pseudo-fs) {
-  /* Prevent the body underneath from scrolling once we're fullscreened. */
   overflow: hidden;
 }

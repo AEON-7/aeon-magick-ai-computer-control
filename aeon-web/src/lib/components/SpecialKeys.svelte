@@ -65,7 +65,7 @@
 
   {#if open}
     <div class="absolute left-0 mt-1 z-40 w-[20rem] max-w-[92vw]
-                rounded-lg border border-ink-700 bg-ink-900/98 backdrop-blur-sm
+                panel/98 backdrop-blur-sm
                 shadow-xl shadow-black/40 p-3 space-y-2.5"
          role="menu">
       <p class="text-[10px] text-zinc-500 leading-snug">
@@ -77,7 +77,7 @@
       <div class="grid grid-cols-6 gap-1">
         {#each FN as f}
           <button class="px-1 py-1.5 rounded bg-ink-800 hover:bg-cursed-500/20 hover:text-cursed-200
-                         border border-ink-700 text-[11px] font-mono text-zinc-300 transition-colors"
+                         border border-steel-700 text-[11px] font-mono text-zinc-300 transition-colors"
                   on:click={() => send([f], f)}>{f}</button>
         {/each}
       </div>
@@ -85,7 +85,7 @@
       <div class="flex flex-wrap gap-1">
         {#each NAV as n}
           <button class="px-2 py-1.5 rounded bg-ink-800 hover:bg-cursed-500/20 hover:text-cursed-200
-                         border border-ink-700 text-[11px] text-zinc-300 transition-colors"
+                         border border-steel-700 text-[11px] text-zinc-300 transition-colors"
                   on:click={() => send(n.keys, n.label)}>{n.label}</button>
         {/each}
       </div>
@@ -94,7 +94,7 @@
         <div class="flex gap-1">
           {#each ARROWS as a}
             <button class="w-8 py-1.5 rounded bg-ink-800 hover:bg-cursed-500/20 hover:text-cursed-200
-                           border border-ink-700 text-sm text-zinc-300 transition-colors"
+                           border border-steel-700 text-sm text-zinc-300 transition-colors"
                     on:click={() => send(a.keys, a.label)}>{a.label}</button>
           {/each}
         </div>

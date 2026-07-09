@@ -145,7 +145,7 @@
   {#if err}<p class="text-xs text-red-400 font-mono">{err}</p>{/if}
 
   <!-- Storage shared with the network -->
-  <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+  <div class="panel p-4 space-y-3">
     <div class="flex items-center justify-between">
       <h2 class="font-mono text-cursed-300 text-sm">Storage shared with the network</h2>
       <span class="text-ink-300 text-sm font-mono">{storageGB} GB</span>
@@ -173,7 +173,7 @@
   </div>
 
   <!-- External USB/SSD storage -->
-  <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+  <div class="panel p-4 space-y-3">
     <div class="flex items-center justify-between">
       <h2 class="font-mono text-cursed-300 text-sm">External storage</h2>
       <button class="text-[11px] text-ink-400 hover:text-cursed-300 font-mono" on:click={loadDisks}>rescan</button>
@@ -192,7 +192,7 @@
     {:else}
       <div class="space-y-2">
         {#each disks as d (d.path)}
-          <div class="rounded border border-ink-700 bg-ink-950/40 p-2.5 space-y-2">
+          <div class="rounded border border-steel-700 bg-ink-950/40 p-2.5 space-y-2">
             <div class="flex items-center justify-between gap-2">
               <div class="min-w-0">
                 <div class="text-sm font-mono text-ink-100 truncate">{d.model || d.vendor || d.path} <span class="text-ink-500">· {(d.size_bytes / 1e9).toFixed(0)} GB</span></div>
@@ -223,7 +223,7 @@
                 <div class="rounded border border-amber-500/30 bg-amber-900/10 p-2 space-y-1.5">
                   <p class="text-[11px] text-amber-300/90 leading-snug">This <b>erases everything</b> on the drive and lays down a fresh <b>GPT + ext4</b> filesystem labelled <span class="font-mono text-amber-200">AEON-DATA</span> — the optimal layout for the Orb's store. Type <span class="font-mono text-amber-200">FORMAT</span> to confirm.</p>
                   <div class="flex gap-2">
-                    <input class="flex-1 min-w-0 bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100 text-xs font-mono tracking-widest"
+                    <input class="flex-1 min-w-0 bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100 text-xs font-mono tracking-widest"
                            placeholder="FORMAT" bind:value={prepArm[d.path]} />
                     <button class="shrink-0 font-mono text-xs px-3 py-1 rounded bg-red-700 hover:bg-red-600 text-white disabled:opacity-40"
                             on:click={() => prepareDisk(d.path)} disabled={prepArm[d.path] !== 'FORMAT' || !!diskBusy}>
@@ -240,7 +240,7 @@
   </div>
 
   <!-- Optional LAN NAS (Samba) -->
-  <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+  <div class="panel p-4 space-y-3">
     <div class="flex items-center justify-between">
       <h2 class="font-mono text-cursed-300 text-sm">LAN file sharing (NAS)</h2>
       <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded {nas?.running === 'active' ? 'bg-emerald-900/50 text-emerald-300' : 'bg-ink-800 text-ink-400'}">
@@ -261,7 +261,7 @@
     {:else}
       <div class="flex gap-2">
         <input type="password" autocomplete="new-password" placeholder="set a share password" bind:value={nasPw}
-               class="flex-1 min-w-0 bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100 text-sm" />
+               class="flex-1 min-w-0 bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100 text-sm" />
         <button class="shrink-0 font-mono text-xs px-3 py-1 rounded bg-cursed-700 hover:bg-cursed-600 text-white disabled:opacity-50"
                 on:click={enableNas} disabled={nasBusy || nasPw.length < 4}>Enable</button>
       </div>

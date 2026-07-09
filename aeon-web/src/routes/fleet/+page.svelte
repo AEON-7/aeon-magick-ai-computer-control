@@ -74,8 +74,8 @@
   $: orbs = roster ? [roster.self, ...roster.peers] : [];
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
+<div class="page-void min-h-screen">
+  <header class="flex items-center justify-between px-5 py-3 chrome-header">
     <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
     <h1 class="font-mono text-lg text-emerald-300 flex items-center gap-2">
       <Icon name="fleet" class="w-5 h-5" /> Fleet
@@ -87,10 +87,10 @@
     {#if loading}
       <p class="text-ink-400 text-sm font-mono">loading roster…</p>
     {:else if err}
-      <div class="rounded-lg border border-red-700 bg-red-900/20 p-4 text-red-300 text-sm font-mono">{err}</div>
+      <div class="rounded-sm border border-red-700 bg-red-900/20 p-4 text-red-300 text-sm font-mono">{err}</div>
     {:else if roster}
       {#if !roster.configured}
-        <div class="rounded-lg border border-amber-700/60 bg-amber-900/15 p-4 text-amber-200 text-sm leading-relaxed">
+        <div class="rounded-sm border border-amber-700/60 bg-amber-900/15 p-4 text-amber-200 text-sm leading-relaxed">
           This Orb isn't enrolled in a fleet yet. Add a shared <code class="font-mono">token</code> (the same value on
           every Orb) and peer <code class="font-mono">seeds</code> to <code class="font-mono">/etc/aeon/fleet.toml</code>,
           then it discovers the others. Only this Orb is shown until then.
@@ -104,7 +104,7 @@
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {#each orbs as o (o.id ?? o.addr)}
-          <div class="rounded-lg border bg-ink-900 p-4 {o.online ? 'border-ink-700' : 'border-ink-800 opacity-70'}">
+          <div class="rounded-sm border bg-ink-900 p-4 {o.online ? 'border-steel-700' : 'border-ink-800 opacity-70'}">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="h-2 w-2 rounded-full shrink-0 {o.online ? 'bg-emerald-400' : 'bg-red-500'}"></span>
@@ -150,14 +150,14 @@
         {/each}
       </div>
 
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+      <div class="panel p-4 space-y-3">
         <div class="font-mono text-sm text-ink-300">This Orb's fleet settings</div>
         <label class="block text-xs font-mono text-ink-400">
           label (what this Orb controls)
           <input
             bind:value={labelInput}
             placeholder="e.g. Pi5 CSI rig"
-            class="mt-1 w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-ink-100 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            class="mt-1 w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-ink-100 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
           />
         </label>
         <label class="block text-xs font-mono text-ink-400">
@@ -165,7 +165,7 @@
           <textarea
             bind:value={seedsInput}
             rows="3"
-            class="mt-1 w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-ink-100 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            class="mt-1 w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-ink-100 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500"
           ></textarea>
         </label>
         <label class="flex items-center gap-2 text-xs font-mono text-ink-400">

@@ -135,8 +135,8 @@
   });
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="disk drive" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="disk drive" subtitle="ISO library · virtual CD-ROM" index="11" />
 
   <main class="flex-1 overflow-auto p-6">
     <div class="max-w-3xl mx-auto space-y-6">
@@ -163,7 +163,7 @@
       </section>
 
       <!-- Currently active -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+      <section class="panel p-5 space-y-3">
         <header class="flex items-center justify-between">
           <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-400">
             Currently inserted
@@ -191,7 +191,7 @@
       </section>
 
       <!-- Upload -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+      <section class="panel p-5 space-y-3">
         <header class="flex items-center justify-between">
           <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-400">
             Upload an ISO
@@ -229,8 +229,8 @@
       </section>
 
       <!-- Library -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl">
-        <header class="px-5 py-3 border-b border-ink-700">
+      <section class="panel">
+        <header class="px-5 py-3 border-b border-steel-700">
           <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-400">
             Library
             {#if state}

@@ -60,6 +60,35 @@
     backspace: '<path d="M8 5h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-6-7 6-7z"/><path d="M12 10l4 4M16 10l-4 4"/>',
     esc: '<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
     tab: '<path d="M3 12h14"/><path d="M13 8l4 4-4 4"/><path d="M21 6v12"/>',
+
+    // ── OrbNet / privacy stack (line icons; communicate the protocol) ──
+    // Tor — onion layers (three concentric arcs around a core).
+    onion:
+      '<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="5.5"/><circle cx="12" cy="12" r="9"/>',
+    // IPFS — content-addressed cube (isometric box) with a content hash node.
+    ipfs:
+      '<path d="M12 3l7 4v10l-7 4-7-4V7l7-4z"/><path d="M12 3v18M5 7l7 4 7-4"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
+    // Mysterium dVPN — peer bandwidth (two endpoints + flowing path).
+    mysterium:
+      '<circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/><path d="M7.4 12h9.2"/><path d="M9.5 9.2c1.6 1.1 3.4 1.1 5 0M9.5 14.8c1.6-1.1 3.4-1.1 5 0"/>',
+    // Matrix homeserver / chat — room + message tail.
+    matrix:
+      '<path d="M5 5h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/><path d="M8 10h6M8 13h4"/>',
+    // Encrypted DNS — lock over a small resolver disc.
+    dns:
+      '<circle cx="12" cy="14" r="6"/><path d="M12 11v3l2 1.2"/><path d="M9 7V5.5a3 3 0 0 1 6 0V7"/><rect x="8" y="7" width="8" height="5" rx="1"/>',
+    // Tunnel / I2P — packet entering a tunnel mouth.
+    tunnel:
+      '<path d="M3 8h8a6 6 0 0 1 0 12H3"/><path d="M3 12h8"/><circle cx="18" cy="12" r="2"/><path d="M15.5 12H11"/>',
+    // Mesh / Tailscale — four peers linked.
+    mesh:
+      '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 6h8M6 8v8M18 8v8M8 18h8"/>',
+    // Model weights / library — stacked layers with a spark (weights file).
+    model:
+      '<path d="M4 7h16v3H4zM4 12h16v3H4zM4 17h16v3H4z"/><path d="M8 8.5h.01M8 13.5h.01M8 18.5h.01"/>',
+    // VPN tunnel shield variant already have shield; wire = link with keyhole.
+    vpn:
+      '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9.5 12.5 11 14l3.5-3.5"/>',
   };
   $: inner = P[name] ?? '';
 </script>

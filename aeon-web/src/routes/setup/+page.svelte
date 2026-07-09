@@ -32,10 +32,10 @@
   }
 </script>
 
-<div class="h-full flex items-center justify-center p-6">
+<div class="page-void h-full flex items-center justify-center p-6">
   <form
     on:submit|preventDefault={submit}
-    class="w-full max-w-md bg-ink-900 border border-ink-700 rounded-2xl p-8 space-y-5"
+    class="w-full max-w-md panel p-8 space-y-5"
   >
     <header class="space-y-1">
       <h1 class="text-cursed-400 font-mono text-lg tracking-widest">
@@ -54,8 +54,8 @@
         type="text"
         bind:value={username}
         autocomplete="username"
-        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-               focus:outline-none focus:ring-2 focus:ring-cursed-500"
+        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-steel-700
+               focus:outline-none focus:ring-1 focus:ring-cursed-500/50"
       />
     </label>
 
@@ -65,8 +65,8 @@
         type="password"
         bind:value={password}
         autocomplete="new-password"
-        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-               focus:outline-none focus:ring-2 focus:ring-cursed-500"
+        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-steel-700
+               focus:outline-none focus:ring-1 focus:ring-cursed-500/50"
       />
       {#if tooShort}
         <span class="text-xs text-amber-400 mt-1 block">at least 8 characters</span>
@@ -79,8 +79,8 @@
         type="password"
         bind:value={confirm}
         autocomplete="new-password"
-        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-               focus:outline-none focus:ring-2 focus:ring-cursed-500"
+        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-steel-700
+               focus:outline-none focus:ring-1 focus:ring-cursed-500/50"
       />
       {#if mismatch}
         <span class="text-xs text-red-400 mt-1 block">passwords don't match</span>

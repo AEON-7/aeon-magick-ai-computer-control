@@ -15,9 +15,9 @@
     error: 'border-red-500/50 text-red-200',
   };
   const DOT: Record<ToastKind, string> = {
-    info: 'bg-cursed-400',
-    success: 'bg-live-400',
-    error: 'bg-red-400',
+    info: 'dot-cursed',
+    success: 'dot-live',
+    error: 'dot-off',
   };
 </script>
 
@@ -26,8 +26,8 @@
        role="status" aria-live="polite">
     {#each $toasts as t (t.id)}
       <button
-        class="pointer-events-auto flex items-start gap-2.5 px-3.5 py-2.5 rounded-lg
-               bg-ink-900/90 backdrop-blur-md border shadow-xl text-left
+        class="pointer-events-auto flex items-start gap-2.5 px-3 py-2 rounded-sm
+               bg-ink-900/95 border shadow-plate text-left
                font-mono text-xs leading-relaxed {STYLE[t.kind]}"
         in:fly={{ y: -6, duration: reduceMotion ? 0 : 150 }}
         on:click={() => dismiss(t.id)}
@@ -36,7 +36,7 @@
         {#if t.kind === 'error'}
           <OrbMark mode="offline" class="w-3.5 h-3.5 mt-0.5" />
         {:else}
-          <span class="h-1.5 w-1.5 rounded-full mt-1.5 shrink-0 {DOT[t.kind]}"></span>
+          <span class="mt-1.5 shrink-0 {DOT[t.kind]}"></span>
         {/if}
         <span class="whitespace-pre-line break-words min-w-0">{t.message}</span>
       </button>

@@ -216,7 +216,7 @@
   <!-- Add-rule form. The id is the deep-link anchor target for
        "allow this traffic" buttons on the /security page. -->
   <section id="fw-add-rule"
-           class="border rounded-lg p-4 space-y-3 transition-colors duration-500
+           class="border rounded-sm p-4 space-y-3 transition-colors duration-500
                   {prefilledFromUrl
                     ? 'bg-live-500/10 border-live-500/40 shadow-[0_0_18px_rgba(110,231,183,0.18)]'
                     : 'bg-ink-950/40 border-ink-800'}">
@@ -232,7 +232,7 @@
       <label class="space-y-1">
         <span class="text-zinc-500">Chain</span>
         <select bind:value={newRule.chain}
-                class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200">
+                class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200">
           {#each CHAIN_ORDER as c}
             <option value={c}>{c}</option>
           {/each}
@@ -241,7 +241,7 @@
       <label class="space-y-1">
         <span class="text-zinc-500">Table</span>
         <select bind:value={newRule.table}
-                class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200">
+                class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200">
           <option value="filter">filter</option>
           <option value="nat">nat</option>
           <option value="mangle">mangle</option>
@@ -250,7 +250,7 @@
       <label class="space-y-1">
         <span class="text-zinc-500">Protocol</span>
         <select bind:value={newRule.proto}
-                class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200">
+                class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200">
           <option value="tcp">tcp</option>
           <option value="udp">udp</option>
           <option value="icmp">icmp</option>
@@ -267,7 +267,7 @@
                     ? 'REJECT: send an explicit "no" back (ICMP port-unreachable for UDP, TCP RST for TCP). Best for OUTBOUND blocks against your trusted clients — they fail-fast and try the next thing.'
                   : 'Pick the action this rule should take.'
                 }
-                class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200">
+                class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200">
           <option value="ACCEPT">ACCEPT</option>
           <option value="DROP">DROP — silent (inbound stealth)</option>
           <option value="REJECT">REJECT — explicit fail (client-facing)</option>
@@ -300,7 +300,7 @@
       <label class="space-y-1">
         <span class="text-zinc-500">In iface ({newRule.chain === 'OUTPUT' || newRule.chain === 'POSTROUTING' ? '-o' : '-i'} e.g. usb0)</span>
         <input type="text" bind:value={newRule.interface} placeholder="any"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
       </label>
       {#if newRule.chain === 'FORWARD'}
         <!-- FORWARD chains have both an input and output interface match;
@@ -311,33 +311,33 @@
         <label class="space-y-1">
           <span class="text-zinc-500">Out iface (-o e.g. eth0)</span>
           <input type="text" bind:value={newRule.out_iface} placeholder="any"
-                 class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+                 class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
         </label>
       {/if}
       <label class="space-y-1">
         <span class="text-zinc-500">Source IP/subnet</span>
         <input type="text" bind:value={newRule.src} placeholder="any"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
       </label>
       <label class="space-y-1">
         <span class="text-zinc-500">Dest IP/subnet</span>
         <input type="text" bind:value={newRule.dst} placeholder="any"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
       </label>
       <label class="space-y-1">
         <span class="text-zinc-500">Source port(s)</span>
         <input type="text" bind:value={newRule.sport} placeholder="any"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
       </label>
       <label class="space-y-1">
         <span class="text-zinc-500">Dest port(s)</span>
         <input type="text" bind:value={newRule.dport} placeholder="e.g. 443 or 80:443"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
       </label>
       <label class="col-span-2 sm:col-span-4 space-y-1">
         <span class="text-zinc-500">Comment (shown in rule list)</span>
         <input type="text" bind:value={newRule.comment} placeholder="why does this rule exist?"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
       </label>
     </div>
     <button class="btn-primary text-xs" on:click={addRule} disabled={savingNew}>
@@ -535,7 +535,7 @@
               </p>
             </div>
           {:else if aeonTotal === 0}
-            <div class="p-3 rounded bg-zinc-700/30 border border-ink-700
+            <div class="p-3 rounded bg-zinc-700/30 border border-steel-700
                         text-xs text-zinc-400 space-y-1">
               <p><strong>No aeon-tagged rules installed.</strong></p>
               <p class="text-zinc-500">

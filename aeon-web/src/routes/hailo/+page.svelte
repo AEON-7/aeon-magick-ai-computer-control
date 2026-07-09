@@ -187,8 +187,8 @@
   $: consumers = status?.consumers ?? [];
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
+<div class="page-void min-h-screen">
+  <header class="flex items-center justify-between px-5 py-3 chrome-header">
     <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
     <h1 class="font-mono text-lg text-orange-300 inline-flex items-center gap-2">
       <Icon name="spark" class="w-5 h-5 text-orange-300" /> Hailo AI
@@ -198,7 +198,7 @@
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-5">
     {#if loadErr}
-      <div class="rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">
+      <div class="rounded-sm border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">
         {loadErr}
       </div>
     {/if}
@@ -210,7 +210,7 @@
 
     {:else if !status.device_present}
       <!-- ── State (a): no HAT over PCIe ──────────────────────────────── -->
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-8 text-center space-y-3">
+      <div class="panel p-8 text-center space-y-3">
         <div class="flex justify-center text-ink-600">
           <Icon name="spark" class="w-10 h-10" />
         </div>
@@ -224,7 +224,7 @@
 
     {:else if !status.installed}
       <!-- ── State (b): HAT present, packages not installed ───────────── -->
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-5 space-y-4">
+      <div class="panel p-5 space-y-4">
         <div class="flex items-center justify-between gap-3">
           <div class="flex items-center gap-3 min-w-0">
             <div class="text-orange-300 shrink-0">
@@ -285,7 +285,7 @@
       <!-- ── State (c): installed — stats + model library ─────────────── -->
 
       <!-- STATS panel -->
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-5 space-y-4">
+      <div class="panel p-5 space-y-4">
         <div class="flex items-center justify-between">
           <div class="font-mono text-orange-200 inline-flex items-center gap-2">
             <Icon name="spark" class="w-4 h-4 text-orange-300" />
@@ -297,21 +297,21 @@
               <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span> online
             </span>
           {:else}
-            <span class="pill bg-ink-800 text-ink-400 border border-ink-700">idle</span>
+            <span class="pill bg-ink-800 text-ink-400 border border-steel-700">idle</span>
           {/if}
         </div>
 
         {#if status.stats}
           <div class="grid grid-cols-3 gap-3">
-            <div class="rounded-lg bg-ink-950 border border-ink-800 p-3">
+            <div class="rounded-sm bg-ink-950 border border-ink-800 p-3">
               <div class="text-[10px] uppercase tracking-wider text-ink-500">NPU util</div>
               <div class="font-mono text-xl text-orange-200">{status.stats.nnc_util_pct}<span class="text-sm text-ink-500">%</span></div>
             </div>
-            <div class="rounded-lg bg-ink-950 border border-ink-800 p-3">
+            <div class="rounded-sm bg-ink-950 border border-ink-800 p-3">
               <div class="text-[10px] uppercase tracking-wider text-ink-500">Temp</div>
               <div class="font-mono text-xl text-orange-200">{status.stats.temp_c}<span class="text-sm text-ink-500">°C</span></div>
             </div>
-            <div class="rounded-lg bg-ink-950 border border-ink-800 p-3">
+            <div class="rounded-sm bg-ink-950 border border-ink-800 p-3">
               <div class="text-[10px] uppercase tracking-wider text-ink-500">Power</div>
               <div class="font-mono text-xl text-orange-200">{status.stats.power_w}<span class="text-sm text-ink-500">W</span></div>
             </div>
@@ -360,8 +360,8 @@
               {@const isDeployed = m.state === 'deployed'}
               {@const isBusy = m.state === 'downloading' || deployingId === m.id || unloadingId === m.id}
               {@const blocked = !m.fits && m.state === 'available'}
-              <div class="rounded-lg border bg-ink-900 p-3.5 flex flex-col gap-2 transition
-                          {isLoaded ? 'border-live-500/40' : 'border-ink-700'}
+              <div class="rounded-sm border bg-ink-900 p-3.5 flex flex-col gap-2 transition
+                          {isLoaded ? 'border-live-500/40' : 'border-steel-700'}
                           {blocked ? 'opacity-50' : ''}">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
@@ -374,7 +374,7 @@
                     {isLoaded ? 'bg-live-500/20 text-live-400 border border-live-500/40'
                     : isDeployed ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/40'
                     : m.state === 'downloading' ? 'bg-orange-500/15 text-orange-300 border border-orange-500/40'
-                    : 'bg-ink-800 text-ink-400 border border-ink-700'}">
+                    : 'bg-ink-800 text-ink-400 border border-steel-700'}">
                     {m.state}
                   </span>
                 </div>

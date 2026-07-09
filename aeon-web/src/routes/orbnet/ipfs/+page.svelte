@@ -280,8 +280,8 @@
   onDestroy(() => clearInterval(poll));
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <PageHeader title="IPFS" backHref="/orbnet" backLabel="ORBNET" />
+<div class="page-void min-h-screen">
+  <PageHeader title="IPFS" subtitle="content-addressed · peers · pins" backHref="/orbnet" backLabel="ORBNET" index="03.2" />
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-6">
     <p class="text-ink-300 text-sm leading-relaxed">
@@ -321,7 +321,7 @@
     </div>
 
     {#if status?.daemon === 'active'}
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 flex gap-4 items-center">
+      <div class="panel p-4 flex gap-4 items-center">
         <div class="bg-white p-1 rounded shrink-0 w-32 h-32 flex items-center justify-center [&_svg]:w-full [&_svg]:h-full">{@html qrSvg}</div>
         <div class="text-sm space-y-1 min-w-0">
           <div class="font-mono text-cursed-300">Your IPFS gateway</div>
@@ -340,10 +340,10 @@
       <!-- Storage allocation + external drives + NAS (shared with Model Share). -->
       <StorageManager />
 
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+      <div class="panel p-4 space-y-3">
         <h2 class="font-mono text-cursed-300 text-sm">Pin content (host a CID)</h2>
         <div class="flex gap-2">
-          <input class="flex-1 bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100 text-sm font-mono" bind:value={cid} placeholder="Qm… or bafy… CID" />
+          <input class="flex-1 bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100 text-sm font-mono" bind:value={cid} placeholder="Qm… or bafy… CID" />
           <button class="font-mono text-sm px-3 py-1 rounded bg-cursed-700 hover:bg-cursed-600 text-white disabled:opacity-50" on:click={pin} disabled={!!busy}>Pin</button>
         </div>
         {#if pins.length}
@@ -364,12 +364,12 @@
       </div>
 
       <!-- ── AI models shared from this Orb ─────────────────────────────── -->
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+      <div class="panel p-4 space-y-3">
         <div class="flex items-center justify-between gap-2 flex-wrap">
           <h2 class="font-mono text-cursed-300 text-sm">AI models — shared from this Orb</h2>
           <div class="flex items-center gap-2">
             <select bind:value={shareKind}
-                    class="bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100 text-xs font-mono">
+                    class="bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100 text-xs font-mono">
               <option value="llm">llm</option>
               <option value="vlm">vlm</option>
               <option value="vision">vision</option>
@@ -382,7 +382,7 @@
             <input type="file" bind:this={fileInput} class="hidden" on:change={onModelFile} />
           </div>
         </div>
-        <input class="w-full bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100 text-xs font-mono"
+        <input class="w-full bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100 text-xs font-mono"
                bind:value={shareDesc} placeholder="optional description (e.g. Qwen3-VL 8B, int4, GUI grounding)" />
 
         {#if uploadPct >= 0}
@@ -443,7 +443,7 @@
       </div>
 
       <!-- ── Federated fleet model index ────────────────────────────────── -->
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+      <div class="panel p-4 space-y-3">
         <h2 class="font-mono text-cursed-300 text-sm">Fleet model index</h2>
         {#if fleetIndex.length}
           <div class="divide-y divide-ink-800">

@@ -396,8 +396,8 @@
   $: homeserver = status?.onion ? 'https://' + status.onion + ':8448' : '';
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="OrbNet chat" backHref="/orbnet" backLabel="ORBNET">
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="OrbNet chat" subtitle="Matrix · Conduit · onion" backHref="/orbnet" backLabel="ORBNET" index="03.1">
     {#if status?.enabled}
       <button class="text-[11px] font-mono text-red-300/80 hover:text-red-300" on:click={deactivate}>take offline ✕</button>
     {/if}

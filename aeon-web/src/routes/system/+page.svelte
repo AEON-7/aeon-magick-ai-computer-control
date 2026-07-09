@@ -389,19 +389,19 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="Pi system" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="Pi system" subtitle="health · streamer · power · backup" index="08" />
 
   <main class="flex-1 overflow-auto">
-    <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
+    <div class="page-main-narrow">
 
-      {#if loading}<p class="text-zinc-500 text-sm">loading…</p>{/if}
-      {#if error}<p class="text-red-400 text-sm">{error}</p>{/if}
-      {#if msg}<p class="text-live-400 text-sm">{msg}</p>{/if}
+      {#if loading}<p class="text-zinc-500 text-sm font-mono">loading…</p>{/if}
+      {#if error}<p class="callout-fault">{error}</p>{/if}
+      {#if msg}<p class="callout-ok">{msg}</p>{/if}
 
       <!-- ─── New Orb image available ─── -->
       {#if img?.update_available}
-        <section class="rounded-xl border border-amber-500/50 bg-amber-500/10 p-5 space-y-3">
+        <section class="rounded-sm border border-amber-500/50 bg-amber-500/10 p-5 space-y-3">
           <div class="flex items-start gap-3">
             <span class="text-2xl leading-none" aria-hidden="true">✨</span>
             <div class="space-y-1">
@@ -432,7 +432,7 @@
 
       <!-- ─── Health ─── -->
       {#if info}
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <header class="space-y-1">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Health
@@ -449,35 +449,34 @@
             </p>
           </header>
 
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div class="p-3 rounded bg-ink-950/40 border border-ink-800">
-              <p class="text-[10px] uppercase tracking-wider text-zinc-500">uptime</p>
-              <p class="font-mono text-base text-zinc-200 mt-1">{fmtUptime(info.uptime_seconds)}</p>
+          <div class="telem-grid">
+            <div class="telem-cell">
+              <span class="telem-key">uptime</span>
+              <span class="telem-val">{fmtUptime(info.uptime_seconds)}</span>
             </div>
-            <div class="p-3 rounded bg-ink-950/40 border border-ink-800">
-              <p class="text-[10px] uppercase tracking-wider text-zinc-500">cpu temp</p>
-              <p class="font-mono text-base mt-1
-                        {info.cpu_temp_c >= 80 ? 'text-red-400' :
-                         info.cpu_temp_c >= 70 ? 'text-amber-400' :
-                         'text-live-300'}">
+            <div class="telem-cell">
+              <span class="telem-key">cpu temp</span>
+              <span
+                class={info.cpu_temp_c >= 80
+                  ? 'telem-val-fault'
+                  : info.cpu_temp_c >= 70
+                    ? 'telem-val-warn'
+                    : 'telem-val-live'}
+              >
                 {info.cpu_temp_c.toFixed(1)}°C
-              </p>
+              </span>
             </div>
-            <div class="p-3 rounded bg-ink-950/40 border border-ink-800">
-              <p class="text-[10px] uppercase tracking-wider text-zinc-500">load (1m / 5m / 15m)</p>
-              <p class="font-mono text-base text-zinc-200 mt-1">
+            <div class="telem-cell">
+              <span class="telem-key">load 1 / 5 / 15</span>
+              <span class="telem-val">
                 {info.loadavg['1m'].toFixed(2)} / {info.loadavg['5m'].toFixed(2)} / {info.loadavg['15m'].toFixed(2)}
-              </p>
-              <p class="text-[10px] text-zinc-600 mt-0.5">cores: {info.cpu_count}</p>
+              </span>
+              <p class="text-2xs text-zinc-600 mt-0.5 font-mono">{info.cpu_count} cores</p>
             </div>
-            <div class="p-3 rounded bg-ink-950/40 border border-ink-800">
-              <p class="text-[10px] uppercase tracking-wider text-zinc-500">memory</p>
-              <p class="font-mono text-base text-zinc-200 mt-1">
-                {fmtBytesKB(info.mem_available_kb)}
-              </p>
-              <p class="text-[10px] text-zinc-600 mt-0.5">
-                of {fmtBytesKB(info.mem_total_kb)} avail
-              </p>
+            <div class="telem-cell">
+              <span class="telem-key">memory free</span>
+              <span class="telem-val">{fmtBytesKB(info.mem_available_kb)}</span>
+              <p class="text-2xs text-zinc-600 mt-0.5 font-mono">of {fmtBytesKB(info.mem_total_kb)}</p>
             </div>
           </div>
         </section>
@@ -485,7 +484,7 @@
 
       <!-- ─── System update (OS packages) — Pi appliance only, not the container ─── -->
       {#if !$serverMode}
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+      <section class="panel p-5 space-y-4">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             System update
@@ -577,7 +576,7 @@
 
       <!-- ─── Stream tuning (v63) ─── -->
       {#if streamerCfg}
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+        <section class="panel p-5 space-y-4">
           <header class="space-y-1">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Stream tuning
@@ -720,7 +719,7 @@
       {/if}
 
       <!-- ─── Configuration backup ─── -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+      <section class="panel p-5 space-y-4">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Configuration backup
@@ -781,7 +780,7 @@
       </section>
 
       <!-- ─── Pi maintenance ─── -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+      <section class="panel p-5 space-y-3">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Pi maintenance
@@ -825,7 +824,7 @@
   {#if showUpgrade}
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
          role="presentation" on:click|self={() => (showUpgrade = false)}>
-      <div class="w-full max-w-md rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-4 shadow-2xl">
+      <div class="w-full max-w-md panel p-5 space-y-4 shadow-2xl">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-amber-200">
             Get {img?.latest_name ?? 'the new image'}
@@ -856,7 +855,7 @@
             </button>
           </div>
         {:else}
-          <div class="rounded-lg border border-live-600/30 bg-live-500/5 p-3">
+          <div class="rounded-sm border border-live-600/30 bg-live-500/5 p-3">
             <p class="text-sm text-live-300 font-mono">{upgradeMsg}</p>
           </div>
           <p class="text-xs text-zinc-500 leading-relaxed">

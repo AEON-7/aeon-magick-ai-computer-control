@@ -116,7 +116,7 @@
       case 'id_eeprom': return 'bg-sky-500/15 border-sky-500/40 text-sky-300';
       default:
         if (p.active) return 'bg-cursed-500/25 border-cursed-400/70 text-cursed-100 ring-1 ring-cursed-500/40';
-        return 'bg-ink-800 border-ink-700 text-zinc-400 hover:border-ink-600';
+        return 'bg-ink-800 border-steel-700 text-zinc-400 hover:border-steel-600';
     }
   }
   function dirGlyph(p: Pin): string {
@@ -188,40 +188,40 @@
   $: if (detailHat && !stack.find((h) => h.id === detailHat.id)) detailHat = null;
 </script>
 
-<div class="h-full flex flex-col bg-ink-950">
-  <PageHeader title="GPIO / Hardware">
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="GPIO / Hardware" subtitle="buses · pins · cameras" index="15">
     {#if state}<span class="text-[11px] font-mono text-zinc-500 truncate max-w-[40vw]">{state.model}</span>{/if}
   </PageHeader>
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-5xl mx-auto w-full space-y-6">
-      {#if error}<div class="bg-red-900/20 border border-red-500/40 rounded-xl p-4 text-red-300 text-sm font-mono">{error}</div>{/if}
+      {#if error}<div class="bg-red-900/20 border border-red-500/40 rounded-sm p-4 text-red-300 text-sm font-mono">{error}</div>{/if}
       {#if loading && !state}<p class="text-zinc-500 text-sm">reading hardware…</p>{/if}
 
       {#if state}
         <!-- Board + power summary -->
         <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+          <div class="panel p-4">
             <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">CPU temp</div>
             <div class="text-2xl font-mono text-zinc-100">{pw.temp_c}<span class="text-sm text-zinc-500">°C</span></div>
           </div>
-          <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+          <div class="panel p-4">
             <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Core voltage</div>
             <div class="text-2xl font-mono text-zinc-100">{pw.core_volts}<span class="text-sm text-zinc-500">V</span></div>
           </div>
-          <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+          <div class="panel p-4">
             <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Power</div>
             {#if pw.healthy}<div class="text-lg font-mono text-live-400">● healthy</div>
             {:else}<div class="text-lg font-mono text-red-400">⚠ {pw.undervolt_now ? 'undervolt' : pw.throttled_now ? 'throttled' : 'fault'}</div>{/if}
           </div>
-          <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+          <div class="panel p-4">
             <div class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Active GPIO</div>
             <div class="text-2xl font-mono text-cursed-300">{activeCount}<span class="text-sm text-zinc-500">/26</span></div>
           </div>
         </section>
 
         <!-- HAT detection + stack planner -->
-        <section class="bg-ink-900 border {hat.present ? 'border-cursed-500/30' : 'border-ink-700'} rounded-xl p-5 space-y-3">
+        <section class="bg-ink-900 border {hat.present ? 'border-cursed-500/30' : 'border-steel-700'} rounded-sm p-5 space-y-3">
           <div class="flex items-start justify-between gap-3">
             <div>
               <h2 class="font-mono text-sm uppercase tracking-wider text-cursed-300">🎩 HAT &amp; stack planner</h2>
@@ -277,7 +277,7 @@
           {#if showBrowser}
             <div class="space-y-2 pt-2 border-t border-ink-800">
               <input bind:value={hatSearch} placeholder="search {hatLibrary.length} HATs by name, maker, or type (motor, rtc, adc, lora…)" autocomplete="off"
-                     class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                     class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
               {#if hatMatches.length}
                 <div class="max-h-56 overflow-y-auto space-y-1">
                   {#each hatMatches as h}
@@ -351,7 +351,7 @@
         </section>
 
         <!-- GPIO header schematic -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+        <section class="panel p-5 space-y-4">
           <div class="flex items-center justify-between flex-wrap gap-2">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">40-pin header (J8)</h2>
             <div class="flex items-center gap-3 text-[10px] font-mono text-zinc-500">
@@ -393,7 +393,7 @@
           </div>
 
           {#if selected}
-            <div class="border-t border-ink-700 pt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs font-mono">
+            <div class="border-t border-steel-700 pt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs font-mono">
               <span class="text-cursed-300">pin {selected.physical} · {selected.name}</span>
               {#if selected.bcm !== undefined}
                 <span class="text-zinc-400">BCM{selected.bcm}</span>
@@ -405,13 +405,13 @@
               {#if selected.bus}<span class="text-zinc-500">{selected.bus}</span>{/if}
             </div>
           {:else}
-            <p class="border-t border-ink-700 pt-3 text-[11px] text-zinc-600">Click a pin for its live state + how each stacked HAT uses it. ⚠ = a collision. Pin control + I2C/SPI arrive with v97.</p>
+            <p class="border-t border-steel-700 pt-3 text-[11px] text-zinc-600">Click a pin for its live state + how each stacked HAT uses it. ⚠ = a collision. Pin control + I2C/SPI arrive with v97.</p>
           {/if}
         </section>
 
         <!-- IO + buses -->
         <div class="grid md:grid-cols-2 gap-6">
-          <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+          <section class="panel p-5 space-y-3">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">IO &amp; network</h2>
             <div class="space-y-1.5">
               {#each io.interfaces ?? [] as iface}
@@ -431,7 +431,7 @@
             {/if}
           </section>
 
-          <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+          <section class="panel p-5 space-y-3">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Buses &amp; camera</h2>
             <div class="space-y-1.5 text-xs font-mono">
               <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {buses.i2c?.enabled ? 'bg-live-400' : 'bg-zinc-600'}"></span><span class="text-zinc-300 w-12">I2C</span><span class="text-zinc-500">{buses.i2c?.enabled ? (buses.i2c.devices ?? []).join(', ') : 'disabled (v97 — needs reboot)'}</span></div>

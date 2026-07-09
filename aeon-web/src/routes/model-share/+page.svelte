@@ -646,8 +646,8 @@
   onDestroy(() => clearTimeout(poll));
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
+<div class="page-void min-h-screen">
+  <header class="flex items-center justify-between px-5 py-3 chrome-header">
     <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
     <h1 class="font-mono text-lg text-cursed-300 flex items-center gap-2"><Icon name="aether" class="w-5 h-5" /> Intergalactic <span class="text-ink-400">Model Share</span></h1>
     <div class="w-28 text-right">
@@ -673,7 +673,7 @@
     </p>
 
     {#if karma && (karma.served_bytes > 0 || karma.downloaded_bytes > 0)}
-      <div class="rounded-lg border border-ink-700 bg-ink-900 px-4 py-3 flex items-center gap-4 flex-wrap">
+      <div class="panel px-4 py-3 flex items-center gap-4 flex-wrap">
         <div class="flex items-center gap-2 shrink-0">
           <span class="text-lg">☯</span>
           <div>
@@ -704,7 +704,7 @@
     {/if}
 
     <!-- IPFS node status + on/off toggle -->
-    <div class="rounded-lg border border-ink-700 bg-ink-900 p-3 flex items-center gap-3 flex-wrap">
+    <div class="panel p-3 flex items-center gap-3 flex-wrap">
       <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-1 rounded {node?.daemon === 'active' ? 'bg-emerald-900/50 text-emerald-300' : node?.daemon === 'failed' ? 'bg-red-900/50 text-red-300' : node?.enabled ? 'bg-amber-900/50 text-amber-300' : 'bg-ink-800 text-ink-400'}">
         {node?.daemon === 'active' ? 'IPFS running' : node?.daemon === 'failed' ? 'IPFS failed' : node?.enabled ? 'IPFS starting' : 'IPFS off'}
       </span>
@@ -726,7 +726,7 @@
     {#if node?.enabled}
       <!-- Storage allocation, external drives + LAN sharing — the same controls
            as the IPFS page, collapsible so the model grid stays front and centre. -->
-      <details class="rounded-lg border border-ink-700 bg-ink-900/60 group">
+      <details class="panel/60 group">
         <summary class="cursor-pointer select-none px-4 py-2.5 font-mono text-sm text-cursed-300 flex items-center gap-2 list-none">
           <span class="text-ink-500 transition-transform group-open:rotate-90">▸</span>
           Storage, drives &amp; LAN sharing
@@ -749,14 +749,14 @@
       <div class="flex items-center gap-3 flex-wrap">
         <button class="btn-primary text-sm px-4 py-2 rounded-md" on:click={pickFile} disabled={uploadPct >= 0}>+ Share a model</button>
         <input type="file" bind:this={fileInput} class="hidden" on:change={onFile} />
-        <input class="flex-1 min-w-[12rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm"
+        <input class="flex-1 min-w-[12rem] bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm"
                bind:value={query} placeholder="Search models, base model, tags…" />
-        <select bind:value={kindFilter} class="bg-ink-800 border border-ink-700 rounded px-2 py-2 text-ink-100 text-sm font-mono">
+        <select bind:value={kindFilter} class="bg-ink-800 border border-steel-700 rounded px-2 py-2 text-ink-100 text-sm font-mono">
           {#each KINDS as k}<option value={k}>{k}</option>{/each}
         </select>
-        <button class="text-xs font-mono px-2.5 py-2 rounded border {onDevice ? 'border-cursed-600 bg-cursed-950/40 text-cursed-300' : 'border-ink-700 text-ink-400 hover:text-ink-200'}"
+        <button class="text-xs font-mono px-2.5 py-2 rounded border {onDevice ? 'border-cursed-600 bg-cursed-950/40 text-cursed-300' : 'border-steel-700 text-ink-400 hover:text-ink-200'}"
                 on:click={() => (onDevice = !onDevice)} title="Show only models this Orb has downloaded">⬇ On Device</button>
-        <button class="text-xs font-mono px-2.5 py-2 rounded border {matureOk ? 'border-red-700 bg-red-950/40 text-red-300' : 'border-ink-700 text-ink-400 hover:text-ink-200'}"
+        <button class="text-xs font-mono px-2.5 py-2 rounded border {matureOk ? 'border-red-700 bg-red-950/40 text-red-300' : 'border-steel-700 text-ink-400 hover:text-ink-200'}"
                 on:click={toggleMature} title="Opt in to view mature content (18+)">{matureOk ? '🔞 Mature: on' : 'Mature: off'}</button>
         <span class="text-ink-500 text-xs font-mono whitespace-nowrap">{filtered.length} model{filtered.length === 1 ? '' : 's'} · {peerCount} peer{peerCount === 1 ? '' : 's'}</span>
       </div>
@@ -775,7 +775,7 @@
       <!-- import straight from HuggingFace -->
       <div class="flex items-center gap-2 flex-wrap">
         <span class="text-lg">🤗</span>
-        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
                bind:value={hfUrl} placeholder="Import from HuggingFace — paste a model URL (huggingface.co/org/model)"
                on:keydown={(e) => e.key === 'Enter' && importHf()} />
         <button class="btn text-sm px-4 py-2 rounded-md" on:click={importHf} disabled={hfBusy || !hfUrl.trim()}>{hfBusy ? 'Starting…' : 'Import'}</button>
@@ -785,7 +785,7 @@
       <!-- import from Ollama -->
       <div class="flex items-center gap-2 flex-wrap">
         <span class="text-lg">🦙</span>
-        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
                bind:value={ollamaRef} placeholder="Import from Ollama — a model tag (e.g. llama3.2:3b or user/model:tag)"
                on:keydown={(e) => e.key === 'Enter' && importOllama()} />
         <button class="btn text-sm px-4 py-2 rounded-md" on:click={importOllama} disabled={ollamaBusy || !ollamaRef.trim()}>{ollamaBusy ? 'Starting…' : 'Import'}</button>
@@ -795,7 +795,7 @@
       <!-- import generative models from Civitai -->
       <div class="flex items-center gap-2 flex-wrap">
         <span class="text-lg">🎨</span>
-        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+        <input class="flex-1 min-w-[14rem] bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
                bind:value={civitaiRef} placeholder="Import from Civitai — a model URL (civitai.com/models/…) for checkpoints, LoRAs, VAEs"
                on:keydown={(e) => e.key === 'Enter' && importCivitai()} />
         <button class="btn text-sm px-4 py-2 rounded-md" on:click={importCivitai} disabled={civitaiBusy || !civitaiRef.trim()}>{civitaiBusy ? 'Starting…' : 'Import'}</button>
@@ -809,13 +809,13 @@
           <span class="text-ink-600">({[tokens.huggingface && 'HF', tokens.civitai && 'Civitai', tokens.ollama && 'Ollama'].filter(Boolean).join(' · ') || 'none set'})</span>
         </button>
         {#if showTokens}
-          <div class="mt-2 space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-3">
+          <div class="mt-2 space-y-2 panel p-3">
             <p class="text-ink-500">Optional. A token lets the importer pull gated repos (HuggingFace), mature/“red” content (Civitai), or private models (Ollama). Stored encrypted-at-rest on this Orb (0600), never shared or gossiped.</p>
             {#each tokenRows as { src, label, ph }}
               <div class="flex items-center gap-2">
                 <span class="w-24 text-ink-400 font-mono">{label}</span>
                 <span class="text-[10px] px-1.5 py-0.5 rounded {tokens[src] ? 'bg-emerald-900/50 text-emerald-300' : 'bg-ink-800 text-ink-500'}">{tokens[src] ? 'set' : 'not set'}</span>
-                <input type="password" class="flex-1 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-ink-100 font-mono" placeholder={ph} bind:value={tokenInput[src]} />
+                <input type="password" class="flex-1 bg-ink-800 border border-steel-700 rounded px-2 py-1 text-ink-100 font-mono" placeholder={ph} bind:value={tokenInput[src]} />
                 <button class="btn px-2 py-1 rounded" on:click={() => saveToken(src)}>{tokenInput[src].trim() ? 'Save' : 'Clear'}</button>
               </div>
             {/each}
@@ -825,7 +825,7 @@
     {/if}
 
     {#if uploadPct >= 0}
-      <div class="rounded-lg border border-cursed-700/50 bg-ink-900 p-4 space-y-1">
+      <div class="rounded-sm border border-cursed-700/50 bg-ink-900 p-4 space-y-1">
         <div class="flex justify-between text-xs font-mono text-ink-300"><span class="truncate">Uploading {uploadName}…</span><span>{uploadPct}%</span></div>
         <div class="h-2 rounded-full bg-ink-800 overflow-hidden"><div class="h-full bg-cursed-500 transition-all duration-150" style="width:{uploadPct}%"></div></div>
         <div class="text-[11px] text-ink-500">Streaming to IPFS — after the upload it's added to the blockstore and announced to the network.</div>
@@ -834,7 +834,7 @@
 
     <!-- in-flight fetch/add phases (real progress bar while downloading) -->
     {#each Object.entries(tasks) as [key, t] (key)}
-      <div class="rounded-lg border border-ink-800 bg-ink-900/60 px-3 py-2">
+      <div class="rounded-sm border border-ink-800 bg-ink-900/60 px-3 py-2">
         <DownloadProgress task={t} label={key} />
       </div>
     {/each}
@@ -855,14 +855,14 @@
         {#each filtered as row (row.entry.cid)}
           {@const c = row.entry.card ?? {}}
           {@const busy = tasks[row.entry.cid]}
-          <div class="rounded-lg border bg-ink-900 p-3.5 flex flex-col gap-2 transition {row.local ? 'border-emerald-500/40' : 'border-ink-700 hover:border-ink-600'}">
+          <div class="rounded-sm border bg-ink-900 p-3.5 flex flex-col gap-2 transition {row.local ? 'border-emerald-500/40' : 'border-steel-700 hover:border-steel-600'}">
             <div class="flex items-start gap-2.5">
               <!-- circular avatar, HuggingFace-style -->
               <button class="shrink-0" on:click={() => (detail = row)}>
                 {#if c.image}
-                  <img src={imageSrc(row.entry.cid, c.image)} alt="" class="w-11 h-11 rounded-full object-cover border border-ink-700 bg-ink-950" loading="lazy" />
+                  <img src={imageSrc(row.entry.cid, c.image)} alt="" class="w-11 h-11 rounded-full object-cover border border-steel-700 bg-ink-950" loading="lazy" />
                 {:else}
-                  <div class="w-11 h-11 rounded-full bg-ink-800 border border-ink-700 flex items-center justify-center text-xl">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
+                  <div class="w-11 h-11 rounded-full bg-ink-800 border border-steel-700 flex items-center justify-center text-xl">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
                 {/if}
               </button>
               <div class="min-w-0 flex-1">
@@ -946,7 +946,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" on:click={() => (showShare = false)}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="w-full max-w-lg rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
+    <div class="w-full max-w-lg panel p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
       <div class="flex items-center justify-between">
         <h2 class="font-mono text-cursed-300">{editingCid ? 'Edit model card' : `Share “${pendingFile?.name}”`}</h2>
         {#if pendingFile}<span class="text-xs text-ink-500 font-mono">{fmtBytes(pendingFile.size)}</span>{/if}
@@ -958,7 +958,7 @@
       <!-- image + name row -->
       <div class="flex gap-3">
         <div class="shrink-0">
-          <div class="w-24 h-24 rounded-full border border-ink-700 bg-ink-950 overflow-hidden flex items-center justify-center">
+          <div class="w-24 h-24 rounded-full border border-steel-700 bg-ink-950 overflow-hidden flex items-center justify-center">
             {#if imageB64}<img src={imageB64} alt="" class="w-full h-full object-cover" />
             {:else if existingImageUrl}<img src={existingImageUrl} alt="" class="w-full h-full object-cover" />
             {:else}<span class="text-ink-600 text-3xl">🖼️</span>{/if}
@@ -970,36 +970,36 @@
           <input type="file" accept="image/*" bind:this={imageInput} class="hidden" on:change={onImage} />
         </div>
         <label class="flex-1 block text-xs font-mono text-ink-400">Name
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.name} placeholder="Qwen3-VL 8B Instruct" />
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.name} placeholder="Qwen3-VL 8B Instruct" />
           <span class="block mt-2">Base model</span>
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.base_model} placeholder="Qwen/Qwen3-VL-8B" />
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.base_model} placeholder="Qwen/Qwen3-VL-8B" />
         </label>
       </div>
 
       <div class="grid grid-cols-2 gap-2">
         <label class="block text-xs font-mono text-ink-400">Kind
-          <select class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.kind}>
+          <select class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.kind}>
             {#each KINDS.slice(1) as k}<option value={k}>{k}</option>{/each}
           </select></label>
         <label class="block text-xs font-mono text-ink-400">Format
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.format} placeholder="gguf / safetensors / hef" /></label>
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.format} placeholder="gguf / safetensors / hef" /></label>
         <label class="block text-xs font-mono text-ink-400">Parameters
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.params} placeholder="8B" /></label>
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.params} placeholder="8B" /></label>
         <label class="block text-xs font-mono text-ink-400">Quantization
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.quant} placeholder="int4 / q4_k_m" /></label>
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.quant} placeholder="int4 / q4_k_m" /></label>
       </div>
       <label class="block text-xs font-mono text-ink-400">Description
-        <textarea rows="2" class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.description} placeholder="What it is, how it was trained/tuned, notable strengths."></textarea></label>
+        <textarea rows="2" class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.description} placeholder="What it is, how it was trained/tuned, notable strengths."></textarea></label>
       <label class="block text-xs font-mono text-ink-400">Intended use
-        <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.intended_use} placeholder="GUI grounding for agent computer-use" /></label>
+        <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.intended_use} placeholder="GUI grounding for agent computer-use" /></label>
       <div class="grid grid-cols-2 gap-2">
         <label class="block text-xs font-mono text-ink-400">License
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.license} placeholder="apache-2.0" /></label>
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.license} placeholder="apache-2.0" /></label>
         <label class="block text-xs font-mono text-ink-400">Tags (comma-sep)
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.tags} placeholder="grounding, agent, vision" /></label>
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm" bind:value={form.tags} placeholder="grounding, agent, vision" /></label>
       </div>
       <label class="block text-xs font-mono text-ink-400">README (markdown)
-        <textarea rows="5" class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm font-mono" bind:value={form.readme} placeholder="# Usage&#10;How to run it, prompt format, benchmarks, credits…"></textarea></label>
+        <textarea rows="5" class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm font-mono" bind:value={form.readme} placeholder="# Usage&#10;How to run it, prompt format, benchmarks, credits…"></textarea></label>
 
       <div class="flex justify-end gap-2 pt-1">
         <button class="btn text-sm px-3 py-1.5 rounded" on:click={() => (showShare = false)}>Cancel</button>
@@ -1017,12 +1017,12 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" on:click={() => (detail = null)}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="w-full max-w-lg rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
+    <div class="w-full max-w-lg panel p-5 space-y-3 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
       <div class="flex items-start gap-4">
         {#if c.image}
-          <img src={imageSrc(detail.entry.cid, c.image)} alt="" class="w-20 h-20 rounded-full object-cover border border-ink-700 bg-ink-950 shrink-0" />
+          <img src={imageSrc(detail.entry.cid, c.image)} alt="" class="w-20 h-20 rounded-full object-cover border border-steel-700 bg-ink-950 shrink-0" />
         {:else}
-          <div class="w-20 h-20 rounded-full bg-ink-800 border border-ink-700 flex items-center justify-center text-3xl shrink-0">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
+          <div class="w-20 h-20 rounded-full bg-ink-800 border border-steel-700 flex items-center justify-center text-3xl shrink-0">{KIND_ICON[c.kind || 'other'] ?? '📦'}</div>
         {/if}
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2">
@@ -1045,7 +1045,7 @@
       {#if c.gallery?.length && (!c.nsfw || matureOk)}
         <div class="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
           {#each c.gallery as g}
-            <img src={imageSrc(detail.entry.cid, g)} alt="example generation" loading="lazy" class="h-32 rounded-lg border border-ink-700 object-cover shrink-0" />
+            <img src={imageSrc(detail.entry.cid, g)} alt="example generation" loading="lazy" class="h-32 rounded-sm border border-steel-700 object-cover shrink-0" />
           {/each}
         </div>
       {/if}
@@ -1098,7 +1098,7 @@
 {#if showAgeGate}
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" on:click={() => (showAgeGate = false)}>
-    <div class="bg-ink-900 border border-red-800/60 rounded-xl w-full max-w-md p-5 space-y-4" on:click|stopPropagation>
+    <div class="bg-ink-900 border border-red-800/60 rounded-sm w-full max-w-md p-5 space-y-4" on:click|stopPropagation>
       <h2 class="font-mono text-red-300 flex items-center gap-2">🔞 View mature content</h2>
       <p class="text-sm text-ink-300 leading-relaxed">Some models on the network (e.g. Civitai content flagged mature/“red”) and their example images are adult in nature. To view them you must confirm the following.</p>
       <label class="flex items-start gap-2 text-sm text-ink-200">
@@ -1111,7 +1111,7 @@
       </label>
       <div class="flex justify-end gap-2 pt-1">
         <button class="btn text-sm px-3 py-1.5 rounded" on:click={() => (showAgeGate = false)}>Cancel</button>
-        <button class="text-sm px-4 py-1.5 rounded-lg font-mono {ageAttest18 && ageAccept ? 'bg-red-700 hover:bg-red-600 text-white' : 'bg-ink-800 text-ink-500 cursor-not-allowed'}"
+        <button class="text-sm px-4 py-1.5 rounded-sm font-mono {ageAttest18 && ageAccept ? 'bg-red-700 hover:bg-red-600 text-white' : 'bg-ink-800 text-ink-500 cursor-not-allowed'}"
                 disabled={!(ageAttest18 && ageAccept)} on:click={() => setMature(true)}>Proceed</button>
       </div>
     </div>
@@ -1123,7 +1123,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" on:click={closePush}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="w-full max-w-md rounded-xl border border-ink-700 bg-ink-900 p-5 space-y-4 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
+    <div class="w-full max-w-md panel p-5 space-y-4 max-h-[90vh] overflow-y-auto" on:click|stopPropagation>
       <div class="flex items-center justify-between gap-2">
         <h2 class="font-mono text-cursed-300 text-sm truncate">⇧ Push “{pushEntry.name}”</h2>
         <button class="text-ink-500 hover:text-ink-200 shrink-0" on:click={closePush}>✕</button>
@@ -1133,14 +1133,14 @@
         <div class="text-center py-4 space-y-3">
           <p class="text-sm text-ink-300">Pushing a model needs a server to push it to — a DGX, an agent
             gateway, or any box you've SSH-linked. You don't have any connected yet.</p>
-          <a href="/agent" class="inline-block bg-cursed-600 hover:bg-cursed-500 text-white font-mono text-sm px-4 py-2 rounded-lg transition-colors">↳ Connect your first system</a>
+          <a href="/agent" class="inline-block bg-cursed-600 hover:bg-cursed-500 text-white font-mono text-sm px-4 py-2 rounded-sm transition-colors">↳ Connect your first system</a>
           <p class="text-xs text-ink-500">Set it up once in the Agent Dashboard, then come back and push.</p>
         </div>
         <div class="flex justify-end"><button class="btn text-sm px-3 py-1.5 rounded" on:click={closePush}>Close</button></div>
       {:else}
         <!-- 1. target system -->
         <label class="block text-xs font-mono text-ink-400">Target system
-          <select bind:value={pushSel} class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1.5 text-ink-100 text-sm">
+          <select bind:value={pushSel} class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1.5 text-ink-100 text-sm">
             {#each systems as s}
               <option value={s.id}>{s.label || s.address}{s.roles?.length ? ' · ' + s.roles.join('/') : ''}</option>
             {/each}
@@ -1160,7 +1160,7 @@
 
         <!-- remote folder browser -->
         {#if pushMode === 'custom'}
-          <div class="rounded border border-ink-700 bg-ink-950/50 p-2 space-y-1.5">
+          <div class="rounded border border-steel-700 bg-ink-950/50 p-2 space-y-1.5">
             <div class="flex items-center gap-2 text-[11px] font-mono">
               <button class="text-cursed-300 hover:text-cursed-200 disabled:opacity-40" on:click={() => browseTo(browseParent)} disabled={!browseParent || browseLoading} title="Up one level">⬆</button>
               <span class="truncate flex-1 text-ink-300" title={browsePath}>{browsePath || '…'}</span>
@@ -1203,7 +1203,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" on:click={() => (showPub = false)}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-    <div class="bg-ink-900 border border-cursed-700/50 rounded-xl w-full max-w-md p-5 space-y-4" on:click|stopPropagation>
+    <div class="bg-ink-900 border border-cursed-700/50 rounded-sm w-full max-w-md p-5 space-y-4" on:click|stopPropagation>
       {#if seedWords.length}
         <h2 class="font-mono text-cursed-300 flex items-center gap-2">🔏 Write down your recovery phrase</h2>
         <p class="text-[12px] text-ink-300 leading-relaxed">These 24 words are the <strong>only</strong> way to recover your publisher identity — shown once, never stored in plain text. Write them down and keep them safe (they're also included in the Orb's encrypted config backup).</p>
@@ -1219,9 +1219,9 @@
         <h2 class="font-mono text-cursed-300">Create a publisher identity</h2>
         <p class="text-[12px] text-ink-400 leading-relaxed">An anonymous <span class="text-cursed-300">ed25519</span> keypair — no email, no PII. The public key <em>is</em> your identity; a 24-word seed is your only backup. Models you share while it's unlocked get signed, so the network can verify you published them.</p>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Display name (a petname)</span>
-          <input bind:value={pubUser} placeholder="e.g. mageworks" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+          <input bind:value={pubUser} placeholder="e.g. mageworks" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Password — encrypts the key (6+ chars)</span>
-          <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+          <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <div class="flex items-center justify-between pt-1">
           <div class="flex items-center gap-3">
             <button class="text-[12px] text-cursed-400 hover:text-cursed-300 font-mono" on:click={() => (pubMode = 'restore')}>↩ restore a backup</button>
@@ -1233,13 +1233,13 @@
         <h2 class="font-mono text-cursed-300">Restore signing identity</h2>
         <p class="text-[12px] text-ink-400 leading-relaxed">Recover a publisher identity from its <span class="text-cursed-300">24-word recovery phrase</span> — your public key and reputation come back <em>exactly</em> as before (the key is derived from the phrase). Set a password to encrypt it on this Orb; it can differ from the original.</p>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Display name (a petname)</span>
-          <input bind:value={pubUser} placeholder="e.g. mageworks" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+          <input bind:value={pubUser} placeholder="e.g. mageworks" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Recovery phrase — 24 words</span>
           <textarea bind:value={seedInput} rows="3" spellcheck="false" autocomplete="off" placeholder="word1 word2 word3 … word24"
-                    class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none resize-none"></textarea>
+                    class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none resize-none"></textarea>
           <span class="text-[10px] font-mono {seedInput.trim().split(/\s+/).filter(Boolean).length === 24 ? 'text-emerald-400' : 'text-ink-600'}">{seedInput.trim() ? seedInput.trim().split(/\s+/).filter(Boolean).length : 0}/24 words</span></label>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">New password — encrypts the key here (6+ chars)</span>
-          <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+          <input bind:value={pubPass} type="password" autocomplete="new-password" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <div class="flex items-center justify-between pt-1">
           <div class="flex items-center gap-3">
             <button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => (pubMode = 'create')}>＋ new instead</button>
@@ -1250,11 +1250,11 @@
       {:else}
         <h2 class="font-mono text-cursed-300">Unlock publisher identity</h2>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Identity</span>
-          <select bind:value={pubSel} class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none">
+          <select bind:value={pubSel} class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none">
             {#each pubAccounts as a}<option value={a.pubkey}>@{a.username} · {a.fingerprint}</option>{/each}
           </select></label>
         <label class="block space-y-1"><span class="text-[11px] text-ink-500 font-mono">Password</span>
-          <input bind:value={pubPass} type="password" autocomplete="current-password" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
+          <input bind:value={pubPass} type="password" autocomplete="current-password" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-cursed-500 outline-none" /></label>
         <div class="flex items-center justify-between pt-1">
           <div class="flex items-center gap-3">
             <button class="text-[12px] text-ink-500 hover:text-ink-300 font-mono" on:click={() => { pubMode = 'create'; pubUser = ''; pubPass = ''; }}>＋ new</button>

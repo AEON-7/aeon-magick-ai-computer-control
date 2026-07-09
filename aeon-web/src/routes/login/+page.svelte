@@ -22,49 +22,64 @@
   }
 </script>
 
-<div class="h-full flex items-center justify-center p-6">
+<div class="page-void h-full flex items-center justify-center p-6">
+  <div class="void-frame" aria-hidden="true">
+    <span class="void-frame-tr"></span>
+    <span class="void-frame-bl"></span>
+  </div>
+
   <form
     on:submit|preventDefault={submit}
-    class="w-full max-w-sm bg-ink-900 border border-ink-700 rounded-2xl p-8 space-y-5"
+    class="panel-bracket w-full max-w-sm p-7 space-y-5 relative z-10 shadow-depth-void"
   >
-    <div class="flex items-center gap-3">
-      <OrbMark class="w-8 h-8" />
-      <h1 class="text-cursed-400 font-mono text-lg tracking-widest">AEON MAGICK AI COMPUTER CONTROL</h1>
+    <div class="status-strip-cursed -mx-7 -mt-7 mb-1" aria-hidden="true"></div>
+
+    <div class="flex items-center gap-3.5 pt-1">
+      <div class="relative">
+        <OrbMark class="w-10 h-10" />
+        <span
+          class="absolute -inset-1 rounded-full border border-cursed-500/20 motion-safe:animate-orb-breathe pointer-events-none"
+          aria-hidden="true"
+        ></span>
+      </div>
+      <div class="min-w-0">
+        <p class="rack-label text-cursed-500/80">01 · access rite</p>
+        <h1 class="text-cursed-200 font-mono text-sm tracking-rite uppercase leading-tight">
+          AEON MAGICK
+        </h1>
+        <p class="text-2xs text-zinc-500 font-mono tracking-wider mt-0.5">THE ORB AWAITS A KEY</p>
+      </div>
     </div>
-    <p class="text-zinc-400 text-sm">Gaze into the orb — sign in to access the session.</p>
+
+    <p class="text-zinc-500 text-xs font-mono leading-relaxed border-l border-cursed-500/30 pl-3">
+      Gaze into the orb — authenticate to bind this session. Hands and eyes stay dark until you do.
+    </p>
 
     <label class="block">
-      <span class="text-xs uppercase tracking-wider text-zinc-500">user</span>
-      <input
-        type="text"
-        bind:value={username}
-        autocomplete="username"
-        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-               focus:outline-none focus:ring-2 focus:ring-cursed-500 focus:border-transparent"
-      />
+      <span class="field-label">user</span>
+      <input type="text" bind:value={username} autocomplete="username" class="field" />
     </label>
 
     <label class="block">
-      <span class="text-xs uppercase tracking-wider text-zinc-500">password</span>
+      <span class="field-label">password</span>
       <input
         type="password"
         bind:value={password}
         autocomplete="current-password"
-        class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-               focus:outline-none focus:ring-2 focus:ring-cursed-500 focus:border-transparent"
+        class="field"
       />
     </label>
 
     {#if error}
-      <p class="text-red-400 text-sm">{error}</p>
+      <p class="callout-fault">{error}</p>
     {/if}
 
-    <button
-      type="submit"
-      disabled={busy || !password}
-      class="btn-primary w-full disabled:opacity-50"
-    >
-      {busy ? 'signing in…' : 'sign in'}
+    <button type="submit" disabled={busy || !password} class="btn-primary w-full tracking-wider uppercase text-xs">
+      {busy ? 'binding…' : 'bind session'}
     </button>
+
+    <p class="text-center font-mono text-2xs text-zinc-600 tracking-instrument">
+      self-signed tls · per-device credential
+    </p>
   </form>
 </div>

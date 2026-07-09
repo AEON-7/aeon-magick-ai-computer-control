@@ -103,53 +103,61 @@
 
 {#if open}
   <div
-    class="fixed inset-0 z-[75] flex items-start justify-center pt-[14vh] px-4 bg-ink-950/60 backdrop-blur-sm"
+    class="fixed inset-0 z-[75] flex items-start justify-center pt-[14vh] px-4 bg-ink-950/85 backdrop-blur-[2px]"
     transition:fade={{ duration: reduceMotion ? 0 : 100 }}
     on:mousedown|self={hide}
     role="presentation"
   >
     <div
-      class="w-full max-w-lg bg-ink-900 border border-cursed-500/40 rounded-2xl shadow-2xl shadow-cursed-800/20 overflow-hidden"
+      class="w-full max-w-lg panel-cursed overflow-hidden shadow-depth-void"
       in:fly={{ y: reduceMotion ? 0 : -8, duration: reduceMotion ? 0 : 130 }}
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
     >
-      <div class="flex items-center gap-2.5 px-4 py-3 border-b border-ink-700">
+      <div class="chrome-sigil" aria-hidden="true"></div>
+      <div class="flex items-center gap-2.5 px-4 py-3 border-b border-steel-700 bg-ink-950/30">
         <OrbMark class="w-4 h-4" />
         <input
           bind:this={inputEl}
           bind:value={query}
           type="text"
-          placeholder="Where to? Type to search pages…"
+          placeholder="Jump to… / search pages"
           autocomplete="off"
           spellcheck="false"
-          class="flex-1 bg-transparent text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none"
+          class="flex-1 bg-transparent border-0 ring-0 focus:ring-0 text-sm font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none"
           aria-label="Search pages"
         />
-        <kbd class="text-[10px] font-mono text-zinc-600 border border-ink-600 rounded px-1.5 py-0.5">esc</kbd>
+        <kbd class="text-2xs font-mono text-zinc-600 border border-steel-600 rounded-sm px-1.5 py-0.5 tracking-instrument">esc</kbd>
       </div>
-      <ul class="max-h-[46vh] overflow-y-auto p-1.5" role="listbox">
+      <ul class="max-h-[46vh] overflow-y-auto p-1" role="listbox">
         {#each results as e, i (e.group + e.href)}
           <li role="option" aria-selected={i === sel}>
             <button
-              class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-sm
-                     {i === sel ? 'bg-cursed-600/20 text-cursed-100' : 'text-zinc-300 hover:bg-ink-800'}"
+              class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-sm text-left text-sm
+                     {i === sel ? 'bg-cursed-600/20 text-cursed-100 border border-cursed-500/25' : 'text-zinc-300 hover:bg-ink-800 border border-transparent'}"
               on:click={() => run(e)}
               on:mousemove={() => (sel = i)}
             >
               <Icon name={e.icon} class="w-4 h-4 {i === sel ? 'text-cursed-300' : 'text-zinc-500'}" />
-              <span class="shrink-0">{e.label}</span>
+              <span class="shrink-0 font-mono text-xs tracking-wide">{e.label}</span>
               {#if e.title}
-                <span class="text-[11px] text-zinc-600 truncate flex-1">{e.title}</span>
+                <span class="text-2xs text-zinc-600 truncate flex-1">{e.title}</span>
               {/if}
-              <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-700 shrink-0">{e.group}</span>
+              <span class="text-2xs font-mono uppercase tracking-instrument text-zinc-600 shrink-0">{e.group}</span>
             </button>
           </li>
         {:else}
-          <li class="px-3 py-6 text-center text-xs font-mono text-zinc-600">the orb finds nothing by that name</li>
+          <li class="void-empty !border-0 !bg-transparent !py-8">
+            <p class="void-empty-title">no match</p>
+            <p class="void-empty-body">Try a page name, group, or path fragment.</p>
+          </li>
         {/each}
       </ul>
+      <div class="px-3 py-1.5 border-t border-steel-700/80 bg-ink-950/40 flex justify-between font-mono text-2xs text-zinc-600 tracking-instrument uppercase">
+        <span>⌘K / Ctrl+K</span>
+        <span>enter · jump</span>
+      </div>
     </div>
   </div>
 {/if}

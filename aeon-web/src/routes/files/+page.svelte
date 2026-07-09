@@ -158,8 +158,8 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="files + clipboard" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="files + clipboard" subtitle="stage · paste · transfer" index="06" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
@@ -169,7 +169,7 @@
       {#if msg}<p class="text-live-400 text-sm">{msg}</p>{/if}
 
       <!-- ─── Shared clipboard ─── -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+      <section class="panel p-5 space-y-3">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Shared clipboard
@@ -188,7 +188,7 @@
           bind:value={clipText}
           rows="6"
           placeholder="Paste or type a snippet here, then click 'type on target'."
-          class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2
+          class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2
                  text-sm text-zinc-200 font-mono"
         ></textarea>
 
@@ -213,7 +213,7 @@
       </section>
 
       <!-- ─── HTTP file transfer ─── -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+      <section class="panel p-5 space-y-4">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             File transfer
@@ -289,7 +289,7 @@
             {#each files as f (f.name)}
               <div class="flex items-center gap-3 p-2 rounded bg-ink-950/40
                           border border-ink-800 text-xs font-mono
-                          hover:border-ink-700">
+                          hover:border-steel-700">
                 <span class="text-zinc-200 flex-1 truncate" title={f.name}>{f.name}</span>
                 <span class="text-zinc-500 w-20 text-right">{fmtBytes(f.size_bytes)}</span>
                 <span class="text-zinc-600 w-24 text-right">{fmtAgo(f.modified_ms)}</span>

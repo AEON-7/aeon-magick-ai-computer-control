@@ -13,7 +13,7 @@
   export let onRotate: (() => void) | null = null;
 </script>
 
-<div class="space-y-3 p-3 rounded-lg border border-ink-800 bg-ink-950/40">
+<div class="space-y-3 p-3 rounded-sm border border-ink-800 bg-ink-950/40">
   <header class="flex items-center justify-between gap-2">
     <div class="flex items-center gap-2 flex-wrap">
       <span class="font-mono text-xs uppercase tracking-wider text-zinc-300">

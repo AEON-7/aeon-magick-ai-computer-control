@@ -20,8 +20,13 @@
   async function checkLockdown() {
     try {
       const r = await fetch('/api/lockdown', { credentials: 'same-origin' });
-      if (r.ok) { const d = await r.json(); lockedDown = !!d.enabled; }
-    } catch { /* admin-only; non-admin/unauth just won't see the banner */ }
+      if (r.ok) {
+        const d = await r.json();
+        lockedDown = !!d.enabled;
+      }
+    } catch {
+      /* admin-only; non-admin/unauth just won't see the banner */
+    }
   }
 
   onMount(async () => {
@@ -58,29 +63,54 @@
 
 <div class="h-full flex flex-col bg-ink-950 text-zinc-200">
   {#if lockedDown}
-    <div class="bg-red-700 text-white text-center text-[11px] font-mono py-1 tracking-widest motion-safe:animate-ember shrink-0
-                flex items-center justify-center gap-1.5">
+    <div
+      class="bg-red-950 border-b border-red-500/50 text-red-200 text-center text-2xs font-mono py-1.5 tracking-instrument motion-safe:animate-ember shrink-0
+                flex items-center justify-center gap-1.5 uppercase"
+    >
       <Icon name="lock" class="w-3 h-3" />
-      LOCKDOWN MODE — all external API + MCP disabled · admin session only
+      LOCKDOWN — external API + MCP disabled · admin session only
     </div>
   {/if}
   <div class="flex-1 min-h-0">
     {#if bootstrapping}
-      <!-- Boot ritual — decorates the REAL auth-probe round-trip, never
-           pads it: the moment bootstrapping flips, the app renders,
-           even mid-animation. -->
-      <div class="h-full flex flex-col items-center justify-center gap-5">
-        <svg viewBox="0 0 24 24" class="w-10 h-10 text-cursed-400" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1"
-                  pathLength="100" class="aeon-summon" />
-          <circle cx="12" cy="12" r="4" fill="currentColor" class="opacity-80" />
-        </svg>
-        <div class="font-mono text-[11px] tracking-widest text-zinc-500 space-y-1.5"
-             aria-label="Loading">
-          <p class="aeon-rite" style="animation-delay: 0ms"><span class="text-cursed-400/70">◇</span> waking the orb</p>
-          <p class="aeon-rite" style="animation-delay: 350ms"><span class="text-cursed-400/70">◇</span> binding HID</p>
-          <p class="aeon-rite" style="animation-delay: 700ms"><span class="text-cursed-400/70">◇</span> attuning stream</p>
+      <!-- Boot ritual — decorates the REAL auth-probe round-trip, never pads it. -->
+      <div class="page-void h-full flex flex-col items-center justify-center gap-7">
+        <div class="relative">
+          <svg viewBox="0 0 24 24" class="w-14 h-14 text-cursed-400" aria-hidden="true">
+            <circle
+              cx="12"
+              cy="12"
+              r="9"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1"
+              pathLength="100"
+              class="aeon-summon"
+            />
+            <circle cx="12" cy="12" r="4" fill="currentColor" class="opacity-85" />
+          </svg>
+          <span
+            class="absolute -inset-3 rounded-full border border-cursed-500/15 motion-safe:animate-orb-breathe"
+            aria-hidden="true"
+          ></span>
         </div>
+        <div
+          class="font-mono text-2xs tracking-rite text-zinc-500 space-y-2.5 uppercase text-center"
+          aria-label="Loading"
+        >
+          <p class="aeon-rite" style="animation-delay: 0ms">
+            <span class="text-cursed-400/80">◈</span> waking the orb
+          </p>
+          <p class="aeon-rite" style="animation-delay: 350ms">
+            <span class="text-cursed-400/80">◈</span> binding hid
+          </p>
+          <p class="aeon-rite" style="animation-delay: 700ms">
+            <span class="text-cursed-400/80">◈</span> attuning stream
+          </p>
+        </div>
+        <p class="font-mono text-2xs text-zinc-700 tracking-instrument motion-safe:animate-telemetry-tick">
+          AEON · MAGICK · CONTROL
+        </p>
       </div>
     {:else}
       <slot />

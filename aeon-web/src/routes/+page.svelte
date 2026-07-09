@@ -25,17 +25,18 @@
   import { SUPER_APPS, SETTINGS_ITEMS, MONITOR_ITEMS } from '$lib/nav';
   import { inputCaptured } from '$lib/capture';
   // Static class strings (Tailwind scans source text — keep them literal).
+  // Super-apps read as rack modules: hard edges, mono, color as signal only.
   const APP_BTN: Record<string, string> = {
-    cursed:  'border-cursed-500/50 bg-cursed-600/15 text-cursed-100 hover:bg-cursed-600/25',
-    sky:     'border-sky-500/50 bg-sky-600/15 text-sky-100 hover:bg-sky-600/25',
-    amber:   'border-amber-500/50 bg-amber-600/15 text-amber-100 hover:bg-amber-600/25',
-    emerald: 'border-emerald-500/50 bg-emerald-600/15 text-emerald-100 hover:bg-emerald-600/25',
-    flame:   'border-orange-500/50 bg-orange-600/15 text-orange-100 hover:bg-orange-600/25',
-    violet:  'border-violet-500/50 bg-violet-600/15 text-violet-100 hover:bg-violet-600/25',
-    rose:    'border-rose-500/50 bg-rose-600/15 text-rose-100 hover:bg-rose-600/25',
+    cursed:  'app-module border-cursed-500/45 bg-cursed-600/12 text-cursed-100 hover:bg-cursed-600/22',
+    sky:     'app-module border-sky-500/45 bg-sky-600/12 text-sky-100 hover:bg-sky-600/22',
+    amber:   'app-module border-amber-500/45 bg-amber-600/12 text-amber-100 hover:bg-amber-600/22',
+    emerald: 'app-module border-emerald-500/45 bg-emerald-600/12 text-emerald-100 hover:bg-emerald-600/22',
+    flame:   'app-module border-orange-500/45 bg-orange-600/12 text-orange-100 hover:bg-orange-600/22',
+    violet:  'app-module border-violet-500/45 bg-violet-600/12 text-violet-100 hover:bg-violet-600/22',
+    rose:    'app-module border-rose-500/45 bg-rose-600/12 text-rose-100 hover:bg-rose-600/22',
   };
   const APP_ICON: Record<string, string> = {
-    cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300', emerald: 'text-emerald-300', flame: 'text-orange-300', violet: 'text-violet-300',
+    cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300', emerald: 'text-emerald-300', flame: 'text-orange-300', violet: 'text-violet-300', rose: 'text-rose-300',
   };
 
   let stream_url = '';
@@ -885,12 +886,13 @@
   // The selector surfaces that with a badge so a human can see at a glance when
   // the box is in agent-drive mode (the persona can also be set over the API by
   // the agent itself). `warn` flags the experimental Apple multi-touch persona.
+  // Labels: theme-facing names; slugs stay API-stable.
   const HID_PERSONAS: { value: string; label: string; agent?: boolean; warn?: boolean }[] = [
-    { value: 'generic-composite', label: 'generic-composite' },
-    { value: 'generic-absolute', label: 'generic-absolute', agent: true },
-    { value: 'logitech-mx', label: 'logitech-mx' },
-    { value: 'apple-magic-stable', label: 'apple-magic-stable' },
-    { value: 'apple-magic', label: 'apple-magic', warn: true },
+    { value: 'generic-composite', label: 'generic hub' },
+    { value: 'generic-absolute', label: 'Wacom tablet (absolute)', agent: true },
+    { value: 'logitech-mx', label: 'Logitech MX' },
+    { value: 'apple-magic-stable', label: 'Apple Magic Kbd/Mouse' },
+    { value: 'apple-magic', label: 'Apple Magic Trackpad', warn: true },
   ];
   const isAgentPersona = (p: string | undefined): boolean =>
     !!p && HID_PERSONAS.some((x) => x.value === p && x.agent);
@@ -970,8 +972,8 @@
   // rotated frames flow in (no double-rotation because the gap is masked by the
   // brief reconnect).
   const orientBtn =
-    'px-1.5 py-0.5 rounded border border-ink-700 bg-ink-800 text-cursed-300 leading-none ' +
-    'hover:bg-ink-700 focus:outline-none focus:ring-1 focus:ring-cursed-500 ' +
+    'px-1.5 py-0.5 rounded-sm border border-steel-700 bg-ink-800 text-cursed-300 leading-none ' +
+    'hover:bg-ink-700 focus:outline-none focus:ring-1 focus:ring-cursed-500/50 ' +
     'disabled:opacity-50 disabled:cursor-wait';
   let orient_switching = false;
   let orient_message = '';
@@ -1102,25 +1104,26 @@
        Keeping all buttons visible at full-Mac sizes was the explicit
        ask — the dividers + 2-row layout makes the cluster cohabit
        with the status line without overlapping. -->
-  <header class="border-b border-ink-700 bg-ink-900 aeon-wardable"
+  <header class="chrome-header aeon-wardable"
           class:hidden={fullscreen}
           class:aeon-warded={captured}>
+    <div class="h-0.5 w-full bg-gradient-to-r from-cursed-500/60 via-cursed-500/15 to-transparent" aria-hidden="true"></div>
     <!-- Row 1: brand + status + persona -->
-    <div class="flex items-center justify-between gap-2 px-3 sm:px-5 pt-3 pb-2">
+    <div class="flex items-center justify-between gap-2 px-3 sm:px-5 pt-2.5 pb-2">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-wrap">
-        <span class="flex items-center gap-2 text-cursed-400 font-mono text-xs sm:text-sm tracking-widest truncate">
+        <span class="flex items-center gap-2 text-cursed-400 font-mono text-2xs sm:text-xs tracking-instrument truncate uppercase">
           <OrbMark class="w-5 h-5" mode={orbMode} />
-          <span class="hidden sm:inline">AEON MAGICK AI COMPUTER CONTROL</span>
+          <span class="hidden sm:inline">AEON MAGICK · AI COMPUTER CONTROL</span>
           <span class="sm:hidden">AEON MAGICK</span>
         </span>
         {#if state}
           <span class={state.online ? 'pill-live' : 'pill-offline'}>
-            <span class="h-1.5 w-1.5 rounded-full {state.online ? 'bg-live-400' : 'bg-red-400'}"></span>
+            <span class={state.online ? 'dot-live' : 'dot-off'}></span>
             {state.online ? 'LIVE' : 'OFFLINE'}
           </span>
         {/if}
         {#if state?.mode}
-          <span class="hidden md:inline text-xs font-mono text-zinc-400">
+          <span class="hidden md:inline text-2xs font-mono text-zinc-500 tracking-wide">
             {state.mode.resolution} · {state.mode.format} · {state.captured_fps} fps
           </span>
         {/if}
@@ -1128,7 +1131,7 @@
           <label class="hidden md:flex items-center gap-1 text-xs font-mono text-zinc-400"
                  title="Which video source this console shows">
             <select value={streamerCfg.source} on:change={onSourceChange} disabled={source_switching}
-                    class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5 text-cursed-300
+                    class="bg-ink-800 border border-steel-700 rounded px-1.5 py-0.5 text-cursed-300
                            focus:outline-none focus:ring-1 focus:ring-cursed-500
                            disabled:opacity-50 disabled:cursor-wait">
               {#each streamerCfg.available_sources as s}
@@ -1168,7 +1171,7 @@
         {/if}
         {#if vpnOn}
           <a href="/network" class="pill-net hidden sm:inline-flex" title="Click to manage VPN">
-            <span class="h-1.5 w-1.5 rounded-full bg-cursed-400 animate-pulse"></span>
+            <span class="dot-cursed motion-safe:animate-phosphor"></span>
             {vpnProvider === 'tor' ? 'TOR' : vpnProvider === 'tailscale' ? 'TAILSCALE'
               : vpnProvider === 'wireguard' ? 'WIREGUARD' : vpnProvider === 'openvpn' ? 'OPENVPN'
               : vpnProvider === 'i2p' ? 'I2P' : 'VPN'}
@@ -1176,7 +1179,7 @@
         {/if}
         {#if dnscryptOn}
           <a href="/network" class="pill-net hidden sm:inline-flex" title="DNSCrypt encrypted DNS — click to configure">
-            <span class="h-1.5 w-1.5 rounded-full bg-live-400"></span>
+            <span class="dot-live"></span>
             DNSCrypt
           </a>
         {/if}
@@ -1206,7 +1209,7 @@
               value={hid.persona}
               on:change={onPersonaChange}
               disabled={persona_switching}
-              class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5
+              class="bg-ink-800 border border-steel-700 rounded px-1.5 py-0.5
                      text-cursed-300 focus:outline-none focus:ring-1 focus:ring-cursed-500
                      disabled:opacity-50 disabled:cursor-wait"
               title="Switch USB HID persona — triggers a 1-second re-enumeration on the target.">
@@ -1234,7 +1237,7 @@
             CAM:
             <select value={webcamCfg.enabled ? webcamCfg.source : 'off'}
                     on:change={onWebcamChange} disabled={webcam_switching}
-                    class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5 text-cursed-300
+                    class="bg-ink-800 border border-steel-700 rounded px-1.5 py-0.5 text-cursed-300
                            focus:outline-none focus:ring-1 focus:ring-cursed-500
                            disabled:opacity-50 disabled:cursor-wait"
                     title="Which video source is passed through USB to the target as a webcam">
@@ -1286,13 +1289,13 @@
         <SpecialKeys />
       </div>
       <!-- divider -->
-      <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
+      <span class="h-6 w-px bg-steel-600 mx-1" aria-hidden="true"></span>
       <!-- Group B (v99): three color-coded "super apps" + Settings/Monitor
            dropdowns. Configuration and monitoring collapse into the dropdowns;
            OrbNet / Agent Dash / GPIO stand alone. -->
       <div class="flex items-center gap-2 px-3">
         {#each SUPER_APPS as app}
-          <a href={app.href} class="text-xs inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border font-medium {APP_BTN[app.color]}" title={app.title}>
+          <a href={app.href} class="{APP_BTN[app.color]}" title={app.title}>
             <Icon name={app.icon} class="w-4 h-4 {APP_ICON[app.color]}" />{app.label}
           </a>
         {/each}
@@ -1303,7 +1306,7 @@
             <Icon name="cpu" class="w-3.5 h-3.5 text-zinc-400" />Settings <span class="text-zinc-500">▾</span>
           </button>
           {#if settingsOpen}
-            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5"
+            <div class="absolute left-0 top-full mt-1 w-48 panel p-1.5 z-50 shadow-xl space-y-0.5"
                  in:fly={menuIn}>
               {#each SETTINGS_ITEMS as it}
                 <a href={it.href} class="flex items-center gap-2 px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-ink-800" title={it.title}>
@@ -1319,7 +1322,7 @@
             <Icon name="list" class="w-3.5 h-3.5 text-zinc-400" />Monitor <span class="text-zinc-500">▾</span>
           </button>
           {#if monitorOpen}
-            <div class="absolute left-0 top-full mt-1 w-48 bg-ink-900 border border-ink-700 rounded-lg p-1.5 z-50 shadow-xl space-y-0.5"
+            <div class="absolute left-0 top-full mt-1 w-48 panel p-1.5 z-50 shadow-xl space-y-0.5"
                  in:fly={menuIn}>
               {#each MONITOR_ITEMS as it}
                 <a href={it.href} class="flex items-center gap-2 px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-ink-800" title={it.title}>
@@ -1331,7 +1334,7 @@
         </div>
       </div>
       <!-- divider -->
-      <span class="h-6 w-px bg-ink-700 mx-1" aria-hidden="true"></span>
+      <span class="h-6 w-px bg-steel-600 mx-1" aria-hidden="true"></span>
       <!-- Group C: target power + session.
            These buttons control the USB-CONNECTED MACHINE, not the Pi.
            They go through the HID Consumer power-button (soft tap or
@@ -1349,7 +1352,7 @@
           {#if rec.recordings.length}
             <button class="btn text-xs" on:click={() => (recListOpen = !recListOpen)} title="Recordings">▾&nbsp;{rec.recordings.length}</button>
             {#if recListOpen}
-              <div class="absolute right-0 top-full mt-1 w-72 max-h-72 overflow-y-auto bg-ink-900 border border-ink-700 rounded-lg p-2 z-50 space-y-1 text-[10px] font-mono shadow-xl"
+              <div class="absolute right-0 top-full mt-1 w-72 max-h-72 overflow-y-auto panel p-2 z-50 space-y-1 text-[10px] font-mono shadow-xl"
                    in:fly={menuIn}>
                 {#if rec.note}
                   <p class="text-red-400 leading-snug pb-1 mb-1 border-b border-ink-800">{rec.note}</p>
@@ -1358,7 +1361,7 @@
                   <div class="flex items-center gap-2 py-0.5">
                     {#if r.has_thumb}
                       <img src={api.recordingThumbURL(r.id)} alt="" loading="lazy"
-                           class="w-12 h-7 object-cover rounded border border-ink-700 flex-shrink-0" />
+                           class="w-12 h-7 object-cover rounded border border-steel-700 flex-shrink-0" />
                     {/if}
                     <a class="text-cursed-300 hover:underline truncate flex-1 min-w-0"
                        href={api.recordingURL(r.id)} download={fmtRecName(r.started_ms)}>{fmtRecTime(r.started_ms)}</a>
@@ -1415,7 +1418,7 @@
   {#if menuOpen}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="lg:hidden border-b border-ink-700 bg-ink-900/95 backdrop-blur-sm
+    <div class="lg:hidden chrome-header/95 backdrop-blur-sm
                 px-3 py-3 space-y-3 z-30"
          in:fly={{ y: -6, duration: reduceMotion ? 0 : 120 }}
          on:click={closeMenu}
@@ -1437,7 +1440,7 @@
           </span>
           <select value={hid.persona} on:change={onPersonaChange}
                   disabled={persona_switching}
-                  class="bg-ink-800 border border-ink-700 rounded px-1.5 py-0.5
+                  class="bg-ink-800 border border-steel-700 rounded px-1.5 py-0.5
                          text-cursed-300 flex-1 disabled:opacity-50">
             {#each HID_PERSONAS as p}
               <option value={p.value}>{p.label}{p.agent ? ' ⌖' : ''}{p.warn ? ' ⚠' : ''}</option>
@@ -1468,7 +1471,7 @@
       <div class="space-y-3 pt-1 border-t border-ink-800">
         <div class="grid grid-cols-3 gap-2">
           {#each SUPER_APPS as app}
-            <a href={app.href} class="flex flex-col items-center gap-1 px-2 py-2.5 rounded-lg border font-medium text-xs {APP_BTN[app.color]}" title={app.title}>
+            <a href={app.href} class="flex flex-col items-center gap-1 {APP_BTN[app.color]}" title={app.title}>
               <Icon name={app.icon} class="w-5 h-5 {APP_ICON[app.color]}" />{app.label}
             </a>
           {/each}
@@ -1514,7 +1517,7 @@
               <div class="flex items-center gap-2">
                 {#if r.has_thumb}
                   <img src={api.recordingThumbURL(r.id)} alt="" loading="lazy"
-                       class="w-12 h-7 object-cover rounded border border-ink-700 flex-shrink-0" />
+                       class="w-12 h-7 object-cover rounded border border-steel-700 flex-shrink-0" />
                 {/if}
                 <a class="text-cursed-300 hover:underline truncate flex-1 min-w-0"
                    href={api.recordingURL(r.id)} download={fmtRecName(r.started_ms)}>{fmtRecTime(r.started_ms)}</a>
@@ -1536,8 +1539,15 @@
     </div>
   {/if}
 
-  <!-- video canvas -->
-  <main class="flex-1 relative bg-ink-950">
+  <!-- video canvas — KVM viewport / instrument glass -->
+  <main class="flex-1 relative bg-black m-0 sm:m-1.5 sm:border sm:border-steel-700 min-h-0">
+    <!-- corner ticks (desktop) -->
+    <div class="pointer-events-none absolute inset-0 z-[6] hidden sm:block" aria-hidden="true">
+      <div class="absolute top-0 left-0 w-3 h-3 border-t border-l border-cursed-500/40"></div>
+      <div class="absolute top-0 right-0 w-3 h-3 border-t border-r border-cursed-500/40"></div>
+      <div class="absolute bottom-0 left-0 w-3 h-3 border-b border-l border-cursed-500/40"></div>
+      <div class="absolute bottom-0 right-0 w-3 h-3 border-b border-r border-cursed-500/40"></div>
+    </div>
     <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
@@ -1679,7 +1689,7 @@
         <div class="absolute top-0 left-0 z-20 p-3 pointer-events-none"
              style="padding-top: max(0.75rem, env(safe-area-inset-top));">
           <span class="px-3 py-1.5 rounded-full
-                       bg-ink-900/70 border border-ink-700 backdrop-blur-md
+                       bg-ink-900/70 border border-steel-700 backdrop-blur-md
                        text-zinc-300 font-mono text-xs tracking-wider">
             {hid.persona}
           </span>
@@ -1713,22 +1723,22 @@
              the most common non-text keys. Only shown when keyboard is up. -->
         {#if kbdVisible}
           <div class="flex gap-1.5">
-            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-steel-700
                            backdrop-blur-md text-zinc-300 active:scale-95
                            flex items-center justify-center"
                     on:click={() => api.sendKey(['ESC'])} aria-label="Send Esc">
               <Icon name="esc" class="w-5 h-5" /></button>
-            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-steel-700
                            backdrop-blur-md text-zinc-300 active:scale-95
                            flex items-center justify-center"
                     on:click={() => api.sendKey(['TAB'])} aria-label="Send Tab">
               <Icon name="tab" class="w-5 h-5" /></button>
-            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-steel-700
                            backdrop-blur-md text-zinc-300 active:scale-95
                            flex items-center justify-center"
                     on:click={() => api.sendKey(['BACKSPACE'])} aria-label="Send Backspace">
               <Icon name="backspace" class="w-5 h-5" /></button>
-            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-ink-700
+            <button class="w-12 h-12 rounded-full bg-ink-900/80 border border-steel-700
                            backdrop-blur-md text-zinc-300 active:scale-95
                            flex items-center justify-center"
                     on:click={() => api.sendKey(['ENTER'])} aria-label="Send Enter">
@@ -1781,7 +1791,7 @@
 
   <!-- Whisper line — ambient telemetry from data the page already
        polls (state / hid / vpn); zero new requests. -->
-  <footer class="px-5 py-2 border-t border-ink-700 bg-ink-900 text-[11px] font-mono text-zinc-500
+  <footer class="px-5 py-2 border-t border-steel-700 bg-ink-900 text-[11px] font-mono text-zinc-500
                  flex items-center gap-2 overflow-hidden whitespace-nowrap aeon-wardable"
           class:hidden={fullscreen}
           class:aeon-warded={captured}>

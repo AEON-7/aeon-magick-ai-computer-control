@@ -194,11 +194,11 @@
   ];
   const okPill = (ok: boolean | undefined) =>
     ok ? 'bg-live-500/20 text-live-400 border border-live-500/40'
-       : 'bg-ink-800 text-ink-400 border border-ink-700';
+       : 'bg-ink-800 text-ink-400 border border-steel-700';
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700 bg-ink-900">
+<div class="page-void min-h-screen">
+  <header class="flex items-center justify-between px-5 py-3 chrome-header">
     <a href="/" class="text-cursed-400 font-mono text-sm tracking-widest hover:underline">← AEON MAGICK</a>
     <h1 class="font-mono text-lg text-violet-300 inline-flex items-center gap-2">
       <Icon name="braincraft" class="w-5 h-5 text-violet-300" /> BrainCraft
@@ -208,7 +208,7 @@
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-5">
     {#if loadErr}
-      <div class="rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">{loadErr}</div>
+      <div class="rounded-sm border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">{loadErr}</div>
     {/if}
 
     {#if !status}
@@ -216,7 +216,7 @@
 
     {:else}
       <!-- ── Enable card ─────────────────────────────────────────────── -->
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-5 flex items-center justify-between gap-3">
+      <div class="panel p-5 flex items-center justify-between gap-3">
         <div class="flex items-center gap-3 min-w-0">
           <div class="text-violet-300 shrink-0"><Icon name="braincraft" class="w-8 h-8" /></div>
           <div class="min-w-0">
@@ -240,8 +240,8 @@
         <!-- ── Mode switch ───────────────────────────────────────────── -->
         <div class="grid grid-cols-3 gap-3">
           {#each MODES as m (m.id)}
-            <button class="rounded-lg border p-3 text-left transition
-                          {mode === m.id ? 'border-violet-500/50 bg-violet-600/15' : 'border-ink-700 bg-ink-900 hover:bg-ink-800'}"
+            <button class="rounded-sm border p-3 text-left transition
+                          {mode === m.id ? 'border-violet-500/50 bg-violet-600/15' : 'border-steel-700 bg-ink-900 hover:bg-ink-800'}"
                     on:click={() => setMode(m.id)} disabled={busy}>
               <div class="inline-flex items-center gap-2 font-mono text-sm {mode === m.id ? 'text-violet-200' : 'text-ink-200'}">
                 <Icon name={m.icon} class="w-4 h-4" /> {m.label}
@@ -254,7 +254,7 @@
         {#if !present}
           {@const reason = dev?.reason}
           {@const needsInstall = reason === 'libs_missing' || (!!voice && !voice.installed)}
-          <div class="rounded-lg border border-ink-700 bg-ink-900 p-6 space-y-3">
+          <div class="panel p-6 space-y-3">
             <div class="flex justify-center text-ink-600"><Icon name="braincraft" class="w-9 h-9" /></div>
 
             {#if needsInstall}
@@ -320,18 +320,18 @@
           </div>
         {:else}
           <!-- ── Device panel ────────────────────────────────────────── -->
-          <div class="rounded-lg border border-ink-700 bg-ink-900 p-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div class="rounded-lg bg-ink-950 border border-ink-800 p-3 space-y-1">
+          <div class="panel p-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="rounded-sm bg-ink-950 border border-ink-800 p-3 space-y-1">
               <div class="text-[10px] uppercase tracking-wider text-ink-500">Display</div>
               <div class="font-mono text-sm text-violet-200">{dev?.display?.driver ?? '—'}</div>
               <span class="pill text-[10px] {okPill(dev?.display?.ok)}">{dev?.display?.ok ? 'ok' : 'off'}</span>
             </div>
-            <div class="rounded-lg bg-ink-950 border border-ink-800 p-3 space-y-1">
+            <div class="rounded-sm bg-ink-950 border border-ink-800 p-3 space-y-1">
               <div class="text-[10px] uppercase tracking-wider text-ink-500">Buttons</div>
               <div class="font-mono text-sm text-violet-200">{dev?.buttons?.chip ?? '—'}</div>
               <span class="pill text-[10px] {okPill(dev?.buttons?.ok)}">{dev?.buttons?.ok ? 'ok' : 'off'}</span>
             </div>
-            <div class="rounded-lg bg-ink-950 border border-ink-800 p-3 space-y-1">
+            <div class="rounded-sm bg-ink-950 border border-ink-800 p-3 space-y-1">
               <div class="text-[10px] uppercase tracking-wider text-ink-500">Audio</div>
               <div class="font-mono text-sm text-violet-200">{dev?.audio?.device ?? '—'}</div>
               <div class="flex gap-1 flex-wrap">
@@ -345,7 +345,7 @@
 
           <!-- ── Viewfinder controls ─────────────────────────────────── -->
           {#if mode === 'viewfinder'}
-            <div class="rounded-lg border border-ink-700 bg-ink-900 p-5 space-y-3">
+            <div class="panel p-5 space-y-3">
               <div class="flex items-center justify-between">
                 <h2 class="font-mono text-sm text-ink-300">Viewfinder</h2>
                 <label class="inline-flex items-center gap-2 text-xs text-ink-400 cursor-pointer">
@@ -373,7 +373,7 @@
           {/if}
 
           <!-- ── Voice panel ─────────────────────────────────────────── -->
-          <div class="rounded-lg border border-ink-700 bg-ink-900 p-5 space-y-4">
+          <div class="panel p-5 space-y-4">
             <h2 class="font-mono text-sm text-ink-300 inline-flex items-center gap-2"><Icon name="zap" class="w-4 h-4 text-violet-300" /> Voice</h2>
 
             {#if !voice?.installed}
@@ -411,12 +411,12 @@
               <div class="space-y-2">
                 <div class="text-[11px] uppercase tracking-wider text-ink-500">Backend</div>
                 <div class="grid grid-cols-2 gap-2">
-                  <button class="rounded-lg border p-2.5 text-left transition {cfg?.backend.mode === 'local' ? 'border-violet-500/50 bg-violet-600/15 text-violet-200' : 'border-ink-700 bg-ink-950 hover:bg-ink-800 text-ink-200'}"
+                  <button class="rounded-sm border p-2.5 text-left transition {cfg?.backend.mode === 'local' ? 'border-violet-500/50 bg-violet-600/15 text-violet-200' : 'border-steel-700 bg-ink-950 hover:bg-ink-800 text-ink-200'}"
                           on:click={() => setBackend('local')} disabled={busy}>
                     <div class="font-mono text-sm">Local</div>
                     <div class="text-[11px] text-ink-500 mt-0.5">Kokoro + Whisper on-device</div>
                   </button>
-                  <button class="rounded-lg border p-2.5 text-left transition {cfg?.backend.mode === 'hosted' ? 'border-violet-500/50 bg-violet-600/15 text-violet-200' : 'border-ink-700 bg-ink-950 hover:bg-ink-800 text-ink-200'}"
+                  <button class="rounded-sm border p-2.5 text-left transition {cfg?.backend.mode === 'hosted' ? 'border-violet-500/50 bg-violet-600/15 text-violet-200' : 'border-steel-700 bg-ink-950 hover:bg-ink-800 text-ink-200'}"
                           on:click={() => setBackend('hosted')} disabled={busy}>
                     <div class="font-mono text-sm">Hosted</div>
                     <div class="text-[11px] text-ink-500 mt-0.5">DGX Spark + persona voice</div>
@@ -458,7 +458,7 @@
 
               <!-- Last exchange -->
               {#if dev?.last_utterance?.text || dev?.last_response?.text}
-                <div class="rounded-lg bg-ink-950 border border-ink-800 p-3 space-y-1.5 text-sm">
+                <div class="rounded-sm bg-ink-950 border border-ink-800 p-3 space-y-1.5 text-sm">
                   {#if dev?.last_utterance?.text}<div><span class="text-ink-500 font-mono text-xs">you</span> <span class="text-ink-200">{dev.last_utterance.text}</span></div>{/if}
                   {#if dev?.last_response?.text}<div><span class="text-violet-400 font-mono text-xs">{cfg?.backend.persona || 'orb'}</span> <span class="text-ink-100">{dev.last_response.text}</span></div>{/if}
                 </div>
@@ -474,7 +474,7 @@
 
               <!-- Audio levels: WM8960 in/out volume via /api/audio/volume -->
               {#if audioVol?.present}
-                <div class="rounded-lg bg-ink-950 border border-ink-800 p-3 space-y-3">
+                <div class="rounded-sm bg-ink-950 border border-ink-800 p-3 space-y-3">
                   <div class="text-[11px] uppercase tracking-wider text-ink-500">
                     Audio levels <span class="text-ink-600 font-mono">{audioVol.card?.name}</span>
                   </div>
@@ -499,7 +499,7 @@
                         <input type="range" min="0" max="100" step="1" bind:value={inVol}
                                on:change={() => saveAudio({ capture: inVol })}
                                disabled={audioBusy || micMuted} class="flex-1 accent-violet-500" />
-                        <button class="btn text-xs px-2 py-1 {micMuted ? 'border-red-500/40 text-red-300' : 'border-ink-700 text-ink-300'}"
+                        <button class="btn text-xs px-2 py-1 {micMuted ? 'border-red-500/40 text-red-300' : 'border-steel-700 text-ink-300'}"
                                 on:click={() => { micMuted = !micMuted; saveAudio({ capture_muted: micMuted }); }}
                                 disabled={audioBusy}>{micMuted ? 'unmute' : 'mute'}</button>
                       </div>

@@ -77,7 +77,7 @@
   function actionClass(a: string): string {
     if (a.startsWith('login') && a.endsWith('_fail')) return 'bg-red-500/20 text-red-300 border-red-500/40';
     if (a.startsWith('login')) return 'bg-live-500/20 text-live-300 border-live-500/40';
-    if (a === 'logout') return 'bg-ink-700 text-zinc-300 border-ink-600';
+    if (a === 'logout') return 'bg-ink-700 text-zinc-300 border-steel-600';
     if (a === 'password_set' || a === 'password_change') return 'bg-amber-500/15 text-amber-300 border-amber-500/40';
     if (a.startsWith('token_')) return 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40';
     if (a === 'scope_denied') return 'bg-red-500/15 text-red-300 border-red-500/40';
@@ -87,12 +87,12 @@
     if (a.startsWith('set_dns')) return 'bg-cursed-500/10 text-cursed-200 border-cursed-500/30';
     if (a.startsWith('set_ssh')) return 'bg-amber-500/10 text-amber-300 border-amber-500/30';
     if (a === 'hid_persona_set') return 'bg-cursed-500/10 text-cursed-200 border-cursed-500/30';
-    return 'bg-ink-700 text-zinc-300 border-ink-600';
+    return 'bg-ink-700 text-zinc-300 border-steel-600';
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="audit log">
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="audit log" subtitle="who did what · when" index="10">
     <button class="btn text-xs hover:bg-red-500/20 hover:text-red-300 hover:border-red-500/40"
             on:click={clearLog}>
       clear log
@@ -107,16 +107,16 @@
     {#if state}
       <!-- Stats -->
       <section class="grid grid-cols-3 gap-3">
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+        <div class="panel p-4">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Entries logged</div>
           <div class="text-2xl font-mono text-zinc-200 mt-1">{state.total_lines.toLocaleString()}</div>
         </div>
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+        <div class="panel p-4">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Showing</div>
           <div class="text-2xl font-mono text-cursed-300 mt-1">{state.entries.length}</div>
           <div class="text-[10px] text-zinc-500 mt-1">filtered • newest first</div>
         </div>
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+        <div class="panel p-4">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Log size</div>
           <div class="text-2xl font-mono text-zinc-300 mt-1">{fmtBytes(state.current_bytes)}</div>
           <div class="text-[10px] text-zinc-500 mt-1">
@@ -126,7 +126,7 @@
       </section>
 
       <!-- Filters -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-4 space-y-3">
+      <section class="panel p-4 space-y-3">
         <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400">Filters</h2>
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
           <label class="space-y-1">
@@ -134,19 +134,19 @@
             <input type="text" bind:value={filterActor}
                    on:input={() => refresh()}
                    placeholder="admin (session)"
-                   class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200 font-mono" />
+                   class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200 font-mono" />
           </label>
           <label class="space-y-1">
             <span class="text-zinc-500">Action (prefix)</span>
             <input type="text" bind:value={filterAction}
                    on:input={() => refresh()}
                    placeholder="login / token / set_network"
-                   class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200 font-mono" />
+                   class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200 font-mono" />
           </label>
           <label class="space-y-1">
             <span class="text-zinc-500">Limit</span>
             <select bind:value={limit} on:change={() => refresh()}
-                    class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200">
+                    class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200">
               <option value={50}>50</option>
               <option value={200}>200</option>
               <option value={500}>500</option>
@@ -157,7 +157,7 @@
       </section>
 
       <!-- Entry list -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl">
+      <section class="panel">
         <div class="max-h-[60vh] overflow-auto divide-y divide-ink-800">
           {#each state.entries as e (e.ts_ms + e.actor + e.action + e.detail)}
             <div class="p-3 hover:bg-ink-950/40 flex items-start gap-3 text-xs font-mono">

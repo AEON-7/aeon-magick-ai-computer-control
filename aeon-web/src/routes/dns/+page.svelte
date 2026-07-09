@@ -220,8 +220,8 @@
   $: blockedCount = log?.entries.filter(e => e.action === 'block').length ?? 0;
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="DNS log + blacklist" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="DNS log + blacklist" subtitle="queries · blocklists · sources" index="13" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-4xl mx-auto w-full space-y-6">
@@ -233,15 +233,15 @@
     <!-- Stats overview -->
     {#if log}
       <section class="grid grid-cols-3 gap-3">
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+        <div class="panel p-4">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Allowed</div>
           <div class="text-2xl font-mono text-live-400 mt-1">{log.allowed_total.toLocaleString()}</div>
         </div>
-        <div class="bg-ink-900 border border-red-500/30 rounded-xl p-4">
+        <div class="bg-ink-900 border border-red-500/30 rounded-sm p-4">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Blocked</div>
           <div class="text-2xl font-mono text-red-400 mt-1">{log.blocked_total.toLocaleString()}</div>
         </div>
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-4">
+        <div class="panel p-4">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Block list size</div>
           <div class="text-2xl font-mono text-cursed-400 mt-1">{blacklist.domains.length.toLocaleString()}</div>
           <div class="text-[10px] text-zinc-500 mt-1">+ {blacklist.regexes.length} regex(es)</div>
@@ -250,7 +250,7 @@
     {/if}
 
     <!-- Logging toggle -->
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+    <section class="panel p-5 space-y-3">
       <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Query log</h2>
       <label class="flex items-center gap-3 cursor-pointer">
         <input type="checkbox" checked={log?.enabled ?? false}
@@ -271,7 +271,7 @@
 
     <!-- Log viewer -->
     {#if log?.enabled}
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+      <section class="panel p-5 space-y-3">
         <div class="flex items-center justify-between">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Recent queries ({filteredEntries.length})
@@ -306,7 +306,7 @@
     {/if}
 
     <!-- ─── Subscription sources ─── -->
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+    <section class="panel p-5 space-y-4">
       <header>
         <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
           Subscription sources
@@ -324,7 +324,7 @@
       {#if sources.length}
         <div class="space-y-1.5">
           {#each sources as s (s.id)}
-            <div class="flex items-center gap-3 p-3 rounded-lg
+            <div class="flex items-center gap-3 p-3 rounded-sm
                         bg-ink-950/60 border
                         {s.last_error
                           ? 'border-red-500/40'
@@ -364,7 +364,7 @@
                 {/if}
               </div>
               <button class="text-xs px-2 py-1 rounded
-                             border border-ink-700 hover:border-cursed-500/60
+                             border border-steel-700 hover:border-cursed-500/60
                              text-zinc-400 hover:text-cursed-200 transition-colors
                              disabled:opacity-50"
                       on:click={() => refreshSrc(s.id)}
@@ -392,7 +392,7 @@
           <div class="grid sm:grid-cols-2 gap-2">
             {#each presets as p}
               {@const already = sources.some(s => s.url === p.url)}
-              <button class="text-left p-3 rounded-lg border transition-colors
+              <button class="text-left p-3 rounded-sm border transition-colors
                              {already
                                ? 'bg-ink-950/40 border-ink-800 opacity-50 cursor-not-allowed'
                                : 'bg-ink-950/40 border-ink-800 hover:border-cursed-500/50 hover:bg-cursed-500/5'}"
@@ -427,9 +427,9 @@
         <div class="grid sm:grid-cols-2 gap-2">
           <input type="text" bind:value={newSrcName}
                  placeholder="Name (e.g. 'My corp blocklist')"
-                 class="bg-ink-800 border border-ink-700 rounded px-3 py-2 text-sm text-zinc-200" />
+                 class="bg-ink-800 border border-steel-700 rounded px-3 py-2 text-sm text-zinc-200" />
           <select bind:value={newSrcFormat}
-                  class="bg-ink-800 border border-ink-700 rounded px-3 py-2 text-sm text-zinc-200">
+                  class="bg-ink-800 border border-steel-700 rounded px-3 py-2 text-sm text-zinc-200">
             <option value="hosts">hosts file (0.0.0.0 domain.com lines)</option>
             <option value="domains">domains (one per line)</option>
             <option value="adblock">adblock (||domain.com^ syntax)</option>
@@ -437,12 +437,12 @@
         </div>
         <input type="url" bind:value={newSrcUrl}
                placeholder="https://raw.githubusercontent.com/…/hosts"
-               class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono" />
+               class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono" />
         <div class="flex items-center gap-3 flex-wrap">
           <label class="flex items-center gap-2 text-xs text-zinc-500">
             Refresh every
             <input type="number" bind:value={newSrcHours} min="1" max="720" step="1"
-                   class="w-16 bg-ink-800 border border-ink-700 rounded px-2 py-1 text-zinc-200" />
+                   class="w-16 bg-ink-800 border border-steel-700 rounded px-2 py-1 text-zinc-200" />
             hours
           </label>
           <button class="btn-primary text-xs ml-auto"
@@ -455,7 +455,7 @@
     </section>
 
     <!-- ─── Manual blacklist editor ─── -->
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+    <section class="panel p-5 space-y-4">
       <header>
         <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Manual blacklist</h2>
         <p class="text-xs text-zinc-500 mt-1">
@@ -475,7 +475,7 @@
           <input id="dns-newdomain" type="text" bind:value={newDomain}
                  placeholder="evil-tracker.com"
                  on:keydown={(e) => e.key === 'Enter' && addDomain()}
-                 class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono" />
+                 class="flex-1 bg-ink-800 border border-steel-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono" />
           <button class="btn-primary text-xs" on:click={addDomain}>+ add</button>
         </div>
       </div>
@@ -487,7 +487,7 @@
           <input id="dns-newregex" type="text" bind:value={newRegex}
                  placeholder=".*\.adsrv\.[a-z]+"
                  on:keydown={(e) => e.key === 'Enter' && addRegex()}
-                 class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono" />
+                 class="flex-1 bg-ink-800 border border-steel-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono" />
           <button class="btn-primary text-xs" on:click={addRegex}>+ add</button>
         </div>
         <p class="text-[11px] text-zinc-500">
@@ -502,7 +502,7 @@
         <label class="text-xs text-zinc-500 block" for="dns-csvimport">Bulk import (paste CSV or hosts-file)</label>
         <textarea id="dns-csvimport" bind:value={csvImport} rows="3"
                   placeholder="ads.example.com&#10;0.0.0.0 trackers.evil.io&#10;another-bad.tld"
-                  class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                  class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
         <button class="btn text-xs" on:click={doImport} disabled={saving || !csvImport.trim()}>
           import
         </button>
@@ -510,7 +510,7 @@
 
       <!-- Current entries -->
       {#if blacklist.domains.length}
-        <details class="border-t border-ink-700 pt-3">
+        <details class="border-t border-steel-700 pt-3">
           <summary class="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">
             Current entries ({blacklist.domains.length} domains, {blacklist.regexes.length} regexes) — expand to edit
           </summary>
@@ -535,7 +535,7 @@
         </details>
       {/if}
 
-      <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+      <div class="flex items-center gap-3 pt-2 border-t border-steel-700">
         <button class="btn-primary" on:click={saveBlacklist} disabled={saving}>
           {saving ? 'saving…' : 'save & apply'}
         </button>

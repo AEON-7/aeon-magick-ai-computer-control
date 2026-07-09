@@ -193,7 +193,7 @@
 </script>
 
 <div class="min-h-screen bg-ink-950 text-ink-100 flex flex-col">
-  <PageHeader title="Aeon Bench" subtitle="deploy the LLM-benchmarking pod">
+  <PageHeader title="Aeon Bench" subtitle="deploy the LLM-benchmarking pod" index="14">
     {#if running}
       <a href={dashUrl} target="_blank" rel="noopener" class="btn-primary text-xs py-1 px-2.5 rounded inline-flex items-center gap-1">
         Open Dashboard <span aria-hidden="true">↗</span>
@@ -204,7 +204,7 @@
   <main class="flex-1 overflow-y-auto px-4 sm:px-6 py-6 w-full max-w-3xl mx-auto space-y-5">
     <!-- intro -->
     <div class="flex items-start gap-3">
-      <div class="shrink-0 w-11 h-11 rounded-lg bg-rose-600/15 border border-rose-500/40 text-rose-300 flex items-center justify-center">
+      <div class="shrink-0 w-11 h-11 rounded-sm bg-rose-600/15 border border-rose-500/40 text-rose-300 flex items-center justify-center">
         <Icon name="bench" class="w-6 h-6" />
       </div>
       <div class="text-sm text-ink-300 leading-relaxed">
@@ -217,7 +217,7 @@
 
     {#if noHost}
       <!-- No GPU server linked — the pod has nowhere to serve the model. -->
-      <div class="rounded-xl border border-rose-700/40 bg-rose-900/10 p-5 text-center space-y-3">
+      <div class="rounded-sm border border-rose-700/40 bg-rose-900/10 p-5 text-center space-y-3">
         <div class="text-sm text-ink-200 leading-relaxed max-w-md mx-auto">
           <span class="text-rose-300 font-mono">No model host connected.</span>
           Aeon Bench serves the model <em>and</em> runs the benchmark together on one <strong>NVIDIA-GPU</strong> box —
@@ -228,17 +228,17 @@
       </div>
     {:else}
       <!-- GPU note -->
-      <div class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-200/90 flex gap-2">
+      <div class="rounded-sm border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-200/90 flex gap-2">
         <span aria-hidden="true">⚠</span>
         <span>The pod serves the model + runs the benchmark <strong>co-located on the target</strong> — so the deploy target must be an <strong>NVIDIA-GPU</strong> server (needs the nvidia-container-toolkit for <code>--gpus all</code>). The prebuilt container is pulled from ghcr.io; Docker is installed on first deploy.</span>
       </div>
 
       <!-- deploy form -->
-      <div class="rounded-xl border border-ink-700 bg-ink-900 p-4 sm:p-5 space-y-4">
+      <div class="panel p-4 sm:p-5 space-y-4">
         <div class="grid gap-4 sm:grid-cols-2">
           <label class="block space-y-1">
             <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">Deploy target — GPU host</span>
-            <select bind:value={target} class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none">
+            <select bind:value={target} class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none">
               {#each targetOptions as o}
                 <option value={o.id}>{o.label}</option>
               {/each}
@@ -246,21 +246,21 @@
           </label>
           <label class="block space-y-1">
             <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">Model to pre-load <span class="text-ink-600 normal-case">(optional)</span></span>
-            <input bind:value={hfLink} placeholder="org/Model-Name — or pick one in the dashboard" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
+            <input bind:value={hfLink} placeholder="org/Model-Name — or pick one in the dashboard" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
           </label>
         </div>
         <div class="grid gap-4 sm:grid-cols-2">
           <label class="block space-y-1">
             <span class="text-[11px] uppercase tracking-wider text-ink-400 font-mono">HuggingFace token <span class="text-ink-600 normal-case">(optional)</span></span>
-            <input bind:value={hfToken} type="password" placeholder="hf_… (for gated models)" autocomplete="off" class="w-full bg-ink-950 border border-ink-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
+            <input bind:value={hfToken} type="password" placeholder="hf_… (for gated models)" autocomplete="off" class="w-full bg-ink-950 border border-steel-700 rounded px-2.5 py-2 text-sm font-mono focus:border-rose-500 outline-none" />
           </label>
         </div>
 
         <!-- auto-detected serve recipe -->
         {#if infoLoading || info}
-          <div class="rounded-lg border border-ink-800 bg-ink-950/60 px-3.5 py-2.5 text-[12px] space-y-1.5">
+          <div class="rounded-sm border border-ink-800 bg-ink-950/60 px-3.5 py-2.5 text-[12px] space-y-1.5">
             {#if infoLoading}
-              <span class="text-ink-500 font-mono inline-flex items-center gap-2"><span class="inline-block h-3 w-3 rounded-full border-2 border-ink-600 border-t-transparent animate-spin"></span>reading model config…</span>
+              <span class="text-ink-500 font-mono inline-flex items-center gap-2"><span class="inline-block h-3 w-3 rounded-full border-2 border-steel-600 border-t-transparent animate-spin"></span>reading model config…</span>
             {:else if info}
               <div class="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-ink-300">
                 <span class="text-ink-500 uppercase tracking-wider text-[10px]">detected</span>
@@ -287,7 +287,7 @@
             {#each [['AEON_PORT', 'Dashboard port', '8091'], ['AEON_SYSTEM', 'Hardware label (on results)', 'e.g. DGX-Spark'], ['AEON_PAUSE_CONTAINERS', 'Pause a container during runs', 'container name']] as [key, label, ph]}
               <label class="block space-y-1">
                 <span class="text-[11px] text-ink-500 font-mono">{label}</span>
-                <input bind:value={adv[key]} placeholder={ph} class="w-full bg-ink-950 border border-ink-800 rounded px-2 py-1.5 text-[13px] font-mono focus:border-ink-600 outline-none" />
+                <input bind:value={adv[key]} placeholder={ph} class="w-full bg-ink-950 border border-ink-800 rounded px-2 py-1.5 text-[13px] font-mono focus:border-steel-600 outline-none" />
               </label>
             {/each}
           </div>
@@ -307,7 +307,7 @@
 
       <!-- status / progress -->
       {#if st && phase !== 'idle'}
-        <div class="rounded-xl border {phase === 'failed' ? 'border-red-800/60' : running ? 'border-emerald-600/40' : 'border-ink-700'} bg-ink-900 p-4 sm:p-5 space-y-3">
+        <div class="rounded-sm border {phase === 'failed' ? 'border-red-800/60' : running ? 'border-emerald-600/40' : 'border-steel-700'} bg-ink-900 p-4 sm:p-5 space-y-3">
           <div class="flex items-center justify-between gap-2">
             <span class="font-mono text-sm {phase === 'failed' ? 'text-red-300' : running ? 'text-emerald-300' : 'text-amber-300'}">
               {#if running}● Pod running on {targetLabel}{:else if phase === 'failed'}⚠ Deploy failed{:else if phase === 'stopped'}Pod stopped{:else}{phase}…{/if}
@@ -328,7 +328,7 @@
             </div>
             <!-- Update Pod — only when the deployed pod is behind the latest on GitHub -->
             {#if upd?.update_available}
-              <div class="flex flex-wrap items-center gap-2 rounded-lg border border-amber-600/40 bg-amber-900/10 px-3 py-2">
+              <div class="flex flex-wrap items-center gap-2 rounded-sm border border-amber-600/40 bg-amber-900/10 px-3 py-2">
                 <button on:click={updatePod} disabled={updating || busy}
                         class="text-sm py-1.5 px-3 rounded inline-flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-ink-950 font-medium disabled:opacity-50 disabled:cursor-not-allowed">
                   {updating ? 'Updating…' : 'Update Pod'} <span aria-hidden="true">↑</span>
@@ -353,7 +353,7 @@
     {/if}
 
     <!-- Patreon -->
-    <div class="rounded-xl border border-cursed-700/40 bg-cursed-900/10 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-3">
+    <div class="rounded-sm border border-cursed-700/40 bg-cursed-900/10 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-3">
       <div class="flex-1 text-sm text-ink-300 leading-relaxed">
         <span class="text-cursed-300 font-mono">Build your own Orb.</span> Join the
         <span class="text-cursed-200">AeonForge Patreon</span> for the full compiled image files (flash straight to your Raspberry Pi),

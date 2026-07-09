@@ -68,12 +68,12 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="SSH key trust store" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="SSH key trust store" subtitle="authorized keys · jump access" index="12" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-4">
+    <section class="panel p-6 space-y-4">
       <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Add a public key</h2>
       <p class="text-sm text-zinc-400">
         Paste a single OpenSSH public key from your laptop's
@@ -84,7 +84,7 @@
       </p>
       <textarea bind:value={newKey} rows="3"
                 placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI… you@laptop"
-                class="w-full bg-ink-800 border border-ink-700 rounded
+                class="w-full bg-ink-800 border border-steel-700 rounded
                        px-3 py-2 text-xs text-zinc-200 font-mono break-all"></textarea>
       <div class="flex items-center gap-3">
         <button class="btn-primary text-sm" on:click={add} disabled={adding || !newKey.trim()}>
@@ -106,7 +106,7 @@
       </p>
     </section>
 
-    <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-3">
+    <section class="panel p-6 space-y-3">
       <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
         Authorized keys
         <span class="text-zinc-500 ml-2">({keys.length})</span>
@@ -121,7 +121,7 @@
       {:else}
         <div class="space-y-2">
           {#each keys as k (k.id)}
-            <div class="p-3 rounded-lg bg-ink-950 border border-ink-800
+            <div class="p-3 rounded-sm bg-ink-950 border border-ink-800
                         flex items-start justify-between gap-3">
               <div class="space-y-1 flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
@@ -142,7 +142,7 @@
                 </div>
               </div>
               <button class="text-xs text-zinc-500 hover:text-red-400
-                             border border-ink-700 hover:border-red-500/50
+                             border border-steel-700 hover:border-red-500/50
                              rounded px-2 py-1 transition-colors flex-shrink-0"
                       on:click={() => remove(k.id, k.fingerprint)}>
                 remove

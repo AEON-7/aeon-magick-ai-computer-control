@@ -293,14 +293,14 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="VPN provider setup" backHref="/network" backLabel="NETWORK" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="VPN provider setup" subtitle="Mullvad · IVPN · Azire · AirVPN" backHref="/network" backLabel="NETWORK" index="04.1" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
 
       <!-- Provider tabs -->
-      <div class="flex gap-2 border-b border-ink-700 pb-2">
+      <div class="flex gap-2 border-b border-steel-700 pb-2">
         {#each PROVIDER_IDS as id}
           <button class="flex items-center gap-2 px-4 py-2 text-sm font-mono uppercase tracking-wider transition-colors
                          {active === id
@@ -321,7 +321,7 @@
 
       {#if meta}
         <!-- Provider info card -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-2">
+        <section class="panel p-5 space-y-2">
           <header class="flex items-baseline justify-between gap-2">
             <h2 class="flex items-center gap-2 font-mono text-sm uppercase tracking-wider text-zinc-300">
               <VpnLogo provider={active} size={22} />
@@ -376,7 +376,7 @@
           <!-- Setup wizard. Also reachable when already configured via the
                "change account" button (forceResetup) — for switching to a new
                account or repairing a stuck session. -->
-          <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+          <section class="panel p-5 space-y-3">
             <header class="flex items-start justify-between gap-3">
               <div class="space-y-1">
                 <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
@@ -413,7 +413,7 @@
                 <p class="text-[11px] uppercase tracking-wider text-zinc-400">AirVPN API key</p>
                 <input type="password" bind:value={airvpnApiKey}
                        placeholder={state?.has_api_key ? '•••••••• (stored — paste again to change)' : 'AirVPN API key (64-char)'}
-                       class="w-full bg-ink-800 border border-ink-700 rounded
+                       class="w-full bg-ink-800 border border-steel-700 rounded
                               px-3 py-2 text-sm text-zinc-200 font-mono" />
                 <p class="text-[10px] text-zinc-600 leading-relaxed">
                   Get it at
@@ -424,7 +424,7 @@
               {:else}
                 <input type="password" bind:value={credentialInput}
                        placeholder={credentialPlaceholder(active)}
-                       class="w-full bg-ink-800 border border-ink-700 rounded
+                       class="w-full bg-ink-800 border border-steel-700 rounded
                               px-3 py-2 text-sm text-zinc-200 font-mono" />
                 {#if active === 'azirevpn'}
                   <p class="text-[11px] text-amber-300/80 leading-relaxed">
@@ -438,7 +438,7 @@
                 {/if}
                 <input type="text" bind:value={deviceName}
                        placeholder="device name (default: aeon-magick)"
-                       class="w-full bg-ink-800 border border-ink-700 rounded
+                       class="w-full bg-ink-800 border border-steel-700 rounded
                               px-3 py-2 text-sm text-zinc-200 font-mono" />
               {/if}
               <button class="btn-primary text-sm" disabled={busy}
@@ -449,7 +449,7 @@
           </section>
         {:else}
           <!-- Configured + server picker -->
-          <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+          <section class="panel p-5 space-y-3">
             <header class="flex items-baseline justify-between gap-2 flex-wrap">
               <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
                 Pick a server
@@ -473,7 +473,7 @@
             <div class="flex flex-wrap gap-2">
               <input type="text" bind:value={countryFilter}
                      placeholder="filter by country / city…"
-                     class="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded
+                     class="flex-1 min-w-0 bg-ink-800 border border-steel-700 rounded
                             px-3 py-1.5 text-xs text-zinc-200 font-mono" />
               <button class="btn text-xs" disabled={busy}
                       on:click={refreshServers}
@@ -556,7 +556,7 @@
           {#if active === 'airvpn'}
             <!-- v77: per-mode auto-generate. Each mode is pulled from AirVPN's
                  generator + stored independently, so all four can be set up. -->
-            <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+            <section class="panel p-5 space-y-3">
               <header class="space-y-1">
                 <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">Connection mode</h2>
                 <p class="text-xs text-zinc-500">
@@ -573,7 +573,7 @@
                   {@const g = airvpnGenerated[m.id]}
                   <div class="p-3 rounded border {state.mode === m.id
                                 ? 'border-cursed-500 bg-cursed-500/10'
-                                : 'border-ink-700 bg-ink-800'}">
+                                : 'border-steel-700 bg-ink-800'}">
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="text-sm text-zinc-200 font-mono">{m.label}</span>
                       <span class="text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wide {m.badgeClass}">{m.badge}</span>

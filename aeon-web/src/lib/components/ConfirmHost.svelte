@@ -64,24 +64,30 @@
   {@const opts = current.opts}
   {@const danger = 'danger' in opts && !!opts.danger}
   <div
-    class="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-ink-950/70 backdrop-blur-sm"
+    class="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-ink-950/80"
     transition:fade={{ duration: reduceMotion ? 0 : 120 }}
     on:mousedown|self={() => finish(false)}
     role="presentation"
   >
     <div
-      class="w-full max-w-md bg-ink-900 border rounded-2xl p-6 space-y-4 shadow-2xl
-             {danger ? 'border-red-500/50 shadow-red-950/40' : 'border-cursed-500/40 shadow-cursed-800/20'}"
+      class="w-full max-w-md panel p-6 space-y-4
+             {danger ? 'panel-danger' : 'panel-cursed'}"
       in:fly={{ y: reduceMotion ? 0 : 8, duration: reduceMotion ? 0 : 150 }}
       role="dialog"
       aria-modal="true"
       aria-label={opts.title}
     >
-      <div class="flex items-center gap-2.5">
+      <div class="{danger ? 'status-strip-fault' : 'status-strip-cursed'} -mx-6 -mt-6 mb-1" aria-hidden="true"></div>
+      <div class="flex items-center gap-2.5 pt-1">
         <OrbMark mode={danger ? 'offline' : 'idle'} class="w-5 h-5" />
-        <h2 class="font-mono text-sm uppercase tracking-wider {danger ? 'text-red-300' : 'text-cursed-300'}">
-          {opts.title}
-        </h2>
+        <div>
+          <p class="rack-label {danger ? 'text-red-500/80' : 'text-cursed-500/80'}">
+            {danger ? 'confirm · danger' : 'confirm'}
+          </p>
+          <h2 class="font-mono text-sm uppercase tracking-wider {danger ? 'text-red-300' : 'text-cursed-300'}">
+            {opts.title}
+          </h2>
+        </div>
       </div>
 
       {#if opts.body}
@@ -92,7 +98,7 @@
         {@const ask = current.opts}
         <label class="block">
           {#if ask.label}
-            <span class="text-xs uppercase tracking-wider text-zinc-500">{ask.label}</span>
+            <span class="field-label">{ask.label}</span>
           {/if}
           <input
             bind:this={textInput}
@@ -101,15 +107,14 @@
             placeholder={ask.placeholder ?? ''}
             autocomplete="off"
             spellcheck="false"
-            class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700 text-sm
-                   focus:outline-none focus:ring-2 focus:ring-cursed-500 focus:border-transparent"
+            class="field"
           />
         </label>
       {:else if current.kind === 'confirm' && current.opts.phrase}
         {@const phrase = current.opts.phrase}
         <label class="block">
-          <span class="text-xs uppercase tracking-wider text-zinc-500">
-            type <span class="font-mono text-red-300 select-none">{phrase}</span> to confirm
+          <span class="field-label">
+            type <span class="text-red-300 select-none">{phrase}</span> to confirm
           </span>
           <input
             bind:this={textInput}
@@ -119,25 +124,19 @@
             autocomplete="off"
             autocapitalize="off"
             spellcheck="false"
-            class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border font-mono text-sm tracking-widest
-                   focus:outline-none focus:ring-2 focus:border-transparent
-                   {phraseOk ? 'border-red-500/60 focus:ring-red-500 text-red-200' : 'border-ink-700 focus:ring-red-500/60'}"
+            class="field font-mono tracking-widest
+                   {phraseOk ? 'border-red-500/60 focus:ring-red-500 text-red-200' : ''}"
           />
         </label>
       {/if}
 
       <div class="flex justify-end gap-2 pt-1">
-        <button class="btn text-xs" on:click={() => finish(false)}>
+        <button class="btn btn-sm" on:click={() => finish(false)}>
           {opts.cancelLabel ?? 'cancel'}
         </button>
         <button
           bind:this={confirmBtn}
-          class="text-xs px-4 py-2 rounded-md font-medium transition-colors
-                 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-ink-900
-                 disabled:opacity-40 disabled:cursor-not-allowed
-                 {danger
-                   ? 'bg-red-700 hover:bg-red-600 text-white focus:ring-red-500'
-                   : 'bg-cursed-600 hover:bg-cursed-500 text-white focus:ring-cursed-500'}"
+          class="{danger ? 'btn-danger' : 'btn-primary'} btn-sm disabled:opacity-40"
           disabled={!phraseOk}
           on:click={accept}
         >

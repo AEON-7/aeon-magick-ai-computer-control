@@ -40,8 +40,8 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="I2P config" backHref="/network" backLabel="NETWORK" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="I2P config" subtitle="garlic routing · proxy" backHref="/network" backLabel="NETWORK" index="04.2" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
@@ -51,7 +51,7 @@
 
       {#if status}
         <!-- ── Why this page exists ── -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-2">
+        <section class="panel p-5 space-y-2">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             About I2P access
           </h2>
@@ -75,7 +75,7 @@
         </section>
 
         <!-- ── Status ── -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Daemon status
           </h2>
@@ -106,7 +106,7 @@
         </section>
 
         <!-- ── Browser proxy setup ── -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Browser proxy
           </h2>
@@ -155,7 +155,7 @@
         </section>
 
         <!-- ── Router console ── -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Router console
           </h2>
@@ -177,7 +177,7 @@
         </section>
 
         <!-- ── Outproxy ── -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Clearnet outproxy
           </h2>

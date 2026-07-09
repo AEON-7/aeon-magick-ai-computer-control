@@ -51,13 +51,13 @@
 </script>
 
 {#if loaded}
-  <section class="bg-ink-900 border {enabled ? 'border-red-500/60' : 'border-ink-700'} rounded-xl p-5 space-y-4">
+  <section class="bg-ink-900 border {enabled ? 'border-red-500/60' : 'border-steel-700'} rounded-sm p-5 space-y-4">
     <div class="flex items-start justify-between gap-4 flex-wrap">
       <div>
         <h2 class="font-mono text-sm uppercase tracking-wider {enabled ? 'text-red-300' : 'text-zinc-400'}">Lockdown &amp; API exposure</h2>
         <p class="text-[11px] text-zinc-500 mt-1 max-w-md">The killswitch refuses every external API token + MCP call — the admin web session and the KVM keep working. Or disable individual categories below.</p>
       </div>
-      <button class="px-4 py-2 rounded-lg font-mono text-sm transition disabled:opacity-50 {enabled ? 'bg-red-700 text-white motion-safe:animate-ember' : 'bg-red-900/30 text-red-300 border border-red-500/40 hover:bg-red-800/40'}"
+      <button class="px-4 py-2 rounded-sm font-mono text-sm transition disabled:opacity-50 {enabled ? 'bg-red-700 text-white motion-safe:animate-ember' : 'bg-red-900/30 text-red-300 border border-red-500/40 hover:bg-red-800/40'}"
               disabled={busy} on:click={toggleLockdown}>
         {enabled ? '● LOCKDOWN ENGAGED — release' : 'ENGAGE LOCKDOWN'}
       </button>
@@ -65,7 +65,7 @@
     {#if !enabled}
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-3 border-t border-ink-800">
         {#each categories as cat}
-          <button class="flex items-center justify-between gap-2 px-3 py-2 rounded border text-xs transition {disabled.includes(cat) ? 'border-red-500/40 bg-red-900/20 text-red-300' : 'border-ink-700 bg-ink-800 text-zinc-300 hover:border-ink-600'}"
+          <button class="flex items-center justify-between gap-2 px-3 py-2 rounded border text-xs transition {disabled.includes(cat) ? 'border-red-500/40 bg-red-900/20 text-red-300' : 'border-steel-700 bg-ink-800 text-zinc-300 hover:border-steel-600'}"
                   disabled={busy} on:click={() => toggleCat(cat)}>
             <span class="truncate">{CAT_LABELS[cat] ?? cat}</span>
             <span class="text-[10px] font-mono">{disabled.includes(cat) ? 'OFF' : 'on'}</span>

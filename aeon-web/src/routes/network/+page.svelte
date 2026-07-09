@@ -767,16 +767,16 @@
       case 'no_logs':    return { text: 'no logs', classes: 'bg-live-500/20 text-live-300 border-live-500/40' };
       case 'anonymized': return { text: 'anonymized', classes: 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40' };
       case 'self_logs':  return { text: 'your dashboard', classes: 'bg-amber-500/15 text-amber-300 border-amber-500/40' };
-      default:           return { text: policy, classes: 'bg-ink-700 text-zinc-400 border-ink-600' };
+      default:           return { text: policy, classes: 'bg-ink-700 text-zinc-400 border-steel-600' };
     }
   }
   function secBadge(sec: string): { text: string; classes: string } {
     switch (sec) {
-      case 'basic':      return { text: 'basic', classes: 'bg-ink-700 text-zinc-300 border-ink-600' };
+      case 'basic':      return { text: 'basic', classes: 'bg-ink-700 text-zinc-300 border-steel-600' };
       case 'filtered':   return { text: 'malware filter', classes: 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40' };
       case 'family':     return { text: 'family filter', classes: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40' };
       case 'ad_block':   return { text: 'ads + trackers', classes: 'bg-live-500/15 text-live-300 border-live-500/40' };
-      default:           return { text: sec, classes: 'bg-ink-700 text-zinc-400 border-ink-600' };
+      default:           return { text: sec, classes: 'bg-ink-700 text-zinc-400 border-steel-600' };
     }
   }
 
@@ -875,8 +875,8 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="network" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="network" subtitle="DNS · VPN · Tor · I2P · Tailscale" index="04" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-3xl mx-auto w-full space-y-6">
@@ -890,7 +890,7 @@
       <!-- ──────────────────────────────────────────────────────────── -->
       <!-- USB ethernet passthrough                                      -->
       <!-- ──────────────────────────────────────────────────────────── -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-5">
+      <section class="panel p-6 space-y-5">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             USB ethernet passthrough
@@ -971,7 +971,7 @@
         </div>
 
         <!-- Save row -->
-        <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+        <div class="flex items-center gap-3 pt-2 border-t border-steel-700">
           <button class="btn-primary" on:click={saveUsb} disabled={usbSaving}>
             {usbSaving ? 'applying…' : 'save & apply'}
           </button>
@@ -982,7 +982,7 @@
       </section>
 
       <!-- Status -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-2 text-sm">
+      <section class="panel p-5 space-y-2 text-sm">
         <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-500">Current</h3>
         <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs font-mono">
           <dt class="text-zinc-500">enabled</dt>
@@ -1015,7 +1015,7 @@
       <!--      with a colored dot. Click jumps to (+opens) the         -->
       <!--      relevant configuration section below.                   -->
       <!-- ──────────────────────────────────────────────────────────── -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-4 space-y-2">
+      <section class="panel p-4 space-y-2">
         <h3 class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
           Privacy stack
         </h3>
@@ -1028,7 +1028,7 @@
                            {l.tone === 'live' ? 'bg-live-500/10 border-live-500/40 text-live-200 hover:bg-live-500/20' :
                             l.tone === 'amber' ? 'bg-amber-500/10 border-amber-500/40 text-amber-200 hover:bg-amber-500/20' :
                             l.tone === 'red' ? 'bg-red-500/10 border-red-500/40 text-red-200 hover:bg-red-500/20' :
-                            'bg-ink-950/60 border-ink-800 text-zinc-500 hover:border-ink-700 hover:text-zinc-300'}">
+                            'bg-ink-950/60 border-ink-800 text-zinc-500 hover:border-steel-700 hover:text-zinc-300'}">
               <span class="h-2 w-2 rounded-full
                            {l.tone === 'live' ? 'bg-live-400 animate-pulse' :
                             l.tone === 'amber' ? 'bg-amber-400 animate-pulse' :
@@ -1049,7 +1049,7 @@
 
       <!-- ─── Encrypted DNS ─── -->
       <details bind:open={dnsOpen}
-               class="bg-ink-900 border border-ink-700 rounded-xl">
+               class="panel">
         <summary class="cursor-pointer select-none px-6 py-4
                         flex items-center justify-between gap-3">
           <div class="flex items-center gap-3 min-w-0">
@@ -1070,7 +1070,7 @@
             {dnsOpen ? '▾ close' : '▸ expand'}
           </span>
         </summary>
-        <div class="border-t border-ink-700 p-6 space-y-8">
+        <div class="border-t border-steel-700 p-6 space-y-8">
 
           <!-- ─── DNSCrypt body ─── -->
           <section class="space-y-4">
@@ -1138,10 +1138,10 @@
                 </p>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <label class="flex items-start gap-3 cursor-pointer
-                                p-3 rounded-lg border transition-colors
+                                p-3 rounded-sm border transition-colors
                                 {srvMode === 'specific'
                                   ? 'bg-cursed-500/10 border-cursed-500/50'
-                                  : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                                  : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
                     <input type="radio" bind:group={srvMode} value="specific"
                            class="mt-1 w-4 h-4 accent-cursed-500" />
                     <div class="space-y-1 flex-1 min-w-0">
@@ -1153,10 +1153,10 @@
                     </div>
                   </label>
                   <label class="flex items-start gap-3 cursor-pointer
-                                p-3 rounded-lg border transition-colors
+                                p-3 rounded-sm border transition-colors
                                 {srvMode === 'auto'
                                   ? 'bg-cursed-500/10 border-cursed-500/50'
-                                  : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                                  : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
                     <input type="radio" bind:group={srvMode} value="auto"
                            class="mt-1 w-4 h-4 accent-cursed-500" />
                     <div class="space-y-1 flex-1 min-w-0">
@@ -1205,35 +1205,35 @@
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <label class="flex items-center gap-2 cursor-pointer text-xs
                                   p-2 rounded border border-ink-800 bg-ink-950/40
-                                  hover:border-ink-700">
+                                  hover:border-steel-700">
                       <input type="checkbox" bind:checked={srvCritNoLogs}
                              class="w-3 h-3 accent-cursed-500" />
                       <span class="text-zinc-300">No-logs policy</span>
                     </label>
                     <label class="flex items-center gap-2 cursor-pointer text-xs
                                   p-2 rounded border border-ink-800 bg-ink-950/40
-                                  hover:border-ink-700">
+                                  hover:border-steel-700">
                       <input type="checkbox" bind:checked={srvCritDnssec}
                              class="w-3 h-3 accent-cursed-500" />
                       <span class="text-zinc-300">DNSSEC validating</span>
                     </label>
                     <label class="flex items-center gap-2 cursor-pointer text-xs
                                   p-2 rounded border border-ink-800 bg-ink-950/40
-                                  hover:border-ink-700">
+                                  hover:border-steel-700">
                       <input type="checkbox" bind:checked={srvCritNoFilter}
                              class="w-3 h-3 accent-cursed-500" />
                       <span class="text-zinc-300">No filtering (raw answers)</span>
                     </label>
                     <label class="flex items-center gap-2 cursor-pointer text-xs
                                   p-2 rounded border border-ink-800 bg-ink-950/40
-                                  hover:border-ink-700">
+                                  hover:border-steel-700">
                       <input type="checkbox" bind:checked={srvCritOutside5}
                              class="w-3 h-3 accent-cursed-500" />
                       <span class="text-zinc-300">Outside Five Eyes</span>
                     </label>
                     <label class="flex items-center gap-2 cursor-pointer text-xs
                                   p-2 rounded border border-ink-800 bg-ink-950/40
-                                  hover:border-ink-700">
+                                  hover:border-steel-700">
                       <input type="checkbox" bind:checked={srvCritOutside14}
                              class="w-3 h-3 accent-cursed-500" />
                       <span class="text-zinc-300">Outside Fourteen Eyes</span>
@@ -1242,7 +1242,7 @@
                                   p-2 rounded border border-ink-800 bg-ink-950/40">
                       <span class="text-zinc-300">Min trust:</span>
                       <select bind:value={srvCritMinTrust}
-                              class="bg-ink-800 border border-ink-700 rounded
+                              class="bg-ink-800 border border-steel-700 rounded
                                      px-2 py-0.5 text-xs text-zinc-200">
                         <option value={0}>any</option>
                         <option value={2}>2+ (small ops)</option>
@@ -1314,7 +1314,7 @@
                   <div class="flex flex-wrap items-center gap-2">
                     <input type="text" bind:value={srvSearch}
                            placeholder="search: name, operator, country code…"
-                           class="flex-1 min-w-0 bg-ink-800 border border-ink-700
+                           class="flex-1 min-w-0 bg-ink-800 border border-steel-700
                                   rounded px-3 py-1.5 text-xs text-zinc-200 font-mono" />
                     <label class="flex items-center gap-1.5 cursor-pointer text-[11px]
                                   text-zinc-400 hover:text-zinc-200">
@@ -1337,7 +1337,7 @@
                         {@const hoverable = srvModeIsSpecific
                           ? (matches
                               ? 'hover:bg-cursed-500/10 hover:border-cursed-500/40 cursor-pointer'
-                              : 'hover:bg-ink-900 hover:border-ink-700 cursor-pointer')
+                              : 'hover:bg-ink-900 hover:border-steel-700 cursor-pointer')
                           : 'cursor-default'}
                         {@const baseClass = picked
                           ? 'bg-cursed-500/15 border border-cursed-500/60'
@@ -1424,11 +1424,11 @@
                   </p>
                   <input type="text" bind:value={dnsCustomLabel}
                          placeholder="Friendly label (e.g. mycorp-dns)"
-                         class="w-full bg-ink-800 border border-ink-700 rounded
+                         class="w-full bg-ink-800 border border-steel-700 rounded
                                 px-3 py-2 text-sm text-zinc-200" />
                   <textarea bind:value={dnsCustomStamp} rows="3"
                             placeholder="sdns://AgcAAAAAAAAAAAAQZG5zLmV4YW1wbGUuY29tCi9kbnMtcXVlcnk"
-                            class="w-full bg-ink-800 border border-ink-700 rounded
+                            class="w-full bg-ink-800 border border-steel-700 rounded
                                    px-3 py-2 text-xs text-zinc-200 font-mono break-all"
                   ></textarea>
                   <p class="text-xs text-zinc-500 leading-relaxed">
@@ -1519,28 +1519,28 @@
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <label class="flex items-center gap-2 cursor-pointer text-xs
                                     p-2 rounded border border-ink-800 bg-ink-950/40
-                                    hover:border-ink-700">
+                                    hover:border-steel-700">
                         <input type="checkbox" bind:checked={anonNoLogs}
                                class="w-3 h-3 accent-cursed-500" />
                         <span class="text-zinc-300">No-logs policy</span>
                       </label>
                       <label class="flex items-center gap-2 cursor-pointer text-xs
                                     p-2 rounded border border-ink-800 bg-ink-950/40
-                                    hover:border-ink-700">
+                                    hover:border-steel-700">
                         <input type="checkbox" bind:checked={anonDnssec}
                                class="w-3 h-3 accent-cursed-500" />
                         <span class="text-zinc-300">DNSSEC pass-through</span>
                       </label>
                       <label class="flex items-center gap-2 cursor-pointer text-xs
                                     p-2 rounded border border-ink-800 bg-ink-950/40
-                                    hover:border-ink-700">
+                                    hover:border-steel-700">
                         <input type="checkbox" bind:checked={anonOutsideFiveEyes}
                                class="w-3 h-3 accent-cursed-500" />
                         <span class="text-zinc-300">Outside Five Eyes</span>
                       </label>
                       <label class="flex items-center gap-2 cursor-pointer text-xs
                                     p-2 rounded border border-ink-800 bg-ink-950/40
-                                    hover:border-ink-700">
+                                    hover:border-steel-700">
                         <input type="checkbox" bind:checked={anonOutsideFourteenEyes}
                                class="w-3 h-3 accent-cursed-500" />
                         <span class="text-zinc-300">Outside Fourteen Eyes</span>
@@ -1603,7 +1603,7 @@
                     <div class="flex flex-wrap items-center gap-2">
                       <input type="text" bind:value={anonSearch}
                              placeholder="search: name, operator, country code…"
-                             class="flex-1 min-w-0 bg-ink-800 border border-ink-700
+                             class="flex-1 min-w-0 bg-ink-800 border border-steel-700
                                     rounded px-3 py-1.5 text-xs text-zinc-200 font-mono" />
                       <label class="flex items-center gap-1.5 cursor-pointer text-[11px]
                                     text-zinc-400 hover:text-zinc-200">
@@ -1613,7 +1613,7 @@
                       </label>
                       {#if anonSpecificRelays.length > 0}
                         <button class="text-[10px] text-zinc-500 hover:text-red-400
-                                       border border-ink-700 hover:border-red-500/50
+                                       border border-steel-700 hover:border-red-500/50
                                        rounded px-2 py-1 transition-colors"
                                 on:click={() => { anonSpecificRelays = []; }}>
                           clear all
@@ -1695,7 +1695,7 @@
               </div>
             </div>
 
-            <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+            <div class="flex items-center gap-3 pt-2 border-t border-steel-700">
               <button class="btn-primary" on:click={saveDns} disabled={dnsSaving}>
                 {dnsSaving ? 'applying…' : 'save & apply'}
               </button>
@@ -1709,7 +1709,7 @@
 
       <!-- ─── VPN ─── -->
       <details bind:open={vpnOpen}
-               class="bg-ink-900 border border-ink-700 rounded-xl">
+               class="panel">
         <summary class="cursor-pointer select-none px-6 py-4
                         flex items-center justify-between gap-3">
           <div class="flex items-center gap-3 min-w-0 flex-wrap">
@@ -1728,7 +1728,7 @@
             {vpnOpen ? '▾ close' : '▸ expand'}
           </span>
         </summary>
-        <div class="border-t border-ink-700 p-6 space-y-4">
+        <div class="border-t border-steel-700 p-6 space-y-4">
           <section class="space-y-4">
             <header class="space-y-2">
               <p class="text-zinc-400 text-sm">
@@ -1813,7 +1813,7 @@ DNS = 1.1.1.1
 PublicKey = …
 Endpoint = vpn.example.com:51820
 AllowedIPs = 0.0.0.0/0`}
-                          class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                          class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
                 <p class="text-xs text-zinc-500">
                   Paste the full contents of a working
                   <code>.conf</code> file. We run it via
@@ -1836,7 +1836,7 @@ AllowedIPs = 0.0.0.0/0`}
                   </label>
                   <textarea id="ov-conf" bind:value={ovConfig} rows="10"
                             placeholder="client&#10;dev tun&#10;proto udp&#10;remote …&#10;…"
-                            class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                            class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
                 </div>
                 <div class="grid grid-cols-2 gap-3">
                   <div class="space-y-1">
@@ -1845,7 +1845,7 @@ AllowedIPs = 0.0.0.0/0`}
                     </label>
                     <input id="ov-user" type="text" bind:value={ovUser}
                            autocomplete="off"
-                           class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                           class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
                   </div>
                   <div class="space-y-1">
                     <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="ov-pass">
@@ -1858,7 +1858,7 @@ AllowedIPs = 0.0.0.0/0`}
                     </label>
                     <input id="ov-pass" type="password" bind:value={ovPass}
                            autocomplete="off"
-                           class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                           class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
                   </div>
                 </div>
                 <p class="text-xs text-zinc-500">
@@ -1878,7 +1878,7 @@ AllowedIPs = 0.0.0.0/0`}
                    wg-quick failure. -->
               <div class="space-y-3 pl-7">
                 {#if wizardProviderConfigured[vpnProvider]}
-                  <div class="p-4 rounded-lg border border-live-500/40 bg-live-500/10 space-y-3">
+                  <div class="p-4 rounded-sm border border-live-500/40 bg-live-500/10 space-y-3">
                     <div class="flex items-center gap-2 text-live-200 text-sm font-medium">
                       <span class="text-live-400">✓</span> {vpnProvider} is configured
                     </div>
@@ -1890,7 +1890,7 @@ AllowedIPs = 0.0.0.0/0`}
                       </label>
                       <div class="flex flex-wrap items-center gap-2">
                         <select id="vpn-srv"
-                                class="flex-1 min-w-[14rem] bg-ink-800 border border-ink-700 rounded px-2 py-1.5 text-sm text-zinc-200 disabled:opacity-50"
+                                class="flex-1 min-w-[14rem] bg-ink-800 border border-steel-700 rounded px-2 py-1.5 text-sm text-zinc-200 disabled:opacity-50"
                                 value={wizardProviderServer[vpnProvider]}
                                 on:change={(e) => selectVpnServer(vpnProvider, e.currentTarget.value)}
                                 disabled={serverBusy === vpnProvider}>
@@ -1920,7 +1920,7 @@ AllowedIPs = 0.0.0.0/0`}
                     </p>
                   </div>
                 {:else}
-                  <div class="p-4 rounded-lg border border-amber-500/40
+                  <div class="p-4 rounded-sm border border-amber-500/40
                               bg-amber-500/10 space-y-3">
                     <div class="flex items-start gap-3">
                       <span class="text-amber-400 text-lg leading-none mt-0.5">⚠</span>
@@ -1985,7 +1985,7 @@ AllowedIPs = 0.0.0.0/0`}
                      is TCP-friendly and leaks no resolver SNI.
                      One click installs the recommended default. -->
                 {#if !dnsEnabled}
-                  <div class="p-4 rounded-lg border border-amber-500/40
+                  <div class="p-4 rounded-sm border border-amber-500/40
                               bg-amber-500/10 space-y-3">
                     <div class="flex items-start gap-3">
                       <span class="text-amber-400 text-lg leading-none mt-0.5">⚠</span>
@@ -2048,7 +2048,7 @@ AllowedIPs = 0.0.0.0/0`}
                     <textarea id="tor-br" bind:value={torBridges} rows="4"
                               placeholder={`obfs4 12.34.56.78:443 BB6E…1A2B cert=…  iat-mode=0
 obfs4 …`}
-                              class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                              class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
                     <p class="text-xs text-zinc-500">
                       Request fresh bridges from
                       <a class="text-cursed-300 hover:underline"
@@ -2108,7 +2108,7 @@ obfs4 …`}
                 <input id="i2p-out" type="text" bind:value={i2pOutproxy}
                        placeholder="exit.stormycloud.i2p"
                        autocomplete="off"
-                       class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                       class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
                 <p class="text-xs text-zinc-500">
                   Without an outproxy, i2pd only reaches <code>.i2p</code>
                   sites (the safest default). Set an outproxy to also reach
@@ -2147,7 +2147,7 @@ obfs4 …`}
                   </label>
                   <input id="lan-byp" type="text" bind:value={vpnLanBypass}
                          placeholder="192.168.0.0/16"
-                         class="w-full max-w-xs bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                         class="w-full max-w-xs bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
                   <p class="text-xs text-zinc-500">
                     Traffic to this CIDR is allowed even with the
                     kill-switch on. Leave it pointed at your home LAN so
@@ -2160,7 +2160,7 @@ obfs4 …`}
               </div>
             {/if}
 
-            <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+            <div class="flex items-center gap-3 pt-2 border-t border-steel-700">
               <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
                 {vpnSaving ? 'applying…' : 'save & apply'}
               </button>
@@ -2184,7 +2184,7 @@ obfs4 …`}
             <!--      Networks panel (see OverlayStatus.svelte).           -->
             <!-- ────────────────────────────────────────────────────── -->
             {#if statusOverlays.some((o) => o.kind === 'vpn')}
-              <div class="mt-4 pt-4 border-t border-ink-700 space-y-4">
+              <div class="mt-4 pt-4 border-t border-steel-700 space-y-4">
                 {#each statusOverlays.filter((o) => o.kind === 'vpn') as ov (ov.kind + ':' + ov.provider)}
                   <OverlayStatus
                     overlay={ov}
@@ -2204,7 +2204,7 @@ obfs4 …`}
            the Privacy Overlay panel). It's an independent mesh that runs
            ALONGSIDE any VPN; tsEnabled is the single source of truth,
            saved on every network request via saveVpn(). -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-6 space-y-5">
+      <section class="panel p-6 space-y-5">
         <header class="space-y-1">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Tailscale
@@ -2236,7 +2236,7 @@ obfs4 …`}
              whenever Tailscale is enabled (independent of the VPN). -->
         {#if tsEnabled && tsOverlay}
           {@const connected = tsOverlay.state === 'connected'}
-          <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-1.5">
+          <div class="ml-7 p-3 rounded-sm border border-cursed-500/30 bg-cursed-500/5 space-y-1.5">
             <div class="flex items-center justify-between gap-2">
               <span class="text-xs font-mono uppercase tracking-wider
                            {connected ? 'text-live-300' : 'text-amber-300'}">
@@ -2280,7 +2280,7 @@ obfs4 …`}
             <input id="ts-auth" type="password" bind:value={tsAuthKey}
                    placeholder="tskey-auth-…"
                    autocomplete="off"
-                   class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                   class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
             <p class="text-xs text-zinc-500">
               Generate from
               <a class="text-cursed-300 hover:underline"
@@ -2298,7 +2298,7 @@ obfs4 …`}
             </label>
             <input id="ts-host" type="text" bind:value={tsHostname}
                    placeholder="aeon-magick"
-                   class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                   class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
             <p class="text-xs text-zinc-500">
               Name this device shows up as in your tailnet. Defaults
               to the Pi's hostname.
@@ -2339,7 +2339,7 @@ obfs4 …`}
 
         <!-- Tailscale shares the atomic network save (saveVpn persists
              Tailscale + Tor + I2P + VPN config in one request). -->
-        <div class="flex items-center gap-3 pt-2 border-t border-ink-700">
+        <div class="flex items-center gap-3 pt-2 border-t border-steel-700">
           <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
             {vpnSaving ? 'saving…' : 'Save & Apply'}
           </button>
@@ -2349,7 +2349,7 @@ obfs4 …`}
 
       <!-- ─── Privacy Overlay Networks (Tor + I2P) ─── -->
       <details bind:open={overlaysOpen}
-               class="bg-ink-900 border border-ink-700 rounded-xl">
+               class="panel">
         <summary class="cursor-pointer select-none px-6 py-4
                         flex items-center justify-between gap-3">
           <div class="flex items-center gap-3 min-w-0 flex-wrap">
@@ -2375,7 +2375,7 @@ obfs4 …`}
             {overlaysOpen ? '▾ close' : '▸ expand'}
           </span>
         </summary>
-        <div class="border-t border-ink-700 p-6 space-y-4">
+        <div class="border-t border-steel-700 p-6 space-y-4">
           <section class="space-y-4">
             <header class="space-y-1">
               <p class="text-zinc-400 text-sm">
@@ -2421,7 +2421,7 @@ obfs4 …`}
             </header>
 
             <!-- ── Tor ── -->
-            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+            <div class="space-y-3 p-4 rounded-sm border border-steel-700 bg-ink-950/30">
               <label class="flex items-center gap-3 cursor-pointer">
                 <input type="checkbox" bind:checked={torEnabled}
                        class="w-4 h-4 accent-cursed-500" />
@@ -2436,7 +2436,7 @@ obfs4 …`}
                    visible (not dimmed) whenever Tor is enabled. Data polls
                    every 4s from aeon-vpn-status (GETINFO bootstrap + circuits). -->
               {#if torEnabled}
-                <div class="ml-7 p-3 rounded-lg border border-cursed-500/30 bg-cursed-500/5 space-y-2">
+                <div class="ml-7 p-3 rounded-sm border border-cursed-500/30 bg-cursed-500/5 space-y-2">
                   {#if torOverlay}
                     {@const pct = torOverlay.bootstrap_percent ?? 0}
                     {@const circuits = torOverlay.detail?.circuits ?? []}
@@ -2493,7 +2493,7 @@ obfs4 …`}
                                   border transition-colors
                                   {torMode === 'split_tunnel'
                                     ? 'bg-cursed-500/10 border-cursed-500/50'
-                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                                    : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
                       <input type="radio" bind:group={torMode} value="split_tunnel"
                              class="mt-1 w-4 h-4 accent-cursed-500" />
                       <div class="space-y-1 flex-1 min-w-0">
@@ -2510,7 +2510,7 @@ obfs4 …`}
                                   border transition-colors
                                   {torMode === 'transparent'
                                     ? 'bg-cursed-500/10 border-cursed-500/50'
-                                    : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                                    : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
                       <input type="radio" bind:group={torMode} value="transparent"
                              class="mt-1 w-4 h-4 accent-cursed-500" />
                       <div class="space-y-1 flex-1 min-w-0">
@@ -2598,7 +2598,7 @@ obfs4 …`}
                     </label>
                     <textarea id="tor-br-ov" bind:value={torBridges} rows="4"
                               placeholder="obfs4 12.34.56.78:443 FINGERPRINT cert=… iat-mode=0"
-                              class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
+                              class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-xs text-zinc-200 font-mono"></textarea>
                     <p class="text-[11px] text-zinc-500">
                       Fresh bridges from
                       <a class="text-cursed-300 hover:underline" href="https://bridges.torproject.org/" target="_blank" rel="noreferrer">bridges.torproject.org</a> — one per line. Most users won't need this.
@@ -2609,7 +2609,7 @@ obfs4 …`}
             </div>
 
             <!-- ── I2P ── -->
-            <div class="space-y-3 p-4 rounded-lg border border-ink-700 bg-ink-950/30">
+            <div class="space-y-3 p-4 rounded-sm border border-steel-700 bg-ink-950/30">
               <label class="flex items-center gap-3 cursor-pointer">
                 <input type="checkbox" bind:checked={i2pEnabled}
                        class="w-4 h-4 accent-cursed-500" />
@@ -2666,7 +2666,7 @@ obfs4 …`}
                  toggles + Tor's bridge preset/bridges/mode/exit-country
                  (and the VPN + Tailscale config too — it's one atomic
                  network save). -->
-            <div class="flex items-center gap-3 pt-3 border-t border-ink-700">
+            <div class="flex items-center gap-3 pt-3 border-t border-steel-700">
               <button class="btn-primary" on:click={saveVpn} disabled={vpnSaving}>
                 {vpnSaving ? 'saving…' : 'Save & Apply'}
               </button>
@@ -2677,7 +2677,7 @@ obfs4 …`}
                  active peers), polled every 4 s. Moved here from the VPN
                  panel so each overlay's status sits under its own section. -->
             {#if statusOverlays.some((o) => o.kind === 'tor' || o.kind === 'i2p')}
-              <div class="pt-4 mt-2 border-t border-ink-700 space-y-3">
+              <div class="pt-4 mt-2 border-t border-steel-700 space-y-3">
                 <p class="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
                   Live status
                 </p>
@@ -2700,7 +2700,7 @@ obfs4 …`}
       <!-- Big rules editor lives in a sub-component imported below.     -->
       <!-- v62: matches the other sections' expand-button affordance.   -->
       <!-- ──────────────────────────────────────────────────────────── -->
-      <details class="bg-ink-900 border border-ink-700 rounded-xl"
+      <details class="panel"
                bind:open={advancedOpen}>
         <summary class="cursor-pointer select-none px-6 py-4
                         flex items-center justify-between gap-3">
@@ -2717,7 +2717,7 @@ obfs4 …`}
             {advancedOpen ? '▾ close' : '▸ expand'}
           </span>
         </summary>
-        <div class="border-t border-ink-700">
+        <div class="border-t border-steel-700">
           {#if advancedOpen}
             <RulesEditor />
           {/if}

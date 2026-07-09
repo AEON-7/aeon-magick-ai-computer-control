@@ -114,8 +114,8 @@
   onDestroy(() => clearInterval(poll));
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <PageHeader title="Mysterium dVPN" backHref="/orbnet" backLabel="ORBNET" />
+<div class="page-void min-h-screen">
+  <PageHeader title="Mysterium dVPN" subtitle="decentralized VPN node" backHref="/orbnet" backLabel="ORBNET" index="03.4" />
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-6">
     <p class="text-ink-300 text-sm leading-relaxed">
@@ -148,7 +148,7 @@
       <div class="text-ink-400 text-sm text-center py-6">{busy || 'Starting the node… (first run installs the myst package)'}</div>
     {:else}
       {#if !mmn_linked}
-        <div class="rounded-lg border border-amber-700/50 bg-amber-950/20 p-4 space-y-4">
+        <div class="rounded-sm border border-amber-700/50 bg-amber-950/20 p-4 space-y-4">
           <h2 class="font-mono text-amber-300 text-sm">Claim this node to your MystNodes account</h2>
 
           <div class="text-sm text-ink-300">
@@ -169,7 +169,7 @@
                 spellcheck="false"
                 bind:value={apiKey}
                 placeholder="MystNodes API key (40+ characters)"
-                class="flex-1 bg-ink-950 border border-ink-700 rounded px-3 py-2 font-mono text-xs text-ink-100 focus:border-cursed-600 focus:outline-none"
+                class="flex-1 bg-ink-950 border border-steel-700 rounded px-3 py-2 font-mono text-xs text-ink-100 focus:border-cursed-600 focus:outline-none"
               />
               <button
                 class="px-3 py-2 rounded bg-cursed-700 text-ink-50 text-sm font-mono hover:bg-cursed-600 disabled:opacity-50"
@@ -195,7 +195,7 @@
           </div>
         </div>
       {:else}
-        <div class="rounded-lg border border-emerald-700/50 bg-emerald-950/20 p-4 flex items-center justify-between gap-3">
+        <div class="rounded-sm border border-emerald-700/50 bg-emerald-950/20 p-4 flex items-center justify-between gap-3">
           <div class="text-sm text-emerald-300">✓ Linked to your MystNodes account{registered ? ' · registered & earning' : ' · not registered yet'}</div>
           <div class="flex items-center gap-3 shrink-0">
             {#if !registered}<button class="text-xs text-cursed-300 hover:text-cursed-200" on:click={register} disabled={registering}>{registering ? 'Registering…' : 'Register'}</button>{/if}
@@ -205,33 +205,33 @@
       {/if}
 
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div class="panel p-3">
           <div class="text-[10px] uppercase tracking-wider text-ink-500">Earnings (unsettled)</div>
           <div class="font-mono text-cursed-300 text-lg">{status.earnings_myst ?? '0'} <span class="text-xs text-ink-400">MYST</span></div>
         </div>
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div class="panel p-3">
           <div class="text-[10px] uppercase tracking-wider text-ink-500">Settled balance</div>
           <div class="font-mono text-ink-200 text-lg">{status.balance_myst ?? '0'} <span class="text-xs text-ink-400">MYST</span></div>
         </div>
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div class="panel p-3">
           <div class="text-[10px] uppercase tracking-wider text-ink-500">Lifetime earned</div>
           <div class="font-mono text-ink-200 text-lg">{status.earnings_total_myst ?? '0'} <span class="text-xs text-ink-400">MYST</span></div>
         </div>
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div class="panel p-3">
           <div class="text-[10px] uppercase tracking-wider text-ink-500">Data served (30d)</div>
           <div class="font-mono text-ink-200">{fmtBytes(status.data_bytes_30d)}</div>
         </div>
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div class="panel p-3">
           <div class="text-[10px] uppercase tracking-wider text-ink-500">Sessions (30d)</div>
           <div class="font-mono text-ink-200">{status.sessions_30d ?? 0} · {status.consumers_30d ?? 0} users</div>
         </div>
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div class="panel p-3">
           <div class="text-[10px] uppercase tracking-wider text-ink-500">Region</div>
           <div class="font-mono text-ink-200 text-sm">{status.city || status.region || status.country || '—'}{status.country ? ` (${status.country})` : ''}</div>
         </div>
       </div>
 
-      <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3 text-sm">
+      <div class="panel p-4 space-y-3 text-sm">
         <div class="space-y-1">
           <span class="text-ink-400 text-xs uppercase tracking-wider">Node ID</span>
           <div class="flex items-center gap-2">
@@ -250,7 +250,7 @@
             </div>
           {/if}
           <div class="flex gap-2">
-            <input type="text" autocomplete="off" spellcheck="false" bind:value={benDraft} placeholder="0x… Polygon (MATIC) wallet" class="flex-1 bg-ink-950 border border-ink-700 rounded px-2 py-1.5 font-mono text-xs text-ink-100 focus:border-cursed-600 focus:outline-none" />
+            <input type="text" autocomplete="off" spellcheck="false" bind:value={benDraft} placeholder="0x… Polygon (MATIC) wallet" class="flex-1 bg-ink-950 border border-steel-700 rounded px-2 py-1.5 font-mono text-xs text-ink-100 focus:border-cursed-600 focus:outline-none" />
             <button class="px-3 py-1.5 rounded bg-cursed-700 text-ink-50 text-xs font-mono hover:bg-cursed-600 disabled:opacity-40" on:click={setBeneficiary} disabled={benBusy || !benValid}>{benBusy ? 'Saving…' : 'Update'}</button>
           </div>
           {#if benErr}<div class="text-xs text-red-400">{benErr}</div>{/if}
@@ -275,7 +275,7 @@
       </div>
 
       {#if svcDraft}
-        <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+        <div class="panel p-4 space-y-3">
           <div class="flex items-center justify-between">
             <h2 class="font-mono text-cursed-300 text-sm">Traffic you share</h2>
             <a href="https://my.mystnodes.com/me" target="_blank" rel="noreferrer" class="text-xs text-ink-400 hover:text-cursed-300">manage on mystnodes.com →</a>

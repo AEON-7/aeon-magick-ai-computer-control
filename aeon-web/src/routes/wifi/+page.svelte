@@ -337,8 +337,8 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="WiFi" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="WiFi" subtitle="scan · join · forget" index="05" />
 
   <div class="flex-1 overflow-y-auto p-6 max-w-4xl w-full mx-auto space-y-6">
 
@@ -347,7 +347,7 @@
     {:else}
 
       <!-- Top status pill -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-4 space-y-2">
+      <section class="panel p-4 space-y-2">
         <div class="flex items-center gap-3 flex-wrap">
           <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
             Current
@@ -385,18 +385,18 @@
       </section>
 
       {#if error}
-        <div class="p-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-200 text-sm">
+        <div class="p-3 rounded-sm border border-red-500/40 bg-red-500/10 text-red-200 text-sm">
           {error}
         </div>
       {/if}
       {#if msg}
-        <div class="p-3 rounded-lg border border-live-500/40 bg-live-500/10 text-live-200 text-sm">
+        <div class="p-3 rounded-sm border border-live-500/40 bg-live-500/10 text-live-200 text-sm">
           {msg}
         </div>
       {/if}
 
       <!-- Mode selector -->
-      <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+      <section class="panel p-5 space-y-3">
         <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
           Operating mode
         </h3>
@@ -405,7 +405,7 @@
                         transition-colors
                         {mode === 'client'
                           ? 'bg-cursed-500/10 border-cursed-500/50'
-                          : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                          : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
             <input type="radio" bind:group={mode} value="client"
                    on:change={() => setRadio(true)}
                    class="mt-1 w-4 h-4 accent-cursed-500" />
@@ -421,7 +421,7 @@
                         transition-colors
                         {mode === 'ap'
                           ? 'bg-cursed-500/10 border-cursed-500/50'
-                          : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                          : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
             <input type="radio" bind:group={mode} value="ap"
                    class="mt-1 w-4 h-4 accent-cursed-500" />
             <div class="space-y-1 min-w-0">
@@ -436,7 +436,7 @@
                         transition-colors
                         {mode === 'off'
                           ? 'bg-cursed-500/10 border-cursed-500/50'
-                          : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                          : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
             <input type="radio" bind:group={mode} value="off"
                    on:change={() => setRadio(false)}
                    class="mt-1 w-4 h-4 accent-cursed-500" />
@@ -452,7 +452,7 @@
 
       <!-- Client mode panel -->
       {#if mode === 'client'}
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+        <section class="panel p-5 space-y-4">
           <header class="flex items-center justify-between">
             <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Connect to a network
@@ -469,7 +469,7 @@
                                ? 'bg-cursed-500/15 border-cursed-400/70 ring-1 ring-cursed-500/40'
                                : n.in_use
                                  ? 'bg-live-500/10 border-live-500/30'
-                                 : 'bg-ink-950/40 border-ink-800 hover:border-ink-700'}">
+                                 : 'bg-ink-950/40 border-ink-800 hover:border-steel-700'}">
                 <span class="font-mono text-[11px] w-8 tabular-nums {n.ssid === connectSsid ? 'text-cursed-200' : 'text-zinc-500'}">{n.signal}</span>
                 <span class="font-mono text-cursed-300 text-xs w-12">{signalBars(n.signal)}</span>
                 <span class="text-sm flex-1 truncate {n.ssid === connectSsid ? 'text-white font-medium' : 'text-zinc-200'}">{n.ssid}</span>
@@ -493,7 +493,7 @@
               <input type="text" bind:value={manualSsid} autocomplete="off"
                      placeholder="…or type a network name (SSID)"
                      on:keydown={(e) => { if (e.key === 'Enter' && manualSsid.trim()) connectSsid = manualSsid.trim(); }}
-                     class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                     class="flex-1 bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
               <button class="btn text-xs"
                       on:click={() => { if (manualSsid.trim()) connectSsid = manualSsid.trim(); }}
                       disabled={!manualSsid.trim()}>
@@ -518,7 +518,7 @@
               <input id="connect-psk" type="password" bind:value={connectPsk}
                      placeholder="Password (leave blank for open networks)"
                      autocomplete="off"
-                     class="w-full bg-ink-800 border border-ink-700 rounded
+                     class="w-full bg-ink-800 border border-steel-700 rounded
                             px-3 py-1.5 text-sm text-zinc-200 font-mono" />
               <div class="flex gap-2">
                 <button class="btn-primary text-xs" on:click={doConnect} disabled={connecting}>
@@ -535,7 +535,7 @@
         </section>
 
         <!-- Known / saved networks -->
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Saved networks ({known.length})
           </h3>
@@ -577,7 +577,7 @@
 
       <!-- AP mode panel -->
       {#if mode === 'ap'}
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4">
+        <section class="panel p-5 space-y-4">
           <header class="space-y-1">
             <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Access point credentials
@@ -609,7 +609,7 @@
             </label>
             <input id="ap-ssid" type="text" bind:value={apSsid}
                    placeholder="aeon-setup"
-                   class="w-full bg-ink-800 border border-ink-700 rounded
+                   class="w-full bg-ink-800 border border-steel-700 rounded
                           px-3 py-1.5 text-sm text-zinc-200 font-mono" />
           </div>
 
@@ -625,7 +625,7 @@
             <input id="ap-pw" type="password" bind:value={apPassword}
                    placeholder="≥ 8 characters"
                    autocomplete="off"
-                   class="w-full bg-ink-800 border border-ink-700 rounded
+                   class="w-full bg-ink-800 border border-steel-700 rounded
                           px-3 py-1.5 text-sm text-zinc-200 font-mono" />
           </div>
 
@@ -652,7 +652,7 @@
 
       <!-- Off mode panel -->
       {#if mode === 'off'}
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-2">
+        <section class="panel p-5 space-y-2">
           <h3 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
             Radio disabled
           </h3>

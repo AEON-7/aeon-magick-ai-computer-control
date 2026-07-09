@@ -179,8 +179,8 @@
   );
 </script>
 
-<div class="h-full flex flex-col">
-  <PageHeader title="security console" />
+<div class="page-void h-full flex flex-col">
+  <PageHeader title="security console" subtitle="metrics · blocked traffic" index="09" />
 
   <main class="flex-1 overflow-auto">
     <div class="p-6 max-w-5xl mx-auto w-full space-y-6">
@@ -189,7 +189,7 @@
     {#if m}
       <!-- Throughput at-a-glance -->
       <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-5">
+        <div class="panel p-5">
           <div class="flex items-center justify-between mb-2">
             <span class="text-[10px] uppercase tracking-wider text-zinc-500">Inbound (WAN → Pi)</span>
             <span class="text-[10px] font-mono text-cursed-400">live</span>
@@ -210,7 +210,7 @@
             {/if}
           </svg>
         </div>
-        <div class="bg-ink-900 border border-ink-700 rounded-xl p-5">
+        <div class="panel p-5">
           <div class="flex items-center justify-between mb-2">
             <span class="text-[10px] uppercase tracking-wider text-zinc-500">Outbound (Pi → WAN)</span>
             <span class="text-[10px] font-mono text-cursed-400">live</span>
@@ -235,17 +235,17 @@
 
       <!-- Blocked / threat stats -->
       <section class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div class="bg-ink-900 border border-red-500/30 rounded-xl p-5">
+        <div class="bg-ink-900 border border-red-500/30 rounded-sm p-5">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Packets blocked</div>
           <div class="text-2xl font-mono text-red-400 mt-1">{m.blocked_24h.toLocaleString()}</div>
           <p class="text-[10px] text-zinc-500 mt-1">cumulative — iptables DROP/REJECT counters</p>
         </div>
-        <div class="bg-ink-900 border border-amber-500/30 rounded-xl p-5">
+        <div class="bg-ink-900 border border-amber-500/30 rounded-sm p-5">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Suspicious events</div>
           <div class="text-2xl font-mono text-amber-400 mt-1">{m.suspicious_events.length}</div>
           <p class="text-[10px] text-zinc-500 mt-1">heuristic detector — extends as alert sources land</p>
         </div>
-        <div class="bg-ink-900 border border-cursed-500/30 rounded-xl p-5">
+        <div class="bg-ink-900 border border-cursed-500/30 rounded-sm p-5">
           <div class="text-[10px] uppercase tracking-wider text-zinc-500">Active clients</div>
           <div class="text-2xl font-mono text-cursed-300 mt-1">{m.top_clients.length}</div>
           <p class="text-[10px] text-zinc-500 mt-1">unique source IPs in current conntrack</p>
@@ -254,7 +254,7 @@
 
       <!-- Top clients -->
       {#if m.top_clients.length}
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-400">Top clients by traffic</h3>
           <div class="space-y-1">
             {#each m.top_clients as c}
@@ -277,7 +277,7 @@
       {/if}
 
       <!-- ─── Blocked traffic (last 2h) ─── -->
-      <section class="bg-ink-900 border border-red-500/30 rounded-xl p-5 space-y-3">
+      <section class="bg-ink-900 border border-red-500/30 rounded-sm p-5 space-y-3">
         <header class="flex items-center justify-between flex-wrap gap-2">
           <div>
             <h3 class="font-mono text-xs uppercase tracking-wider text-red-300">
@@ -310,7 +310,7 @@
                   <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0
                                {b.proto === 'TCP' ? 'bg-cursed-500/15 text-cursed-300 border-cursed-500/40'
                                  : b.proto === 'UDP' ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40'
-                                 : 'bg-ink-700 text-zinc-300 border-ink-600'}">
+                                 : 'bg-ink-700 text-zinc-300 border-steel-600'}">
                     {b.proto || '?'}
                   </span>
                   <span class="text-zinc-500 w-12 shrink-0 truncate">
@@ -354,14 +354,14 @@
 
       <!-- Suspicious events -->
       {#if m.suspicious_events.length}
-        <section class="bg-ink-900 border border-amber-500/30 rounded-xl p-5 space-y-3">
+        <section class="bg-ink-900 border border-amber-500/30 rounded-sm p-5 space-y-3">
           <h3 class="font-mono text-xs uppercase tracking-wider text-amber-400">Suspicious activity</h3>
           <div class="space-y-2">
             {#each m.suspicious_events as ev}
               <div class="p-2 rounded border
                           {ev.severity === 'crit' ? 'bg-red-500/10 border-red-500/40'
                             : ev.severity === 'warn' ? 'bg-amber-500/10 border-amber-500/40'
-                            : 'bg-ink-800 border-ink-700'}">
+                            : 'bg-ink-800 border-steel-700'}">
                 <div class="text-sm font-medium text-zinc-200">{ev.label}</div>
                 <div class="text-xs text-zinc-400 mt-0.5">{ev.detail}</div>
               </div>

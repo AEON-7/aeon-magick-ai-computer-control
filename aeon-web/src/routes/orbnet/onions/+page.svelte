@@ -89,8 +89,8 @@
   onDestroy(() => clearInterval(poll));
 </script>
 
-<div class="min-h-screen bg-ink-950 text-ink-100">
-  <PageHeader title="Tor hidden services" backHref="/orbnet" backLabel="ORBNET" />
+<div class="page-void min-h-screen">
+  <PageHeader title="Tor hidden services" subtitle="v3 · host without ports" backHref="/orbnet" backLabel="ORBNET" index="03.3" />
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-6">
     <p class="text-ink-300 text-sm leading-relaxed">
@@ -118,30 +118,30 @@
       {/if}
     </div>
 
-    <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 space-y-3">
+    <div class="panel p-4 space-y-3">
       <h2 class="font-mono text-cursed-300 text-sm">Host a new service</h2>
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <label class="text-xs text-ink-400 block">Nickname
-          <input class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100" bind:value={nickname} placeholder="my site" />
+          <input class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100" bind:value={nickname} placeholder="my site" />
         </label>
         <label class="text-xs text-ink-400 block">Local port
-          <input type="number" min="1" max="65535" class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100" bind:value={localPort} placeholder="8080" />
+          <input type="number" min="1" max="65535" class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100" bind:value={localPort} placeholder="8080" />
         </label>
         <label class="text-xs text-ink-400 block">Onion port
-          <input type="number" min="1" max="65535" class="mt-1 w-full bg-ink-800 border border-ink-600 rounded px-2 py-1 text-ink-100" bind:value={virtPort} />
+          <input type="number" min="1" max="65535" class="mt-1 w-full bg-ink-800 border border-steel-600 rounded px-2 py-1 text-ink-100" bind:value={virtPort} />
         </label>
       </div>
       <button
         class="font-mono text-sm px-3 py-1.5 rounded bg-cursed-700 hover:bg-cursed-600 text-white disabled:opacity-50"
         on:click={create}
         disabled={!!busy}
-      >{busy === 'Minting onion…' ? busy : '🧅 Mint onion'}</button>
+      >{busy === 'Minting onion…' ? busy : 'Mint .onion'}</button>
     </div>
 
     <div class="space-y-2">
       {#if status && status.services.length}
         {#each status.services as s (s.id)}
-          <div class="rounded-lg border border-ink-700 bg-ink-900 p-3">
+          <div class="panel p-3">
             <div class="flex items-center justify-between gap-2">
               <div class="font-mono text-sm text-ink-100">{s.nickname || s.id}</div>
               <button class="text-xs text-ink-500 hover:text-red-400" on:click={() => remove(s.id)}>retire</button>

@@ -150,7 +150,7 @@
 </script>
 
 <details open class="mt-8 bg-gradient-to-br from-cursed-900/40 via-ink-900/70 to-fuchsia-900/30
-                     border border-cursed-500/40 rounded-xl group
+                     border border-cursed-500/40 rounded-sm group
                      shadow-[0_0_25px_rgba(217,70,239,0.18)]
                      hover:shadow-[0_0_35px_rgba(217,70,239,0.30)]
                      transition-shadow">
@@ -183,8 +183,8 @@
     <div class="space-y-2">
       {#each wallets as w (w.id)}
         <div
-          class="flex items-center gap-3 p-3 rounded-lg bg-ink-950 border border-ink-800
-                 hover:border-ink-700 transition-colors"
+          class="flex items-center gap-3 p-3 rounded-sm bg-ink-950 border border-ink-800
+                 hover:border-steel-700 transition-colors"
         >
           <!-- Glyph -->
           <div class="flex-shrink-0 w-9 h-9 rounded-md bg-ink-900 border border-ink-800
@@ -205,7 +205,7 @@
           <div class="flex items-center gap-1.5">
             <button
               class="text-[10px] font-mono px-2 py-1 rounded
-                     border border-ink-700 hover:border-cursed-500
+                     border border-steel-700 hover:border-cursed-500
                      text-zinc-400 hover:text-cursed-300 transition-colors"
               on:click={() => copy(w.address, w.id)}
               title="Copy address"
@@ -214,7 +214,7 @@
             </button>
             <a
               class="text-[10px] font-mono px-2 py-1 rounded
-                     border border-ink-700 hover:border-cursed-500
+                     border border-steel-700 hover:border-cursed-500
                      text-zinc-400 hover:text-cursed-300 transition-colors"
               href={openUrlFor(w)}
               target={w.id === 'eth' || w.id === 'sol' ? '_blank' : undefined}
@@ -285,7 +285,7 @@
          don't close the overlay — only taps on the backdrop do. -->
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="bg-ink-900 border border-cursed-500/40 rounded-2xl
+    <div class="bg-ink-900 border border-cursed-500/40 rounded-sm
                 shadow-[0_0_40px_rgba(217,70,239,0.30)]
                 p-6 max-w-md w-full space-y-4"
          on:click|stopPropagation
@@ -312,7 +312,7 @@
       <!-- Big QR. 320×320 = scannable from across the room or by a
            phone that's a foot or two away. White margin (p-3) keeps
            the quiet zone the spec requires for reliable decoding. -->
-      <div class="bg-zinc-200 rounded-lg p-3 mx-auto w-fit">
+      <div class="bg-zinc-200 rounded-sm p-3 mx-auto w-fit">
         {@html qrSvg(uriFor(w), 320)}
       </div>
 

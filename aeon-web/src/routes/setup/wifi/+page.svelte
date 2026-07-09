@@ -145,8 +145,8 @@
     </header>
 
     <!-- Network list -->
-    <section class="bg-ink-900 border border-ink-700 rounded-xl">
-      <header class="flex items-center justify-between px-5 py-3 border-b border-ink-700">
+    <section class="panel">
+      <header class="flex items-center justify-between px-5 py-3 border-b border-steel-700">
         <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400">
           Nearby networks
           {#if loadingScan}
@@ -205,7 +205,7 @@
     <!-- Connect form -->
     <form
       on:submit|preventDefault={submit}
-      class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-4"
+      class="panel p-5 space-y-4"
     >
       <div class="space-y-1">
         <label class="text-xs uppercase tracking-wider text-zinc-500 block" for="manual-ssid">
@@ -222,9 +222,9 @@
           bind:value={manualSsid}
           placeholder="or type an SSID manually (e.g. hidden network)"
           disabled={!!selectedSsid}
-          class="w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
+          class="w-full px-3 py-2 rounded-md bg-ink-800 border border-steel-700
                  disabled:opacity-50 disabled:cursor-not-allowed
-                 focus:outline-none focus:ring-2 focus:ring-cursed-500"
+                 focus:outline-none focus:ring-1 focus:ring-cursed-500/50"
         />
       </div>
 
@@ -240,8 +240,8 @@
           type="password"
           bind:value={password}
           autocomplete="new-password"
-          class="w-full px-3 py-2 rounded-md bg-ink-800 border border-ink-700
-                 focus:outline-none focus:ring-2 focus:ring-cursed-500"
+          class="w-full px-3 py-2 rounded-md bg-ink-800 border border-steel-700
+                 focus:outline-none focus:ring-1 focus:ring-cursed-500/50"
         />
       </div>
 
