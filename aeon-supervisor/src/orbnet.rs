@@ -14,6 +14,11 @@
 //! Talking to the local Conduit is done by shelling out to `curl -sk` (the
 //! supervisor has no reqwest; curl is on the image and `-k` accepts the
 //! throwaway self-signed cert on 127.0.0.1).
+//!
+//! Memory safety (2026-07): never pull an unfiltered full `/sync` into the
+//! supervisor. Dashboard polls use a tight Matrix filter + `since` token, curl
+//! responses are size-capped, and a failed enable/boot reconcile rolls
+//! `enabled` back to false so Tor/Conduit do not thrash the box forever.
 
 use crate::api::AppState;
 use axum::extract::{Path as AxPath, State};
@@ -21,13 +26,96 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 const CONFIG_TOML: &str = "/etc/aeon/orbnet.toml";
 const RUNTIME_DIR: &str = "/var/lib/aeon/orbnet";
 const OWNER_JSON: &str = "/var/lib/aeon/orbnet/owner.json";
+const OWNER_SINCE: &str = "/var/lib/aeon/orbnet/owner-sync-since";
+const LAST_ERROR: &str = "/var/lib/aeon/orbnet/last-error.txt";
 const SCRIPT: &str = "/usr/local/bin/aeon-orbnet";
 const CS_BASE: &str = "https://127.0.0.1:8448";
+
+/// Dashboard / rooms poll: short timeout, hard body cap (was unbounded → OOM).
+const CS_READ_TIMEOUT_S: &str = "12";
+const CS_READ_MAX_BYTES: &str = "1500000"; // 1.5 MiB
+/// Mutations / register can be slower (Tor cold paths).
+const CS_WRITE_TIMEOUT_S: &str = "45";
+const CS_WRITE_MAX_BYTES: &str = "512000";
+
+/// Minimal Matrix filter: room name + short message timeline only. No presence,
+/// no account_data, no full member lists (lazy_load). Keeps `/sync` tiny.
+fn rooms_sync_filter() -> String {
+    // Inline JSON — urlencoded by caller.
+    r#"{"presence":{"types":[]},"account_data":{"types":[]},"room":{"account_data":{"types":[]},"ephemeral":{"types":[]},"state":{"lazy_load_members":true,"types":["m.room.name"]},"timeline":{"limit":8,"types":["m.room.message"]},"include_leave":false}}"#.to_string()
+}
+
+fn persona_sync_filter() -> String {
+    r#"{"presence":{"types":[]},"account_data":{"types":[]},"room":{"account_data":{"types":[]},"ephemeral":{"types":[]},"state":{"lazy_load_members":true,"types":[]},"timeline":{"limit":16,"types":["m.room.message"]},"include_leave":false}}"#.to_string()
+}
+
+#[derive(Clone, Default)]
+struct RoomSnap {
+    name: String,
+    members: i64,
+    last_ts: i64,
+    last_sender: String,
+    last_body: String,
+}
+
+#[derive(Default)]
+struct RoomsCache {
+    since: String,
+    rooms: HashMap<String, RoomSnap>,
+}
+
+fn rooms_cache() -> &'static Mutex<RoomsCache> {
+    static C: OnceLock<Mutex<RoomsCache>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(RoomsCache::default()))
+}
+
+/// Serialize heavy Matrix reads so concurrent dashboard polls cannot stack
+/// multi‑MB allocations on the blocking pool.
+fn sync_gate() -> &'static Mutex<()> {
+    static G: OnceLock<Mutex<()>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(()))
+}
+
+fn write_last_error(msg: &str) {
+    let _ = std::fs::create_dir_all(RUNTIME_DIR);
+    let _ = std::fs::write(LAST_ERROR, msg);
+}
+
+fn read_last_error() -> Option<String> {
+    std::fs::read_to_string(LAST_ERROR)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn clear_last_error() {
+    let _ = std::fs::remove_file(LAST_ERROR);
+}
+
+/// Roll OrbNet fully off after a hard failure so we never stay `enabled=true`
+/// without a working owner (that path re-bootstraps Tor forever and OOMs the
+/// supervisor under load).
+fn disable_after_failure(reason: &str) {
+    eprintln!("orbnet: disabling after failure — {reason}");
+    write_last_error(reason);
+    let mut cfg = read_config();
+    cfg.enabled = false;
+    let _ = write_config(&cfg);
+    let _ = run_script(&["down"]);
+    // Drop in-memory room cache so a later enable starts clean.
+    if let Ok(mut c) = rooms_cache().lock() {
+        *c = RoomsCache::default();
+    }
+    let _ = std::fs::remove_file(OWNER_SINCE);
+}
 
 // ── config ───────────────────────────────────────────────────────────────────
 
@@ -137,11 +225,40 @@ fn script_status() -> Value {
 }
 
 /// Call the local Conduit client-server API. `curl -sk` accepts the self-signed
-/// localhost cert; body is JSON.
+/// localhost cert; body is JSON. Size- and time-capped to protect the supervisor
+/// process (unbounded `/sync` responses previously ballooned RSS past 1 GiB).
 fn cs_curl(method: &str, path: &str, token: Option<&str>, body: Option<&str>) -> Result<Value, String> {
+    let write = matches!(method, "POST" | "PUT" | "DELETE");
+    cs_curl_opts(
+        method,
+        path,
+        token,
+        body,
+        if write { CS_WRITE_TIMEOUT_S } else { CS_READ_TIMEOUT_S },
+        if write { CS_WRITE_MAX_BYTES } else { CS_READ_MAX_BYTES },
+    )
+}
+
+fn cs_curl_opts(
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+    max_time: &str,
+    max_bytes: &str,
+) -> Result<Value, String> {
     let url = format!("{CS_BASE}{path}");
     let mut cmd = Command::new("curl");
-    cmd.args(["-sk", "--max-time", "60", "-X", method]);
+    // --max-filesize: abort if body exceeds cap (curl exits non-zero).
+    cmd.args([
+        "-sk",
+        "--max-time",
+        max_time,
+        "--max-filesize",
+        max_bytes,
+        "-X",
+        method,
+    ]);
     if let Some(t) = token {
         cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
     }
@@ -150,11 +267,47 @@ fn cs_curl(method: &str, path: &str, token: Option<&str>, body: Option<&str>) ->
     }
     cmd.arg(&url);
     let out = cmd.output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let hint = if err.contains("Maximum file size exceeded") || out.stdout.len() as u64
+            >= max_bytes.parse::<u64>().unwrap_or(u64::MAX)
+        {
+            "response exceeded size cap (filter/sync too large)"
+        } else {
+            err.trim()
+        };
+        // Empty body + non-zero often means timeout / connection refused.
+        if out.stdout.is_empty() {
+            return Err(format!("curl {method} {path}: {hint}"));
+        }
+    }
+    if out.stdout.len() > max_bytes.parse::<usize>().unwrap_or(usize::MAX) {
+        return Err(format!(
+            "curl {method} {path}: response {} bytes over cap {max_bytes}",
+            out.stdout.len()
+        ));
+    }
     let raw = String::from_utf8_lossy(&out.stdout);
     if raw.trim().is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}; raw={}", raw.chars().take(200).collect::<String>()))
+    serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "parse {path}: {e}; raw={}",
+            raw.chars().take(200).collect::<String>()
+        )
+    })
+}
+
+/// Wait until local Conduit answers `/_matrix/client/versions` (or timeout).
+fn wait_homeserver(secs: u64) -> bool {
+    for _ in 0..secs {
+        if cs_curl_opts("GET", "/_matrix/client/versions", None, None, "3", "65536").is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
 }
 
 // ── owner account ────────────────────────────────────────────────────────────
@@ -275,6 +428,7 @@ pub async fn status(State(_s): State<AppState>) -> Json<Value> {
             "handle": cfg.handle,
             "auto_join_community": cfg.auto_join_community,
             "moderation_keywords": cfg.moderation_keywords,
+            "last_error": read_last_error(),
         })
     })
     .await
@@ -295,20 +449,34 @@ pub struct EnableReq {
 /// safe to re-run — `provision_owner` reuses an existing account and
 /// `setup_community` rejoins existing rooms. Runs on the blocking pool, off the
 /// request path (the Tor bootstrap can take minutes).
+///
+/// On hard failure, **disables OrbNet** so we never stick in `enabled=true`
+/// without an owner (that caused boot-loop Tor bring-up + supervisor OOM).
 fn reconcile() -> Value {
     let cfg = read_config();
     let onion = match run_script(&["up"]) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("orbnet reconcile: up failed: {e}");
-            return json!({"ok": false, "err": format!("orbnet up: {e}")});
+            let msg = format!("orbnet up: {e}");
+            eprintln!("orbnet reconcile: {msg}");
+            disable_after_failure(&msg);
+            return json!({"ok": false, "err": msg});
         }
     };
+    // Conduit can take a few seconds after systemd start — don't race register.
+    if !wait_homeserver(45) {
+        let msg = "homeserver did not become ready within 45s".to_string();
+        eprintln!("orbnet reconcile: {msg}");
+        disable_after_failure(&msg);
+        return json!({"ok": false, "err": msg, "onion": onion});
+    }
     let owner = match provision_owner(&cfg.handle) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("orbnet reconcile: provision owner failed: {e}");
-            return json!({"ok": false, "err": format!("provision owner: {e}"), "onion": onion});
+            let msg = format!("provision owner: {e}");
+            eprintln!("orbnet reconcile: {msg}");
+            disable_after_failure(&msg);
+            return json!({"ok": false, "err": msg, "onion": onion});
         }
     };
     let community = if cfg.auto_join_community {
@@ -321,6 +489,12 @@ fn reconcile() -> Value {
     for seed in &cfg.directory_seeds {
         peered += peer_seed(&owner, seed);
     }
+    clear_last_error();
+    // Reset rooms sync cursor so the next dashboard poll does a clean filtered sync.
+    let _ = std::fs::remove_file(OWNER_SINCE);
+    if let Ok(mut c) = rooms_cache().lock() {
+        *c = RoomsCache::default();
+    }
     json!({"ok": true, "onion": onion, "owner": owner.user_id, "community": community, "peered_rooms": peered})
 }
 
@@ -329,6 +503,8 @@ fn reconcile() -> Value {
 /// the request never blocks on the Tor bootstrap — which would otherwise blow
 /// past the browser's request timeout (the "Load failed" the operator saw).
 /// The dashboard polls /status until the owner account appears. Admin-gated.
+///
+/// If background reconcile fails, config is rolled back to `enabled=false`.
 pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> Json<Value> {
     let saved = tokio::task::spawn_blocking(move || -> Value {
         let mut cfg = read_config();
@@ -342,6 +518,7 @@ pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> J
             cfg.display_name = req.display_name.clone();
         }
         cfg.enabled = true;
+        clear_last_error();
         match write_config(&cfg) {
             Ok(_) => json!({"ok": true}),
             Err(e) => json!({"ok": false, "err": format!("write config: {e}")}),
@@ -350,22 +527,63 @@ pub async fn enable(State(_s): State<AppState>, Json(req): Json<EnableReq>) -> J
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "enable task failed"}));
     if saved.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-        // Fire-and-forget the slow bring-up; the dashboard polls /status.
+        // Fire-and-forget the slow bring-up; failures self-disable via reconcile().
         tokio::task::spawn_blocking(reconcile);
         return Json(json!({"ok": true, "started": true}));
     }
     Json(saved)
 }
 
-/// On boot, if OrbNet is enabled but the owner account was never provisioned
-/// (e.g., a crash/OOM-restart interrupted activation), finish the bring-up.
-/// Idempotent — a no-op once the owner exists.
+/// On boot: if OrbNet is enabled, ensure infra + owner exist. Retries a few
+/// times with backoff; if owner still cannot be provisioned, **disable** so we
+/// do not thrash Tor/Conduit forever after a half-finished activation.
 pub async fn reconcile_on_boot() {
-    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
     let cfg = read_config();
-    if cfg.enabled && read_owner().is_none() {
-        eprintln!("orbnet: enabled but owner missing on boot — reconciling");
-        let _ = tokio::task::spawn_blocking(reconcile).await;
+    if !cfg.enabled {
+        return;
+    }
+    // Owner already good — systemd units from a prior `up` should keep Conduit
+    // running; nothing expensive to do here.
+    if read_owner().is_some() {
+        // Soft ensure: if homeserver is down, try `up` once without disabling.
+        let ok = tokio::task::spawn_blocking(|| {
+            wait_homeserver(2)
+                || run_script(&["up"]).map(|_| wait_homeserver(30)).unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+        if !ok {
+            eprintln!("orbnet: enabled+owner present but homeserver down after soft up");
+        }
+        return;
+    }
+    eprintln!("orbnet: enabled but owner missing on boot — reconciling (with backoff)");
+    for attempt in 1u32..=4 {
+        let result = tokio::task::spawn_blocking(reconcile).await;
+        let ok = result
+            .ok()
+            .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+        if ok || read_owner().is_some() {
+            eprintln!("orbnet: boot reconcile ok (attempt {attempt})");
+            return;
+        }
+        // reconcile() already disables on hard failure — stop retrying.
+        if !read_config().enabled {
+            eprintln!("orbnet: boot reconcile disabled OrbNet after failure");
+            return;
+        }
+        let wait = 15 * attempt;
+        eprintln!("orbnet: boot reconcile attempt {attempt} failed; retry in {wait}s");
+        tokio::time::sleep(Duration::from_secs(wait as u64)).await;
+    }
+    if read_owner().is_none() {
+        tokio::task::spawn_blocking(|| {
+            disable_after_failure("boot reconcile exhausted retries without owner");
+        })
+        .await
+        .ok();
     }
 }
 
@@ -376,6 +594,11 @@ pub async fn disable(State(_s): State<AppState>) -> Json<Value> {
         let mut cfg = read_config();
         cfg.enabled = false;
         let _ = write_config(&cfg);
+        clear_last_error();
+        if let Ok(mut c) = rooms_cache().lock() {
+            *c = RoomsCache::default();
+        }
+        let _ = std::fs::remove_file(OWNER_SINCE);
         match run_script(&["down"]) {
             Ok(_) => json!({"ok": true}),
             Err(e) => json!({"ok": false, "err": e}),
@@ -493,31 +716,63 @@ pub async fn cert() -> impl IntoResponse {
 
 /// GET /api/orbnet/rooms — the owner's joined rooms (community + groups + DMs)
 /// with names, member counts, and a recent-activity timestamp. Admin-gated.
+///
+/// Uses a **filtered + incremental** Matrix `/sync` (name + short timeline only)
+/// and an in-process cache. Never pulls an unfiltered full sync (that path
+/// ballooned supervisor RSS past 1 GiB under dashboard polling).
 pub async fn rooms(State(_s): State<AppState>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| -> Value {
         let Some(o) = read_owner() else {
             return json!({"ok": false, "err": "owner not provisioned"});
         };
-        let sync = match cs_curl(
-            "GET",
-            "/_matrix/client/v3/sync?timeout=0",
-            Some(&o.access_token),
-            None,
-        ) {
+        let _gate = sync_gate().lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = rooms_cache().lock().unwrap_or_else(|e| e.into_inner());
+        // Seed since from disk if memory is empty (after supervisor restart).
+        if cache.since.is_empty() {
+            if let Ok(s) = std::fs::read_to_string(OWNER_SINCE) {
+                cache.since = s.trim().to_string();
+            }
+        }
+        let filter = urlencode(&rooms_sync_filter());
+        let mut path = format!("/_matrix/client/v3/sync?timeout=0&filter={filter}");
+        if !cache.since.is_empty() {
+            path.push_str(&format!("&since={}", urlencode(&cache.since)));
+        }
+        let sync = match cs_curl("GET", &path, Some(&o.access_token), None) {
             Ok(v) => v,
-            Err(e) => return json!({"ok": false, "err": e}),
+            Err(e) => {
+                // Stale since / oversized response → reset cursor once and retry.
+                if !cache.since.is_empty() {
+                    eprintln!("orbnet rooms: sync failed ({e}); resetting since");
+                    cache.since.clear();
+                    cache.rooms.clear();
+                    let _ = std::fs::remove_file(OWNER_SINCE);
+                    let path2 = format!("/_matrix/client/v3/sync?timeout=0&filter={filter}");
+                    match cs_curl("GET", &path2, Some(&o.access_token), None) {
+                        Ok(v) => v,
+                        Err(e2) => return json!({"ok": false, "err": e2}),
+                    }
+                } else {
+                    return json!({"ok": false, "err": e});
+                }
+            }
         };
-        let mut out = vec![];
-        let mut members = std::collections::HashSet::new();
-        let mut active = std::collections::HashSet::new();
-        let mut activity: Vec<Value> = vec![];
+        if let Some(nb) = sync.get("next_batch").and_then(|v| v.as_str()) {
+            cache.since = nb.to_string();
+            let _ = std::fs::create_dir_all(RUNTIME_DIR);
+            let _ = std::fs::write(OWNER_SINCE, nb);
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let mut activity: Vec<Value> = vec![];
+        let mut active = std::collections::HashSet::new();
+
         if let Some(join) = sync.pointer("/rooms/join").and_then(|v| v.as_object()) {
             for (rid, room) in join {
-                let name = room
+                let entry = cache.rooms.entry(rid.clone()).or_default();
+                if let Some(name) = room
                     .pointer("/state/events")
                     .and_then(|v| v.as_array())
                     .and_then(|evs| {
@@ -528,52 +783,95 @@ pub async fn rooms(State(_s): State<AppState>) -> Json<Value> {
                             .and_then(|n| n.as_str())
                             .map(|s| s.to_string())
                     })
-                    .unwrap_or_else(|| rid.clone());
-                let member_count = room
+                {
+                    entry.name = name;
+                }
+                if entry.name.is_empty() {
+                    entry.name = rid.clone();
+                }
+                if let Some(mc) = room
                     .pointer("/summary/m.joined_member_count")
                     .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                // unique community members across rooms (from join state events)
-                if let Some(evs) = room.pointer("/state/events").and_then(|v| v.as_array()) {
-                    for e in evs {
-                        if e.get("type").and_then(|t| t.as_str()) == Some("m.room.member")
-                            && e.pointer("/content/membership").and_then(|m| m.as_str()) == Some("join")
-                        {
-                            if let Some(sk) = e.get("state_key").and_then(|s| s.as_str()) {
-                                members.insert(sk.to_string());
-                            }
-                        }
-                    }
+                {
+                    entry.members = mc;
                 }
-                let mut last_sender = String::new();
-                let mut last_body = String::new();
-                let mut last_ts = 0i64;
                 if let Some(evs) = room.pointer("/timeline/events").and_then(|v| v.as_array()) {
                     for e in evs {
                         if e.get("type").and_then(|t| t.as_str()) != Some("m.room.message") {
                             continue;
                         }
                         let ts = e.get("origin_server_ts").and_then(|t| t.as_i64()).unwrap_or(0);
-                        let sender = e.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                        let body = e.pointer("/content/body").and_then(|b| b.as_str()).unwrap_or("").to_string();
-                        // "active now" = posted in the last hour (presence over Tor
-                        // federation is unreliable, so we proxy it with activity).
+                        let sender = e
+                            .get("sender")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let body = e
+                            .pointer("/content/body")
+                            .and_then(|b| b.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if now - ts < 3_600_000 && !sender.is_empty() {
                             active.insert(sender.clone());
                         }
-                        activity.push(json!({"room": name, "sender": sender, "body": body, "ts": ts}));
-                        last_sender = sender;
-                        last_body = body;
-                        last_ts = ts;
+                        if ts >= entry.last_ts {
+                            entry.last_ts = ts;
+                            entry.last_sender = sender.clone();
+                            entry.last_body = body.clone();
+                        }
+                        activity.push(json!({
+                            "room": entry.name,
+                            "sender": sender,
+                            "body": body,
+                            "ts": ts
+                        }));
                     }
                 }
-                out.push(json!({"room_id": rid, "name": name, "last_ts": last_ts, "members": member_count, "last_sender": last_sender, "last_body": last_body}));
             }
         }
+        // Drop rooms we fully left (leave section).
+        if let Some(leave) = sync.pointer("/rooms/leave").and_then(|v| v.as_object()) {
+            for rid in leave.keys() {
+                cache.rooms.remove(rid);
+            }
+        }
+
+        let mut out: Vec<Value> = cache
+            .rooms
+            .iter()
+            .map(|(rid, e)| {
+                json!({
+                    "room_id": rid,
+                    "name": e.name,
+                    "last_ts": e.last_ts,
+                    "members": e.members,
+                    "last_sender": e.last_sender,
+                    "last_body": e.last_body,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b["last_ts"]
+                .as_i64()
+                .unwrap_or(0)
+                .cmp(&a["last_ts"].as_i64().unwrap_or(0))
+        });
         activity.sort_by(|a, b| b["ts"].as_i64().unwrap_or(0).cmp(&a["ts"].as_i64().unwrap_or(0)));
         activity.truncate(15);
+        // Approximate unique members as sum of room member counts (avoids
+        // loading every m.room.member event into RAM).
+        let members_approx: i64 = cache.rooms.values().map(|e| e.members).sum();
         let rooms_count = out.len();
-        json!({"ok": true, "rooms": out, "stats": {"rooms": rooms_count, "members": members.len(), "active": active.len()}, "activity": activity})
+        json!({
+            "ok": true,
+            "rooms": out,
+            "stats": {
+                "rooms": rooms_count,
+                "members": members_approx,
+                "active": active.len()
+            },
+            "activity": activity
+        })
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "rooms task failed"}));
@@ -937,14 +1235,23 @@ fn llm_reply(p: &Persona, context: &[(String, String)]) -> Option<String> {
 
 /// One sync+reply pass for a persona. First sync records position (no replies to
 /// history); later syncs reply to new non-persona messages.
+/// Always uses a tight filter so persona bots never pull full room state.
 fn respond_for_persona(p: &Persona, persona_ids: &[String]) {
     let since = read_since(&p.handle);
+    let filter = urlencode(&persona_sync_filter());
     let path = if since.is_empty() {
-        "/_matrix/client/v3/sync?timeout=0".to_string()
+        format!("/_matrix/client/v3/sync?timeout=0&filter={filter}")
     } else {
-        format!("/_matrix/client/v3/sync?since={}&timeout=0", urlencode(&since))
+        format!(
+            "/_matrix/client/v3/sync?timeout=0&filter={filter}&since={}",
+            urlencode(&since)
+        )
     };
     let Ok(sync) = cs_curl("GET", &path, Some(&p.access_token), None) else {
+        // Drop a broken since token once so the next pass can recover.
+        if !since.is_empty() {
+            let _ = std::fs::remove_file(format!("{SINCE_DIR}/{}", p.handle));
+        }
         return;
     };
     if let Some(nb) = sync.get("next_batch").and_then(|v| v.as_str()) {
@@ -1178,18 +1485,43 @@ pub async fn unpeer(State(_s): State<AppState>, Json(req): Json<PeerReq>) -> Jso
         cfg.directory_seeds.retain(|s| s != &onion);
         let removed = cfg.directory_seeds.len() != before;
         let _ = write_config(&cfg);
-        // Leave any currently-joined rooms hosted on that onion (room_id ends
-        // with ":<onion>"). Uses a local sync — no flaky remote alias lookups.
+        // Leave joined rooms hosted on that onion. Prefer lightweight
+        // `/joined_rooms` over a full `/sync` (was an OOM footgun).
         let mut left = 0;
         if let Some(o) = read_owner() {
-            if let Ok(sync) = cs_curl("GET", "/_matrix/client/v3/sync?timeout=0", Some(&o.access_token), None) {
-                if let Some(join) = sync.pointer("/rooms/join").and_then(|v| v.as_object()) {
-                    let suffix = format!(":{onion}");
-                    for rid in join.keys().filter(|r| r.ends_with(&suffix)) {
-                        let _ = cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/leave", urlencode(rid)), Some(&o.access_token), Some("{}"));
-                        let _ = cs_curl("POST", &format!("/_matrix/client/v3/rooms/{}/forget", urlencode(rid)), Some(&o.access_token), Some("{}"));
-                        left += 1;
-                    }
+            let suffix = format!(":{onion}");
+            let rids: Vec<String> = cs_curl(
+                "GET",
+                "/_matrix/client/v3/joined_rooms",
+                Some(&o.access_token),
+                None,
+            )
+            .ok()
+            .and_then(|v| {
+                v.get("joined_rooms").and_then(|a| a.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .filter(|r| r.ends_with(&suffix))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+            for rid in rids {
+                let _ = cs_curl(
+                    "POST",
+                    &format!("/_matrix/client/v3/rooms/{}/leave", urlencode(&rid)),
+                    Some(&o.access_token),
+                    Some("{}"),
+                );
+                let _ = cs_curl(
+                    "POST",
+                    &format!("/_matrix/client/v3/rooms/{}/forget", urlencode(&rid)),
+                    Some(&o.access_token),
+                    Some("{}"),
+                );
+                left += 1;
+                if let Ok(mut c) = rooms_cache().lock() {
+                    c.rooms.remove(&rid);
                 }
             }
         }

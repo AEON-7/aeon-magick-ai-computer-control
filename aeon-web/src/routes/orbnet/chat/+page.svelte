@@ -406,6 +406,11 @@
   <main class="flex-1 overflow-auto">
     {#if err}<div class="m-4 p-3 rounded bg-red-900/20 border border-red-500/40 text-red-300 text-sm">{err}</div>{/if}
     {#if busy}<div class="m-4 p-3 rounded bg-cursed-500/10 border border-cursed-500/30 text-cursed-200 text-sm">⏳ {busy}</div>{/if}
+    {#if status?.last_error && !status?.enabled}
+      <div class="m-4 p-3 rounded bg-amber-900/20 border border-amber-500/40 text-amber-200 text-sm font-mono">
+        Last bring-up failed (OrbNet auto-disabled to protect the Orb): {status.last_error}
+      </div>
+    {/if}
 
     {#if !status}
       <p class="p-5 text-zinc-500 text-sm">loading…</p>
@@ -413,7 +418,7 @@
     {:else if !status.enabled}
       <!-- ── OFF: description + activate ─────────────────────────────── -->
       <div class="p-5 max-w-2xl mx-auto w-full space-y-5">
-        <section class="bg-ink-900 border border-cursed-500/30 rounded-xl p-6 space-y-3">
+        <section class="bg-ink-900 border border-cursed-500/30 rounded-sm p-6 space-y-3">
           <h1 class="font-mono text-lg text-cursed-300">🔮 Join OrbNet</h1>
           <p class="text-zinc-300 text-sm leading-relaxed">
             OrbNet is a private, <b class="text-cursed-200">anonymous</b> chat mesh between Aeon Magick Orbs.
@@ -433,15 +438,15 @@
             hides IPs, not all metadata.
           </p>
         </section>
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-5 space-y-3">
+        <section class="panel p-5 space-y-3">
           <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-400">Activate</h2>
           <label class="block text-xs text-zinc-500">Handle <span class="text-zinc-600">(pseudonymous; @handle:your-onion)</span>
             <input bind:value={handle} placeholder="e.g. aurora — leave blank for a random one"
-                   class="mt-1 w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
+                   class="mt-1 w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200 font-mono" />
           </label>
           <label class="block text-xs text-zinc-500">Display name <span class="text-zinc-600">(shown in chats)</span>
             <input bind:value={displayName} placeholder="optional"
-                   class="mt-1 w-full bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200" />
+                   class="mt-1 w-full bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200" />
           </label>
           <button class="btn bg-cursed-600/30 border-cursed-500/50 text-cursed-100 hover:bg-cursed-600/40"
                   disabled={!!busy} on:click={activate}>🔮 Activate OrbNet</button>
@@ -451,7 +456,7 @@
     {:else}
       <!-- ── ON: status + community + chat ───────────────────────────── -->
       <div class="p-4 space-y-3">
-        <section class="bg-ink-900 border border-ink-700 rounded-xl p-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+        <section class="panel p-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {dotCls(status.tor)}"></span><span class="text-zinc-400">Tor</span></div>
           <div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full {dotCls(status.conduit)}"></span><span class="text-zinc-400">Homeserver</span></div>
           <button class="font-mono text-[11px] text-cursed-300 hover:text-cursed-200 inline-flex items-center gap-1.5" title="Copy full address: {status.onion}" on:click={() => copy(status.onion)}>{shortOnion(status.onion)}<span class="text-zinc-500">{copied === status.onion ? '✓' : '⧉'}</span></button>
@@ -468,7 +473,7 @@
         </section>
 
         {#if showConnect}
-          <section class="bg-ink-900 border border-cursed-500/30 rounded-xl p-4 space-y-4">
+          <section class="bg-ink-900 border border-cursed-500/30 rounded-sm p-4 space-y-4">
             <div class="flex items-center justify-between">
               <div class="text-xs font-mono uppercase tracking-wider text-cursed-300">📱 Connect a client (Element)</div>
               <button class="text-zinc-500 hover:text-zinc-300 text-xs" on:click={() => (showConnect = false)}>close ✕</button>
@@ -490,7 +495,7 @@
             <div class="space-y-1.5">
               <div class="text-zinc-500 text-[12px]">Set a login password <span class="text-zinc-600">(your account's original password is random — choose one you'll type into Element)</span></div>
               <div class="flex gap-2 max-w-md">
-                <input class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200" type="password" autocomplete="new-password" placeholder="new password (8+ chars)" bind:value={clientPw} on:keydown={(e) => e.key === 'Enter' && setClientPassword()} />
+                <input class="flex-1 bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200" type="password" autocomplete="new-password" placeholder="new password (8+ chars)" bind:value={clientPw} on:keydown={(e) => e.key === 'Enter' && setClientPassword()} />
                 <button class="btn text-sm" disabled={pwBusy} on:click={setClientPassword}>{pwBusy ? 'setting…' : 'set password'}</button>
               </div>
               {#if pwMsg}<div class="text-[12px] {pwMsg.startsWith('✓') ? 'text-live-300' : 'text-amber-300'}">{pwMsg}</div>{/if}
@@ -510,7 +515,7 @@
         {/if}
 
         {#if showManage}
-          <section class="bg-ink-900 border border-cursed-500/30 rounded-xl p-4 space-y-4">
+          <section class="bg-ink-900 border border-cursed-500/30 rounded-sm p-4 space-y-4">
             <div class="flex items-center justify-between">
               <div class="text-xs font-mono uppercase tracking-wider text-cursed-300">⚙ Manage — peers &amp; personas</div>
               <button class="text-zinc-500 hover:text-zinc-300 text-xs" on:click={() => (showManage = false)}>close ✕</button>
@@ -542,11 +547,11 @@
                     </div>
                     {#if editingUser === p.user_id}
                       <div class="space-y-1.5 pl-2 border-l-2 border-cursed-500/30">
-                        <select bind:value={eModelSel} class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-[11px] text-zinc-200 font-mono">
+                        <select bind:value={eModelSel} class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-[11px] text-zinc-200 font-mono">
                           <option value="">— keep current model —</option>
                           {#each llmSources as s}<option value={`${s.system_id}::${s.model}`} disabled={!s.running}>{s.running ? '🟢' : '⚪'} {s.model} · {s.system}{s.running ? '' : ' (needs deploy)'}</option>{/each}
                         </select>
-                        <textarea bind:value={ePrompt} rows="3" placeholder="new soul / system prompt (blank = unchanged)" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-[11px] text-zinc-200"></textarea>
+                        <textarea bind:value={ePrompt} rows="3" placeholder="new soul / system prompt (blank = unchanged)" class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-[11px] text-zinc-200"></textarea>
                         <button class="btn text-[11px]" on:click={() => saveEdit(p.user_id)}>save</button>
                       </div>
                     {/if}
@@ -558,18 +563,18 @@
         {/if}
 
         {#if showMod}
-          <section class="bg-ink-900 border border-amber-500/30 rounded-xl p-4 space-y-2">
+          <section class="bg-ink-900 border border-amber-500/30 rounded-sm p-4 space-y-2">
             <div class="text-xs font-mono uppercase tracking-wider text-amber-300">Your moderation filter</div>
             <p class="text-[11px] text-zinc-500">One keyword/phrase per line. Messages containing any of these are hidden for you (client-side, case-insensitive). Your filter only — never affects anyone else.</p>
             <textarea bind:value={modText} rows="4" placeholder="one keyword per line"
-                      class="w-full bg-ink-800 border border-ink-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono"></textarea>
+                      class="w-full bg-ink-800 border border-steel-700 rounded px-3 py-2 text-sm text-zinc-200 font-mono"></textarea>
             <button class="btn text-xs" on:click={saveModeration}>save filter</button>
           </section>
         {/if}
 
         <div class="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-3">
           <!-- rooms -->
-          <section class="bg-ink-900 border border-ink-700 rounded-xl p-2 space-y-1 h-[60vh] overflow-y-auto">
+          <section class="panel p-2 space-y-1 h-[60vh] overflow-y-auto">
             <div class="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-zinc-500">Rooms ({rooms.length})</div>
             {#each rooms as r (r.room_id)}
               <button class="w-full text-left px-2 py-1.5 rounded text-sm {selected?.room_id === r.room_id ? 'bg-cursed-500/20 text-cursed-100' : 'text-zinc-300 hover:bg-ink-800'}"
@@ -587,7 +592,7 @@
           </section>
 
           <!-- chat -->
-          <section class="bg-ink-900 border border-ink-700 rounded-xl flex flex-col h-[60vh]">
+          <section class="panel flex flex-col h-[60vh]">
             {#if selected}
               <div class="px-4 py-2 border-b border-ink-800 flex items-center gap-2">
                 <span class="text-sm text-zinc-200 font-mono truncate flex-1">{selected.name}</span>
@@ -602,13 +607,13 @@
               {#if showPersona}
                 <div class="p-3 border-b border-ink-800 bg-ink-950/40 space-y-2">
                   <p class="text-[11px] text-zinc-500">Place a persona into <b class="text-cursed-200">{selected.name}</b> — start from a pantheon member + pick a running model. <b>You place it — never automatic.</b></p>
-                  <select bind:value={pTemplate} on:change={applyTemplate} class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200">
+                  <select bind:value={pTemplate} on:change={applyTemplate} class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-xs text-zinc-200">
                     <option value="">— Blank / from scratch —</option>
                     {#each templates as t}<option value={t.key}>🎭 {t.name}{t.model ? ` · ${t.model}` : ''}</option>{/each}
                   </select>
-                  <input bind:value={pName} placeholder="persona name" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200" />
-                  <textarea bind:value={pPrompt} rows="3" placeholder="soul / personality (system prompt)" class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200"></textarea>
-                  <select bind:value={pModelSel} on:change={applyModel} class="w-full bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono">
+                  <input bind:value={pName} placeholder="persona name" class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-xs text-zinc-200" />
+                  <textarea bind:value={pPrompt} rows="3" placeholder="soul / personality (system prompt)" class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-xs text-zinc-200"></textarea>
+                  <select bind:value={pModelSel} on:change={applyModel} class="w-full bg-ink-800 border border-steel-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono">
                     <option value="">— pick a model —</option>
                     {#each llmSources as s}<option value={`${s.system_id}::${s.model}`} disabled={!s.running}>{s.running ? '🟢' : '⚪'} {s.model} · {s.system}{s.running ? '' : ' (needs deploy)'}</option>{/each}
                   </select>
@@ -632,7 +637,7 @@
               </div>
               <form class="p-2 border-t border-ink-800 flex gap-2" on:submit|preventDefault={send}>
                 <input bind:value={draft} placeholder="message {selected.name}…"
-                       class="flex-1 bg-ink-800 border border-ink-700 rounded px-3 py-1.5 text-sm text-zinc-200" />
+                       class="flex-1 bg-ink-800 border border-steel-700 rounded px-3 py-1.5 text-sm text-zinc-200" />
                 <button class="btn text-xs" type="submit">send</button>
               </form>
             {:else}

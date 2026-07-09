@@ -158,3 +158,18 @@ Federation over Tor is ~1 s once circuits are warm (the keepalive handles this),
 sudo systemctl stop aeon-orbnet-conduit aeon-orbnet-tor aeon-orbnet-keepalive.timer
 sudo rm -rf /var/lib/aeon/orbnet
 ```
+
+### Memory / stuck-enable notes (supervisor)
+
+OrbNet is **Conduit**, not Synapse. The process that previously ballooned under load
+was **`aeon-supervisor`**, not the homeserver: unfiltered Matrix `/sync` responses
+were deserialized on every dashboard poll.
+
+Mitigations in `orbnet.rs` (2026-07):
+
+- Dashboard `/rooms` uses a **tight filter** + **`since`** token (incremental).
+- `curl` to Conduit is **time- and size-capped**.
+- Failed enable / boot reconcile **sets `enabled = false`** and runs `aeon-orbnet down`
+  so a half-finished activation cannot re-bootstrap Tor forever after every restart.
+- Last failure reason is exposed as `last_error` on `GET /api/orbnet/status`
+  (also written to `/var/lib/aeon/orbnet/last-error.txt`).
