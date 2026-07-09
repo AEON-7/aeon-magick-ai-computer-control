@@ -1,0 +1,7 @@
+[Unit]
+Description=Aeon UPS/power trend logger (diagnostic)
+After=aeon-ups.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aeon-ups-trend

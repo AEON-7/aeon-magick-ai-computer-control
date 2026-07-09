@@ -31,6 +31,8 @@ for u in \
     aeon-hdmi-csi.service \
     aeon-hdmi-csi-watch.service \
     aeon-ups.service \
+    aeon-ups-trend.service \
+    aeon-ups-trend.timer \
     aeon-uvc.service \
     aeon-vision.service \
     aeon-vision-vlm.service \
@@ -65,6 +67,18 @@ install -m 0755 "${THIS_DIR}/files/aeon-hdmi-csi-watch.sh" "${ROOTFS_DIR}/usr/lo
 # Waveshare UPS HAT (E) battery monitor + low-battery safe-shutdown daemon.
 # No-op (idles) on a Pi without the HAT (probes I2C 0x2D, finds nothing).
 install -m 0755 "${THIS_DIR}/files/aeon-ups.py"        "${ROOTFS_DIR}/usr/local/bin/aeon-ups"
+# Once-a-minute UPS/power trend logger (survives hard power-cuts; journald
+# alone is not enough on Pi OS which ships Storage=volatile by default).
+install -m 0755 "${THIS_DIR}/files/aeon-ups-trend.sh"  "${ROOTFS_DIR}/usr/local/bin/aeon-ups-trend"
+# Keep journals across reboots so UPS / undervolt / CSI storms leave a trail.
+# Pi OS ships Storage=volatile in 40-rpi-volatile-storage.conf; conf.d files are
+# merged in lexicographic order regardless of /etc vs /usr, so we both drop a
+# late 99- override AND shadow the rpi file under the same basename in /etc.
+install -d "${ROOTFS_DIR}/etc/systemd/journald.conf.d"
+install -m 0644 "${THIS_DIR}/files/aeon-journald-persistent.conf" \
+    "${ROOTFS_DIR}/etc/systemd/journald.conf.d/99-aeon-persistent.conf"
+printf '[Journal]\nStorage=persistent\n' \
+    > "${ROOTFS_DIR}/etc/systemd/journald.conf.d/40-rpi-volatile-storage.conf"
 # On-device live vision (OCR / Hailo AI HAT+ detection over the capture feed).
 # OFF by default; self-idles without the streamer/Hailo. Drop .hef models into
 # the vision dir once the AI HAT+ is enumerating (see vision.toml).
@@ -191,6 +205,8 @@ systemctl enable aeon-hdmi-csi-watch.service
 systemctl enable aeon-uvc.service
 # UPS HAT (E) battery monitor + safe-shutdown (idles cleanly if no HAT).
 systemctl enable aeon-ups.service
+# Minute-resolution UPS/power trend (diagnostic ring for hard power-cuts).
+systemctl enable aeon-ups-trend.timer
 # On-device vision OCR/detection (idles cleanly if disabled / no streamer).
 systemctl enable aeon-vision.service
 # describe_screen VLM service (no-op until the VLM .hef is deployed; the unit's

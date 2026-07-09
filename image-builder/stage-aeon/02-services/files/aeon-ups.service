@@ -11,6 +11,15 @@ Type=simple
 Environment=AEON_UPS_BUS=1
 Environment=AEON_UPS_LOW_MV=3150
 Environment=AEON_UPS_GRACE_S=60
+Environment=AEON_UPS_LOW_PCT=15
+# Extra discharge floor (mA magnitude). Pack must be drawing at least this much
+# from the cells before a low-battery poweroff can arm — blocks the "battery
+# full / trickle (~0 mA) + one corrupt cell read" false positive.
+Environment=AEON_UPS_MIN_DISCHARGE_MA=100
+# Set to 0 to monitor+publish only (never write 0x55 / never systemctl poweroff).
+# Useful to A/B-test unexplained rail-cuts. Re-enable once the pack truly needs
+# low-battery protection.
+Environment=AEON_UPS_AUTO_POWEROFF=1
 # Runs as root: reads I2C 0x2D and may issue `systemctl poweroff` on low batt.
 ExecStart=/usr/bin/python3 /usr/local/bin/aeon-ups
 Restart=on-failure
