@@ -4,19 +4,19 @@
   "patreon": "https://www.patreon.com/AeonForge7",
   "tracks": {
     "pi4": {
-      "version": 111,
-      "name": "v111",
-      "published": "2026-07-04",
+      "version": 113,
+      "name": "v113",
+      "published": "2026-07-09",
       "codename": "bookworm",
-      "notes": "Raspberry Pi 4 (Bookworm). Model Share with signed publisher provenance, Aeon Bench, the WM8960 audio fix, and the full agentic computer-control stack.",
+      "notes": "Raspberry Pi 4 (Bookworm). UI ritual-instrument uplift, OrbNet/Conduit memory-safety (supervisor OOM fix), UPS harden, rotating HID identity, latest agentic control stack.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     },
     "pi5": {
-      "version": 112,
-      "name": "v112",
-      "published": "2026-07-04",
+      "version": 113,
+      "name": "v113",
+      "published": "2026-07-09",
       "codename": "trixie",
-      "notes": "Raspberry Pi 5 (Trixie). Everything in the Pi 4 image plus the Hailo super-app and the on-device vision / voice / UPS suite.",
+      "notes": "Raspberry Pi 5 (Trixie). Everything in the Pi 4 v113 image plus Hailo super-app and on-device vision / voice / UPS suite.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     }
   }
