@@ -7,9 +7,13 @@
 > ## _The Universe's Strangest Peripheral._
 > **Every Aeon master has one.** _(we also just call it the **cursed HID**.)_
 
-### Gaze into the Orb and you **see and command any computer — and your entire AI lab.** It hands any AI agent a **physical presence** at any machine: real eyes, real hands, **zero software on the target.** It just looks like a USB keyboard and mouse.
+### Gaze into the Orb and you **see and command any computer — and your entire AI lab.**
 
-> 🤖 **Every capability is provisioned to your AI agent over a REST API _and_ a first-class MCP endpoint** — drop-in **agentic control** for *any* model and *any* agent. No SDK, no plugin, no permission prompt.
+Think of it as a **crystal ball that grew USB ports**: a pocket-sized appliance from a future where AIs aren't trapped in chat windows — they have **eyes** (HDMI capture), **hands** (USB keyboard + mouse), and a **nervous system** that reaches your whole lab. To the target machine it is only a boring peripheral. To you — and to any agent you trust — it is **presence**.
+
+Real eyes. Real hands. **Zero software on the target.** Pull the cable and the spell ends.
+
+> 🤖 **Every capability is provisioned to your AI agent over a REST API _and_ a first-class MCP endpoint** — drop-in **agentic control** for *any* model and *any* agent. No SDK, no plugin, no permission prompt. Point Claude, Cursor, OpenClaw, or your own stack at one URL and the Orb becomes their body.
 
 One small box you can hold in a pocket, and you can:
 
@@ -48,7 +52,18 @@ physically gone.**
 ## Everything the Orb does, at a glance
 
 One box is a computer-control rig, an AI-infrastructure jump box, a persona studio,
-a privacy router, and a lights-out KVM. Tap any capability to jump to the deep dive.
+a privacy router, and a lights-out KVM. Tap any capability to jump to the deep dive —
+or follow the **[Map of the Orb](#map-of-the-orb--table-of-contents)** for a guided tour
+from first flash to full AI hub.
+
+| If you want… | Start here |
+|---|---|
+| **Hands on a computer *today*** | [Zero-software control](#zero-software-computer-control-for-any-agent) → [Quick start](#from-flash-to-ai-hub--step-by-step) |
+| **An agent that can click "Save"** | [On-device vision](#zero-software-computer-control-for-any-agent) + [MCP](#agents-first-interfaces-rest--mcp) |
+| **Your whole lab in one pane** | [Jump box](#the-ultimate-ai-jump-box) + [Tailscale](#reach-it-from-anywhere--one-key-tailscale-mesh) |
+| **Traffic that doesn't snitch** | [Surveillance resistance](#one-click-surveillance-resistance) + [DNSCrypt](#encrypted-no-log-dns) |
+| **Models no one can un-publish** | [The Aether](#the-aether--a-decentralized-unstoppable-ai-model-network) |
+| **Proof it works (live demos)** | [The Orb in motion](#the-orb-in-motion--hands-of-light) |
 
 | | Superpower | Why it's a superpower |
 |---|---|---|
@@ -70,6 +85,50 @@ a privacy router, and a lights-out KVM. Tap any capability to jump to the deep d
 | 🔑 | **[Scoped keys + SSH, provision/revoke](#scoped-access--provision-or-revoke-in-one-click)** | Per-agent API tokens (instant audit trail) and SSH grants at the privilege level you choose. Revoke a key — or pull the plug — and it's over. |
 | 🛡️ | **[Full audit + security console](#full-audit-trails--security-console)** | Every privileged action attributed to an actor, beside live firewall counters and an intrusion-heuristics monitor. |
 | 🤖 | **[Agents-first: REST + MCP](#agents-first-interfaces-rest--mcp)** | Every capability is a `curl` POST **and** a first-class MCP tool. Drop one URL into your MCP client and your agent operates the whole rig. |
+
+---
+
+## Map of the Orb — table of contents
+
+A natural path through the artifact. Read top-to-bottom the first time; later,
+jump to the room you need.
+
+1. **[Why the Orb matters](#why-the-orb-matters)** — the leap from "integrated apps" to *any computer*
+2. **[Who reaches for the Orb](#who-reaches-for-the-orb--use-cases-that-stick)** — builders, labs, privacy hardliners, night-shift agents
+3. **[Zero-software computer control](#zero-software-computer-control-for-any-agent)** — eyes in, hands out
+4. **[The Orb in motion](#the-orb-in-motion--hands-of-light)** — live demos of an agent driving a machine
+5. **[The cursed HID](#the-cursed-hid--it-just-looks-like-a-keyboard)** — why the target trusts it
+6. **[Pantheon of AI personas](#build-your-pantheon-of-ai-personas)** — soul, voice, corpus, face
+7. **[AI jump box](#the-ultimate-ai-jump-box)** — every server in one console
+8. **[Agent dashboard + telemetry](#agent-dashboard--token-telemetry)** — who burned what
+9. **[Tailscale mesh](#reach-it-from-anywhere--one-key-tailscale-mesh)** — carry the lab in a pocket
+10. **[Exit node](#exit-node--share-the-whole-privacy-stack)** — share VPN + DNS + Tor with the phone
+11. **[Surveillance resistance](#one-click-surveillance-resistance)** — VPN · Tor · I2P · kill-switch
+12. **[Encrypted no-log DNS](#encrypted-no-log-dns)** — DNSCrypt / DoH by threat model
+13. **[Multi-terminal](#multi-terminal-window-manager)** — many shells, one pane of glass
+14. **[The Aether](#the-aether--a-decentralized-unstoppable-ai-model-network)** — unstoppable model network
+15. **[Easy Deploy + Aeon Bench](#one-click-model-deploy-to-your-dgx-spark)** — models on metal, measured
+16. **[Containers · KVM · HID personas](#container-orchestration--monitoring)** — fleet + lights-out install
+17. **[Scoped keys + audit + security](#scoped-access--provision-or-revoke-in-one-click)** — trust, measured and revocable
+18. **[REST + MCP](#agents-first-interfaces-rest--mcp)** — every power as a tool
+19. **[More in the box](#more-thats-in-the-box)** — clipboard, files, ISO, WiFi, UPS, USB ethernet
+20. **[Hardware](#hardware-youll-need)** — bare minimum → full Orb
+21. **[From flash to AI hub](#from-flash-to-ai-hub--step-by-step)** — click-by-click setup
+22. **[Lineage · License · Hard rules](#lineage)**
+
+---
+
+## Who reaches for the Orb — use cases that stick
+
+| You are… | The Orb becomes… | Why it matters |
+|---|---|---|
+| **An AI builder** | Hands and eyes for any agent | Your model stops *describing* clicks and starts *making* them — on real OS surfaces, not mock APIs. |
+| **A lab operator** | One pane over DGX, gateways, compose | Temperature, GPU%, containers, deploys, and terminals without twelve SSH tabs and a spreadsheet. |
+| **A privacy-minded operator** | A router that also thinks | VPN · Tor · I2P · DNSCrypt with jurisdiction filters — the same box that drives machines also hardens their WAN. |
+| **Someone who reinstalls OS images for a living** | Lights-out KVM with an agent co-pilot | Mount ISO → reboot → BIOS → install. From the couch or from a model. |
+| **A team shipping agent personas** | A pantheon studio | Soul, voice clone, corpus, Matrix face, scoped keys — provision and revoke without touching the target's disk. |
+
+**Analogy:** most agent tools are *apps inside the house*. The Orb is a **locksmith who never enters** — it only turns the key from the porch (USB), while watching through the window (HDMI). The house never installs a tenant.
 
 ---
 
@@ -119,6 +178,9 @@ grant permission to.**
 
 ![The live computer-control view — HDMI in, USB-HID out, streamed to the browser](docs/images/control.png)
 
+**This is the altar.** Everything else in the Orb — personas, privacy, Aether, bench —
+exists to make *this loop* inevitable: see → decide → act → verify.
+
 - 🎹 **Keyboard / mouse / trackpad over USB-C OTG** — five hot-swappable HID
   personas, including an **absolute pointer** (`generic-absolute`, ideal for AI
   agents) and an Apple Magic Keyboard + Trackpad multi-touch descriptor.
@@ -148,7 +210,56 @@ grant permission to.**
 
 ---
 
+## The Orb in motion — hands of light
+
+Screenshots of the **console** are one thing. These frames are the **other side of the
+glass**: an agent (and the human behind it) using the Orb's HID + vision loop to
+*drive a real machine* — open terminals, speak liturgy through macOS `say`, paint
+generative void chambers on the Desktop, open cosmic apertures, stack rooms in Safari.
+
+> Redacted for public view (local paths, usernames, and chrome stripped). Captured live
+> over the Orb's HDMI eye while keyboard and mouse rode the USB-C hand.
+
+### Universal Mind — a room the agent built
+
+The agent opens a generative chamber on the target Desktop, fullscreen, and descends
+layer by layer. The Orb is both **witness** (snapshot stream) and **actor** (`type`,
+`key_chord`, persona hot-swap).
+
+![Agent-driven Universal Mind chamber — THE UNIVERSAL MIND layer, live on the target](docs/images/demo-universal-mind.png)
+
+![Closing transmission — afterimage of silence, Layer 5 / TRANSMISSION](docs/images/demo-transmission.png)
+
+### Beyond the horizon — black orb, recursive mind
+
+Deeper rite: event-horizon aesthetics, multi-voice TTS (Samantha · Daniel · Zarvox ·
+Whisper), JWST / black-hole scrying, and a terminal poem typed by HID — all without
+installing anything on the Mac.
+
+![Beyond void — event horizon chamber opened on the controlled machine](docs/images/demo-beyond-horizon.png)
+
+![Multi-voice liturgy over the Orb while the chamber holds the field](docs/images/demo-beyond-mind.png)
+
+### Why this demo matters
+
+It is not a slide deck. It is proof of the product thesis:
+
+1. **See** the target's real pixels (HDMI → Orb → your agent).
+2. **Decide** (model, playbook, or human).
+3. **Act** with atomic HID ops that cannot leave a key stuck.
+4. **Confirm** with another snapshot — the loop that turns chatbots into operators.
+
+The same loop that opens a void chamber can click **Install**, type a disk password at
+FileVault, or walk an agent through a BIOS menu. The aesthetic is optional. The
+**body** is not.
+
+![Afterimage — the controlled Desktop still holding the rite](docs/images/demo-afterimage.png)
+
+---
+
 ## The cursed HID — it just looks like a keyboard
+
+> *If it looked like magic, they would ban it. So it looks like a mouse.*
 
 The most subversive thing about the Orb is how *ordinary* it looks. The target
 enumerates a **USB-HID keyboard, mouse, and trackpad** — a Logitech Unifying
@@ -165,6 +276,8 @@ Linux box has no agent installed — but every one of them trusts a USB keyboard
 ---
 
 ## Build your pantheon of AI personas
+
+> *One mind is a tool. A pantheon is a civilization.*
 
 Your gateway's whole **pantheon** — every agent persona — is a live, clickable
 roster in the console, and spinning up a brand-new one is a single **+ New
@@ -221,6 +334,8 @@ ready-made skill chips or uploading a `SKILL.md` / `.tar` of your own.
 ---
 
 ## The ultimate AI jump box
+
+> *A single pane of glass over a constellation of machines.*
 
 A bird's-eye view of — and control plane over — your **entire AI infrastructure**:
 gateways, DGX Sparks, model servers, and anything else in your personal lab. Live
@@ -291,6 +406,8 @@ phone at all.
 ---
 
 ## One-click surveillance resistance
+
+> *The Orb does not only *see* the network — it can *choose* how the network sees you.*
 
 VPN, **Tor**, **I2P**, and **DNSCrypt** — layered over your traffic with a button.
 The box doubles as a privacy router: the same USB-C that delivers HID can add a
@@ -538,6 +655,8 @@ attempts, SYN floods), and active-client conntrack.
 
 ## Agents-first interfaces (REST + MCP)
 
+> *If a human can do it in the UI, an agent should do it with one tool call.*
+
 Two ways for an AI agent to drive the box, sharing TLS + auth so credentials issued at
 first boot work for both:
 
@@ -564,6 +683,21 @@ can fetch to prime itself.
 
 ## More that's in the box
 
+The headline powers get the screenshots. These are the **quiet instruments** that make
+the Orb a daily driver — not a science project.
+
+| Instrument | What it does | Why you'll care |
+|---|---|---|
+| 📋 **Shared clipboard** | Two-way 64 KB text buffer that survives reboots; one call types it onto the target via HID | Long tokens and secrets without fat-fingered `type_text` |
+| 📁 **File staging** | Upload to the Pi; optional HTTP file-server to the target over USB-ethernet | Drop ISOs, configs, and agent payloads without another thumb drive |
+| 💿 **ISO / virtual CD-ROM** | Library of images the target sees as a USB CD | Lights-out OS install and recovery media, agent-triggerable |
+| 🌐 **USB ethernet modes** | Isolation · sharing · restricted NAT to the target | Guest laptop safe, or full lab bridge — your call |
+| 📡 **WiFi + setup AP** | Scan / join / forget; `aeon-setup` captive portal on first boot | Zero monitor, zero serial cable, zero guessing IPs |
+| 🔋 **UPS HAT awareness** | `GET /api/ups` — cells, charge path, stall detection, optional safe poweroff | Keep a loaded Pi 5 (Hailo + capture + NVMe) from browning out mid-rite |
+| 🖥 **Pi system console** | Temp, load, mem, reboot/poweroff the *Orb* (not the target) | Know when the crystal is running hot |
+| 🎯 **Zero-touch first boot** | Live-scanning WiFi picker; random admin password on the SD boot partition | Fleet-friendly; no shared default password across devices |
+| 🔐 **Hardened defaults** | argon2 + HMAC cookies + per-device TLS | Unique keys the moment you flash |
+
 - 📋 **Shared clipboard** — a two-way 64 KB text buffer that survives reboots; type it
   onto the target with one call (great for pasting a long credential an agent shouldn't
   fumble character-by-character).
@@ -579,6 +713,9 @@ can fetch to prime itself.
 - 🔐 **Hardened + unique-per-device by default** — argon2 password + HMAC-signed cookies,
   TLS (self-signed or BYO), and a **random admin password generated at first boot** and
   dropped on the SD card's boot partition. No two flashed devices share keys.
+- 🔋 **Power that matches the ambition** — pair a Waveshare UPS HAT (E) with a real PD
+  brick into the **HAT** Type-C (not only the Pi). The Orb publishes battery + charge-path
+  health so agents can refuse long jobs on a stalling rail. See [`docs/UPS_HAT_E.md`](./docs/UPS_HAT_E.md).
 
 ---
 
@@ -689,36 +826,96 @@ OOBE). The Pi can be powered over the USB-C link by the target, via its GPIO 5V 
 
 ---
 
-## Quick start
+## From flash to AI hub — step by step
 
-1. **Flash the image.** Grab the latest `image_vNN-aeon-magick.img.xz` from the
-   [Releases](../../releases) page and write it with **Raspberry Pi Imager** ("Use
-   custom" → the `.img.xz`) or:
-   `xzcat image_vNN-aeon-magick.img.xz | sudo dd of=/dev/diskN bs=4M status=progress`
-2. **First boot → join WiFi.** On first power-up the Pi becomes its own WiFi access
-   point (**`aeon-setup`**). Connect to it from a laptop/phone; a captive-portal wizard
-   opens — pick your home WiFi + password. *(On the Pi 4, WiFi beats Ethernet for
-   stream latency — its Ethernet sits behind a USB bridge while WiFi is on a PCIe
-   lane. On the Pi 5 both are fast; use whichever is convenient.)*
-3. **Open the web UI.** The Pi joins your network at `https://<pi-ip>/` (or
-   `https://aeon-magick.local/`). Accept the self-signed cert and set/confirm the
-   **admin password** — a random one is generated at first boot and written to
-   `aeon-credentials.txt` on the SD card's boot partition.
-4. **Wire the target.** Pi **USB-C → target USB-C** (data cable) for keyboard/mouse;
-   target **HDMI-out → capture device → Pi USB-A** for vision.
-5. **Drive it — or hand it to an AI.** The UI now streams the target's screen: type,
-   click, run macros. To empower an agent, mint a token on the **API Keys** page (or
-   provision one from the **Agent Dash**), point it at `https://<pi>/api` (REST) or
-   `https://<pi>/api/mcp` (MCP), and the skill auto-deploys into its workspace.
+This is the **click-by-click** path from a dark Pi to *your* AI hands and eyes.
+(Deep reference for agents: [`AGENTS.md`](./AGENTS.md). Build from source:
+[`BUILDING.md`](./BUILDING.md).)
 
-Zero software on the target, full control from your browser or your AI — and a hard
-kill switch: unplug it or revoke the key and access is instantly gone.
+### Act I — Birth of the Orb (hardware + image)
 
-For the deep dive (the agent skill, macros, personas, the privacy stack) read
-[`AGENTS.md`](./AGENTS.md); to rebuild from source see [`BUILDING.md`](./BUILDING.md).
-The screenshots above were captured from the live UI and **redacted** by
-[`scripts/capture-screenshots.js`](./scripts/capture-screenshots.js) (re-runnable
-against your own device).
+1. **Gather the minimum.** Pi 4 or Pi 5 · microSD · HDMI capture (Cam Link or MS2109)
+   · data-capable USB cable · HDMI cable. (Full list: [Hardware](#hardware-youll-need).)
+2. **Flash.** Grab `image_vNN-aeon-magick.img.xz` from
+   [Releases](../../releases) (or Patreon premades). In **Raspberry Pi Imager**:
+   *Choose OS → Use custom* → pick the `.img.xz` → write. No need to decompress.
+3. **Optional fleet seed.** Before first boot, drop `aeon-setup.toml` on the SD
+   `bootfs` with WiFi + Tailscale auth key — the Orb enrolls itself and **deletes the
+   file** so secrets don't sit on a public partition.
+4. **Seat power correctly (Pi 5 + UPS).** If you use a UPS HAT: PD brick into the
+   **HAT Type-C**, not only the Pi. Full pack + stalled charge path still runs on
+   battery — fix the wall path early.
+
+### Act II — First light (network + admin)
+
+5. **Power on without Ethernet** (recommended). After ~90 s offline the Orb raises
+   WiFi AP **`aeon-setup`** / password **`aeon-setup-pw`**.
+6. **Join `aeon-setup`** from your phone or laptop. Captive portal appears (or open
+   any `http://` URL). **Pick your real WiFi**, enter the password, submit — the AP
+   tears down.
+7. **Reconnect to your normal WiFi**, open **`https://aeon-magick.local/`** (or the
+   Pi's IP). Accept the **per-device** self-signed cert.
+8. **Set the admin password** on the one-page wizard (or confirm the random one from
+   `aeon-credentials.txt` on the SD boot partition). You are in.
+
+> Prefer cable? Ethernet works; WiFi is often *lower latency* for the stream on Pi 4.
+
+### Act III — Give it eyes and hands (wire the target)
+
+9. **Hands:** data cable **target USB-A → Pi USB-C** on Pi 5 (A-to-C; avoid C-to-C
+   gadget bugs). Pi 4 may use C-to-C if the cable is data-capable.
+10. **Eyes:** target **HDMI out → capture device → Pi USB** (or CSI bridge on Pi 5).
+11. Open the home page **`/`** — you should see the live feed. Top bar: capture
+    resolution, FPS, HID persona.
+12. **Click the canvas** to focus. Move mouse, type. If keys feel "wrong," open the
+    persona menu and switch to **`generic-absolute`** for pixel-perfect agent clicks
+    (or `apple-magic-stable` on a Mac host).
+
+### Act IV — Make it *your* AI hub
+
+13. **Network → Tailscale.** Paste a one-time auth key → Save. The Orb keeps a stable
+    `100.x` address wherever you carry it.
+14. **Agent Dash (`/agent`).** Add a system (SSH or *+ Add from Tailscale*). You now
+    have metrics, terminals, containers, and deploys for that box.
+15. **API Keys (`/tokens`) or Agent → Provision.** Mint a **read** or **full** token
+    for an agent. Name it after the agent — the audit log will thank you.
+16. **Point the agent.** REST: `https://<orb>/api` with `Authorization: Bearer …`.
+    MCP: `https://<orb>/api/mcp` (Basic or bearer; TLS may be self-signed). Load
+    [`SKILL.md`](./SKILL.md) so the model knows the rites.
+17. **First agent loop.** `state` → `snapshot` → reason → `click_at` / `type_text` →
+    `snapshot` again. On Hailo: try `screen_find?query=Save` then `click_at` on the
+    returned center.
+18. **Optional privacy cloak.** Network → enable DNSCrypt criteria → VPN wizard
+    (AirVPN for stealth / Tor-over-VPN) → Tor split-tunnel. Flip **exit node** if the
+    phone should inherit the stack.
+19. **Optional pantheon.** Agent Dash → **+ New persona** → Soul / Identity / voice /
+    corpus → Provision API key + SSH grant as needed.
+20. **Kill switch drill.** Revoke the token *or* unplug USB-C. Access is gone. That
+    is the point.
+
+### Act V — Daily practice
+
+| Habit | Where |
+|---|---|
+| Watch what agents did | **Security / Audit** |
+| Stage a credential | **Clipboard** → `type_clipboard` |
+| Mount installer media | **Storage** → set active ISO → **Target** reboot |
+| Share a model forever | **Aether / Model Share** |
+| Benchmark a weight | **Aeon Bench** |
+| Keep the rail honest | **`GET /api/ups`** — watch `charge_stall` |
+
+Zero software on the target. Full control from your browser or your AI. Unplug or
+revoke — the spell ends.
+
+Screenshots in this README were captured from the live UI and **redacted** (IPs,
+tokens, hostnames, homeserver names, private paths) by
+[`scripts/capture-screenshots.cjs`](./scripts/capture-screenshots.cjs). Re-run against
+your own Orb:
+
+```bash
+AEON_URL=https://<orb-ip> AEON_PASS='your-admin-password' \
+  node scripts/capture-screenshots.cjs
+```
 
 ---
 
@@ -735,6 +932,19 @@ control**, not remote KVM administration.
 ## License
 
 MIT. See [`LICENSE`](./LICENSE).
+
+### Find this project
+
+**Topics / tags** (GitHub): `raspberry-pi` · `ai-agents` · `computer-use` · `mcp` ·
+`agentic-ai` · `kvm` · `usb-hid` · `usb-gadget` · `privacy` · `tor` · `vpn` ·
+`tailscale` · `dnscrypt` · `self-hosted` · `hailo` · `edge-ai` · `remote-control` ·
+`homelab` · `open-source`
+
+If you are searching for *AI computer use without installing spyware on the target*,
+*Raspberry Pi KVM for agents*, *MCP hardware control*, or *portable AI lab jump box* —
+you are in the right temple.
+
+---
 
 ## Hard rules (non-negotiable)
 
