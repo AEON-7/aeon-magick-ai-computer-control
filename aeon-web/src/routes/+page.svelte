@@ -1380,6 +1380,17 @@
             <span class="hidden lg:inline text-xs font-mono text-zinc-500">{webcam_message}</span>
           {/if}
         {/if}
+        <!-- Live target audio: always visible (not only lg toolbar). -->
+        <button class="btn text-xs inline-flex items-center gap-1.5 {listenAudio ? 'border-cursed-500/50 text-cursed-200' : ''}"
+                on:click={toggleListenAudio}
+                title="Play live capture audio (Cam Link / HDMI target). On the target OS, set Sound output to this HDMI display.">
+          {listenAudio ? '🔇 mute' : '🔊 listen'}
+        </button>
+        {#if listenAudio}
+          <audio bind:this={liveAudioEl} src={api.audioStreamUrl()} autoplay controls
+                 class="h-7 w-28 sm:w-36 opacity-90"
+                 title="Live HDMI / capture audio (MP3)"></audio>
+        {/if}
         <!-- Hamburger: shown below lg, opens the mobile dropdown. -->
         <button class="btn text-xs lg:hidden"
                 on:click={() => (menuOpen = !menuOpen)}
@@ -1400,16 +1411,6 @@
     <div class="hidden lg:flex items-center flex-wrap gap-2 px-5 pb-3">
       <!-- Group A -->
       <div class="flex items-center gap-2 pr-3">
-        <button class="btn text-xs inline-flex items-center gap-1.5 {listenAudio ? 'border-cursed-500/50 text-cursed-200' : ''}"
-                on:click={toggleListenAudio}
-                title="Play live capture audio in this browser: HDMI target sound when tc358743-audio is loaded, otherwise USB/BrainCraft mic. On the target OS, set Sound output to this HDMI display.">
-          {listenAudio ? '🔇 mute audio' : '🔊 listen'}
-        </button>
-        {#if listenAudio}
-          <audio bind:this={liveAudioEl} src={api.audioStreamUrl()} autoplay controls
-                 class="h-7 w-36 opacity-90"
-                 title="Live audio passthrough (MP3) — HDMI target or mic"></audio>
-        {/if}
         {#if audioVol?.present && (listenAudio || audioVol.playback)}
           <label class="hidden xl:flex items-center gap-1 text-[10px] font-mono text-zinc-400"
                  title="Speaker / headphone level (BrainCraft WM8960)">
