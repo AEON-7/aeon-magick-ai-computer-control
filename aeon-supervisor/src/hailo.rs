@@ -354,12 +354,18 @@ pub async fn get_models(State(_s): State<AppState>) -> Json<Value> {
         for mut m in read_library() {
             let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let size = m.get("size_mb").and_then(|v| v.as_i64()).unwrap_or(0);
+            let runtime = m
+                .get("runtime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("npu")
+                .to_string();
             if let Some(state) = live_state(&id) {
                 m["state"] = json!(state);
             } else if m.get("state").is_none() {
                 m["state"] = json!("available");
             }
-            m["fits"] = json!(size <= mem_free);
+            // CPU TTS/STT never compete for NPU RAM.
+            m["fits"] = json!(runtime == "cpu" || size <= mem_free);
             // A deploy in flight surfaces as "downloading".
             if task_running(&format!("model:{id}")) {
                 m["state"] = json!("downloading");

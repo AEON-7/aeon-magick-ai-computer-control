@@ -75,9 +75,34 @@
       "params": "74M",
       "quant": "int8",
       "size_mb": 155,
+      "runtime": "npu",
       "source": "whisper-base",
       "license": "MIT",
-      "use_for": "speech-to-text transcription"
+      "use_for": "speech-to-text (Hailo Speech2Text / GenAI when HEF present; CPU fallback via BrainCraft)"
+    },
+    {
+      "id": "kokoro-en-v0_19",
+      "name": "Kokoro EN v0.19",
+      "kind": "tts",
+      "params": "82M · multi-voice",
+      "quant": "fp32",
+      "size_mb": 85,
+      "runtime": "cpu",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
+      "license": "Apache-2.0",
+      "use_for": "on-device neural TTS for BrainCraft voice / say (sherpa-onnx CPU — Hailo has no TTS HEF yet)"
+    },
+    {
+      "id": "sherpa-whisper-base-en",
+      "name": "Whisper Base EN (CPU)",
+      "kind": "stt",
+      "params": "74M",
+      "quant": "int8",
+      "size_mb": 140,
+      "runtime": "cpu",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.en.tar.bz2",
+      "license": "MIT",
+      "use_for": "push-to-talk ASR on BrainCraft (CPU) when Hailo STT HEF is not loaded"
     },
     {
       "id": "yolov8s",

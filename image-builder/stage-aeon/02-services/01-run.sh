@@ -105,6 +105,12 @@ camera_auto_detect=0
 # Pi 5 + X1301 hardware, 2026-06-11.] If `dmesg | grep tc358743` is EMPTY after
 # boot, switch ,cam1 -> ,cam0 here and reboot.
 dtoverlay=tc358743,cam1,4lane=1
+# HDMI *audio* from the same bridge over I2S (GPIO 18/19/20). Required for the
+# web "listen" button and agent ASR of target desktop sound. Uses RP1
+# i2s_clk_consumer — TC358743 is clock master. CONFLICT: BrainCraft WM8960 /
+# seeed-2mic also uses GPIO 18–20; only one of tc358743-audio or wm8960-mic /
+# seeed-2mic-voicecard can own I2S at a time. KVM default = HDMI audio.
+dtoverlay=tc358743-audio
 # CAM0 live-camera vision source. Default: Sony IMX708 (Camera Module 3, incl.
 # the Wide variant — same sensor, lens-only difference). Because the tc358743
 # bridge above forces camera_auto_detect=0, the camera can't be auto-detected and

@@ -34,6 +34,12 @@ use std::path::Path;
 use std::process::Command;
 
 const STREAMER_TOML: &str = "/etc/aeon/streamer.toml";
+const UVC_TOML: &str = "/etc/aeon/uvc.toml";
+
+/// Default ALSA device for muxing mic audio into recordings when viewing the
+/// Pi camera (BrainCraft WM8960). Empty/missing cards make ffmpeg fail, so we
+/// only auto-fill when the WM8960 card is present.
+const WM8960_ALSA: &str = "plughw:CARD=wm8960soundcard,DEV=0";
 
 /// Detect which capture sources are physically present, so the UI picker only
 /// offers ones that exist. "auto" is always listed (resolves per-platform).
@@ -64,6 +70,123 @@ pub fn detect_available_sources() -> Vec<&'static str> {
         v.push("camera-csi");
     }
     v
+}
+
+/// Read enabled+source from `/etc/aeon/uvc.toml` (webcam gadget feeder).
+fn read_uvc() -> (bool, String) {
+    let v: toml::Value = std::fs::read_to_string(UVC_TOML)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_else(|| toml::Value::Table(Default::default()));
+    let enabled = v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+    let source = v
+        .get("source")
+        .and_then(|s| s.as_str())
+        .unwrap_or("camera-csi")
+        .to_string();
+    (enabled, source)
+}
+
+/// Disable the UVC feeder when it holds the same single-consumer camera the
+/// console streamer needs. libcamera (IMX477 etc.) only allows one client —
+/// without this handoff, `camera-csi` in the web console loops forever with
+/// "Pipeline handler in use by another process".
+///
+/// Returns true if UVC was active and we stopped it.
+fn release_uvc_if_same_source(streamer_source: &str) -> bool {
+    let (enabled, uvc_src) = read_uvc();
+    if !enabled || uvc_src != streamer_source {
+        return false;
+    }
+    // Concrete sources only — "auto" never collides by name.
+    if streamer_source == "auto" {
+        return false;
+    }
+    let text = std::fs::read_to_string(UVC_TOML).unwrap_or_default();
+    let mut parsed: toml::Value =
+        toml::from_str(&text).unwrap_or_else(|_| toml::Value::Table(Default::default()));
+    if let Some(t) = parsed.as_table_mut() {
+        t.insert("enabled".into(), toml::Value::Boolean(false));
+    }
+    if let Ok(s) = toml::to_string_pretty(&parsed) {
+        let tmp = format!("{UVC_TOML}.tmp");
+        let _ = std::fs::write(&tmp, s).and_then(|_| std::fs::rename(&tmp, UVC_TOML));
+    }
+    // Stop feeder first so the camera is released before streamer opens it.
+    let _ = Command::new("systemctl")
+        .args(["stop", "aeon-uvc.service"])
+        .output();
+    // Drop the gadget function (brief re-enumeration) so the target loses the
+    // webcam while the console holds the camera.
+    let _ = Command::new("systemctl")
+        .args(["restart", "aeon-hid.service"])
+        .output();
+    true
+}
+
+/// If `audio_device` is empty, auto-wire a sensible ALSA capture device when
+/// the matching card is present (avoids ffmpeg record fail on a missing card).
+///
+/// - `hdmi-csi`      → TC358743 HDMI audio (`plughw:CARD=tc358743,DEV=0`)
+/// - `cam-link-usb` / `auto` → Elgato Cam Link 4K USB audio (`C4K`) when present
+/// - `camera-csi`    → BrainCraft WM8960 mic when present
+fn maybe_default_audio_device(table: &mut toml::map::Map<String, toml::Value>, source: &str) {
+    let cap = table
+        .entry("capture".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let Some(cap_tbl) = cap.as_table_mut() else {
+        return;
+    };
+    let empty = cap_tbl
+        .get("audio_device")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true);
+    if !empty {
+        return;
+    }
+    let cards = std::fs::read_to_string("/proc/asound/cards").unwrap_or_default();
+    let low = cards.to_ascii_lowercase();
+
+    // Prefer explicit source match, then fall through to whatever capture card exists.
+    if (source == "hdmi-csi" || source == "auto") && low.contains("tc358743") {
+        cap_tbl.insert(
+            "audio_device".into(),
+            toml::Value::String("plughw:CARD=tc358743,DEV=0".into()),
+        );
+        return;
+    }
+    // Cam Link ALSA id is typically "C4K" (Elgato); also match card name text.
+    if (source == "cam-link-usb" || source == "auto" || source == "hdmi-csi")
+        && (low.contains("c4k") || low.contains("cam link") || low.contains("elgato"))
+    {
+        // Resolve the bracket id from /proc/asound/cards (e.g. C4K).
+        let alsa = cards
+            .lines()
+            .find_map(|line| {
+                let name = line.split('[').nth(1)?.split(']').next()?.trim();
+                let n = name.to_ascii_lowercase();
+                if n.contains("c4k") || n.contains("cam") || n.contains("elgato") {
+                    Some(format!("plughw:CARD={name},DEV=0"))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "plughw:CARD=C4K,DEV=0".into());
+        cap_tbl.insert("audio_device".into(), toml::Value::String(alsa));
+        return;
+    }
+    // camera-csi / fallback: WM8960 or seeed card name
+    if source == "camera-csi" || source == "auto" {
+        if low.contains("wm8960") || low.contains("seeed") {
+            let alsa = if low.contains("wm8960") {
+                WM8960_ALSA
+            } else {
+                "plughw:CARD=seeed2micvoicec,DEV=0"
+            };
+            cap_tbl.insert("audio_device".into(), toml::Value::String(alsa.into()));
+        }
+    }
 }
 
 /// GET /api/streamer/config — read the current fps/quality values
@@ -143,6 +266,34 @@ pub async fn get_config(State(_state): State<AppState>) -> impl IntoResponse {
         .and_then(|c| c.get("vflip"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let audio_device = capture
+        .and_then(|c| c.get("audio_device"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Pi-camera knobs — independent of HDMI/Cam-Link output.fps/width/height.
+    let camera_width = capture
+        .and_then(|c| c.get("camera_width"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(1280);
+    let camera_height = capture
+        .and_then(|c| c.get("camera_height"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(720);
+    let camera_fps = capture
+        .and_then(|c| c.get("camera_fps"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(24);
+    let camera_pipe = capture
+        .and_then(|c| c.get("camera_pipe"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("yuv420")
+        .to_string();
+    let camera_mode = if camera_height >= 1000 || camera_width >= 1800 {
+        "1080p"
+    } else {
+        "720p"
+    };
     // Which sources are usable depends on the board — hdmi-csi / camera-csi
     // are Pi-5-only. Surface the model so the UI/agent can gate the choices.
     let platform = match std::fs::read_to_string("/proc/device-tree/model") {
@@ -150,10 +301,12 @@ pub async fn get_config(State(_state): State<AppState>) -> impl IntoResponse {
         Ok(m) if m.contains("Raspberry Pi 4") => "pi4",
         _ => "other",
     };
+    let (uvc_enabled, uvc_source) = read_uvc();
 
     Json(json!({
         "ok": true,
         "jpeg_quality": jpeg_quality,
+        // HDMI / Cam Link encode fps (NOT the Pi camera).
         "fps": fps,
         "width": width,
         "height": height,
@@ -164,8 +317,20 @@ pub async fn get_config(State(_state): State<AppState>) -> impl IntoResponse {
         "rotation": rotation,
         "hflip": hflip,
         "vflip": vflip,
+        "audio_device": audio_device,
+        // Pi-camera encode (camera-csi only) — separate from fps/width above.
+        "camera_width": camera_width,
+        "camera_height": camera_height,
+        "camera_fps": camera_fps,
+        "camera_pipe": camera_pipe,
+        "camera_mode": camera_mode,
+        "camera_modes": ["720p", "1080p"],
+        "camera_fps_choices": [15, 24, 30],
         "platform": platform,
         "available_sources": detect_available_sources(),
+        // Webcam feeder state — UI can warn when console source collides.
+        "uvc_enabled": uvc_enabled,
+        "uvc_source": uvc_source,
     }))
     .into_response()
 }
@@ -202,6 +367,21 @@ pub struct ConfigPatch {
     /// When true the encode tracks the (capped-1080p) source resolution; set
     /// false to force the fixed `width`×`height` above for lower CPU/power.
     pub match_source: Option<bool>,
+    /// ALSA capture device muxed into MP4 recordings (not the live H.264 pipe).
+    /// Empty string clears it. Example: `plughw:CARD=wm8960soundcard,DEV=0`.
+    pub audio_device: Option<String>,
+    /// Pi-camera target fps (camera-csi only). Independent of `fps` (HDMI/Cam Link).
+    /// Snapped to 15 / 24 / 30 (default 24).
+    pub camera_fps: Option<i64>,
+    /// Pi-camera encode width (even, 160..=1920). Prefer `camera_mode` from the UI.
+    pub camera_width: Option<i64>,
+    /// Pi-camera encode height (even, 120..=1080).
+    pub camera_height: Option<i64>,
+    /// Convenience preset: `"720p"` → 1280×720, `"1080p"` → 1920×1080.
+    /// Overrides camera_width/height when set.
+    pub camera_mode: Option<String>,
+    /// `"yuv420"` (default, fast) or `"mjpeg"` (legacy double-encode fallback).
+    pub camera_pipe: Option<String>,
 }
 
 /// PUT /api/streamer/config — update fps and/or jpeg_quality, then
@@ -216,9 +396,7 @@ pub async fn put_config(
     State(_state): State<AppState>,
     Json(patch): Json<ConfigPatch>,
 ) -> impl IntoResponse {
-    // Frame rate is restricted to deterministic divisors of the 60fps
-    // capture (15/30/60) so frame-dropping is even — snap any incoming value
-    // to the nearest allowed step.
+    // HDMI/Cam-Link frame rate: snap to divisors of 60 so drop is even.
     let fps = patch
         .fps
         .map(|v| [15i64, 30, 60].into_iter().min_by_key(|&f| (f - v).abs()).unwrap_or(30));
@@ -251,12 +429,58 @@ pub async fn put_config(
     });
     let hflip = patch.hflip;
     let vflip = patch.vflip;
+    // Allow clearing with "" and setting a concrete ALSA device string.
+    let audio_device = patch.audio_device.clone();
 
     // Output resolution: clamp to sane H.264 bounds and force even dimensions
-    // (libx264/H.264 require even width+height).
+    // (libx264/H.264 require even width+height). HDMI/Cam-Link only.
     let width = patch.width.map(|v| v.clamp(160, 1920) & !1);
     let height = patch.height.map(|v| v.clamp(120, 1080) & !1);
     let match_source = patch.match_source;
+
+    // Pi-camera knobs (independent of HDMI fps/width).
+    let camera_fps = patch.camera_fps.map(|v| {
+        [15i64, 24, 30]
+            .into_iter()
+            .min_by_key(|&f| (f - v).abs())
+            .unwrap_or(24)
+    });
+    let camera_pipe = match &patch.camera_pipe {
+        Some(p) if p.eq_ignore_ascii_case("yuv420") || p.eq_ignore_ascii_case("mjpeg") => {
+            Some(p.to_ascii_lowercase())
+        }
+        Some(p) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "err": format!(
+                    "invalid camera_pipe {p:?}; expected \"yuv420\" or \"mjpeg\""
+                )})),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+    // camera_mode preset wins over raw width/height when both are sent.
+    let (camera_width, camera_height) = if let Some(mode) = &patch.camera_mode {
+        match mode.as_str() {
+            "720p" | "720" => (Some(1280i64), Some(720i64)),
+            "1080p" | "1080" => (Some(1920i64), Some(1080i64)),
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "err": format!(
+                        "invalid camera_mode {other:?}; expected \"720p\" or \"1080p\""
+                    )})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        (
+            patch.camera_width.map(|v| v.clamp(160, 1920) & !1),
+            patch.camera_height.map(|v| v.clamp(120, 1080) & !1),
+        )
+    };
 
     if fps.is_none()
         && q.is_none()
@@ -267,6 +491,11 @@ pub async fn put_config(
         && width.is_none()
         && height.is_none()
         && match_source.is_none()
+        && audio_device.is_none()
+        && camera_fps.is_none()
+        && camera_width.is_none()
+        && camera_height.is_none()
+        && camera_pipe.is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -334,7 +563,16 @@ pub async fn put_config(
             }
         }
     }
-    if source.is_some() || rotation.is_some() || hflip.is_some() || vflip.is_some() {
+    if source.is_some()
+        || rotation.is_some()
+        || hflip.is_some()
+        || vflip.is_some()
+        || audio_device.is_some()
+        || camera_fps.is_some()
+        || camera_width.is_some()
+        || camera_height.is_some()
+        || camera_pipe.is_some()
+    {
         // [capture] is shipped in the default config, but create it if a
         // hand-edited file dropped it so we don't error on PUT.
         let cap_entry = table
@@ -353,7 +591,27 @@ pub async fn put_config(
             if let Some(v) = vflip {
                 cap_tbl.insert("vflip".into(), toml::Value::Boolean(v));
             }
+            if let Some(ad) = &audio_device {
+                cap_tbl.insert("audio_device".into(), toml::Value::String(ad.clone()));
+            }
+            if let Some(cf) = camera_fps {
+                cap_tbl.insert("camera_fps".into(), toml::Value::Integer(cf));
+            }
+            if let Some(cw) = camera_width {
+                cap_tbl.insert("camera_width".into(), toml::Value::Integer(cw));
+            }
+            if let Some(ch) = camera_height {
+                cap_tbl.insert("camera_height".into(), toml::Value::Integer(ch));
+            }
+            if let Some(cp) = &camera_pipe {
+                cap_tbl.insert("camera_pipe".into(), toml::Value::String(cp.clone()));
+            }
         }
+    }
+    // When switching to the Pi camera, auto-wire BrainCraft mic for recordings
+    // if the operator hasn't set an audio_device yet.
+    if let Some(src) = &source {
+        maybe_default_audio_device(table, src);
     }
 
     let serialized = match toml::to_string_pretty(&parsed) {
@@ -384,6 +642,16 @@ pub async fn put_config(
             .into_response();
     }
 
+    // If console view now wants the same single-consumer camera the UVC webcam
+    // feeder is holding, release UVC first so rpicam-vid can open CAM0.
+    let uvc_released = if let Some(src) = source.clone() {
+        tokio::task::spawn_blocking(move || release_uvc_if_same_source(&src))
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     // Restart aeon-streamer so the new settings take effect. systemd
     // handles the actual process replacement; we just spawn-and-wait.
     let restart = tokio::task::spawn_blocking(|| {
@@ -406,6 +674,12 @@ pub async fn put_config(
                 "width": width,
                 "height": height,
                 "match_source": match_source,
+                "audio_device": audio_device,
+                "camera_fps": camera_fps,
+                "camera_width": camera_width,
+                "camera_height": camera_height,
+                "camera_pipe": camera_pipe,
+                "uvc_released": uvc_released,
                 "restarted": true,
             }))
             .into_response()

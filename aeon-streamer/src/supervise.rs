@@ -22,17 +22,26 @@ pub async fn run(state: SharedState) -> Result<()> {
         // counter-based liveness (pipeline_kind "libcamera-h264") works the
         // same as the Cam Link H.264 path.
         if state.0.cfg.capture.source == Source::CameraCsi {
-            let (res, cam_id) = {
-                let out = &state.0.cfg.output;
+            let (res, cam_id, cam_fps) = {
+                let (cw, ch) = state.0.cfg.capture.camera_dims();
                 // Report the post-rotation geometry: a 90/270 turn swaps W↔H.
                 let (w, h) = if state.0.cfg.capture.swaps_dims() {
-                    (out.height, out.width)
+                    (ch, cw)
                 } else {
-                    (out.width, out.height)
+                    (cw, ch)
                 };
-                (format!("{w}x{h}"), state.0.cfg.capture.camera_id)
+                (
+                    format!("{w}x{h}"),
+                    state.0.cfg.capture.camera_id,
+                    state.0.cfg.capture.camera_target_fps(),
+                )
             };
-            info!(camera_id = cam_id, %res,
+            let pipe = if state.0.cfg.capture.camera_uses_yuv() {
+                "yuv420"
+            } else {
+                "mjpeg"
+            };
+            info!(camera_id = cam_id, %res, cam_fps, pipe,
                   "camera-csi: spawning rpicam-vid → ffmpeg (H.264 + JPEG snapshot)");
             let (mut child, mut sidecar) = match spawn_libcamera_h264(&state) {
                 Ok(pair) => pair,
@@ -899,12 +908,13 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
 
 /// Camera-CSI pipeline (Pi 5 + a Raspberry Pi camera, e.g. the HQ Camera /
 /// IMX477). A Pi camera's v4l2 node is raw Bayer needing the ISP, so ffmpeg
-/// can't `-f v4l2` it directly — we go through libcamera. `rpicam-vid` emits
-/// an **MJPEG** stream (self-describing, so ffmpeg parses frame boundaries
-/// with no width/height/stride assumptions — robust against the buffer
-/// alignment that bites the raw-yuv420 route at non-16-aligned heights like
-/// 1080). ffmpeg ingests it and splits into the SAME two sinks as the Cam
-/// Link H.264 path:
+/// can't `-f v4l2` it directly — we go through libcamera.
+///
+/// Default pipe is **yuv420** (raw planar from `rpicam-vid` → one software
+/// H.264 pass). The old **mjpeg** intermediate (JPEG encode → decode → H.264)
+/// is kept as `capture.camera_pipe = "mjpeg"` for recovery if a sensor ever
+/// mis-packs raw frames. Geometry + fps come from `capture.camera_*` and are
+/// independent of HDMI/Cam-Link `[output].width/height/fps`.
 ///
 ///   output 1: H.264 Annex-B → stdout → `h264_pipe::run` → WebSocket/WebCodecs
 ///   output 2: a single JPEG, atomically rewritten → `/snapshot` (+ the MJPEG
@@ -916,42 +926,48 @@ fn spawn_ffmpeg_h264(state: &SharedState, pipeline: &Pipeline) -> Result<Child> 
 fn spawn_libcamera_h264(state: &SharedState) -> Result<(Child, Child)> {
     let cfg = &state.0.cfg;
     let out = &cfg.output;
+    let cap = &cfg.capture;
 
     if let Some(parent) = out.snapshot_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let w = out.width.max(2);
-    let h = out.height.max(2);
-    let fps = out.fps.max(1);
-    let cam_id = cfg.capture.camera_id;
+    // Camera-only geometry / fps — never reuse HDMI capture-card output knobs.
+    let (w, h) = cap.camera_dims();
+    let fps = cap.camera_target_fps();
+    let cam_id = cap.camera_id;
+    let use_yuv = cap.camera_uses_yuv();
+    let w_s = w.to_string();
+    let h_s = h.to_string();
+    let fps_s = fps.to_string();
 
-    // ── Stage 1: rpicam-vid → MJPEG on stdout ──
-    // NOTE: orientation (rotation/flip) is realised ONLY in the ffmpeg filter
-    // graph below (see `orientation_vf` in the filter_complex). Do NOT also add
-    // rpicam-vid `--rotation`/`--hflip`/`--vflip` here — that would rotate the
-    // frame twice. The single-layer (ffmpeg) model is deliberate: it keeps the
-    // H.264 stream, the JPEG snapshot, recordings, and the vision tap identical
-    // and dodges rpicam's 0/180-only `--rotation` limitation.
+    // ── Stage 1: rpicam-vid → stdout (yuv420 default, or mjpeg fallback) ──
+    // Orientation is applied ONLY in the ffmpeg filter graph below — never on
+    // rpicam — so H.264 / snapshot / vision stay identical and we avoid
+    // rpicam's 0/180-only `--rotation`.
     let mut rpicam = Command::new("rpicam-vid");
     rpicam
         .arg("--camera").arg(cam_id.to_string())
         .arg("-t").arg("0") // run until killed
         .arg("--nopreview")
         .arg("--flush") // flush each frame for lower latency
-        .arg("--width").arg(w.to_string())
-        .arg("--height").arg(h.to_string())
-        .arg("--framerate").arg(fps.to_string())
-        .arg("--codec").arg("mjpeg")
-        .arg("--quality").arg("90")
+        .arg("--width").arg(&w_s)
+        .arg("--height").arg(&h_s)
+        .arg("--framerate").arg(&fps_s);
+    if use_yuv {
+        rpicam.arg("--codec").arg("yuv420");
+    } else {
+        rpicam
+            .arg("--codec").arg("mjpeg")
+            .arg("--quality").arg("90");
+    }
+    rpicam
         .arg("-o").arg("-")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     let mut rpicam_child = rpicam.spawn().map_err(|e| {
         anyhow::anyhow!("spawning rpicam-vid (is rpicam-apps installed + a camera attached?): {e}")
     })?;
-    // Hand rpicam's stdout pipe to ffmpeg's stdin (the tokio documented
-    // ChildStdout → Stdio handoff).
     let rpicam_stdio: Stdio = rpicam_child
         .stdout
         .take()
@@ -959,27 +975,29 @@ fn spawn_libcamera_h264(state: &SharedState) -> Result<(Child, Child)> {
         .try_into()
         .map_err(|e| anyhow::anyhow!("rpicam stdout → Stdio: {e}"))?;
 
-    // ── Stage 2: ffmpeg ingests MJPEG, splits to H.264 + JPEG snapshot ──
-    // Pi 5 has no HW H.264 encoder, so libx264 (already the non-Pi4 default).
+    // ── Stage 2: ffmpeg → H.264 stdout + JPEG snapshot ──
+    // Pi 5 has no HW H.264 encoder → libx264; Pi 4 can use h264_v4l2m2m.
     let venc = match cfg.platform {
         Platform::Pi4 => "h264_v4l2m2m",
         _ => "libx264",
     };
-    let bitrate = format!("{}k", out.h264_bitrate_kbps.max(500));
-    let gop = out.h264_gop.max(1).to_string();
+    let bitrate = format!(
+        "{}k",
+        cap.camera_bitrate_kbps(out.h264_bitrate_kbps.max(500))
+    );
+    // GOP ≈ 1 s of frames for fast WebCodecs keyframe sync.
+    let gop = fps.max(1).to_string();
     let qv = {
         let inverted = 31u32.saturating_sub(((cfg.jpeg_quality as u32) * 31) / 100);
         inverted.clamp(2, 15).to_string()
     };
     let snap_fps = fps.clamp(1, 6).to_string();
     let snapshot_path = out.snapshot_path.display().to_string();
-    // No crop (a camera has no pillarbox) and no scale (rpicam already emits
-    // w×h). Decimate to target fps at the head, apply the configured display
-    // rotation/flip, then split — so the H.264 stream AND the JPEG snapshot are
-    // rotated identically (Pi-camera mounts are often physically turned).
-    let filter_complex = match cfg.capture.orientation_vf() {
-        Some(rot) => format!("[0:v]fps={fps},{rot},split=2[vh][vj]"),
-        None => format!("[0:v]fps={fps},split=2[vh][vj]"),
+    // rpicam already emits w×h @ fps — no scale. Optional orientation, then
+    // split to H.264 + snapshot (same orientation on every consumer).
+    let filter_complex = match cap.orientation_vf() {
+        Some(rot) => format!("[0:v]{rot},split=2[vh][vj]"),
+        None => "[0:v]split=2[vh][vj]".to_string(),
     };
 
     let mut cmd = Command::new(&cfg.ffmpeg_bin);
@@ -987,14 +1005,21 @@ fn spawn_libcamera_h264(state: &SharedState) -> Result<(Child, Child)> {
         .arg("-loglevel").arg("warning")
         .arg("-y")
         .arg("-fflags").arg("nobuffer")
-        .arg("-flags").arg("low_delay")
-        // Input: MJPEG stream from rpicam-vid's stdout.
-        .arg("-f").arg("mjpeg")
-        .arg("-i").arg("pipe:0")
-        .arg("-filter_complex").arg(&filter_complex)
+        .arg("-flags").arg("low_delay");
+    if use_yuv {
+        // Raw planar YUV — one encode pass (no JPEG intermediate).
+        cmd.arg("-f").arg("rawvideo")
+            .arg("-pix_fmt").arg("yuv420p")
+            .arg("-s").arg(format!("{w}x{h}"))
+            .arg("-r").arg(&fps_s)
+            .arg("-i").arg("pipe:0");
+    } else {
+        cmd.arg("-f").arg("mjpeg").arg("-i").arg("pipe:0");
+    }
+    cmd.arg("-filter_complex").arg(&filter_complex)
         // output 1: H.264 Annex-B → stdout
         .arg("-map").arg("[vh]")
-        .arg("-r").arg(fps.to_string())
+        .arg("-r").arg(&fps_s)
         .arg("-c:v").arg(venc)
         .arg("-b:v").arg(&bitrate)
         .arg("-g").arg(&gop)

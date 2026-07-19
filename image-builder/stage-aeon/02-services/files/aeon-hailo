@@ -240,25 +240,43 @@ try:
 except Exception:
     pass
 
-used=sum(float(m.get("size_mb",0)) for m in lib.get("models",[]) if m["id"] in loaded)
+used=sum(float(m.get("size_mb",0)) for m in lib.get("models",[])
+         if m["id"] in loaded and m.get("runtime","npu") != "cpu")
 budget=lib.get("usable_mb",5500)
 free=budget-used
+
+# CPU voice stack markers (BrainCraft / sherpa-onnx) — TTS + CPU STT.
+voice_dir="/usr/share/aeon/voice"
+kokoro_ok=os.path.isfile(os.path.join(voice_dir,"kokoro","model.onnx"))
+whisper_cpu_ok=(
+    os.path.isfile(os.path.join(voice_dir,"whisper","encoder.onnx"))
+    or os.path.isfile(os.path.join(voice_dir,"whisper","model.onnx"))
+    or any(n.endswith(".onnx") for n in os.listdir(os.path.join(voice_dir,"whisper")) if os.path.isdir(os.path.join(voice_dir,"whisper")))
+) if os.path.isdir(os.path.join(voice_dir,"whisper")) else False
 
 out=[]
 for m in lib.get("models",[]):
     mid=m["id"]; size=float(m.get("size_mb",0))
+    kind=m.get("kind","")
+    runtime=m.get("runtime","npu")
     if mid in loaded:
         state="loaded"
     elif mid in downloaded or m.get("source","") in ollama_tags or m.get("ollama_tag","") in ollama_tags:
         state="deployed"
+    elif kind=="tts" and (mid.startswith("kokoro") or "kokoro" in (m.get("source") or "")) and kokoro_ok:
+        state="loaded"   # CPU always "resident" once files are on disk
+    elif kind=="stt" and runtime=="cpu" and whisper_cpu_ok:
+        state="loaded"
     else:
         state="available"
-    fits = (mid in loaded) or (size <= free)
+    # CPU models never compete for NPU RAM.
+    fits = True if runtime == "cpu" else ((mid in loaded) or (size <= free))
     out.append({
-        "id":mid,"name":m.get("name",mid),"kind":m.get("kind",""),
+        "id":mid,"name":m.get("name",mid),"kind":kind,
         "params":m.get("params"),"quant":m.get("quant"),
         "size_mb":int(size),"fits":bool(fits),"state":state,
         "license":m.get("license"),"use_for":m.get("use_for"),
+        "runtime":runtime,
     })
 print(json.dumps({"ok":True,"models":out}))
 PY
@@ -501,29 +519,82 @@ cmd_deploy() {
                         >>"$dlog" 2>&1 || echo "WARN: ppocrv5 dict download failed — OCR recognition degraded" >>"$dlog"
                 fi
                 ;;
-            vlm|stt)
-                # [DEVICE] genai (VLM / Speech2Text) .hef — a public dev-public.hailo.ai
-                # blob, loaded by hailo_platform.genai.VLM(vdevice, hef_path). It holds
-                # the NPU's single GenAI slot, so describe_screen swaps it with the
-                # resident hailo-ollama LLM. The library `source` must be the .hef URL.
+            vlm)
                 local url="${src:-}"
                 case "$url" in
                     http*) curl -fsSL --max-time 3600 -o "$HEF_DIR/$id.hef" "$url" >>"$dlog" 2>&1 \
                         || { dphase failed 100; log "genai .hef download failed for $id ($url)"; return 1; } ;;
-                    *) echo "aeon-hailo: genai model $id has no .hef source URL — set the library 'source'" >> "$dlog" ;;
+                    *) echo "aeon-hailo: VLM $id has no .hef source URL" >> "$dlog" ;;
                 esac
+                ;;
+            stt)
+                local runtime; runtime="$(lib_field "$id" runtime)"; runtime="${runtime:-npu}"
+                if [ "$runtime" = "cpu" ]; then
+                    dphase pulling 20
+                    if [ -x /usr/local/bin/aeon-voice ]; then
+                        /usr/local/bin/aeon-voice install >>"$dlog" 2>&1 \
+                            || { dphase failed 100; log "aeon-voice install failed for CPU STT $id"; return 1; }
+                    else
+                        dphase failed 100; log "aeon-voice missing — cannot install CPU STT"; return 1
+                    fi
+                else
+                    local url="${src:-}"
+                    case "$url" in
+                        http*) curl -fsSL --max-time 3600 -o "$HEF_DIR/$id.hef" "$url" >>"$dlog" 2>&1 \
+                            || { dphase failed 100; log "STT .hef download failed for $id"; return 1; } ;;
+                        *) echo "aeon-hailo: NPU STT $id has no .hef URL yet — mark ledger only" >> "$dlog" ;;
+                    esac
+                fi
+                ;;
+            tts)
+                # CPU sherpa-onnx Kokoro (no Hailo TTS HEF in the GenAI zoo yet).
+                dphase pulling 20
+                if [ -x /usr/local/bin/aeon-voice ]; then
+                    /usr/local/bin/aeon-voice install >>"$dlog" 2>&1 \
+                        || { dphase failed 100; log "aeon-voice install failed for TTS $id"; return 1; }
+                else
+                    local vdir=/usr/share/aeon/voice/kokoro
+                    mkdir -p "$vdir" /usr/share/aeon/voice
+                    if [ ! -f "$vdir/model.onnx" ]; then
+                        local url="${src:-https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2}"
+                        curl -fsSL --retry 3 "$url" -o /tmp/kokoro.tar.bz2 >>"$dlog" 2>&1 \
+                            || { dphase failed 100; log "kokoro download failed"; return 1; }
+                        tar -xjf /tmp/kokoro.tar.bz2 -C /usr/share/aeon/voice >>"$dlog" 2>&1 \
+                            || { dphase failed 100; log "kokoro extract failed"; return 1; }
+                        if [ -d /usr/share/aeon/voice/kokoro-en-v0_19 ]; then
+                            cp -a /usr/share/aeon/voice/kokoro-en-v0_19/. "$vdir/" 2>/dev/null || true
+                            rm -rf /usr/share/aeon/voice/kokoro-en-v0_19
+                        fi
+                        rm -f /tmp/kokoro.tar.bz2
+                        pip3 install --break-system-packages sherpa-onnx >>"$dlog" 2>&1 || true
+                    fi
+                    [ -f "$vdir/model.onnx" ] || { dphase failed 100; log "kokoro model missing after deploy"; return 1; }
+                fi
                 ;;
             *) dphase failed 100; log "unhandled kind '$kind'"; return 1;;
         esac
     else
-        # Device-free scaffold: record the intent so the UI advances + the ledger
-        # reflects the (simulated) load. Honest because cmd_status still reports
-        # device_present:false.
-        echo "aeon-hailo: no Hailo device — recording $id in ledger (scaffold mode)" >> "$dlog"
+        # No Hailo device: still allow CPU TTS/STT deploys (voice stack).
+        local runtime; runtime="$(lib_field "$id" runtime)"; runtime="${runtime:-npu}"
+        if [ "$kind" = "tts" ] || { [ "$kind" = "stt" ] && [ "$runtime" = "cpu" ]; }; then
+            dphase pulling 20
+            if [ -x /usr/local/bin/aeon-voice ]; then
+                /usr/local/bin/aeon-voice install >>"$dlog" 2>&1 \
+                    || { dphase failed 100; log "aeon-voice install failed for $id"; return 1; }
+            else
+                echo "aeon-hailo: no device + no aeon-voice — ledger only for $id" >> "$dlog"
+            fi
+        else
+            echo "aeon-hailo: no Hailo device — recording $id in ledger (scaffold mode)" >> "$dlog"
+        fi
     fi
 
     dphase loading 90
-    ledger_add "$id" "$name" "$kind" "$size"
+    # CPU models don't consume NPU budget — ledger only tracks NPU-resident HEFs/LLMs.
+    local runtime; runtime="$(lib_field "$id" runtime)"; runtime="${runtime:-npu}"
+    if [ "$runtime" != "cpu" ]; then
+        ledger_add "$id" "$name" "$kind" "$size"
+    fi
     dphase done 100
     return 0
 }

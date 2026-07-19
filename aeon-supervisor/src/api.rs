@@ -438,9 +438,10 @@ pub fn build_router(cfg: Config) -> Router {
         // /run/aeon/ups.json; {"present":false} when no HAT).
         .route("/ups",                get(crate::ups::get_ups))
         // Audio in/out volume (BrainCraft WM8960 via amixer); {present:false}
-        // when no codec card is fitted.
+        // when no codec card is fitted. Live mic MP3 for the web console.
         .route("/audio/volume",
             get(crate::audio::get_audio).put(crate::audio::put_audio))
+        .route("/audio/stream", get(crate::audio::stream_audio))
         // On-device live vision (OCR / detection over the capture feed).
         .route("/vision/detections",  get(crate::vision::get_detections))
         // OCR-anchored grounding: GET /vision/find?query=Save → ranked text

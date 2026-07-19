@@ -23,11 +23,9 @@
   let msg = '';
   let poll: ReturnType<typeof setInterval>;
 
-  // v63: live streamer tuning. fps + jpeg_quality knobs go through
-  // GET/PUT /api/streamer/config which writes streamer.toml + bounces
-  // aeon-streamer.service. The page also surfaces the read-only
-  // format/resolution/hw_accel values so operators know what they're
-  // dialing in latency against.
+  // Live streamer tuning via GET/PUT /api/streamer/config (writes streamer.toml
+  // + restarts aeon-streamer). HDMI/Cam-Link knobs (fps, encode res, jpeg) are
+  // independent of Pi-camera knobs (camera_mode, camera_fps).
   let streamerCfg: {
     fps: number;
     jpeg_quality: number;
@@ -36,21 +34,47 @@
     match_source: boolean;
     format: string;
     hw_accel: boolean;
+    source: string;
+    camera_mode: string;
+    camera_fps: number;
+    camera_width: number;
+    camera_height: number;
+    camera_pipe: string;
+    available_sources: string[];
   } | null = null;
-  let stagedFps = 24;
+  let stagedFps = 30;
   let stagedQuality = 70;
   // 'match' = track source res (capped 1080p); 'WxH' = fixed encode size.
   // Lower sizes cut the Pi 5 software-H.264 CPU/power on the capture paths.
   let stagedResolution = 'match';
   const RES_PRESETS = ['match', '1920x1080', '1280x720', '960x540', '640x360'];
+  // Pi camera (camera-csi) — separate from HDMI/Cam-Link above.
+  let stagedCameraMode: '720p' | '1080p' = '720p';
+  let stagedCameraFps = 24;
+  const CAMERA_MODES: { id: '720p' | '1080p'; label: string; hint: string }[] = [
+    { id: '720p', label: '720p', hint: '1280×720 · default @ 24 fps on Pi 5' },
+    { id: '1080p', label: '1080p', hint: '1920×1080 · sharper, more CPU' },
+  ];
+  const CAMERA_FPS = [15, 24, 30];
   let streamerSaving = false;
   let streamerMsg = '';
+
+  function cameraModeFrom(r: {
+    camera_mode?: string;
+    camera_width?: number;
+    camera_height?: number;
+  }): '720p' | '1080p' {
+    if (r.camera_mode === '1080p' || r.camera_mode === '720p') return r.camera_mode;
+    if ((r.camera_height ?? 0) >= 1000 || (r.camera_width ?? 0) >= 1800) return '1080p';
+    return '720p';
+  }
 
   async function refreshStreamer() {
     try {
       const r = await fetch('/api/streamer/config', { credentials: 'same-origin' })
         .then((r) => r.json());
       if (r.ok) {
+        const camMode = cameraModeFrom(r);
         streamerCfg = {
           fps: r.fps,
           jpeg_quality: r.jpeg_quality,
@@ -59,6 +83,13 @@
           match_source: r.match_source ?? true,
           format: r.format,
           hw_accel: r.hw_accel,
+          source: r.source ?? 'auto',
+          camera_mode: camMode,
+          camera_fps: r.camera_fps ?? 24,
+          camera_width: r.camera_width ?? 1280,
+          camera_height: r.camera_height ?? 720,
+          camera_pipe: r.camera_pipe ?? 'yuv420',
+          available_sources: r.available_sources ?? [],
         };
         // Pre-fill the sliders with the saved values so the user sees
         // where they currently are; let them tweak without losing
@@ -67,6 +98,8 @@
           stagedFps = r.fps;
           stagedQuality = r.jpeg_quality;
           stagedResolution = (r.match_source ?? true) ? 'match' : `${r.width}x${r.height}`;
+          stagedCameraMode = camMode;
+          stagedCameraFps = r.camera_fps ?? 24;
         }
       }
     } catch {
@@ -74,6 +107,14 @@
       streamerCfg = null;
     }
   }
+
+  $: streamerDirty = streamerCfg != null && (
+    stagedFps !== streamerCfg.fps
+    || stagedQuality !== streamerCfg.jpeg_quality
+    || stagedResolution !== (streamerCfg.match_source ? 'match' : `${streamerCfg.width}x${streamerCfg.height}`)
+    || stagedCameraMode !== streamerCfg.camera_mode
+    || stagedCameraFps !== streamerCfg.camera_fps
+  );
 
   async function saveStreamer() {
     streamerSaving = true;
@@ -95,10 +136,15 @@
           fps: stagedFps,
           jpeg_quality: stagedQuality,
           ...resPatch,
+          // Pi camera — always sent so Settings is the one place to set them.
+          camera_mode: stagedCameraMode,
+          camera_fps: stagedCameraFps,
         }),
       }).then((r) => r.json());
       if (r.ok) {
-        streamerMsg = `✓ saved + restarted aeon-streamer (fps=${stagedFps}, res=${stagedResolution}, q=${stagedQuality})`;
+        streamerMsg =
+          `✓ saved + restarted (HDMI ${stagedFps} fps · ${stagedResolution}; ` +
+          `cam ${stagedCameraMode} @ ${stagedCameraFps} fps)`;
         await refreshStreamer();
       } else {
         streamerMsg = `✗ ${r.err ?? 'save failed'}`;
@@ -107,7 +153,7 @@
       streamerMsg = `✗ ${e?.message ?? 'save failed'}`;
     } finally {
       streamerSaving = false;
-      setTimeout(() => (streamerMsg = ''), 5000);
+      setTimeout(() => (streamerMsg = ''), 6000);
     }
   }
 
@@ -574,110 +620,172 @@
       </section>
       {/if}
 
-      <!-- ─── Stream tuning (v63) ─── -->
+      <!-- ─── Stream tuning ─── -->
       {#if streamerCfg}
-        <section class="panel p-5 space-y-4">
+        <section class="panel p-5 space-y-5">
           <header class="space-y-1">
             <h2 class="font-mono text-sm uppercase tracking-wider text-zinc-300">
               Stream tuning
             </h2>
             <p class="text-xs text-zinc-500 leading-relaxed">
-              Live knobs for the H.264 capture pipeline. The Cam Link
-              captures at 60fps, so frame rate is restricted to its clean
-              divisors (15 / 30 / 60) — that keeps frame-drops even (every
-              4th / 2nd / all). 60 is smoothest but only sustainable at lower
-              source resolutions; use 30 or 15 at 1080p. JPEG quality now
-              only affects the /snapshot image + MJPEG fallback, not the live
-              H.264 stream.
-            </p>
-            <p class="text-[11px] text-zinc-600 leading-relaxed pt-1">
-              Source resolution {streamerCfg.width}×{streamerCfg.height},
-              format <code>{streamerCfg.format}</code>,
-              hw_accel <code>{streamerCfg.hw_accel ? 'on' : 'off'}</code>.
-              Saving these settings restarts aeon-streamer (the live
-              stream drops for ~2 s).
+              Two independent encode paths: <strong class="text-zinc-400">HDMI / capture card</strong>
+              (KVM view) and <strong class="text-zinc-400">Pi camera</strong> (CSI).
+              Change either without affecting the other. Active console source:
+              <code class="text-cursed-300">{streamerCfg.source}</code>
+              · format <code>{streamerCfg.format}</code>
+              · pipe <code>{streamerCfg.camera_pipe}</code>.
+              Save restarts aeon-streamer (~2 s blip).
             </p>
           </header>
 
-          <!-- fps: discrete divisors of the 60fps capture, so frame-dropping
-               is deterministic (keep every 4th / 2nd / all frame). -->
-          <div class="space-y-1">
-            <div class="flex justify-between text-[11px] uppercase tracking-wider">
-              <span class="text-zinc-500">Frame rate</span>
-              <span class="font-mono text-cursed-300">{stagedFps} fps</span>
+          <!-- ═══ Pi camera (camera-csi) ═══ -->
+          <div class="rounded-md border border-violet-500/25 bg-violet-500/5 p-4 space-y-4">
+            <header class="space-y-0.5">
+              <h3 class="font-mono text-xs uppercase tracking-wider text-violet-300">
+                Pi camera (camera-csi)
+              </h3>
+              <p class="text-[11px] text-zinc-500 leading-relaxed">
+                CSI camera only — HQ / Cam Module. Default pipeline is raw YUV → software H.264
+                (no MJPEG intermediate). These do <em>not</em> change HDMI capture-card fps or resolution.
+                {#if streamerCfg.source === 'camera-csi'}
+                  <span class="text-live-400"> · currently the live view source</span>
+                {:else}
+                  <span class="text-zinc-600"> · switch the live view source to “camera” to use this feed</span>
+                {/if}
+              </p>
+            </header>
+
+            <div class="space-y-1">
+              <div class="flex justify-between text-[11px] uppercase tracking-wider">
+                <span class="text-zinc-500">Camera resolution</span>
+                <span class="font-mono text-violet-300">{stagedCameraMode}</span>
+              </div>
+              <div class="flex gap-2">
+                {#each CAMERA_MODES as m}
+                  <button type="button"
+                          on:click={() => (stagedCameraMode = m.id)}
+                          disabled={streamerSaving}
+                          class="flex-1 rounded-md border px-3 py-2.5 text-left transition
+                                 {stagedCameraMode === m.id
+                                   ? 'border-violet-500 bg-violet-500/20 text-violet-200'
+                                   : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
+                    <div class="font-mono text-sm">{m.label}</div>
+                    <div class="text-[10px] text-zinc-500 mt-0.5 leading-snug">{m.hint}</div>
+                  </button>
+                {/each}
+              </div>
             </div>
-            <div class="flex gap-2">
-              {#each [15, 30, 60] as f}
-                <button type="button"
-                        on:click={() => (stagedFps = f)}
-                        disabled={streamerSaving}
-                        class="flex-1 rounded-md border px-3 py-2 font-mono text-sm transition
-                               {stagedFps === f
-                                 ? 'border-cursed-500 bg-cursed-500/20 text-cursed-300'
-                                 : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
-                  {f} fps
-                </button>
-              {/each}
-            </div>
-            <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
-              <span>15 (low bandwidth)</span>
-              <span>30 (default)</span>
-              <span>60 (smoothest — low-res only)</span>
+
+            <div class="space-y-1">
+              <div class="flex justify-between text-[11px] uppercase tracking-wider">
+                <span class="text-zinc-500">Camera frame rate</span>
+                <span class="font-mono text-violet-300">{stagedCameraFps} fps</span>
+              </div>
+              <div class="flex gap-2">
+                {#each CAMERA_FPS as f}
+                  <button type="button"
+                          on:click={() => (stagedCameraFps = f)}
+                          disabled={streamerSaving}
+                          class="flex-1 rounded-md border px-3 py-2 font-mono text-sm transition
+                                 {stagedCameraFps === f
+                                   ? 'border-violet-500 bg-violet-500/20 text-violet-200'
+                                   : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
+                    {f} fps
+                  </button>
+                {/each}
+              </div>
+              <p class="text-[10px] text-zinc-600 font-mono leading-relaxed">
+                Default is 720p @ 24 fps. 1080p is happier at 15–24 fps
+                (software libx264 — no HW encoder on Pi 5).
+                Saved as {streamerCfg.camera_width}×{streamerCfg.camera_height} @ {streamerCfg.camera_fps} fps.
+              </p>
             </div>
           </div>
 
-          <!-- encode resolution: the Pi 5 has no HW H.264 encoder, so lowering
-               this cuts software-libx264 CPU + power on the capture-card paths.
-               'Match source' tracks the input (capped 1080p). -->
-          <div class="space-y-1">
-            <div class="flex justify-between text-[11px] uppercase tracking-wider">
-              <span class="text-zinc-500">Encode resolution</span>
-              <span class="font-mono text-cursed-300">
-                {stagedResolution === 'match' ? 'match source' : stagedResolution}
-              </span>
+          <!-- ═══ HDMI / capture card ═══ -->
+          <div class="rounded-md border border-ink-800 bg-ink-950/40 p-4 space-y-4">
+            <header class="space-y-0.5">
+              <h3 class="font-mono text-xs uppercase tracking-wider text-zinc-300">
+                HDMI / capture card
+              </h3>
+              <p class="text-[11px] text-zinc-500 leading-relaxed">
+                Cam Link USB or HDMI-CSI (X1301) KVM path. Cam Link captures at 60 fps —
+                output is snapped to 15 / 30 / 60 so drops stay even. JPEG quality only
+                affects /snapshot + MJPEG fallback, not the live H.264 stream.
+              </p>
+            </header>
+
+            <div class="space-y-1">
+              <div class="flex justify-between text-[11px] uppercase tracking-wider">
+                <span class="text-zinc-500">Frame rate</span>
+                <span class="font-mono text-cursed-300">{stagedFps} fps</span>
+              </div>
+              <div class="flex gap-2">
+                {#each [15, 30, 60] as f}
+                  <button type="button"
+                          on:click={() => (stagedFps = f)}
+                          disabled={streamerSaving}
+                          class="flex-1 rounded-md border px-3 py-2 font-mono text-sm transition
+                                 {stagedFps === f
+                                   ? 'border-cursed-500 bg-cursed-500/20 text-cursed-300'
+                                   : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
+                    {f} fps
+                  </button>
+                {/each}
+              </div>
+              <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
+                <span>15 (low bandwidth)</span>
+                <span>30 (default)</span>
+                <span>60 (smoothest — low-res only)</span>
+              </div>
             </div>
-            <div class="flex flex-wrap gap-2">
-              {#each RES_PRESETS as r}
-                <button type="button"
-                        on:click={() => (stagedResolution = r)}
-                        disabled={streamerSaving}
-                        class="flex-1 min-w-[88px] rounded-md border px-3 py-2 font-mono text-xs transition
-                               {stagedResolution === r
-                                 ? 'border-cursed-500 bg-cursed-500/20 text-cursed-300'
-                                 : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
-                  {r === 'match' ? 'match' : r.replace('x', '×')}
-                </button>
-              {/each}
+
+            <div class="space-y-1">
+              <div class="flex justify-between text-[11px] uppercase tracking-wider">
+                <span class="text-zinc-500">Encode resolution</span>
+                <span class="font-mono text-cursed-300">
+                  {stagedResolution === 'match' ? 'match source' : stagedResolution}
+                </span>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                {#each RES_PRESETS as r}
+                  <button type="button"
+                          on:click={() => (stagedResolution = r)}
+                          disabled={streamerSaving}
+                          class="flex-1 min-w-[88px] rounded-md border px-3 py-2 font-mono text-xs transition
+                                 {stagedResolution === r
+                                   ? 'border-cursed-500 bg-cursed-500/20 text-cursed-300'
+                                   : 'border-ink-800 text-zinc-400 hover:border-zinc-700'}">
+                    {r === 'match' ? 'match' : r.replace('x', '×')}
+                  </button>
+                {/each}
+              </div>
+              <p class="text-[10px] text-zinc-600 font-mono">
+                Lower = less CPU/power on Pi 5 software H.264. 720p ≈ ½ the encode load of 1080p.
+              </p>
             </div>
-            <p class="text-[10px] text-zinc-600 font-mono">
-              Lower = less CPU/power (Pi 5 software-encodes H.264). 720p ≈ ½ the
-              encode load of 1080p; pair with 15 fps on marginal power.
-            </p>
+
+            <div class="space-y-1">
+              <div class="flex justify-between text-[11px] uppercase tracking-wider">
+                <span class="text-zinc-500">JPEG quality</span>
+                <span class="font-mono text-cursed-300">{stagedQuality}</span>
+              </div>
+              <input type="range" min="40" max="95" step="1"
+                     bind:value={stagedQuality}
+                     disabled={streamerSaving}
+                     class="w-full accent-cursed-500" />
+              <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
+                <span>40 (mushy, low bandwidth)</span>
+                <span>70 (default)</span>
+                <span>95 (max detail)</span>
+              </div>
+            </div>
           </div>
 
-          <!-- quality slider -->
-          <div class="space-y-1">
-            <div class="flex justify-between text-[11px] uppercase tracking-wider">
-              <span class="text-zinc-500">JPEG quality</span>
-              <span class="font-mono text-cursed-300">{stagedQuality}</span>
-            </div>
-            <input type="range" min="40" max="95" step="1"
-                   bind:value={stagedQuality}
-                   disabled={streamerSaving}
-                   class="w-full accent-cursed-500" />
-            <div class="flex justify-between text-[10px] text-zinc-600 font-mono">
-              <span>40 (mushy, low bandwidth)</span>
-              <span>70 (default, lossless-feeling)</span>
-              <span>95 (zero compression artifacts)</span>
-            </div>
-          </div>
-
-          <div class="flex items-center gap-3 pt-2 border-t border-ink-800">
+          <div class="flex items-center gap-3 pt-1">
             <button class="btn-primary text-sm"
                     on:click={saveStreamer}
-                    disabled={streamerSaving ||
-                              (stagedFps === streamerCfg.fps
-                                && stagedQuality === streamerCfg.jpeg_quality)}>
+                    disabled={streamerSaving || !streamerDirty}>
               {streamerSaving ? 'saving + restarting…' : 'Save & restart streamer'}
             </button>
             {#if streamerMsg}
@@ -688,30 +796,16 @@
             {/if}
           </div>
 
-          <details class="pt-3 border-t border-ink-800">
+          <details class="pt-2 border-t border-ink-800">
             <summary class="cursor-pointer text-[11px] uppercase tracking-wider
                             text-zinc-500 hover:text-zinc-300">
               ▸ Where does the latency come from?
             </summary>
             <div class="mt-3 space-y-2 text-[11px] text-zinc-500 leading-relaxed">
               <p>
-                The capture chain is roughly:
-                <strong>Cam Link (~50 ms internal queue)</strong> →
-                <strong>ffmpeg/ustreamer encode (~30 ms)</strong> →
-                <strong>axum HTTPS body stream (~5 ms)</strong> →
-                <strong>browser multipart parser (variable)</strong>.
-                The first three add up to ~85 ms steady state — fast.
-                The fourth is where multi-second "lag" usually lives:
-                browsers buffer multipart-MJPEG aggressively, and over
-                WiFi a slow drain piles frames into that buffer faster
-                than the consumer reads them.
-              </p>
-              <p>
-                The real fix is dropping the MJPEG transport entirely
-                and shipping H.264 over WebSocket — hardware-encoded on
-                the Pi 4 (h264_v4l2m2m), software-encoded on the Pi 5
-                (libx264). That path already exists; the levers above
-                tune the MJPEG fallback.
+                HDMI path: capture device queue → software/HW encode → HTTPS → browser.
+                Camera path: rpicam YUV → libx264 (Pi 5 has no HW H.264) → same transport.
+                Multi-second “lag” is usually browser buffering, not the Pi encode.
               </p>
             </div>
           </details>

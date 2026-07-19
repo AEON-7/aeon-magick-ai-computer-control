@@ -24,12 +24,23 @@ mode = "ai"
 # fractions 0..1) over the live image in viewfinder mode.
 overlay = true
 
+# Whole-panel orientation (ST7789 / numpy.rot90, degrees counter-clockwise).
+# 270 = 90° left of the classic "button edge down" 180° layout — menus, AI face,
+# volume, and camera all match a side-held HAT. Valid: 0 | 90 | 180 | 270.
+# The joystick d-pad is remapped to the same rotation so ↑ always means
+# on-screen up (btn / joystick-press are unchanged).
+display_rotation = 270
+
+# Extra content-only rotate for camera frames only (usually 0; the panel already
+# orients the whole UI). Use 90/270 only if the CSI mount still looks wrong.
+viewfinder_rotate = 0
+
 [audio]
-# ALSA device preference. "auto" probes for a working playback+capture device,
-# PREFERRING USB audio — the WM8960 I2S codec is UNVERIFIED on Pi 5 / RP1, so a
-# plug-in USB sound card is the supported default. Use "usb", "wm8960", or a
-# literal ALSA device name (e.g. "hw:1") to pin it.
-device = "auto"
+# ALSA device preference. "aeon" / "wm8960" / "auto" → BrainCraft WM8960 via
+# plughw (see /etc/asound.conf). Never use bare hw:N — mono/16 kHz ASR opens
+# fail on the stereo-only codec. "usb" forces a USB sound card; HDMI is never
+# selected for capture (playback-only).
+device = "wm8960"
 tts = "kokoro"    # local TTS engine — sherpa-onnx Kokoro-82M neural voice
 asr = "whisper"   # local STT engine — sherpa-onnx Whisper base.en
 tts_voice = 0     # Kokoro speaker id (0-10; different English voices)

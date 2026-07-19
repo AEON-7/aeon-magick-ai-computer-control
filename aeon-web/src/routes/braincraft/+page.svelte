@@ -189,8 +189,10 @@
 
   const MODES: { id: api.BraincraftMode; label: string; icon: string; blurb: string }[] = [
     { id: 'ai',         label: 'AI face',    icon: 'braincraft', blurb: 'Persona + last reply on the TFT' },
-    { id: 'viewfinder', label: 'Viewfinder', icon: 'monitor',    blurb: 'Live camera + photo/record' },
-    { id: 'voice',      label: 'Voice',      icon: 'zap',        blurb: 'Push-to-talk assistant' },
+    { id: 'viewfinder', label: 'Camera',     icon: 'monitor',    blurb: 'Live camera · btn=photo · ←→ record' },
+    { id: 'analyze',    label: 'Analyze',    icon: 'spark',      blurb: 'AI video feed · OCR / Hailo boxes' },
+    { id: 'voice',      label: 'Voice chat', icon: 'zap',        blurb: 'Push-to-talk · mic → LLM → speaker' },
+    { id: 'volume',     label: 'Volume',     icon: 'cpu',        blurb: 'Speaker + mic levels on the HAT' },
   ];
   const okPill = (ok: boolean | undefined) =>
     ok ? 'bg-live-500/20 text-live-400 border border-live-500/40'
@@ -237,8 +239,8 @@
       {#if saveErr}<div class="rounded border border-red-500/40 bg-red-500/10 p-2.5 text-xs text-red-300">{saveErr}</div>{/if}
 
       {#if enabled}
-        <!-- ── Mode switch ───────────────────────────────────────────── -->
-        <div class="grid grid-cols-3 gap-3">
+        <!-- ── Mode switch (matches on-HAT menu: joy press → list, ↑↓, btn) ─ -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
           {#each MODES as m (m.id)}
             <button class="rounded-sm border p-3 text-left transition
                           {mode === m.id ? 'border-violet-500/50 bg-violet-600/15' : 'border-steel-700 bg-ink-900 hover:bg-ink-800'}"
@@ -250,6 +252,12 @@
             </button>
           {/each}
         </div>
+        <p class="text-[11px] text-ink-500 font-mono leading-relaxed">
+          On the HAT: <span class="text-ink-300">joystick press</span> opens the menu ·
+          <span class="text-ink-300">↑↓</span> navigate ·
+          <span class="text-ink-300">button</span> select ·
+          volume mode uses ↑↓ speaker / ←→ mic.
+        </p>
 
         {#if !present}
           {@const reason = dev?.reason}

@@ -15,21 +15,40 @@ harmless on a bare Pi.
 > richer on the Pi 5 (where the Hailo/vision feed lives), but the core modes work
 > on either.
 
-## Three modes (button-switchable)
+## Full on-HAT menu (joystick + button)
 
-A button (or joystick press) cycles the modes; you can also set the mode from the
-web console.
+The BrainCraft has **one face button** (BCM 17) and a **5-way joystick**
+(select=16, left=22, up=23, right=24, down=27). **Joystick press** opens the
+mode menu; **↑↓** navigate; **button** (or right) selects; **left** backs out.
+You can also set the mode from the web console **BrainCraft** tile.
 
-- **AI face** *(default)* — the Orb's "face" on the TFT: the active backend /
-  persona, a listening/speaking indicator, and the last reply (wrapped). The idle
-  interface screen.
-- **Viewfinder** — a live camera preview, pulled from the running streamer's
-  snapshot socket (so it never fights the single-consumer CSI/USB capture device).
-  **Button A** takes a photo, **Button B** toggles video recording (saved under
-  `/var/lib/aeon/captures/`). An **AI overlay** toggle draws the live
-  `/run/aeon/vision.json` detection boxes (OCR / Hailo) over the preview.
-- **Voice** — a push-to-talk assistant on **Button A**: mic → ASR → LLM → TTS →
-  speaker.
+| Mode | What it does | Controls |
+|---|---|---|
+| **AI face** *(default)* | Idle "face": backend / persona, listen/speak state, last reply | Button opens menu |
+| **Camera capture** | Live preview from the streamer snapshot socket (never opens CSI twice) | **Button** = photo · **←→** = start/stop record · **↑** = toggle overlay |
+| **AI video analysis** | Same preview with vision/OCR boxes always on + caption strip | **Button** = photo |
+
+### Display orientation (side-held HAT)
+
+The whole TFT (menus, AI face, volume, camera) uses ST7789 `display_rotation`
+in `/etc/aeon/braincraft.toml` — default **`270`** (90° left of the old
+button-edge-down `180` layout). Restart `aeon-braincraft` after changing it:
+
+```toml
+display_rotation = 270   # 0 | 90 | 180 | 270  (CCW)
+viewfinder_rotate = 0    # extra camera-only rotate; leave 0 unless CSI is still wrong
+```
+
+The joystick **d-pad is remapped** to the same `display_rotation`, so ↑ / ↓ / ← / →
+always match the on-screen menu (joystick press and the face button stay fixed).
+| **AI voice chat** | Push-to-talk: mic → ASR → LLM → TTS → speaker | **Button** = PTT |
+| **Volume** | Speaker + mic levels via `amixer` (WM8960) | **↑↓** speaker · **←→** mic |
+
+Captures land under `/var/lib/aeon/captures/`. Volume changes are persisted with
+`alsactl store` and match the web console `/api/audio/volume` sliders.
+
+> **libgpiod v2:** the daemon uses `request_lines` (Bookworm/Trixie). Older
+> `get_line` / `LINE_REQ_*` code left buttons dead (`buttons.ok: false`).
 
 ## Local ↔ hosted voice (personas)
 

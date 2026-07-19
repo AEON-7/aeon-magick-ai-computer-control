@@ -138,6 +138,7 @@ export interface StreamerConfig {
   source: string;            // auto | cam-link-usb | hdmi-csi | camera-csi
   platform: string;          // pi4 | pi5 | other
   available_sources: string[];
+  /** HDMI / Cam Link encode fps — NOT the Pi camera. */
   fps?: number;
   format?: string;
   width?: number;            // encode width  (used when match_source = false)
@@ -146,10 +147,19 @@ export interface StreamerConfig {
   rotation?: number;         // clockwise degrees: 0 | 90 | 180 | 270
   hflip?: boolean;           // mirror left↔right (after rotation)
   vflip?: boolean;           // mirror top↔bottom (after rotation)
+  /** Pi-camera encode (camera-csi only) — independent of fps/width above. */
+  camera_width?: number;
+  camera_height?: number;
+  camera_fps?: number;
+  camera_pipe?: string;      // yuv420 | mjpeg
+  camera_mode?: '720p' | '1080p' | string;
+  camera_modes?: string[];
+  camera_fps_choices?: number[];
 }
 export const getStreamerConfig = () => req<StreamerConfig>('GET', '/streamer/config');
 export const setStreamerSource = (source: string) =>
-  req<{ ok: boolean; source: string; restarted?: boolean }>('PUT', '/streamer/config', { source });
+  req<{ ok: boolean; source: string; restarted?: boolean; uvc_released?: boolean }>(
+    'PUT', '/streamer/config', { source });
 
 // Encode resolution. Lower W×H (or match_source:false at 1280×720) sharply cuts
 // the Pi 5 software-H.264 CPU + power on the capture-card paths. Restarts the
@@ -165,6 +175,24 @@ export interface OrientationPatch { rotation?: number; hflip?: boolean; vflip?: 
 export const setStreamerOrientation = (o: OrientationPatch) =>
   req<{ ok: boolean; rotation?: number; hflip?: boolean; vflip?: boolean; restarted?: boolean }>(
     'PUT', '/streamer/config', o);
+
+/** Pi-camera only (camera-csi). Independent of HDMI/Cam-Link fps/resolution. */
+export interface CameraEncodePatch {
+  camera_mode?: '720p' | '1080p' | string;
+  camera_fps?: number;
+  camera_width?: number;
+  camera_height?: number;
+  camera_pipe?: 'yuv420' | 'mjpeg' | string;
+}
+export const setCameraEncode = (p: CameraEncodePatch) =>
+  req<{
+    ok: boolean;
+    camera_mode?: string;
+    camera_fps?: number;
+    camera_width?: number;
+    camera_height?: number;
+    restarted?: boolean;
+  }>('PUT', '/streamer/config', p);
 
 // ── USB webcam passthrough (expose a video source to the target as a webcam) ──
 export interface WebcamConfig {
@@ -213,6 +241,10 @@ export interface AudioVolume {
 export const getAudioVolume = () => req<AudioVolume>('GET', '/audio/volume');
 export const setAudioVolume = (p: { playback?: number; capture?: number; capture_muted?: boolean }) =>
   req<AudioVolume>('PUT', '/audio/volume', p);
+
+/** Live mic passthrough (BrainCraft WM8960 / USB) as continuous MP3.
+ *  Cookie-auth'd same-origin URL for an `<audio src>` element. */
+export const audioStreamUrl = () => '/api/audio/stream';
 
 // ── fleet (decentralized roster of peer Orbs over the tailnet/LAN) ──
 // Offline peers come back as { online:false, addr } stubs — the rich fields
@@ -1911,14 +1943,15 @@ export interface HailoStats {
 export interface HailoModel {
   id: string;
   name: string;
-  kind: 'llm' | 'vlm' | 'stt' | 'vision' | 'ocr';
+  kind: 'llm' | 'vlm' | 'stt' | 'tts' | 'vision' | 'ocr';
   params?: string;        // e.g. "1B", "8B"
   quant?: string;         // e.g. "int4", "w4a16"
-  size_mb: number;        // RAM footprint when loaded
-  fits: boolean;          // size_mb <= free budget (greyed in UI if false)
+  size_mb: number;        // RAM footprint when loaded (NPU); disk size for CPU models
+  fits: boolean;          // size_mb <= free budget (always true for runtime=cpu)
   state: 'available' | 'downloading' | 'deployed' | 'loaded';
   license?: string;
   use_for?: string;       // short "good for OCR / chat / …" blurb
+  runtime?: 'npu' | 'cpu' | string;  // cpu = sherpa-onnx voice stack (TTS)
 }
 
 /** Whole-subsystem snapshot driving the three dashboard states. */
@@ -1973,7 +2006,7 @@ export const unloadHailoModel = (id: string) =>
 // commands, and runs the button-driven voice-stack install (Piper + Vosk +
 // display/audio libs, NOT baked). present:false ⇒ no HAT / daemon idle.
 
-export type BraincraftMode = 'ai' | 'viewfinder' | 'voice';
+export type BraincraftMode = 'ai' | 'viewfinder' | 'analyze' | 'voice' | 'volume';
 export type BraincraftBackend = 'local' | 'hosted';
 
 /** Persisted config (braincraft.toml). */

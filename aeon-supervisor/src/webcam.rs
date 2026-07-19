@@ -81,6 +81,19 @@ pub struct WebcamPatch {
     pub source: String,
 }
 
+/// Read the streamer's current concrete capture source (for collision checks).
+fn streamer_source() -> String {
+    let v: toml::Value = std::fs::read_to_string("/etc/aeon/streamer.toml")
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_else(|| toml::Value::Table(Default::default()));
+    v.get("capture")
+        .and_then(|c| c.get("source"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("auto")
+        .to_string()
+}
+
 /// PUT /api/webcam — set the webcam source (or "off") and apply it.
 pub async fn put_webcam(
     State(_s): State<AppState>,
@@ -95,6 +108,29 @@ pub async fn put_webcam(
             )})),
         )
             .into_response();
+    }
+
+    // libcamera sensors are single-consumer. Refuse to enable the webcam on
+    // the same source the console streamer is currently using — the console
+    // would go black / loop "Pipeline handler in use".
+    if !off {
+        let view = streamer_source();
+        if view == patch.source {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "ok": false,
+                    "err": format!(
+                        "webcam source {:?} is already the console view source — \
+                         switch the console to another source (e.g. hdmi-csi) first, \
+                         or set webcam to off. CAM0/libcamera is single-consumer.",
+                        patch.source
+                    ),
+                    "streamer_source": view,
+                })),
+            )
+                .into_response();
+        }
     }
 
     let text = std::fs::read_to_string(UVC_TOML).unwrap_or_default();

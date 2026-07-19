@@ -17,6 +17,7 @@ use tracing::info;
 mod api;
 mod config;
 mod gadget;
+mod identity;
 mod input;
 mod persona;
 mod state;
@@ -115,27 +116,88 @@ async fn main() -> Result<()> {
 
     let state = state::SharedState::new(cfg);
     let api = tokio::spawn(api::serve(state.clone()));
+    // When the host unplugs (UDC → not attached), rebuild the gadget with a
+    // *new* rotating identity so the next plug-in looks like a fresh unit —
+    // defeats stale macOS "block this accessory" pins on VID+PID+serial.
+    let reconnect = tokio::spawn(identity_reconnect_loop(state.clone()));
 
     tokio::select! {
         r = api => { tracing::error!(?r, "api exited"); }
+        r = reconnect => { tracing::error!(?r, "identity reconnect loop exited"); }
         _ = tokio::signal::ctrl_c() => { info!("SIGINT, shutting down"); }
     }
 
     Ok(())
 }
 
+/// Watch UDC attach state. After a host disconnect, re-run gadget setup with
+/// a fresh identity once the port has stayed detached for a short settle.
+async fn identity_reconnect_loop(state: state::SharedState) {
+    use std::time::Duration;
+    let udc = state.0.cfg.udc.clone();
+    let state_path = format!("/sys/class/udc/{}/state", udc);
+    let mut was_attached = read_udc_attached(&state_path);
+    let mut need_rotate = false;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let attached = read_udc_attached(&state_path);
+        if was_attached && !attached {
+            info!("USB host detached — will rotate identity before next attach");
+            need_rotate = true;
+        }
+        // Rebind while still detached so the next cable-in sees new IDs.
+        if need_rotate && !attached {
+            // Brief settle so a flaky cable doesn't thrash.
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            if read_udc_attached(&state_path) {
+                was_attached = true;
+                need_rotate = false;
+                continue;
+            }
+            info!("rebuilding gadget with rotated identity for next host connection");
+            let cfg = state.0.cfg.clone();
+            // Blocking configfs work off the runtime.
+            let result = tokio::task::spawn_blocking(move || {
+                let _ = gadget::teardown(&cfg);
+                try_setup_persona(&cfg)
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {
+                    info!("gadget rebound with new identity");
+                    need_rotate = false;
+                }
+                Ok(Err(e)) => tracing::error!(?e, "identity rebind failed"),
+                Err(e) => tracing::error!(?e, "identity rebind task join failed"),
+            }
+        }
+        was_attached = attached;
+    }
+}
+
+fn read_udc_attached(path: &str) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let t = s.trim();
+            // Kernel uses "configured" / "addressed" / "default" when a host
+            // is present; "not attached" when idle.
+            t != "not attached" && !t.is_empty()
+        }
+        Err(_) => false,
+    }
+}
+
 /// Build the gadget composite for `cfg.persona`. Pulled out so the main
 /// fallback path can call it twice without duplicating the descriptor
 /// assembly.
+///
+/// **Identity is rotated on every call** (fresh VID/PID/bcd/serial from
+/// the persona's commercial-peripheral pool). Call this again after a
+/// host disconnect if you want the next plug-in to look like a new unit.
 fn try_setup_persona(cfg: &config::Config) -> Result<()> {
     let mut desc = persona::descriptors_for(cfg.persona);
-    // Inject a per-device random serial. Persisted across reboots so the
-    // host sees a stable identity, but unique per Pi and free of any
-    // strings (like "ACURSED-…") that would trip host-side anomaly
-    // heuristics. Real USB devices have factory-unique serials; this
-    // mimics that behavior.
-    desc.serial = load_or_gen_serial();
-    info!(serial = %desc.serial, persona = ?cfg.persona, "USB serial");
+
     if let Some(ecm) = load_ecm_config() {
         info!(host_mac=%ecm.host_mac, dev_mac=%ecm.dev_mac, "ECM enabled (USB ethernet passthrough)");
         desc.ecm = Some(ecm);
@@ -148,59 +210,13 @@ fn try_setup_persona(cfg: &config::Config) -> Result<()> {
         info!(w = uvc.width, h = uvc.height, "UVC webcam enabled (Cam0 → USB webcam)");
         desc.uvc = Some(uvc);
     }
-    gadget::setup(cfg, &desc)
-}
 
-/// Per-device USB serial.
-///
-/// Loads from /etc/aeon/usb-serial.state if it exists, else generates a
-/// fresh 12-char uppercase alphanumeric string and persists it. The
-/// format roughly mimics what Apple and Logitech print on real device
-/// hardware (e.g. `F2LV8XLBL311`, `0123456789AB`) so it doesn't stand
-/// out to host-side device-fingerprinting or anomaly scanners that flag
-/// suspicious-looking strings.
-///
-/// Stable across reboots; unique per Pi (because file is generated
-/// per-device on first boot).
-fn load_or_gen_serial() -> String {
-    use std::path::Path;
-    let path = Path::new("/etc/aeon/usb-serial.state");
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        let trimmed = existing.trim();
-        // Validate it's still a sensible serial (12+ uppercase alnum).
-        if trimmed.len() >= 8
-            && trimmed
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-        {
-            return trimmed.to_string();
-        }
-    }
-    // Generate. 12 chars: 36^12 keyspace, ample.
-    let alpha = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let serial: String = {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        (0..12)
-            .map(|_| {
-                let idx = rng.gen_range(0..alpha.len());
-                alpha[idx] as char
-            })
-            .collect()
-    };
-    // Persist (best-effort — if the dir doesn't exist or we can't write,
-    // we still return the freshly-generated value but it won't survive
-    // a reboot; next boot will regenerate).
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, &serial);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    serial
+    // Dock-mode identity (Belkin) when multi-function beyond HID-only.
+    let dock_mode = desc.ecm.is_some() || desc.mass_storage.is_some() || desc.uvc.is_some();
+    identity::apply_rotating_identity(&mut desc, cfg.persona, dock_mode);
+    identity::write_identity_audit(&desc);
+
+    gadget::setup(cfg, &desc)
 }
 
 /// Read /etc/aeon/network.toml. Returns an EcmConfig if usb_ethernet is

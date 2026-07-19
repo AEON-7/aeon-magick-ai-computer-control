@@ -39,15 +39,16 @@ pub enum HidKind {
 
 #[derive(Debug, Clone)]
 pub struct PersonaDescriptors {
+    /// Overwritten at bind time by `identity::apply_rotating_identity`
+    /// (fresh VID/PID/bcd/serial per connection).
     pub id_vendor: u16,
     pub id_product: u16,
     pub bcd_device: u16,
     pub manufacturer: &'static str,
     pub product: &'static str,
-    /// USB iSerialNumber string. Owned, not `&'static`, because we
-    /// inject a randomly-generated per-device serial at runtime rather
-    /// than ship a hard-coded marker that looks suspicious to host
-    /// heuristic scanners. See `aeon-hid/src/main.rs::load_or_gen_serial`.
+    /// USB iSerialNumber — regenerated every bind / host reconnect so
+    /// host accessory allow-lists cannot pin a single "bad" serial.
+    /// See `identity::fresh_serial`.
     pub serial: String,
     pub functions: Vec<HidFunction>,
     /// If `Some`, add a CDC ECM ethernet function alongside HID so the
@@ -314,16 +315,13 @@ const APPLE_TOUCHPAD_DESC: &[u8] = &[
 ];
 
 fn generic() -> PersonaDescriptors {
+    // Identity (VID/PID/serial/strings) rotated at bind — see identity.rs.
     PersonaDescriptors {
-        id_vendor: 0x1d6b,  // Linux Foundation
-        id_product: 0x0104, // Multifunction Composite Gadget
+        id_vendor: 0x1d6b,
+        id_product: 0x0104,
         bcd_device: 0x0100,
-        // Neutral, non-revealing strings — the gadget must NEVER announce itself
-        // as "Aeon Magick AI Computer Control" on the target (that's an obvious
-        // tell). A plain composite-device name blends in.
         manufacturer: "Generic",
         product: "USB Composite Device",
-        // Filled in at runtime by main.rs from /etc/aeon/usb-serial.state
         serial: String::new(),
         ecm: None,
         mass_storage: None,
@@ -351,24 +349,20 @@ fn generic() -> PersonaDescriptors {
     }
 }
 
-/// Generic composite, but with an ABSOLUTE pointer in the hidg1 "mouse"
-/// slot instead of the relative boot mouse. The keyboard stays boot-protocol
-/// (works pre-OS); the absolute pointer is report-protocol only (absolute
-/// pointing can't be a boot device). Driven via the /move_abs API.
+/// Absolute pointer persona — QEMU-tablet style 0..32767 via /move_abs.
+///
+/// **Do not** default to real Wacom VID `0x056a`: Windows Wacom drivers claim
+/// that VID and remap absolute coordinates into a tablet rectangle (agent
+/// clicks miss). Defaults + rotating identity use Linux Foundation `0x1d6b`.
+/// Keyboard stays boot-protocol for pre-OS use.
 fn generic_absolute() -> PersonaDescriptors {
     PersonaDescriptors {
-        // Disguise as a Logitech keyboard+mouse receiver — believable for a
-        // composite keyboard + pointer, and (unlike "Aeon Magick AI Computer
-        // Control") gives away nothing. Uses PID 0xc31c (plain Logitech USB
-        // Keyboard, driven by usbhid) NOT the Unifying-receiver 0xc52b, which
-        // makes Linux bind hid-logitech-dj and wedge the daemon (see
-        // logitech_mx). The absolute-pointer descriptor below is unaffected by
-        // the VID/PID, so it stays deterministic.
-        id_vendor: 0x046d,  // Logitech
-        id_product: 0xc31c, // Logitech USB Keyboard (plain HID, hid-logitech-dj-safe)
-        bcd_device: 0x0100,
-        manufacturer: "Logitech",
-        product: "USB Receiver",
+        // Overwritten by identity::apply_rotating_identity (absolute pool).
+        id_vendor: 0x1d6b,
+        id_product: 0x0104,
+        bcd_device: 0x0103,
+        manufacturer: "Generic",
+        product: "USB Absolute Tablet",
         serial: String::new(),
         ecm: None,
         mass_storage: None,
@@ -381,19 +375,17 @@ fn generic_absolute() -> PersonaDescriptors {
                 report_length: 8,
                 report_desc: BOOT_KEYBOARD_DESC,
                 kind: HidKind::Keyboard,
-                interface_label: Some("Keyboard"),
+                interface_label: Some("Absolute Keyboard"),
             },
             HidFunction {
-                // Keep the name "hid.mouse" so it lands in the Hid struct's
-                // hidg1 `mouse` slot — but the descriptor is absolute, so it
-                // must be driven via move_abs (6-byte report), not move_rel.
+                // hid.mouse slot → Hid's hidg1; descriptor is absolute.
                 name: "hid.mouse",
-                protocol: 0, // not a boot mouse (absolute = report protocol)
+                protocol: 0, // report protocol (absolute ≠ boot mouse)
                 subclass: 0,
                 report_length: 6,
                 report_desc: ABS_POINTER_DESC,
                 kind: HidKind::Mouse,
-                interface_label: Some("Mouse"),
+                interface_label: Some("Absolute Pointer"),
             },
             HidFunction {
                 name: "hid.consumer",
@@ -408,24 +400,17 @@ fn generic_absolute() -> PersonaDescriptors {
     }
 }
 
+/// Logitech MX-class keyboard + mouse. Uses plain HID PIDs only
+/// (never Unifying 0xc52b — that binds hid-logitech-dj on Linux and wedges).
+/// VID/PID/serial rotate every connection via identity.rs.
 fn logitech_mx() -> PersonaDescriptors {
     PersonaDescriptors {
-        id_vendor: 0x046d, // Logitech
-        // 0xc31c = Logitech USB Keyboard (plain HID, driven by usbhid).
-        //
-        // Was 0xc52b (Unifying Receiver). On Linux that ID makes the kernel
-        // bind `hid-logitech-dj`, which expects the wireless-receiver HID++/DJ
-        // protocol and never polls our plain boot-HID interrupt-IN endpoints —
-        // so every report write blocked forever and wedged the daemon (input
-        // dead, persona switch frozen). Verified on-device: swapping c52b→c31c
-        // made the Linux target drain the endpoint and accept input instantly.
-        // macOS/Windows drive both IDs with generic HID, so this is a strict
-        // win. Still presents as genuine Logitech (VID 0x046d) for blending in.
+        id_vendor: 0x046d,
         id_product: 0xc31c,
         bcd_device: 0x1210,
         manufacturer: "Logitech",
-        product: "USB Keyboard",
-        serial: String::new(), // injected by main.rs
+        product: "MX Universal Receiver",
+        serial: String::new(),
         ecm: None,
         mass_storage: None,
         uvc: None,
@@ -522,35 +507,18 @@ fn apple_magic() -> PersonaDescriptors {
     }
 }
 
-// Apple-labeled but bus-recognized as a generic Linux Foundation
-// composite. Avoids macOS's AppleUSBMultitouch kext from attaching and
-// hammering the device with feature requests it doesn't understand —
-// the exact failure mode that caused brown-out cycles on the real
-// apple-magic persona post-v18 (Apple VID + IAD composite invoked
-// chatty driver retries that pulled current beyond the Mac's port
-// budget).
-//
-// The user-visible names (manufacturer, product, per-interface
-// iInterface strings) are still Apple-themed, so System Information
-// shows "Apple Magic Keyboard" + "Apple Magic Trackpad" + "Apple Magic
-// Consumer Control" sub-labels — just inside a host-recognized-as-
-// generic device. macOS treats every interface as generic HID and
-// doesn't load the trackpad kext.
-//
-// Trade-off: programmatic 3/4-finger gestures via macOS's gesture
-// engine aren't available — that path requires real Apple VID:PID +
-// the proprietary report format (tracked as task #44, "real Apple
-// gestures"). For the typical use case (clicks, typing, scroll,
-// drag) this persona is functionally identical to apple-magic but
-// power-stable.
+// Apple Magic Keyboard + Magic Mouse (relative pointer). Identity layer
+// rotates real Apple VIDs/PIDs that are *keyboard/mouse* class (not Magic
+// Trackpad 0x0265) so AppleUSBMultitouch stays off the bus. Fresh serial
+// every connection. Use apple-magic for experimental multi-touch trackpad.
 fn apple_magic_stable() -> PersonaDescriptors {
     PersonaDescriptors {
-        id_vendor: 0x1d6b,  // Linux Foundation
-        id_product: 0x0104, // Multifunction Composite Gadget
-        bcd_device: 0x0119, // Valid BCD
+        id_vendor: 0x05ac,
+        id_product: 0x024f,
+        bcd_device: 0x0074,
         manufacturer: "Apple Inc.",
-        product: "Magic Keyboard with Trackpad",
-        serial: String::new(), // injected by main.rs
+        product: "Magic Keyboard",
+        serial: String::new(),
         ecm: None,
         mass_storage: None,
         uvc: None,
@@ -571,7 +539,7 @@ fn apple_magic_stable() -> PersonaDescriptors {
                 report_length: 4,
                 report_desc: BOOT_MOUSE_DESC,
                 kind: HidKind::Mouse,
-                interface_label: Some("Apple Magic Trackpad"),
+                interface_label: Some("Apple Magic Mouse"),
             },
             HidFunction {
                 name: "hid.consumer",
@@ -580,7 +548,7 @@ fn apple_magic_stable() -> PersonaDescriptors {
                 report_length: 2,
                 report_desc: CONSUMER_DESC,
                 kind: HidKind::Consumer,
-                interface_label: Some("Apple Magic Consumer Control"),
+                interface_label: Some("Apple Consumer Control"),
             },
         ],
     }

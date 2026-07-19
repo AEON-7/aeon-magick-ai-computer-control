@@ -117,28 +117,115 @@ fn ctl_pct(card: &str, ctl: &str) -> Option<i64> {
     amixer(&["-c", card, "sget", ctl]).and_then(|s| parse_pct(&s))
 }
 
+/// All ALSA cards with a coarse role tag (codec / hdmi / other).
+fn list_cards() -> Vec<Value> {
+    let text = match std::fs::read_to_string("/proc/asound/cards") {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let idx: i32 = match line
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+        {
+            Some(i) => i,
+            None => continue,
+        };
+        let name = line
+            .split('[')
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let low = name.to_lowercase();
+        let role = if low.contains("wm8960") {
+            "braincraft"
+        } else if low.contains("usb") {
+            "usb"
+        } else if low.contains("hdmi") || low.contains("vc4") {
+            "hdmi-out" // playback only — never use for mic
+        } else {
+            "other"
+        };
+        out.push(json!({
+            "index": idx,
+            "name": name,
+            "role": role,
+            "plughw": format!("plughw:CARD={name},DEV=0"),
+        }));
+    }
+    out
+}
+
 /// Read the current audio state (runs the blocking amixer calls).
 fn read_state() -> Value {
     let (card, name) = match pick_card() {
         Some(c) => c,
-        None => return json!({ "present": false }),
+        None => {
+            return json!({
+                "present": false,
+                "devices": list_cards(),
+                "note": "no codec card with volume controls (BrainCraft WM8960 / USB)",
+            });
+        }
     };
     let cs = card.to_string();
     let names = scontrol_names(&cs);
     let out_ctl =
         first_present(&names, OUT_ANALOG).or_else(|| first_present(&names, OUT_FALLBACK));
     let in_ctl = first_present(&names, IN_CTRL);
+    let speaker = if names.iter().any(|n| n == "Speaker") {
+        ctl_pct(&cs, "Speaker").map(|p| json!({ "control": "Speaker", "percent": p }))
+    } else {
+        None
+    };
+    let headphone = if names.iter().any(|n| n == "Headphone") {
+        ctl_pct(&cs, "Headphone").map(|p| json!({ "control": "Headphone", "percent": p }))
+    } else {
+        None
+    };
     let playback = out_ctl.and_then(|c| ctl_pct(&cs, c).map(|p| json!({ "control": c, "percent": p })));
     let capture = in_ctl.and_then(|c| {
         amixer(&["-c", &cs, "sget", c]).map(|s| {
             json!({ "control": c, "percent": parse_pct(&s).unwrap_or(0), "muted": s.contains("[off]") })
         })
     });
+    // Canonical device strings — match /etc/asound.conf + braincraft probe_audio.
+    let plughw = format!("plughw:CARD={name},DEV=0");
+    let pcm_default = if name.to_lowercase().contains("wm8960") && std::path::Path::new("/etc/asound.conf").exists() {
+        "aeon"
+    } else {
+        plughw.as_str()
+    };
     json!({
         "present": true,
         "card": { "index": card, "name": name },
-        "playback": playback,   // null if no output control
+        "playback": playback,   // primary slider (Speaker preferred)
+        "speaker": speaker,
+        "headphone": headphone,
         "capture": capture,     // null if no capture control
+        // How apps should open the card (never use bare hw:N for mono/16k).
+        "devices": {
+            "playback": pcm_default,
+            "capture": pcm_default,
+            "plughw": plughw,
+            "named": if name.to_lowercase().contains("wm8960") {
+                json!(["aeon", "aeon_play", "aeon_cap"])
+            } else {
+                json!([])
+            },
+            "cards": list_cards(),
+        },
+        "mapping": {
+            "speakers": "WM8960 SPK_L/SPK_R (class-D JST)",
+            "headphone": "WM8960 HP jack",
+            "mics": "WM8960 stereo electrets (LINPUT1/RINPUT1 + MICBIAS)",
+            "hdmi": "vc4-hdmi is output-only — not used for capture",
+        },
     })
 }
 
@@ -231,4 +318,207 @@ pub async fn put_audio(
     .await
     .unwrap_or_else(|_| json!({ "present": false }));
     Json(v).into_response()
+}
+
+/// Resolved capture source for live web passthrough.
+#[derive(Clone, Debug)]
+struct CapturePick {
+    /// ALSA device string (prefer `plughw:` so format/rate convert works).
+    device: String,
+    /// Human label for UI / `X-Aeon-Audio-Source` header.
+    kind: &'static str,
+    /// ffmpeg input sample rate hint (plughw still converts).
+    rate: u32,
+    channels: u32,
+}
+
+/// Resolve an ALSA capture device for live web passthrough.
+///
+/// Preference (KVM-first Orb):
+/// 1. **tc358743** — HDMI audio from the target (X1301 I2S; needs
+///    `dtoverlay=tc358743-audio` and an EDID that advertises audio).
+/// 2. USB capture mic
+/// 3. BrainCraft WM8960 / seeed (local mics — same I2S pins as HDMI audio;
+///    usually not co-present with tc358743-audio)
+///
+/// Skips Pi onboard HDMI *outputs* (`vc4-hdmi*`).
+fn capture_alsa_device() -> Option<CapturePick> {
+    let cards = std::fs::read_to_string("/proc/asound/cards").ok()?;
+    let mut usb: Option<CapturePick> = None;
+    let mut braincraft: Option<CapturePick> = None;
+    let mut other: Option<CapturePick> = None;
+
+    for line in cards.lines() {
+        let name = line
+            .split('[')
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let low = name.to_lowercase();
+        // Pi HDMI *outputs* (speakers on a monitor) — not capture sources.
+        if low.contains("vc4") {
+            continue;
+        }
+        let dev = format!("plughw:CARD={name},DEV=0");
+        if low.contains("tc358743") {
+            return Some(CapturePick {
+                device: dev,
+                kind: "hdmi-target",
+                rate: 48000,
+                channels: 2,
+            });
+        }
+        // Elgato Cam Link 4K (and similar HDMI USB capture) — target HDMI audio.
+        if low.contains("c4k") || low.contains("cam link") || low.contains("elgato") {
+            return Some(CapturePick {
+                device: dev,
+                kind: "camlink-hdmi",
+                rate: 48000,
+                channels: 2,
+            });
+        }
+        if (low.contains("usb") || low.contains("uac")) && usb.is_none() {
+            usb = Some(CapturePick {
+                device: dev.clone(),
+                kind: "usb-mic",
+                rate: 48000,
+                channels: 2,
+            });
+        }
+        if (low.contains("wm8960") || low.contains("seeed")) && braincraft.is_none() {
+            braincraft = Some(CapturePick {
+                device: dev.clone(),
+                kind: "braincraft-mic",
+                rate: 16000,
+                channels: 1,
+            });
+        }
+        if other.is_none() && !low.contains("hdmi") {
+            other = Some(CapturePick {
+                device: dev,
+                kind: "alsa-capture",
+                rate: 48000,
+                channels: 2,
+            });
+        }
+    }
+    // Prefer /etc/asound.conf `aeon` only when it maps to a real capture card we know.
+    if std::path::Path::new("/etc/asound.conf").exists() {
+        if cards.to_ascii_lowercase().contains("tc358743") {
+            return Some(CapturePick {
+                device: "aeon".into(),
+                kind: "hdmi-target",
+                rate: 48000,
+                channels: 2,
+            });
+        }
+    }
+    usb.or(braincraft).or(other)
+}
+
+/// GET /api/audio/stream — continuous low-latency MP3 for the operator console
+/// and agents: **HDMI target audio** when `tc358743` is present, otherwise USB /
+/// BrainCraft mic. The web `<audio>` element plays this beside the video stream.
+///
+/// Implementation: `ffmpeg -f alsa -i … -f mp3 -` piped as an HTTP body.
+pub async fn stream_audio(State(_state): State<AppState>) -> impl IntoResponse {
+    use axum::body::Body;
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode as SC};
+    use tokio::process::Command as TokioCommand;
+    use tokio_util::io::ReaderStream;
+
+    let Some(pick) = capture_alsa_device() else {
+        return (
+            SC::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "err": "no capture sound card (need tc358743-audio for HDMI, or USB/BrainCraft mic)"
+            })),
+        )
+            .into_response();
+    };
+    let dev = pick.device.clone();
+    let rate = pick.rate.to_string();
+    let ch = pick.channels.to_string();
+
+    let mut child = match TokioCommand::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "alsa",
+            "-ar",
+            &rate,
+            "-ac",
+            &ch,
+            "-i",
+            &dev,
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "128k",
+            "-f",
+            "mp3",
+            "-",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                SC::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "err": format!("spawn ffmpeg: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill().await;
+            return (
+                SC::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "err": "ffmpeg stdout missing"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Keep the child alive for the life of the stream by moving it into a
+    // background task that waits until the pipe ends (client disconnect or
+    // ffmpeg exit). kill_on_drop on the child is NOT enough once we move
+    // stdout out — so we explicitly kill when the wait finishes.
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+
+    let stream = ReaderStream::new(stdout);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("audio/mpeg"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache"),
+    );
+    // Expose source kind so the UI can show "HDMI target" vs "BrainCraft mic".
+    if let Ok(v) = HeaderValue::from_str(&format!(
+        "{}; device=\"{}\"",
+        pick.kind, pick.device
+    )) {
+        headers.insert(header::HeaderName::from_static("x-aeon-audio-source"), v);
+    }
+
+    (SC::OK, headers, Body::from_stream(stream)).into_response()
 }

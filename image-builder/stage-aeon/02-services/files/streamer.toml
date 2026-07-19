@@ -93,16 +93,34 @@ hw_accel = false
 source = "auto"
 camera_id = 0      # rpicam --camera N selector, only used for source = "camera-csi"
 
+# ── Pi camera encode (camera-csi ONLY — independent of [output] above) ──
+# HDMI / Cam Link use [output].fps + width/height. The Pi camera has its own
+# knobs so you can run the KVM view at 1080p30 while the camera sits at 720p30
+# (or the reverse) without them fighting.
+#
+#   camera_width / camera_height → 1280×720 (default, software H.264 on Pi 5)
+#                                  or 1920×1080 (sharper, more CPU).
+#   camera_fps                   → 15 | 24 | 30 (default 24). Independent of
+#                                  [output].fps.
+#   camera_pipe                  → "yuv420" (default: raw planar, one encode)
+#                                  or "mjpeg" (legacy double-encode fallback).
+# Live switch: PUT /api/streamer/config
+#   {"camera_mode":"720p","camera_fps":24}  or  {"camera_mode":"1080p","camera_fps":15}
+camera_width = 1280
+camera_height = 720
+camera_fps = 24
+camera_pipe = "yuv420"
+
 # ── Recording audio track (A/V mux) ──
 # ALSA capture device muxed into /record MP4s as an AAC track. Empty = video-
-# only (the historical default; the live H.264 stream is ALWAYS video-only).
-# Tie this to your source:
-#   camera-csi → the BrainCraft WM8960 mic:  "plughw:CARD=wm8960soundcard,DEV=0"
-#   hdmi-csi   → the TC358743 HDMI audio (needs the tc358743-audio overlay):
-#                find the card with `arecord -l`, then e.g. "hw:2,0"
-# Leave empty unless the device exists and works (a missing ALSA device makes
-# ffmpeg fail the recording).
-audio_device = ""
+# only for recording (live H.264 is still video-only; live *listen* is a
+# separate GET /api/audio/stream). Tie this to your source:
+#   hdmi-csi   → TC358743 HDMI audio (dtoverlay=tc358743-audio):
+#                "plughw:CARD=tc358743,DEV=0"
+#   camera-csi → BrainCraft WM8960 mic: "plughw:CARD=wm8960soundcard,DEV=0"
+# PUT /api/streamer/config auto-fills when empty and the card is present.
+# Leave empty only if no capture card exists (missing ALSA device fails ffmpeg).
+audio_device = "plughw:CARD=tc358743,DEV=0"
 audio_rate = 48000
 audio_channels = 2
 

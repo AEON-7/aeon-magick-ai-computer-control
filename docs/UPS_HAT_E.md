@@ -25,8 +25,32 @@ every 2s talks to the HAT's MCU at **I2C `0x2D` (bus 1)** and:
    and runs `systemctl poweroff` — a clean halt before the cells are damaged or
    power is yanked.
 
-Tunables (defaults match Waveshare) are env vars on the unit:
-`AEON_UPS_BUS=1`, `AEON_UPS_LOW_MV=3150`, `AEON_UPS_GRACE_S=60`.
+Tunables (env vars on the unit):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `AEON_UPS_BUS` | `1` | I2C bus |
+| `AEON_UPS_LOW_MV` | `3150` | per-cell mV floor |
+| `AEON_UPS_GRACE_S` | `60` | sustained-low seconds before poweroff |
+| `AEON_UPS_LOW_PCT` | `15` | fuel-gauge % must also be ≤ this (misread guard) |
+| `AEON_UPS_MIN_DISCHARGE_MA` | `100` | pack must be discharging at least this hard (mA) |
+| `AEON_UPS_AUTO_POWEROFF` | `1` | set `0` to **monitor only** (never write `0x55` / never `poweroff`) |
+
+The trigger only fires when **all** of these agree on a self-consistent read:
+on battery, percent ≤ `LOW_PCT`, min cell < `LOW_MV`, pack discharging
+(≤ `-MIN_DISCHARGE_MA`), sustained for `GRACE_S`. Anything else is logged and
+ignored — a single corrupt I2C cell read used to power the Orb off with a full
+pack.
+
+**Diagnostics that survive a hard cut** (Pi OS journals are volatile by default;
+the image now overrides that to persistent):
+
+| Path | What |
+|---|---|
+| `/var/log/aeon-ups-trend.log` | once-a-minute thr + load + ups.json |
+| `/var/lib/aeon/ups-ring.jsonl` | last ~2 min of 2 s samples (fsynced) |
+| `/var/lib/aeon/ups-last-poweroff.json` | breadcrumb written *before* any 0x55 cut |
+| `journalctl -u aeon-ups` | ignored-misread + charge-stall + LOW lines |
 
 ## `GET /api/ups` fields
 
@@ -80,4 +104,13 @@ Tunables (defaults match Waveshare) are env vars on the unit:
   off cleanly on battery yourself, run `i2cset -y 1 0x2d 0x01 0x55` just before
   `poweroff` (a shutdown hook was deliberately *not* auto-installed — telling it
   apart from a reboot is error-prone and a wrong guess could cut power mid-reboot).
+- **A/B-test unexplained rail-cuts:** if the Orb still drops while the pack is
+  healthy, set `AEON_UPS_AUTO_POWEROFF=0` on the unit (or drop a drop-in),
+  `systemctl daemon-reload && systemctl restart aeon-ups`. If cutouts **stop**,
+  software was still cutting the rail; if they **continue**, look at hardware
+  (UPS Type-C PSU must be PD fast-charge into the **HAT's** Type-C, not the Pi's;
+  pogo-pin seating; HAT power switch; `PSU_MAX_CURRENT=5000` in the Pi 5 EEPROM).
+- **Charge-path stall:** the daemon logs when VBUS shows ~15 V PD but almost no
+  VBUS current while the pack is discharging. That's "on battery despite a wall
+  brick" — fix the PSU/cable before blaming the OS.
 - Source of truth: Waveshare `UPS_HAT_E.zip` → `ups.py`.

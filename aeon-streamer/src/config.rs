@@ -85,6 +85,21 @@ pub struct Capture {
     /// both run 48 kHz stereo).
     pub audio_rate: u32,
     pub audio_channels: u32,
+
+    /// Pi-camera encode width — independent of HDMI/Cam-Link `[output].width`.
+    /// Snapped to even dims; common presets are 1280 (720p) and 1920 (1080p).
+    /// Default 1280: software libx264 on Pi 5 sustains ~24–30 fps at 720p;
+    /// 1080p is selectable but costs more CPU.
+    pub camera_width: u32,
+    /// Pi-camera encode height (720 or 1080 for the usual presets).
+    pub camera_height: u32,
+    /// Pi-camera target fps — independent of HDMI/Cam-Link `[output].fps`.
+    /// Default 24. Clamped 1..=60 at use site.
+    pub camera_fps: u32,
+    /// Intermediate pipe from `rpicam-vid` into ffmpeg: `"yuv420"` (default,
+    /// raw planar — one encode pass) or `"mjpeg"` (legacy double-encode path,
+    /// kept as a fallback if raw packing ever misbehaves on a sensor).
+    pub camera_pipe: String,
 }
 
 impl Default for Capture {
@@ -98,6 +113,10 @@ impl Default for Capture {
             audio_device: String::new(),
             audio_rate: 48000,
             audio_channels: 2,
+            camera_width: 1280,
+            camera_height: 720,
+            camera_fps: 24,
+            camera_pipe: "yuv420".into(),
         }
     }
 }
@@ -143,6 +162,42 @@ impl Capture {
     /// introspection.
     pub fn swaps_dims(&self) -> bool {
         matches!(self.rotation % 360, 90 | 270)
+    }
+
+    /// Even camera encode geometry. Known UI presets snap cleanly to
+    /// 1280×720 / 1920×1080; other even sizes pass through for power users.
+    pub fn camera_dims(&self) -> (u32, u32) {
+        let w = self.camera_width.max(160).min(1920) & !1;
+        let h = self.camera_height.max(120).min(1080) & !1;
+        if w >= 1800 && h >= 1000 {
+            return (1920, 1080);
+        }
+        if (1200..=1400).contains(&w) && (680..=800).contains(&h) {
+            return (1280, 720);
+        }
+        (w, h)
+    }
+
+    /// Camera-only target fps (does not touch HDMI / Cam Link `output.fps`).
+    pub fn camera_target_fps(&self) -> u32 {
+        let f = if self.camera_fps == 0 { 24 } else { self.camera_fps };
+        f.clamp(1, 60)
+    }
+
+    /// True when the camera pipe is the raw YUV path (default).
+    pub fn camera_uses_yuv(&self) -> bool {
+        !self.camera_pipe.eq_ignore_ascii_case("mjpeg")
+    }
+
+    /// Suggested libx264 bitrate (kbps) for the camera geometry.
+    pub fn camera_bitrate_kbps(&self, fallback: u32) -> u32 {
+        let (w, h) = self.camera_dims();
+        let pixels = w.saturating_mul(h);
+        if pixels <= 1280 * 720 {
+            fallback.min(4000).max(2000)
+        } else {
+            fallback.max(4000)
+        }
     }
 }
 

@@ -8,37 +8,25 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Persona {
-    /// Generic boot keyboard + boot mouse. Universally accepted, no fancy
-    /// features. Safe default.
+    /// Generic hub / composite keyboard+mouse. Identity rotates each connect.
     GenericComposite,
 
-    /// Boot keyboard + boot mouse + consumer page, advertised as a
-    /// Logitech Unifying Receiver. Lets media keys + extra mouse buttons
-    /// route through OS-side Logitech driver paths when present.
+    /// Logitech MX-class keyboard + mouse. Rotating Logitech VID/PID/serial
+    /// (plain HID PIDs only — never Unifying 0xc52b).
     LogitechMx,
 
-    /// Apple Magic Keyboard + Magic Trackpad (multi-touch) descriptors.
-    /// macOS routes Apple-VID multi-touch devices through its gesture
-    /// engine — this is the only path to programmatic 3/4-finger swipes.
-    /// EXPERIMENTAL — requires hardware-in-the-loop validation.
-    /// Power-unstable on Mac USB-C due to AppleUSBMultitouch driver
-    /// chatter (see apple-magic-stable for the practical alternative).
+    /// Experimental Apple Magic Trackpad multi-touch path (Apple VID + MT
+    /// descriptor). Can load AppleUSBMultitouch; prefer apple-magic-stable
+    /// for daily Mac use.
     AppleMagic,
 
-    /// Apple-themed sub-interface labels, but the device's USB VID:PID
-    /// is generic (Linux Foundation composite) so macOS uses generic
-    /// HID handling instead of loading AppleUSBMultitouch. Stable under
-    /// Mac USB-C power. Recommended for everyday use; loses the
-    /// programmatic Apple-VID gesture path (use the experimental
-    /// `apple-magic` persona on a robust power supply for that).
+    /// Apple Magic Keyboard + Magic Mouse (relative). Rotating Apple
+    /// keyboard/mouse PIDs (not Trackpad 0x0265). Recommended for macOS.
     AppleMagicStable,
 
-    /// Generic composite with an ABSOLUTE pointer instead of a relative
-    /// mouse: keyboard + absolute pointing device (16-bit X/Y, logical
-    /// 0..32767) + consumer. Lets the UI place the remote cursor exactly
-    /// where the user points over the video, instead of accumulating
-    /// relative deltas. Linux/Windows honor absolute USB pointers natively;
-    /// macOS is quirkier (prefer generic-composite there).
+    /// Absolute pointer themed as a **Wacom tablet** (rotating Wacom
+    /// VID/PID/serial). Report path is absolute HID (0..32767) via /move_abs.
+    /// Best for agent click_at precision.
     GenericAbsolute,
 }
 

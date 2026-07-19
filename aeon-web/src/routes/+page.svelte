@@ -1049,9 +1049,17 @@
     source_switching = true;
     source_message = `→ ${sourceLabel(src)}…`;
     try {
-      await api.setStreamerSource(src);
+      const r = await api.setStreamerSource(src) as { ok?: boolean; uvc_released?: boolean };
       if (streamerCfg) streamerCfg = { ...streamerCfg, source: src };
+      // Console view wins the single-consumer camera: webcam is auto-disabled
+      // when it was holding the same source (see streamer_config release_uvc).
+      if (r?.uvc_released && webcamCfg) {
+        webcamCfg = { ...webcamCfg, enabled: false };
+        webcam_message = 'webcam auto-off (same cam)';
+        setTimeout(() => (webcam_message = ''), 4000);
+      }
       await refreshState();
+      await loadPickers();
       source_message = `view: ${sourceLabel(src)}`;
       setTimeout(() => (source_message = ''), 3000);
     } catch (e: any) {
@@ -1060,6 +1068,96 @@
     } finally {
       source_switching = false;
     }
+  }
+
+  // ── Pi-camera encode (resolution + fps independent of HDMI/Cam-Link) ──
+  let camera_switching = false;
+  let camera_message = '';
+  const cameraModeOf = (cfg: api.StreamerConfig | null) =>
+    cfg?.camera_mode
+    ?? ((cfg?.camera_height ?? 720) >= 1000 || (cfg?.camera_width ?? 1280) >= 1800 ? '1080p' : '720p');
+
+  async function onCameraModeChange(ev: Event) {
+    const mode = (ev.target as HTMLSelectElement).value;
+    if (!streamerCfg || camera_switching) return;
+    if (mode === cameraModeOf(streamerCfg)) return;
+    camera_switching = true;
+    camera_message = `→ cam ${mode}…`;
+    try {
+      await api.setCameraEncode({ camera_mode: mode });
+      await loadPickers();
+      await refreshState();
+      camera_message = `cam ${mode}`;
+      setTimeout(() => (camera_message = ''), 3000);
+    } catch {
+      camera_message = 'error';
+      setTimeout(() => (camera_message = ''), 3000);
+    } finally {
+      camera_switching = false;
+    }
+  }
+
+  async function onCameraFpsChange(ev: Event) {
+    const v = Number((ev.target as HTMLSelectElement).value);
+    if (!streamerCfg || camera_switching || Number.isNaN(v)) return;
+    if (v === (streamerCfg.camera_fps ?? 24)) return;
+    camera_switching = true;
+    camera_message = `→ cam ${v} fps…`;
+    try {
+      await api.setCameraEncode({ camera_fps: v });
+      await loadPickers();
+      await refreshState();
+      camera_message = `cam ${v} fps`;
+      setTimeout(() => (camera_message = ''), 3000);
+    } catch {
+      camera_message = 'error';
+      setTimeout(() => (camera_message = ''), 3000);
+    } finally {
+      camera_switching = false;
+    }
+  }
+
+  // ── Live audio passthrough (BrainCraft mic / first non-HDMI capture) ──
+  let listenAudio = false;
+  let audioVol: api.AudioVolume | null = null;
+  let audioBusy = false;
+  let liveAudioEl: HTMLAudioElement | null = null;
+
+  async function refreshAudioVol() {
+    try {
+      audioVol = await api.getAudioVolume();
+    } catch {
+      audioVol = null;
+    }
+  }
+
+  async function toggleListenAudio() {
+    listenAudio = !listenAudio;
+    if (listenAudio) {
+      await refreshAudioVol();
+      // Kick the element after the attribute binds.
+      setTimeout(() => {
+        liveAudioEl?.play().catch(() => {
+          listenAudio = false;
+        });
+      }, 50);
+    } else if (liveAudioEl) {
+      liveAudioEl.pause();
+      liveAudioEl.removeAttribute('src');
+      liveAudioEl.load();
+    }
+  }
+
+  async function onLiveVol(kind: 'playback' | 'capture', ev: Event) {
+    const v = Number((ev.target as HTMLInputElement).value);
+    if (Number.isNaN(v)) return;
+    audioBusy = true;
+    try {
+      audioVol = await api.setAudioVolume(
+        kind === 'playback' ? { playback: v } : { capture: v },
+      );
+    } catch { /* best-effort */ }
+    finally { audioBusy = false; }
   }
 
   async function onWebcamChange(ev: Event) {
@@ -1141,6 +1239,37 @@
           </label>
           {#if source_message}
             <span class="hidden md:inline text-xs font-mono text-zinc-500">{source_message}</span>
+          {/if}
+        {/if}
+        {#if streamerCfg && streamerCfg.source === 'camera-csi'}
+          <!-- Pi-camera encode knobs (also on System → Stream tuning). -->
+          <label class="inline-flex items-center gap-1 text-xs font-mono text-zinc-400"
+                 title="Pi camera resolution — full controls under System → Stream tuning">
+            cam
+            <select value={cameraModeOf(streamerCfg)} on:change={onCameraModeChange}
+                    disabled={camera_switching || source_switching}
+                    class="bg-ink-800 border border-steel-700 rounded px-1.5 py-0.5 text-cursed-300
+                           focus:outline-none focus:ring-1 focus:ring-cursed-500
+                           disabled:opacity-50 disabled:cursor-wait">
+              {#each (streamerCfg.camera_modes ?? ['720p', '1080p']) as m}
+                <option value={m}>{m}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="inline-flex items-center gap-1 text-xs font-mono text-zinc-400"
+                 title="Pi camera framerate — independent of HDMI capture card">
+            <select value={streamerCfg.camera_fps ?? 24} on:change={onCameraFpsChange}
+                    disabled={camera_switching || source_switching}
+                    class="bg-ink-800 border border-steel-700 rounded px-1.5 py-0.5 text-cursed-300
+                           focus:outline-none focus:ring-1 focus:ring-cursed-500
+                           disabled:opacity-50 disabled:cursor-wait">
+              {#each (streamerCfg.camera_fps_choices ?? [15, 24, 30]) as f}
+                <option value={f}>{f} fps</option>
+              {/each}
+            </select>
+          </label>
+          {#if camera_message}
+            <span class="inline text-xs font-mono text-zinc-500">{camera_message}</span>
           {/if}
         {/if}
         {#if streamerCfg}
@@ -1271,6 +1400,36 @@
     <div class="hidden lg:flex items-center flex-wrap gap-2 px-5 pb-3">
       <!-- Group A -->
       <div class="flex items-center gap-2 pr-3">
+        <button class="btn text-xs inline-flex items-center gap-1.5 {listenAudio ? 'border-cursed-500/50 text-cursed-200' : ''}"
+                on:click={toggleListenAudio}
+                title="Play live capture audio in this browser: HDMI target sound when tc358743-audio is loaded, otherwise USB/BrainCraft mic. On the target OS, set Sound output to this HDMI display.">
+          {listenAudio ? '🔇 mute audio' : '🔊 listen'}
+        </button>
+        {#if listenAudio}
+          <audio bind:this={liveAudioEl} src={api.audioStreamUrl()} autoplay controls
+                 class="h-7 w-36 opacity-90"
+                 title="Live audio passthrough (MP3) — HDMI target or mic"></audio>
+        {/if}
+        {#if audioVol?.present && (listenAudio || audioVol.playback)}
+          <label class="hidden xl:flex items-center gap-1 text-[10px] font-mono text-zinc-400"
+                 title="Speaker / headphone level (BrainCraft WM8960)">
+            spk
+            <input type="range" min="0" max="100" step="1"
+                   value={audioVol.playback?.percent ?? 50}
+                   on:change={(e) => onLiveVol('playback', e)}
+                   disabled={audioBusy}
+                   class="w-16 accent-cursed-500" />
+          </label>
+          <label class="hidden xl:flex items-center gap-1 text-[10px] font-mono text-zinc-400"
+                 title="Mic capture level">
+            mic
+            <input type="range" min="0" max="100" step="1"
+                   value={audioVol.capture?.percent ?? 50}
+                   on:change={(e) => onLiveVol('capture', e)}
+                   disabled={audioBusy}
+                   class="w-16 accent-cursed-500" />
+          </label>
+        {/if}
         {#if captured}
           <button class="btn-primary text-xs motion-safe:animate-ember inline-flex items-center gap-1.5" on:click={exitCapture}
                   title="Release input capture (Ctrl+Alt+Esc)">

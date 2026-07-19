@@ -43,7 +43,7 @@ pub struct BraincraftConfig {
     /// Off by default. The daemon idles (writes {"present":false}) until on.
     #[serde(default)]
     pub enabled: bool,
-    /// Active mode: "ai" (interface), "viewfinder" (camera), or "voice".
+    /// Active mode: ai | viewfinder | analyze | voice | volume.
     #[serde(default = "default_mode")]
     pub mode: String,
     /// Draw the live vision.json detection boxes over the viewfinder.
@@ -306,8 +306,10 @@ pub async fn put_config(State(_s): State<AppState>, Json(p): Json<ConfigPatch>) 
     let v = tokio::task::spawn_blocking(move || -> Value {
         // Validate the constrained fields up front.
         if let Some(m) = &p.mode {
-            if !["ai", "viewfinder", "voice"].contains(&m.as_str()) {
-                return json!({"ok": false, "err": format!("invalid mode: {m}")});
+            if !["ai", "viewfinder", "analyze", "voice", "volume"].contains(&m.as_str()) {
+                return json!({"ok": false, "err": format!(
+                    "invalid mode: {m} (expected ai|viewfinder|analyze|voice|volume)"
+                )});
             }
         }
         if let Some(m) = &p.backend_mode {
@@ -317,6 +319,7 @@ pub async fn put_config(State(_s): State<AppState>, Json(p): Json<ConfigPatch>) 
         }
         let mut cfg = read_config();
         if let Some(v) = p.enabled { cfg.enabled = v; }
+        let mode_cmd = p.mode.clone();
         if let Some(v) = p.mode { cfg.mode = v; }
         if let Some(v) = p.overlay { cfg.overlay = v; }
         if let Some(v) = p.audio_device { cfg.audio.device = v; }
@@ -328,7 +331,15 @@ pub async fn put_config(State(_s): State<AppState>, Json(p): Json<ConfigPatch>) 
         if let Some(v) = p.tts_url { cfg.hosted.tts_url = v; }
         if let Some(v) = p.asr_url { cfg.hosted.asr_url = v; }
         match write_config(&cfg) {
-            Ok(()) => json!({"ok": true, "config": cfg}),
+            Ok(()) => {
+                // Also poke the command channel so a live daemon picks up a
+                // mode change immediately (it re-reads toml, but mode was
+                // historically only applied at startup / button press).
+                if let Some(m) = mode_cmd {
+                    let _ = push_cmd(&format!("mode:{m}"));
+                }
+                json!({"ok": true, "config": cfg})
+            }
             Err(e) => json!({"ok": false, "err": format!("write {CONFIG_TOML}: {e}")}),
         }
     })

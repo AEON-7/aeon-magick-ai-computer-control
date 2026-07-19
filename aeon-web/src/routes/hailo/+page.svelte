@@ -177,9 +177,37 @@
     : 0;
 
   const KIND_LABEL: Record<string, string> = {
-    llm: 'LLM', vlm: 'Vision-LLM', stt: 'Speech-to-text', vision: 'Vision', ocr: 'OCR',
+    llm: 'LLM',
+    vlm: 'Vision-LLM',
+    stt: 'Speech-to-text',
+    tts: 'Text-to-speech',
+    vision: 'Vision',
+    ocr: 'OCR',
   };
   const kindLabel = (k: string) => KIND_LABEL[k] ?? k;
+
+  // Kind filter for the model library (TTS lives here too — CPU Kokoro until
+  // Hailo ships a TTS HEF).
+  type KindFilter = 'all' | 'llm' | 'vlm' | 'stt' | 'tts' | 'vision' | 'ocr';
+  let kindFilter: KindFilter = 'all';
+  const KIND_FILTERS: { id: KindFilter; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'llm', label: 'LLM' },
+    { id: 'vlm', label: 'VLM' },
+    { id: 'stt', label: 'STT' },
+    { id: 'tts', label: 'TTS' },
+    { id: 'vision', label: 'Vision' },
+    { id: 'ocr', label: 'OCR' },
+  ];
+  $: filteredModels = kindFilter === 'all'
+    ? mergedModels
+    : mergedModels.filter((m) => m.kind === kindFilter);
+  $: kindCounts = KIND_FILTERS.reduce((acc, f) => {
+    acc[f.id] = f.id === 'all'
+      ? mergedModels.length
+      : mergedModels.filter((m) => m.kind === f.id).length;
+    return acc;
+  }, {} as Record<string, number>);
 
   // Per-card consumer line: look up consumers attached to the loaded model.
   // The contract puts consumers at the top level; we also accept a model
@@ -350,16 +378,45 @@
 
       <!-- MODEL LIBRARY -->
       <div class="space-y-3">
-        <h2 class="font-mono text-sm text-ink-300 tracking-wide">Model library</h2>
-        {#if mergedModels.length === 0}
-          <p class="text-xs text-ink-500">No models in the library yet.</p>
+        <div class="flex flex-wrap items-end justify-between gap-2">
+          <h2 class="font-mono text-sm text-ink-300 tracking-wide">Model library</h2>
+          <p class="text-[10px] text-ink-600 font-mono max-w-xs text-right leading-snug">
+            TTS runs on the Pi CPU (Kokoro). Hailo-10H GenAI ships STT/LLM/VLM HEFs — not TTS yet.
+          </p>
+        </div>
+
+        <!-- Kind filters (TTS / STT / …) -->
+        <div class="flex flex-wrap gap-1.5">
+          {#each KIND_FILTERS as f}
+            {@const n = kindCounts[f.id] ?? 0}
+            {#if f.id === 'all' || n > 0}
+              <button type="button"
+                      class="rounded-full border px-2.5 py-1 text-[11px] font-mono transition
+                             {kindFilter === f.id
+                               ? 'border-orange-500/50 bg-orange-500/15 text-orange-200'
+                               : 'border-steel-700 text-ink-400 hover:border-ink-600'}"
+                      on:click={() => (kindFilter = f.id)}>
+                {f.label}
+                <span class="text-ink-600 ml-1">{n}</span>
+              </button>
+            {/if}
+          {/each}
+        </div>
+
+        {#if filteredModels.length === 0}
+          <p class="text-xs text-ink-500">
+            {mergedModels.length === 0
+              ? 'No models in the library yet.'
+              : `No ${kindFilter.toUpperCase()} models in the library.`}
+          </p>
         {:else}
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {#each mergedModels as m (m.id)}
+            {#each filteredModels as m (m.id)}
               {@const isLoaded = m.state === 'loaded'}
               {@const isDeployed = m.state === 'deployed'}
               {@const isBusy = m.state === 'downloading' || deployingId === m.id || unloadingId === m.id}
               {@const blocked = !m.fits && m.state === 'available'}
+              {@const isCpu = m.runtime === 'cpu' || m.kind === 'tts'}
               <div class="rounded-sm border bg-ink-900 p-3.5 flex flex-col gap-2 transition
                           {isLoaded ? 'border-live-500/40' : 'border-steel-700'}
                           {blocked ? 'opacity-50' : ''}">
@@ -367,7 +424,9 @@
                   <div class="min-w-0">
                     <div class="font-mono text-sm text-orange-200 truncate">{m.name}</div>
                     <div class="text-[11px] text-ink-500 mt-0.5">
-                      {kindLabel(m.kind)}{#if m.params} · {m.params}{/if}{#if m.quant} · {m.quant}{/if}
+                      {kindLabel(m.kind)}
+                      {#if isCpu}<span class="text-violet-400/90"> · CPU</span>{:else}<span class="text-orange-400/80"> · NPU</span>{/if}
+                      {#if m.params} · {m.params}{/if}{#if m.quant} · {m.quant}{/if}
                     </div>
                   </div>
                   <span class="pill text-[10px] shrink-0
@@ -407,8 +466,12 @@
                                    disabled:opacity-40 disabled:cursor-not-allowed"
                             on:click={() => deploy(m.id)}
                             disabled={blocked || !!deployingId}
-                            title={blocked ? 'Not enough free NPU memory — unload another model first' : 'Download + load onto the NPU'}>
-                      Deploy
+                            title={blocked
+                              ? 'Not enough free NPU memory — unload another model first'
+                              : isCpu
+                                ? 'Install on-device (CPU voice stack / sherpa-onnx)'
+                                : 'Download + load onto the NPU'}>
+                      {isCpu ? 'Install' : 'Deploy'}
                     </button>
                   {/if}
                 </div>

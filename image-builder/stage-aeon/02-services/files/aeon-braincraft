@@ -8,19 +8,16 @@ iteration, so a config edit (mode flip, backend switch, enable/disable) takes
 effect without a restart. Status is published atomically to
 /run/aeon/braincraft.json for the supervisor's braincraft relay + web tile.
 
-Three button-cyclable modes (a button / joystick-press cycles ai→viewfinder→voice):
-  * ai         — the idle interface: renders backend mode/persona, a listening/
-                 speaking indicator, and the last response (wrapped) on the TFT.
-  * viewfinder — pulls a frame from aeon-streamer's unix socket (the SAME tap
-                 aeon-vision uses, so we never open a 2nd handle on the capture
-                 device), downscales to 240x240, pushes to the TFT, and — when
-                 overlay=true — draws /run/aeon/vision.json detection boxes.
-                 Button A = photo, Button B = toggle video record.
-  * voice      — push-to-talk on Button A: mic → ASR → LLM → TTS → speaker.
-                 backend.mode "local"  = sherpa-onnx Whisper ASR + Kokoro TTS +
-                 a local LLM endpoint (127.0.0.1:8000, OpenAI-compatible / hailo-ollama).
-                 backend.mode "hosted" = ASR/LLM/TTS POSTed to a DGX Spark, so
-                 the Orb can "make calls" with different personas.
+Full on-HAT menu (joystick + single button — Adafruit BrainCraft pinout):
+  * MENU (joystick press) opens a mode list; up/down navigate, button selects.
+  * ai         — idle face: backend / persona / last reply on the TFT.
+  * viewfinder — live camera from streamer snapshot socket (no 2nd CSI open).
+                 Button = photo · left/right = start/stop record · up = overlay.
+  * analyze    — viewfinder + vision/OCR boxes always on (AI video feed analysis).
+  * voice      — push-to-talk on Button: mic → ASR → LLM → TTS → speaker.
+  * volume     — speaker + mic levels via amixer; up/down speaker, left/right mic.
+  GPIO (BCM): button=17, joy select=16, left=22, up=23, right=24, down=27.
+  Uses libgpiod v2 (`request_lines`); v1 API is gone on Bookworm/Trixie.
 
 Self-idles (writes {"present": false} and sleeps) when braincraft is disabled in
 the config, the ST7789/SPI display libs can't import, or there's no SPI device —
@@ -79,12 +76,31 @@ def load_cfg():
     backend = cfg.get("backend", {}) if isinstance(cfg.get("backend"), dict) else {}
     hosted = cfg.get("hosted", {}) if isinstance(cfg.get("hosted"), dict) else {}
     mode = os.environ.get("AEON_BRAINCRAFT_MODE", cfg.get("mode", "ai"))
-    if mode not in ("ai", "viewfinder", "voice"):
+    MODES = ("ai", "viewfinder", "analyze", "voice", "volume")
+    if mode not in MODES:
         mode = "ai"
+    # Whole-panel ST7789 rotation (numpy.rot90 CCW). 270 = 90° left of the
+    # old "button edge down" 180° mount — menus, AI face, volume, and camera
+    # all share this orientation when you hold the HAT that way.
+    try:
+        disp_rot = int(cfg.get("display_rotation", 270))
+    except (TypeError, ValueError):
+        disp_rot = 270
+    if disp_rot not in (0, 90, 180, 270):
+        disp_rot = 270
+    # Extra content-only rotate for camera frames (usually 0 — panel handles it).
+    try:
+        vf_rot = int(cfg.get("viewfinder_rotate", 0))
+    except (TypeError, ValueError):
+        vf_rot = 0
+    if vf_rot not in (0, 90, 180, 270):
+        vf_rot = 0
     return {
         "enabled": bool(cfg.get("enabled", False)),
         "mode": mode,
         "overlay": bool(cfg.get("overlay", True)),
+        "display_rotation": disp_rot,
+        "viewfinder_rotate": vf_rot,
         "audio_device": str(audio.get("device", "auto")),
         "tts": str(audio.get("tts", "kokoro")),
         "asr": str(audio.get("asr", "whisper")),
@@ -95,7 +111,25 @@ def load_cfg():
         "llm_url": str(hosted.get("llm_url", "http://192.168.1.116:8000/v1")),
         "tts_url": str(hosted.get("tts_url", "http://192.168.1.116:8002")),
         "asr_url": str(hosted.get("asr_url", "http://192.168.1.116:8001")),
+        "modes": list(MODES),
     }
+
+
+def persist_mode(mode):
+    """Write mode back into braincraft.toml so web + buttons stay in sync."""
+    try:
+        import re
+        raw = open(BRAINCRAFT_TOML).read() if os.path.isfile(BRAINCRAFT_TOML) else ""
+        if re.search(r"(?m)^mode\s*=", raw):
+            raw2 = re.sub(r"(?m)^mode\s*=\s*.*$", f'mode = "{mode}"', raw, count=1)
+        else:
+            raw2 = f'mode = "{mode}"\n' + raw
+        tmp = BRAINCRAFT_TOML + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(raw2)
+        os.replace(tmp, BRAINCRAFT_TOML)
+    except Exception as e:
+        sys.stderr.write(f"aeon-braincraft: persist mode failed: {e}\n")
 
 
 def write_json(obj):
@@ -202,81 +236,109 @@ def detect_gpiochip():
     return "gpiochip4" if os.path.exists("/dev/gpiochip4") else "gpiochip0"
 
 
-def probe_audio(device):
-    """Resolve the ALSA playback+capture device for the configured preference.
-
-    `device=auto` → prefer USB audio: the WM8960 I2S codec is UNVERIFIED on Pi 5
-    / RP1, so a plug-in USB sound card is the supported default. We only attempt
-    the WM8960 when it's named explicitly. Returns (name, playback, capture).
-    """
-    def cards():
-        # /proc/asound/cards: lines like " 1 [Device  ]: USB-Audio - ...".
-        out = []
-        try:
-            with open("/proc/asound/cards") as f:
-                txt = f.read()
-        except OSError:
-            return out
-        for ln in txt.splitlines():
-            ln = ln.strip()
-            if not ln or ln[0].isalpha() is False and ":" not in ln:
-                pass
-            # index in column 0
-            head = ln.split()
-            if head and head[0].isdigit():
-                idx = head[0]
-                lower = ln.lower()
-                out.append((idx, lower, ln))
+def _alsa_cards():
+    """Parse /proc/asound/cards → [(idx, id, lower_desc), ...]. Skip pure HDMI."""
+    out = []
+    try:
+        with open("/proc/asound/cards") as f:
+            txt = f.read()
+    except OSError:
         return out
+    for ln in txt.splitlines():
+        head = ln.strip().split()
+        if not (head and head[0].isdigit()):
+            continue
+        idx = head[0]
+        # "0 [wm8960soundcard]: simple-card - wm8960-soundcard"
+        cid = ""
+        if "[" in ln and "]" in ln:
+            cid = ln.split("[", 1)[1].split("]", 1)[0].strip()
+        lower = ln.lower()
+        out.append((idx, cid, lower))
+    return out
 
-    def dev_ok(alsa_dev):
-        # Best-effort: aplay/arecord -l list the hw nodes; if the tools are
-        # absent we optimistically assume the named card is usable.
-        return True
 
-    cards_list = cards()
-    chosen = None
-    if device == "auto":
-        # Prefer a USB-Audio card.
-        for idx, lower, _raw in cards_list:
-            if "usb" in lower:
-                chosen = (f"hw:{idx}", "usb")
-                break
-        # Then a WM8960 if it happens to be present and nothing else is — but
-        # do NOT silently trust it as the default per the support note above.
-        if chosen is None:
-            for idx, lower, _raw in cards_list:
-                if "wm8960" in lower:
-                    chosen = (f"hw:{idx}", "wm8960")
-                    break
-        if chosen is None and cards_list:
-            idx = cards_list[0][0]
-            chosen = (f"hw:{idx}", "default")
-        if chosen is None:
-            return ("default", False, False)
-        name, _kind = chosen
-    elif device == "usb":
-        name = None
-        for idx, lower, _raw in cards_list:
-            if "usb" in lower:
-                name = f"hw:{idx}"
-                break
-        if name is None:
-            return ("usb", False, False)
-    elif device == "wm8960":
-        name = None
-        for idx, lower, _raw in cards_list:
-            if "wm8960" in lower:
-                name = f"hw:{idx}"
-                break
-        if name is None:
+def _plughw(card_id_or_idx):
+    """plughw by CARD id when possible — survives renumbering + rate/channel convert."""
+    s = str(card_id_or_idx)
+    if s.isdigit():
+        return f"plughw:{s},0"
+    return f"plughw:CARD={s},DEV=0"
+
+
+def probe_audio(device):
+    """Resolve ALSA playback+capture for the configured preference.
+
+    Returns (alsa_device, playback_ok, capture_ok).
+
+    Mapping rules (BrainCraft Orb):
+      * Prefer the WM8960 by *name* (`wm8960soundcard`) via `plughw:CARD=…`
+        — never bare `hw:N` (mono/16 kHz ASR opens fail; index can drift).
+      * Never default to vc4-hdmi (playback-only, no mic).
+      * `device=auto` → wm8960 if present, else first USB, else `aeon`/`default`.
+      * `device=wm8960|usb|aeon` or a literal ALSA string.
+    """
+    cards_list = _alsa_cards()
+
+    def find_id(pred):
+        for idx, cid, lower in cards_list:
+            if pred(idx, cid, lower):
+                return cid or idx
+        return None
+
+    def is_hdmi(_i, _c, lower):
+        return "hdmi" in lower or "vc4" in lower
+
+    name = None
+    kind = "none"
+    d = (device or "auto").strip().lower()
+
+    if d in ("auto", "wm8960", "aeon", "braincraft"):
+        cid = find_id(lambda i, c, lo: "wm8960" in lo or "wm8960" in (c or "").lower())
+        if cid is not None:
+            # Prefer the named PCM from /etc/asound.conf when present.
+            if os.path.exists("/etc/asound.conf") and d in ("auto", "aeon", "braincraft"):
+                name, kind = "aeon", "wm8960"
+            else:
+                name, kind = _plughw(cid), "wm8960"
+        elif d in ("wm8960", "braincraft"):
             return ("wm8960", False, False)
+        # auto with no wm8960: fall through to USB / default
+        if name is None and d == "auto":
+            cid = find_id(lambda i, c, lo: "usb" in lo and not is_hdmi(i, c, lo))
+            if cid is not None:
+                name, kind = _plughw(cid), "usb"
+    elif d == "usb":
+        cid = find_id(lambda i, c, lo: "usb" in lo and not is_hdmi(i, c, lo))
+        if cid is None:
+            return ("usb", False, False)
+        name, kind = _plughw(cid), "usb"
     else:
-        # Treat as a literal ALSA device name.
-        name = device
+        # Literal ALSA device (plughw:…, hw:…, aeon, default, …).
+        name, kind = device, "literal"
 
-    playback = dev_ok(name)
-    capture = dev_ok(name)
+    if name is None:
+        # Last resort: first non-HDMI card, else default.
+        cid = find_id(lambda i, c, lo: not is_hdmi(i, c, lo))
+        if cid is not None:
+            name, kind = _plughw(cid), "fallback"
+        else:
+            name, kind = "default", "default"
+
+    # Playback exists if card is non-HDMI; capture only if card has a capture PCM.
+    playback = kind != "none"
+    capture = False
+    try:
+        with open("/proc/asound/pcm") as f:
+            pcm = f.read().lower()
+        # lines like "00-00: ... : playback 1 : capture 1"
+        if "wm8960" in (name or "").lower() or kind == "wm8960":
+            capture = "capture" in pcm and "wm8960" in pcm
+        else:
+            capture = "capture" in pcm
+    except OSError:
+        capture = playback
+
     return (name, playback, capture)
 
 
@@ -301,11 +363,20 @@ def http_reachable(url):
 
 # ── frame grab (mirrors aeon-vision.grab_frame) ──────────────────────────────
 def grab_frame():
-    """Pull one JPEG from the streamer's unix socket. Returns bytes or None.
+    """Pull one JPEG from the streamer. Returns bytes or None.
 
-    Identical tap to aeon-vision: hits /snapshot on /run/aeon/streamer.sock so we
-    never fight the single-consumer capture device for a second open.
+    Prefer the atomic snapshot file (always readable, no socket perms issues),
+    then fall back to the streamer's unix-socket /snapshot — same single-
+    consumer-safe tap as aeon-vision (never opens the CSI device).
     """
+    snap_path = "/run/aeon/snapshots/live.jpg"
+    try:
+        with open(snap_path, "rb") as f:
+            data = f.read()
+        if len(data) > 3 and data[0] == 0xFF and data[1] == 0xD8:
+            return data
+    except OSError:
+        pass
     try:
         out = subprocess.run(
             ["curl", "-s", "--max-time", "4", "--unix-socket", STREAMER_SOCK,
@@ -342,9 +413,13 @@ class Display:
     W = 240
     H = 240
 
-    def __init__(self):
+    def __init__(self, rotation=270):
+        """rotation: ST7789 degrees (0/90/180/270). Library applies numpy.rot90
+        (counter-clockwise). Default 270 = 90° left of the old button-edge-down
+        180° layout so the whole UI matches a side-held HAT."""
         self.ok = False
         self.driver = "st7789"
+        self.rotation = int(rotation) if int(rotation) in (0, 90, 180, 270) else 270
         self._disp = None
         self._Image = None
         self._ImageDraw = None
@@ -355,11 +430,14 @@ class Display:
             self._Image = Image
             self._ImageDraw = ImageDraw
             self._ImageFont = ImageFont
-            # BrainCraft HAT wiring: SPI0, CS0, DC=GPIO25, BL=GPIO22, no reset.
-            # rotation 180 puts the image upright with the HAT's button edge down.
+            # BrainCraft HAT wiring (Adafruit pinout):
+            #   SPI0 CE0 · DC=GPIO25 · backlight=GPIO26 · no reset pin
+            # ⚠ backlight must be 26 — NOT 22. GPIO 22 is joystick LEFT; claiming
+            #   it as BL made request_lines for the joystick fail with EBUSY and
+            #   left buttons.ok=false forever.
             self._disp = st7789.ST7789(
-                height=240, width=240, rotation=180,
-                port=0, cs=0, dc=25, backlight=22,
+                height=240, width=240, rotation=self.rotation,
+                port=0, cs=0, dc=25, backlight=26,
                 spi_speed_hz=60 * 1000 * 1000,
             )
             try:
@@ -367,6 +445,7 @@ class Display:
             except Exception:
                 pass
             self.ok = True
+            sys.stderr.write(f"aeon-braincraft: display rotation={self.rotation}\n")
         except Exception as e:
             sys.stderr.write(f"aeon-braincraft: display init failed: {e}\n")
             self.ok = False
@@ -474,27 +553,66 @@ class Display:
             y += 17
         self.show(img)
 
-    def render_frame(self, jpeg, detections, overlay):
+    @staticmethod
+    def _map_box(x, y, w, h, deg, panel_w, panel_h):
+        """Map a unit-square box through the same CCW rotation as the frame."""
+        deg = deg % 360
+        if deg == 0:
+            nx, ny, nw, nh = x, y, w, h
+        elif deg == 90:
+            # (px,py) → (py, 1-px); box → (y, 1-x-w, h, w)
+            nx, ny, nw, nh = y, 1.0 - x - w, h, w
+        elif deg == 180:
+            nx, ny, nw, nh = 1.0 - x - w, 1.0 - y - h, w, h
+        elif deg == 270:
+            # (px,py) → (1-py, px); box → (1-y-h, x, h, w)
+            nx, ny, nw, nh = 1.0 - y - h, x, h, w
+        else:
+            nx, ny, nw, nh = x, y, w, h
+        return (nx * panel_w, ny * panel_h, nw * panel_w, nh * panel_h)
+
+    def _prepare_viewfinder(self, jpeg, rotate_deg=90):
+        """Decode stream JPEG, rotate CCW by rotate_deg, letterbox into 240×240.
+
+        Default 90° left so a typical landscape stream sits upright on the HAT
+        when the camera is mounted for portrait use. Letterbox (not stretch)
+        keeps the aspect so the rotation is unambiguous.
+        """
+        import io
+        src = self._Image.open(io.BytesIO(jpeg)).convert("RGB")
+        deg = int(rotate_deg) % 360
+        if deg:
+            # PIL rotate() is counter-clockwise; expand keeps full frame.
+            src = src.rotate(deg, expand=True)
+        # Letterbox into the square panel (black bars) — no distort.
+        sw, sh = src.size
+        scale = min(self.W / sw, self.H / sh)
+        nw, nh = max(1, int(sw * scale)), max(1, int(sh * scale))
+        src = src.resize((nw, nh))
+        canvas = self._Image.new("RGB", (self.W, self.H), (0, 0, 0))
+        canvas.paste(src, ((self.W - nw) // 2, (self.H - nh) // 2))
+        return canvas
+
+    def render_frame(self, jpeg, detections, overlay, rotate_deg=90):
         """Downscale the grabbed JPEG to 240x240 and (optionally) draw boxes."""
         if not self.ok:
             return
         try:
-            import io
-            src = self._Image.open(io.BytesIO(jpeg)).convert("RGB")
+            img = self._prepare_viewfinder(jpeg, rotate_deg=rotate_deg)
         except Exception as e:
-            sys.stderr.write(f"aeon-braincraft: jpeg decode failed: {e}\n")
+            sys.stderr.write(f"aeon-braincraft: jpeg decode/rotate failed: {e}\n")
             return
-        img = src.resize((self.W, self.H))
         if overlay and detections:
             draw = self._ImageDraw.Draw(img)
             label_f = self._font(11)
             for d in detections[:60]:
                 box = d.get("box") or {}
                 try:
-                    x = float(box.get("x", 0)) * self.W
-                    y = float(box.get("y", 0)) * self.H
-                    w = float(box.get("w", 0)) * self.W
-                    h = float(box.get("h", 0)) * self.H
+                    x = float(box.get("x", 0))
+                    y = float(box.get("y", 0))
+                    w = float(box.get("w", 0))
+                    h = float(box.get("h", 0))
+                    x, y, w, h = self._map_box(x, y, w, h, rotate_deg, self.W, self.H)
                 except (TypeError, ValueError):
                     continue
                 draw.rectangle((x, y, x + w, y + h), outline=(40, 220, 90), width=2)
@@ -516,61 +634,290 @@ class Display:
             y += 18
         self.show(img)
 
+    def render_menu(self, items, cursor, title="MENU"):
+        """Scrollable mode list. `cursor` is the highlighted index."""
+        if not self.ok:
+            return
+        img = self.blank()
+        draw = self._ImageDraw.Draw(img)
+        draw.rectangle((0, 0, self.W, 28), fill=(30, 20, 50))
+        draw.text((8, 5), title, font=self._font(16), fill=(210, 180, 255))
+        y = 36
+        f = self._font(15)
+        # Show a window of items around the cursor if the list is long.
+        win = 8
+        start = max(0, min(cursor - win // 2, max(0, len(items) - win)))
+        for i, label in enumerate(items[start:start + win], start=start):
+            if i == cursor:
+                draw.rectangle((4, y - 2, self.W - 4, y + 18), fill=(70, 50, 120))
+                col = (255, 240, 255)
+                prefix = "› "
+            else:
+                col = (180, 185, 195)
+                prefix = "  "
+            draw.text((8, y), prefix + label, font=f, fill=col)
+            y += 22
+        draw.text((8, self.H - 18), "↑↓ move · btn pick · ⊙ back",
+                  font=self._font(11), fill=(120, 125, 140))
+        self.show(img)
+
+    def render_volume(self, vol):
+        """Speaker + mic bars for the on-HAT volume mode."""
+        if not self.ok:
+            return
+        img = self.blank()
+        draw = self._ImageDraw.Draw(img)
+        draw.rectangle((0, 0, self.W, 28), fill=(20, 28, 40))
+        draw.text((8, 5), "VOLUME", font=self._font(16), fill=(180, 220, 255))
+        pb = int(vol.get("playback", 50))
+        cap = int(vol.get("capture", 50))
+
+        def bar(y, label, pct, col):
+            draw.text((8, y), f"{label}  {pct}%", font=self._font(14), fill=(210, 215, 225))
+            x0, x1, by = 8, self.W - 8, y + 22
+            draw.rectangle((x0, by, x1, by + 14), outline=(90, 95, 110), width=1)
+            fill = max(1, int((x1 - x0 - 2) * pct / 100))
+            draw.rectangle((x0 + 1, by + 1, x0 + 1 + fill, by + 13), fill=col)
+
+        bar(44, "Speaker", pb, (90, 180, 255))
+        bar(100, "Mic", cap, (90, 220, 140))
+        draw.text((8, 170), "↑↓ speaker  ·  ←→ mic", font=self._font(12),
+                  fill=(140, 145, 160))
+        draw.text((8, 192), "⊙ menu", font=self._font(12), fill=(140, 145, 160))
+        self.show(img)
+
+    def render_analyze(self, jpeg, detections, caption, rotate_deg=90):
+        """Viewfinder with forced overlay + a one-line AI caption footer."""
+        if not self.ok:
+            return
+        if jpeg is not None:
+            try:
+                img = self._prepare_viewfinder(jpeg, rotate_deg=rotate_deg)
+            except Exception as e:
+                sys.stderr.write(f"aeon-braincraft: analyze frame failed: {e}\n")
+                img = self.blank()
+        else:
+            img = self.blank()
+        draw = self._ImageDraw.Draw(img)
+        if detections:
+            label_f = self._font(11)
+            for d in detections[:40]:
+                box = d.get("box") or {}
+                try:
+                    x = float(box.get("x", 0))
+                    y = float(box.get("y", 0))
+                    w = float(box.get("w", 0))
+                    h = float(box.get("h", 0))
+                    x, y, w, h = self._map_box(x, y, w, h, rotate_deg, self.W, self.H)
+                except (TypeError, ValueError):
+                    continue
+                draw.rectangle((x, y, x + w, y + h), outline=(255, 200, 40), width=2)
+                label = str(d.get("text") or d.get("label") or "")[:16]
+                if label:
+                    draw.text((x + 1, max(0, y - 12)), label, font=label_f,
+                              fill=(255, 200, 40))
+        # Footer caption strip
+        draw.rectangle((0, self.H - 36, self.W, self.H), fill=(10, 10, 16))
+        draw.text((6, self.H - 32), "ANALYZE", font=self._font(11), fill=(255, 200, 40))
+        if caption:
+            for i, ln in enumerate(self._wrap(draw, caption, self._font(12), self.W - 12)[:1]):
+                draw.text((6, self.H - 18), ln, font=self._font(12), fill=(220, 220, 230))
+        self.show(img)
+
+
+# ── volume helpers (amixer → WM8960 / any card with Capture/Speaker) ─────────
+def _amixer_pct(card, control):
+    """Best-effort read of an amixer simple-control percent."""
+    try:
+        r = subprocess.run(
+            ["amixer", "-c", str(card), "sget", control],
+            capture_output=True, text=True, timeout=2,
+        )
+        import re
+        m = re.search(r"\[(\d+)%\]", r.stdout or "")
+        return int(m.group(1)) if m else None
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _amixer_set(card, control, pct, extra=None):
+    args = ["amixer", "-c", str(card), "sset", control, f"{int(max(0, min(100, pct)))}%"]
+    if extra:
+        args.append(extra)
+    try:
+        subprocess.run(args, capture_output=True, timeout=2)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
+def volume_state():
+    """Speaker + mic percents for the first non-HDMI card with controls."""
+    try:
+        cards = open("/proc/asound/cards").read()
+    except OSError:
+        return {"playback": 50, "capture": 50, "card": None}
+    card = None
+    for ln in cards.splitlines():
+        head = ln.strip().split()
+        if not head or not head[0].isdigit():
+            continue
+        idx = head[0]
+        low = ln.lower()
+        if "hdmi" in low or "vc4" in low:
+            continue
+        card = int(idx)
+        break
+    if card is None:
+        return {"playback": 50, "capture": 50, "card": None}
+    # Prefer analog Speaker/Headphone over digital Playback for the slider.
+    pb = (_amixer_pct(card, "Speaker")
+          or _amixer_pct(card, "Headphone")
+          or _amixer_pct(card, "Playback")
+          or 50)
+    cap = _amixer_pct(card, "Capture") or 50
+    return {"playback": pb, "capture": cap, "card": card}
+
+
+def volume_nudge(kind, delta):
+    """Adjust speaker (kind='playback') or mic (kind='capture') by delta %."""
+    st = volume_state()
+    card = st.get("card")
+    if card is None:
+        return st
+    if kind == "playback":
+        # Drive Speaker + Headphone if present; open digital path fully.
+        for ctl in ("Speaker", "Headphone"):
+            cur = _amixer_pct(card, ctl)
+            if cur is not None:
+                _amixer_set(card, ctl, cur + delta)
+        for ctl in ("Playback", "PCM"):
+            if _amixer_pct(card, ctl) is not None:
+                _amixer_set(card, ctl, 100)
+        for ctl in ("Left Output Mixer PCM", "Right Output Mixer PCM"):
+            try:
+                subprocess.run(
+                    ["amixer", "-c", str(card), "sset", ctl, "on"],
+                    capture_output=True, timeout=2,
+                )
+            except (subprocess.SubprocessError, OSError):
+                pass
+    else:
+        cur = _amixer_pct(card, "Capture") or 50
+        _amixer_set(card, "Capture", cur + delta, "cap")
+        for ctl in ("Left Input Boost Mixer LINPUT1", "Right Input Boost Mixer RINPUT1"):
+            if _amixer_pct(card, ctl) is not None:
+                _amixer_set(card, ctl, 100)
+        for ctl in ("Left Input Mixer Boost", "Right Input Mixer Boost"):
+            try:
+                subprocess.run(
+                    ["amixer", "-c", str(card), "sset", ctl, "on"],
+                    capture_output=True, timeout=2,
+                )
+            except (subprocess.SubprocessError, OSError):
+                pass
+    try:
+        subprocess.run(["alsactl", "store"], capture_output=True, timeout=3)
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return volume_state()
+
 
 # ── buttons / joystick ───────────────────────────────────────────────────────
 class Buttons:
-    """Reads the BrainCraft HAT's 3 buttons (A=GPIO17, B=GPIO27, joystick-press)
-    via libgpiod. No-op (ok=False) when gpiod / the chip is unavailable."""
+    """BrainCraft HAT: 1 button + 5-way joystick via libgpiod v2.
 
-    # BrainCraft HAT: button A = BCM23, button B = BCM24, joystick select = BCM4.
-    # (Pins are stable across the 40-pin header; only the CHIP differs Pi4/Pi5.)
-    PIN_A = 23
-    PIN_B = 24
-    PIN_SEL = 4
+    Official Adafruit pinout (BCM):
+      button=17 · joy select=16 · left=22 · up=23 · right=24 · down=27
+    (GPIO 4 is the fan — do NOT use it as select.)
+    Active-low with external 10k pull-ups. No-op (ok=False) if gpiod/chip missing.
+    """
+
+    PINS = {
+        "btn": 17,   # single face button
+        "sel": 16,   # joystick press — open/close menu
+        "left": 22,
+        "up": 23,
+        "right": 24,
+        "down": 27,
+    }
 
     def __init__(self, chip_name):
         self.ok = False
         self.chip_name = chip_name
-        self._lines = {}
-        self._chip = None
-        self._prev = {"a": 1, "b": 1, "sel": 1}
+        self._req = None
+        self._prev = {k: 1 for k in self.PINS}
+        path = chip_name if chip_name.startswith("/") else f"/dev/{chip_name}"
         try:
             import gpiod
-            self._gpiod = gpiod
-            self._chip = gpiod.Chip(chip_name)
-            for key, pin in (("a", self.PIN_A), ("b", self.PIN_B), ("sel", self.PIN_SEL)):
-                try:
-                    line = self._chip.get_line(pin)
-                    line.request(consumer="aeon-braincraft",
-                                 type=gpiod.LINE_REQ_DIR_IN,
-                                 flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
-                    self._lines[key] = line
-                except Exception:
-                    # Newer libgpiod (v2) has a different API; skip the button
-                    # rather than crash. The aeon-voice installer pins a known lib.
-                    pass
-            self.ok = bool(self._lines)
+            from gpiod.line import Direction, Bias, Value
+            self._Value = Value
+            # libgpiod v2 (Bookworm/Trixie). v1 get_line/LINE_REQ_* is gone.
+            settings = gpiod.LineSettings(
+                direction=Direction.INPUT,
+                bias=Bias.PULL_UP,
+            )
+            config = {off: settings for off in self.PINS.values()}
+            self._req = gpiod.request_lines(
+                path,
+                consumer="aeon-braincraft",
+                config=config,
+            )
+            self._offsets = dict(self.PINS)  # key → offset
+            self.ok = True
+            sys.stderr.write(f"aeon-braincraft: buttons ok on {path} "
+                             f"(gpiod v2, pins {list(self.PINS.values())})\n")
         except Exception as e:
             sys.stderr.write(f"aeon-braincraft: gpiod init failed: {e}\n")
             self.ok = False
+            self._req = None
 
     def poll(self):
-        """Return the set of buttons that went LOW (pressed) since last poll.
-
-        Buttons are active-low with a pull-up, so a press reads 0. We edge-detect
-        in software (debounce-by-loop) → {'a','b','sel'} subset."""
+        """Edge-detect presses (active-low). Returns a set of key names."""
         pressed = set()
-        if not self.ok:
+        if not self.ok or self._req is None:
             return pressed
-        for key, line in self._lines.items():
+        for key, off in self._offsets.items():
             try:
-                val = line.get_value()
+                raw = self._req.get_value(off)
             except Exception:
                 continue
+            # ACTIVE (line high) = released; INACTIVE (low) = pressed.
+            if hasattr(self, "_Value"):
+                val = 1 if raw == self._Value.ACTIVE else 0
+            else:
+                val = int(raw)
             if self._prev.get(key, 1) == 1 and val == 0:
                 pressed.add(key)
             self._prev[key] = val
         return pressed
+
+
+def remap_dpad(pressed, display_rotation):
+    """Map physical joystick directions → on-screen directions.
+
+    The ST7789 `display_rotation` uses numpy.rot90 (counter-clockwise). When
+    the panel is rotated, "up" on the UI is no longer the physical up pad —
+    re-key so ↑ on the menu always means the direction toward the top of the
+    text as you hold the HAT. `btn` and `sel` are unchanged.
+    """
+    if not pressed:
+        return pressed
+    k = (int(display_rotation) // 90) % 4
+    if k == 0:
+        return pressed
+    # physical → logical for k steps of CCW content rotation
+    maps = {
+        # 90° CCW: physical left is toward screen top
+        1: {"up": "right", "right": "down", "down": "left", "left": "up"},
+        2: {"up": "down", "down": "up", "left": "right", "right": "left"},
+        # 270° CCW (default side-held): physical right is toward screen top
+        3: {"up": "left", "left": "down", "down": "right", "right": "up"},
+    }
+    m = maps.get(k, {})
+    out = set()
+    for p in pressed:
+        out.add(m.get(p, p))  # btn/sel pass through
+    return out
 
 
 # ── audio: TTS / ASR / capture ───────────────────────────────────────────────
@@ -588,12 +935,23 @@ def tts_speak(text, cfg, audio_dev):
 def _aplay(wav_path, audio_dev):
     if not os.path.isfile(wav_path):
         return
-    args = ["aplay", "-q"]
-    if audio_dev and audio_dev != "default":
-        args += ["-D", audio_dev]
-    args.append(wav_path)
+    dev = audio_dev or "aeon"
+    if dev.startswith("hw:"):
+        dev = dev.replace("hw:", "plughw:", 1)
+    args = ["aplay", "-q", "-D", dev, wav_path]
     try:
-        subprocess.run(args, capture_output=True, timeout=60)
+        r = subprocess.run(args, capture_output=True, timeout=60)
+        if r.returncode != 0:
+            # Fallback named PCMs
+            for fb in ("aeon", "plughw:CARD=wm8960soundcard,DEV=0", "default"):
+                if fb == dev:
+                    continue
+                r2 = subprocess.run(["aplay", "-q", "-D", fb, wav_path],
+                                    capture_output=True, timeout=60)
+                if r2.returncode == 0:
+                    return
+            err = (r.stderr or b"").decode("utf-8", "replace").strip()
+            sys.stderr.write(f"aeon-braincraft: aplay failed ({dev}): {err}\n")
     except (subprocess.SubprocessError, OSError) as e:
         sys.stderr.write(f"aeon-braincraft: aplay failed: {e}\n")
 
@@ -694,20 +1052,39 @@ def _tts_hosted(text, cfg, audio_dev):
 
 
 def record_mic(audio_dev, seconds=5):
-    """Capture `seconds` of mono 16 kHz WAV from the mic via arecord. Best-effort.
+    """Capture `seconds` of mono 16 kHz WAV from the mic via arecord.
 
-    Returns the WAV path or None. (A real VAD would gate on silence; this is the
-    simple fixed-window capture the push-to-talk button triggers.)"""
-    args = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
-            "-d", str(int(seconds))]
-    if audio_dev and audio_dev != "default":
-        args += ["-D", audio_dev]
-    args.append(ASR_WAV)
+    BrainCraft WM8960 is stereo-only at the hardware PCM — bare `hw:N` with
+    `-c 1` fails ("Channels count non available"). Always open via plug
+    (`aeon` / `plughw:CARD=wm8960soundcard`) so ALSA can downmix + resample
+    for Whisper (16 kHz mono).
+
+    Returns the WAV path or None.
+    """
+    # Prefer the named PCM; fall back to plughw if something odd is configured.
+    dev = audio_dev or "aeon"
+    if dev.startswith("hw:"):
+        # Force plug conversion — hw rejects mono/16k.
+        dev = dev.replace("hw:", "plughw:", 1)
+    args = [
+        "arecord", "-q",
+        "-D", dev,
+        "-f", "S16_LE",
+        "-r", "16000",
+        "-c", "1",           # plug downmixes stereo mics → mono
+        "-d", str(int(max(1, seconds))),
+        ASR_WAV,
+    ]
     try:
-        r = subprocess.run(args, capture_output=True, timeout=seconds + 10)
+        r = subprocess.run(args, capture_output=True, timeout=seconds + 12)
         if r.returncode != 0 or not os.path.isfile(ASR_WAV):
-            sys.stderr.write("aeon-braincraft: arecord failed\n")
-            return None
+            err = (r.stderr or b"").decode("utf-8", "replace").strip()
+            sys.stderr.write(f"aeon-braincraft: arecord failed ({dev}): {err}\n")
+            # One more try: explicit card name.
+            args[3] = "plughw:CARD=wm8960soundcard,DEV=0"
+            r2 = subprocess.run(args, capture_output=True, timeout=seconds + 12)
+            if r2.returncode != 0 or not os.path.isfile(ASR_WAV):
+                return None
     except (subprocess.SubprocessError, OSError) as e:
         sys.stderr.write(f"aeon-braincraft: arecord failed: {e}\n")
         return None
@@ -951,19 +1328,24 @@ def claim_commands():
 
 # ── status assembly ──────────────────────────────────────────────────────────
 def build_status(cfg, disp, buttons, gpiochip, audio, mode, voice_state,
-                 last_utt, last_resp, last_photo, recording, reachable):
+                 last_utt, last_resp, last_photo, recording, reachable,
+                 menu_open=False, menu_cursor=0, vol=None, analyze_caption=""):
     name, playback, capture = audio
     return {
         "present": True,
         "ok": True,
         "enabled": cfg["enabled"],
         "mode": mode,
+        "modes": list(cfg.get("modes") or ("ai", "viewfinder", "analyze", "voice", "volume")),
         "overlay": cfg["overlay"],
+        "menu_open": bool(menu_open),
+        "menu_cursor": int(menu_cursor),
         "display": {"driver": disp.driver, "w": disp.W, "h": disp.H, "ok": disp.ok},
         "buttons": {"chip": gpiochip, "ok": buttons.ok},
         "audio": {"device": name, "playback": bool(playback), "capture": bool(capture),
                   "tts": cfg["tts"], "asr": cfg["asr"],
-                  "ok": bool(playback or capture)},
+                  "ok": bool(playback or capture),
+                  "volume": vol or volume_state()},
         "backend": {"mode": cfg["backend_mode"],
                     "persona": cfg["persona"] or None,
                     "reachable": bool(reachable)},
@@ -971,6 +1353,7 @@ def build_status(cfg, disp, buttons, gpiochip, audio, mode, voice_state,
         "last_utterance": last_utt,
         "last_response": last_resp,
         "captures": {"last_photo": last_photo, "recording": bool(recording)},
+        "analyze_caption": analyze_caption or "",
         "ups": read_ups(),     # battery meter (None if no UPS HAT (E) fitted)
         "ts_ms": int(time.time() * 1000),
         # Internal hint for the display renderer; harmless extra key in the JSON.
@@ -999,7 +1382,7 @@ def main():
 
     # Hardware is present + enabled: bring up display + buttons.
     gpiochip = detect_gpiochip()
-    disp = Display()
+    disp = Display(rotation=cfg.get("display_rotation", 270))
     buttons = Buttons(gpiochip)
     rec = Recorder()
     mode = cfg["mode"]
@@ -1013,12 +1396,30 @@ def main():
     sys.stderr.write(f"aeon-braincraft: starting (mode={mode}, chip={gpiochip}, "
                      f"display={disp.ok})\n")
 
-    MODES = ("ai", "viewfinder", "voice")
+    MODES = ("ai", "viewfinder", "analyze", "voice", "volume")
+    MODE_LABELS = {
+        "ai": "AI face",
+        "viewfinder": "Camera capture",
+        "analyze": "AI video analysis",
+        "voice": "AI voice chat",
+        "volume": "Volume",
+    }
+    menu_open = False
+    menu_cursor = 0
+    analyze_caption = ""
+    last_analyze_ms = 0
 
-    def cycle_mode():
-        nonlocal mode
-        mode = MODES[(MODES.index(mode) + 1) % len(MODES)]
-        sys.stderr.write(f"aeon-braincraft: mode -> {mode}\n")
+    last_cfg_mode = mode  # track toml mode so web PUT is picked up live
+
+    def set_mode(m, persist=True):
+        nonlocal mode, menu_open, last_cfg_mode
+        if m in MODES:
+            mode = m
+            menu_open = False
+            last_cfg_mode = m
+            if persist:
+                persist_mode(m)
+            sys.stderr.write(f"aeon-braincraft: mode -> {mode}\n")
 
     def run_voice_turn(audio_dev):
         nonlocal voice_state, last_utt, last_resp
@@ -1038,6 +1439,14 @@ def main():
             tts_speak(reply, cfg, audio_dev)
         voice_state = "idle"
 
+    def status_now(vol=None):
+        return build_status(
+            cfg, disp, buttons, gpiochip, audio, mode, voice_state,
+            last_utt, last_resp, last_photo, rec.recording, reachable,
+            menu_open=menu_open, menu_cursor=menu_cursor, vol=vol,
+            analyze_caption=analyze_caption,
+        )
+
     while True:
         try:
             cfg = load_cfg()
@@ -1048,6 +1457,13 @@ def main():
                 time.sleep(2)
                 continue
 
+            # Web PUT /api/braincraft/config writes mode into toml — pick it up
+            # when the file changes (buttons also persist, so no fight).
+            if cfg.get("mode") in MODES and cfg["mode"] != last_cfg_mode:
+                set_mode(cfg["mode"], persist=False)
+                last_cfg_mode = cfg["mode"]
+
+            vf_rot = int(cfg.get("viewfinder_rotate", 90))
             audio = probe_audio(cfg["audio_device"])
             audio_dev = audio[0]
 
@@ -1061,7 +1477,6 @@ def main():
                 last_reach_check = now
 
             # ── command channel ────────────────────────────────────────────
-            transient_mode = None
             for line in claim_commands():
                 if line == "photo":
                     last_photo = take_photo(grab_frame()) or last_photo
@@ -1080,60 +1495,122 @@ def main():
                 elif line.startswith("mode:"):
                     m = line[5:].strip()
                     if m in MODES:
-                        transient_mode = m
+                        set_mode(m)
                 # Unknown lines are ignored.
-            if transient_mode:
-                mode = transient_mode
 
-            # ── buttons ────────────────────────────────────────────────────
-            pressed = buttons.poll()
-            # Joystick-press cycles modes everywhere.
+            # ── buttons / joystick ─────────────────────────────────────────
+            # Remap d-pad to match display_rotation so ↑ follows on-screen up.
+            pressed = remap_dpad(
+                buttons.poll(),
+                cfg.get("display_rotation", 270),
+            )
+
+            # Joystick press toggles the full mode menu everywhere.
             if "sel" in pressed:
-                cycle_mode()
+                menu_open = not menu_open
+                if menu_open:
+                    try:
+                        menu_cursor = MODES.index(mode)
+                    except ValueError:
+                        menu_cursor = 0
+
+            if menu_open:
+                if "up" in pressed:
+                    menu_cursor = (menu_cursor - 1) % len(MODES)
+                if "down" in pressed:
+                    menu_cursor = (menu_cursor + 1) % len(MODES)
+                if "btn" in pressed or "right" in pressed:
+                    set_mode(MODES[menu_cursor])
+                if "left" in pressed:
+                    menu_open = False
+                labels = [MODE_LABELS.get(m, m) for m in MODES]
+                status = status_now()
+                write_json(status)
+                if disp.ok:
+                    disp.render_menu(labels, menu_cursor)
+                time.sleep(0.12)
+                continue
 
             if mode == "ai":
-                # In the idle interface, button A also cycles (no camera/voice action).
-                if "a" in pressed or "b" in pressed:
-                    cycle_mode()
-                status = build_status(cfg, disp, buttons, gpiochip, audio, mode,
-                                      voice_state, last_utt, last_resp, last_photo,
-                                      rec.recording, reachable)
+                # Button opens the menu (same as joystick press) for discoverability.
+                if "btn" in pressed:
+                    menu_open = True
+                    menu_cursor = 0
+                status = status_now()
                 write_json(status)
                 if disp.ok:
                     disp.render_ai(status)
-                time.sleep(0.4)  # idle screen — slower cadence
+                time.sleep(0.35)
 
             elif mode == "viewfinder":
-                if "a" in pressed:
+                if "btn" in pressed:
                     last_photo = take_photo(grab_frame()) or last_photo
-                if "b" in pressed:
+                if "right" in pressed or "left" in pressed:
                     if rec.recording:
                         rec.stop()
                     else:
                         rec.start()
+                if "up" in pressed:
+                    cfg["overlay"] = not cfg["overlay"]
                 jpeg = grab_frame()
                 dets = read_detections() if cfg["overlay"] else []
-                status = build_status(cfg, disp, buttons, gpiochip, audio, mode,
-                                      voice_state, last_utt, last_resp, last_photo,
-                                      rec.recording, reachable)
+                status = status_now()
                 write_json(status)
                 if disp.ok and jpeg is not None:
-                    disp.render_frame(jpeg, dets, cfg["overlay"])
+                    disp.render_frame(jpeg, dets, cfg["overlay"], rotate_deg=vf_rot)
                 elif disp.ok:
-                    disp.render_message("Viewfinder", "no frame from streamer")
-                time.sleep(0.15)  # ~6-7 Hz so the live view + buttons feel responsive
+                    disp.render_message("Camera", "no frame — set console\nto camera-csi or\nhdmi-csi")
+                time.sleep(0.15)
+
+            elif mode == "analyze":
+                # Always-on vision overlay + lightweight caption from top OCR.
+                if "btn" in pressed:
+                    last_photo = take_photo(grab_frame()) or last_photo
+                jpeg = grab_frame()
+                dets = read_detections()
+                # Refresh caption from OCR labels every ~2 s (cheap, local).
+                now_ms = int(time.time() * 1000)
+                if now_ms - last_analyze_ms > 2000:
+                    texts = []
+                    for d in dets[:12]:
+                        t = str(d.get("text") or d.get("label") or "").strip()
+                        if t:
+                            texts.append(t)
+                    analyze_caption = " · ".join(texts)[:80] if texts else "watching…"
+                    last_analyze_ms = now_ms
+                status = status_now()
+                write_json(status)
+                if disp.ok:
+                    disp.render_analyze(jpeg, dets, analyze_caption, rotate_deg=vf_rot)
+                time.sleep(0.15)
 
             elif mode == "voice":
-                # Push-to-talk: button A runs a full mic→ASR→LLM→TTS turn.
-                if "a" in pressed:
+                if "btn" in pressed:
                     run_voice_turn(audio_dev)
-                status = build_status(cfg, disp, buttons, gpiochip, audio, mode,
-                                      voice_state, last_utt, last_resp, last_photo,
-                                      rec.recording, reachable)
+                status = status_now()
                 write_json(status)
                 if disp.ok:
                     disp.render_ai(status)
-                time.sleep(0.12)  # responsive so the PTT button latches quickly
+                time.sleep(0.12)
+
+            elif mode == "volume":
+                vol = volume_state()
+                if "up" in pressed:
+                    vol = volume_nudge("playback", +5)
+                if "down" in pressed:
+                    vol = volume_nudge("playback", -5)
+                if "right" in pressed:
+                    vol = volume_nudge("capture", +5)
+                if "left" in pressed:
+                    vol = volume_nudge("capture", -5)
+                status = status_now(vol=vol)
+                write_json(status)
+                if disp.ok:
+                    disp.render_volume(vol)
+                time.sleep(0.12)
+
+            else:
+                set_mode("ai")
 
         except Exception as e:
             # One bad frame / audio glitch must not exit the daemon.
