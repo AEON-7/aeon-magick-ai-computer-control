@@ -367,10 +367,11 @@ pub fn auto_record_audio_device() -> (String, u32, u32) {
         if low.contains("vc4") {
             continue; // Pi HDMI *outputs*
         }
-        let dev = prefer_shared_capture(&format!("plughw:CARD={name},DEV=0"));
         if low.contains("tc358743") {
-            return (dev, 48000, 2);
+            // plughw (not dsnoop) — see resolve_record_audio.
+            return (format!("plughw:CARD={name},DEV=0"), 48000, 2);
         }
+        let dev = prefer_shared_capture(&format!("plughw:CARD={name},DEV=0"));
         if low.contains("c4k") || low.contains("cam") || low.contains("elgato") {
             c4k = Some(dev);
             continue;
@@ -405,6 +406,13 @@ pub fn resolve_record_audio(
 ) -> (String, u32, u32) {
     let cfg = configured.trim();
     if !cfg.is_empty() {
+        let low = cfg.to_ascii_lowercase();
+        // tc358743 HDMI audio: keep plughw. ffmpeg's alsa demuxer cannot
+        // negotiate s32 on raw dsnoop (only s16), so "shared" capture fails
+        // open and used to empty the whole MP4. Cam Link (C4K) is fine as dsnoop.
+        if low.contains("tc358743") {
+            return (cfg.to_string(), rate.max(1), channels.max(1));
+        }
         return (prefer_shared_capture(cfg), rate.max(1), channels.max(1));
     }
     auto_record_audio_device()
@@ -437,12 +445,10 @@ async fn record_loop(
     } else {
         info!(id, "recording video-only (no ALSA capture card)");
     }
-    // Prefer shared ALSA (dsnoop) so live listen can stay open.
-    let audio_dev = if audio {
-        prefer_shared_capture(&audio_device)
-    } else {
-        String::new()
-    };
+    // Device is already resolved by resolve_record_audio (tc358743 stays
+    // plughw; Cam Link may be dsnoop). Do NOT re-map here — forcing dsnoop
+    // on HDMI audio breaks ffmpeg sample-format negotiation.
+    let audio_dev = audio_device;
     let use_audio = !audio_dev.is_empty();
 
     // Build ffmpeg argv. If A/V fails to produce output (classic cause: the
@@ -463,9 +469,13 @@ async fn record_loop(
                 audio_rate.to_string(),
                 "-ac".into(),
                 audio_channels.to_string(),
-                "-i".into(),
-                audio_dev.clone(),
             ]);
+            // dsnoop on tc358743 rejects ffmpeg's default s16; force s32.
+            // plughw converts, so leave its format alone.
+            if audio_dev.starts_with("dsnoop:") || audio_dev.starts_with("hw:") {
+                args.extend(["-sample_fmt".into(), "s32".into()]);
+            }
+            args.extend(["-i".into(), audio_dev.clone()]);
         }
         args.extend([
             "-fflags".into(),
@@ -478,6 +488,9 @@ async fn record_loop(
             "pipe:0".into(),
         ]);
         if with_audio {
+            // Video = input 1 (pipe), audio = input 0 (alsa). Cap wall time with
+            // -t so continuous HDMI audio doesn't leave ffmpeg running forever
+            // after the video pipe closes (without -t, drop(stdin) alone hangs).
             args.extend([
                 "-map".into(),
                 "1:v:0".into(),
@@ -491,9 +504,8 @@ async fn record_loop(
                 "128k".into(),
                 "-async".into(),
                 "1".into(),
-                // End when the video pipe closes (operator hits stop) — not when
-                // ALSA briefly underruns.
-                "-shortest".into(),
+                "-t".into(),
+                (cap_s + 2).to_string(), // small slack past the host deadline
             ]);
         } else {
             args.extend(["-c".into(), "copy".into()]);
@@ -517,11 +529,19 @@ async fn record_loop(
         budget_tick.tick().await; // consume the immediate first tick
         let mut armed = false; // start writing only once we've seen a keyframe
         let mut wrote_any = false;
+        // If ALSA open fails, ffmpeg exits before we see a keyframe — fail fast
+        // into the video-only retry instead of sitting for the full duration.
+        let keyframe_deadline = tokio::time::sleep(Duration::from_secs(4));
+        tokio::pin!(keyframe_deadline);
 
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
                 _ = stop.notified() => break,
+                _ = &mut keyframe_deadline, if !armed => {
+                    warn!(id, with_audio, "no H.264 keyframe within 4s — aborting this attempt");
+                    break;
+                }
                 _ = budget_tick.tick() => {
                     let budget = me.disk_budget();
                     let total = me.enforce_budget(Some(id));
@@ -547,15 +567,25 @@ async fn record_loop(
             }
         }
 
-        drop(stdin); // EOF → ffmpeg writes the moov atom and exits
-        let status = child.wait().await;
+        drop(stdin); // EOF on video → with -t (A/V) or video-only, ffmpeg finalizes
+        // Never hang the recorder if ffmpeg sticks on a live ALSA input.
+        let status = match tokio::time::timeout(Duration::from_secs(8), child.wait()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(id, "ffmpeg did not exit after record end — killing");
+                let _ = child.kill().await;
+                child.wait().await
+            }
+        };
         let mut err_txt = String::new();
         if let Some(mut e) = stderr.take() {
             use tokio::io::AsyncReadExt;
             let mut buf = vec![0u8; 1500];
-            if let Ok(n) = e.read(&mut buf).await {
-                if n > 0 {
-                    err_txt = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+            if let Ok(n) = tokio::time::timeout(Duration::from_secs(1), e.read(&mut buf)).await {
+                if let Ok(n) = n {
+                    if n > 0 {
+                        err_txt = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                    }
                 }
             }
         }
@@ -571,12 +601,16 @@ async fn record_loop(
             return Ok(size);
         }
 
-        // Empty output. If we tried A/V and never got a durable write, fall
-        // back to video-only once (ALSA permission / busy is the usual cause).
-        if with_audio && !wrote_any {
+        // Empty output after an A/V attempt → always retry video-only once.
+        // (Previously we only retried when wrote_any==false; if ALSA died after
+        // a few NALs were written to a dead ffmpeg stdin, size stayed 0 and the
+        // UI showed a 0s recording.)
+        if with_audio {
             warn!(
                 id,
                 device = %audio_dev,
+                wrote_any,
+                armed,
                 err = %err_txt,
                 "A/V record produced no data — retrying video-only"
             );
@@ -585,7 +619,10 @@ async fn record_loop(
             continue;
         }
 
-        let detail = if err_txt.is_empty() {
+        let detail = if !armed {
+            "recording produced no data — no H.264 keyframe from the live pipe (is HDMI capture online?)"
+                .into()
+        } else if err_txt.is_empty() {
             format!(
                 "recording produced no data — is {} writable by the streamer (aeon)?",
                 out.display()

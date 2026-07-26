@@ -22,9 +22,9 @@ RestartSec=2
 # Needs read on /dev/video* and write on /run/aeon/
 User=aeon
 Group=aeon
-# video: V4L2 capture. audio: ALSA for A/V recordings (Cam Link / HDMI).
+# video: V4L2 capture. audio: ALSA for A/V recordings (Cam Link / HDMI-CSI).
 # Without `audio`, record+sound fails open and the MP4 is empty (0s rec).
-SupplementaryGroups=video audio
+SupplementaryGroups=video audio plugdev
 # CPU ceiling (defense-in-depth). The shipped ustreamer has no hardware
 # JPEG encoder, so the MJPEG path software-encodes; an uncapped 720p60
 # stream pegs ~2.3 cores and starves the supervisor (sluggish web UI,
