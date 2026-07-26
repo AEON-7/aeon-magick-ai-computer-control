@@ -4,19 +4,19 @@
   "patreon": "https://www.patreon.com/AeonForge7",
   "tracks": {
     "pi4": {
-      "version": 114,
-      "name": "v114",
-      "published": "2026-07-25",
+      "version": 115,
+      "name": "v115",
+      "published": "2026-07-26",
       "codename": "bookworm",
-      "notes": "Raspberry Pi 4 (Bookworm). Wacom-profile HID absolute identity (safe non-Wacom VID), Cam Link/HDMI A/V record + low-latency live listen (dsnoop share), Hermes+OpenClaw agent pantheon, wifi powersave soft-recovery (brcmfmac), streamer audio group for A/V mux.",
+      "notes": "Raspberry Pi 4 (Bookworm). Aeon Bench remote verified-path (SSH authorize/scan/run from the Orb), playable A/V screen recording (moov finalize + no partial purge), Wacom-profile HID, wifi powersave soft-recovery, Hermes+OpenClaw pantheon.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     },
     "pi5": {
-      "version": 114,
-      "name": "v114",
-      "published": "2026-07-25",
+      "version": 115,
+      "name": "v115",
+      "published": "2026-07-26",
       "codename": "trixie",
-      "notes": "Raspberry Pi 5 (Trixie). Everything in the Pi 4 v114 image plus Hailo super-app and on-device vision / voice / UPS suite.",
+      "notes": "Raspberry Pi 5 (Trixie). Everything in Pi 4 v115 plus Hailo super-app and on-device vision / voice / UPS suite. HDMI-CSI A/V record with playable MP4 finalize.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     }
   }
