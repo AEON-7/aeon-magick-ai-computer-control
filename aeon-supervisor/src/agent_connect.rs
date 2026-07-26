@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -532,14 +532,19 @@ fn parse_metrics(s: &str) -> serde_json::Value {
     json!({"reachable": true, "host": host, "load": load, "cpu": cpu, "mem": mem, "gpus": gpus, "containers": containers, "mac": mac})
 }
 
-// ── per-agent roster (the OpenClaw pantheon) ─────────────────────────────
+// ── per-agent roster (OpenClaw + Hermes pantheon) ────────────────────────
 
 /// OpenClaw's agents HTTP API port. `GET http://<addr>:9787/agents` returns the
 /// live roster — every agent with its emoji/name/model plus token, session and
 /// activity stats. (Same endpoint the presto-cockpit dashboard consumes.)
 const OPENCLAW_AGENTS_PORT: u16 = 9787;
 
-/// GET /agent/systems/:id/agents — the gateway's pantheon roster for a system.
+/// GET /agent/systems/:id/agents — pantheon roster for a system.
+///
+/// Pulls OpenClaw agents (HTTP :9787) and/or Hermes profiles (SSH
+/// `~/.hermes/profiles/*`) based on the system's `roles`. Every agent is
+/// tagged with `source` / `gateway` = `"openclaw"` | `"hermes"` so the UI can
+/// show a label badge.
 pub async fn system_agents(Path(id): Path<String>) -> impl IntoResponse {
     let Some(sys) = load_systems().into_iter().find(|s| s.id == id) else {
         return Json(json!({"ok": false, "err": "no such system"}));
@@ -551,27 +556,188 @@ pub async fn system_agents(Path(id): Path<String>) -> impl IntoResponse {
 }
 
 fn fetch_agents(sys: &System) -> serde_json::Value {
+    let want_openclaw = sys.roles.iter().any(|r| r == "openclaw");
+    let want_hermes = sys.roles.iter().any(|r| r == "hermes");
+    // Backward-compat: no role tags → try OpenClaw (historical default).
+    let (want_openclaw, want_hermes) = if !want_openclaw && !want_hermes {
+        (true, false)
+    } else {
+        (want_openclaw, want_hermes)
+    };
+
+    let mut agents: Vec<serde_json::Value> = Vec::new();
+    let mut errs: Vec<String> = Vec::new();
+    let mut sources: Vec<&'static str> = Vec::new();
+    let mut ts: Option<serde_json::Value> = None;
+    let mut warming = false;
+
+    if want_openclaw {
+        match fetch_openclaw_agents(sys) {
+            Ok((list, t, w)) => {
+                agents.extend(list);
+                sources.push("openclaw");
+                if t.is_some() {
+                    ts = t;
+                }
+                warming = w;
+            }
+            Err(e) => errs.push(format!("openclaw: {e}")),
+        }
+    }
+    if want_hermes {
+        match fetch_hermes_agents(sys) {
+            Ok(list) => {
+                agents.extend(list);
+                sources.push("hermes");
+            }
+            Err(e) => errs.push(format!("hermes: {e}")),
+        }
+    }
+
+    if agents.is_empty() && !errs.is_empty() {
+        return json!({
+            "ok": false,
+            "reachable": false,
+            "err": errs.join("; "),
+            "agents": [],
+        });
+    }
+
+    // Stable sort: source then name.
+    agents.sort_by(|a, b| {
+        let sa = a.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let sb = b.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let na = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let nb = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        sa.cmp(sb).then_with(|| na.cmp(nb))
+    });
+
+    json!({
+        "ok": true,
+        "reachable": true,
+        "ts": ts,
+        "warming": warming,
+        "sources": sources,
+        "agents": agents,
+        "partial_err": if errs.is_empty() { Value::Null } else { json!(errs.join("; ")) },
+    })
+}
+
+fn tag_agent_source(mut a: serde_json::Value, source: &str) -> serde_json::Value {
+    if let Some(obj) = a.as_object_mut() {
+        // Keep native `id` unchanged so existing detail/provision routes still
+        // work; the UI labels personas via `source` / `gateway`.
+        obj.insert("source".into(), json!(source));
+        obj.insert("gateway".into(), json!(source));
+    }
+    a
+}
+
+fn fetch_openclaw_agents(
+    sys: &System,
+) -> Result<(Vec<serde_json::Value>, Option<serde_json::Value>, bool), String> {
     let url = format!("http://{}:{}/agents", sys.address, OPENCLAW_AGENTS_PORT);
     let out = Command::new("curl")
         .args(["-s", "--max-time", "6", "-H", "Accept: application/json", &url])
-        .output();
-    match out {
-        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
-            match serde_json::from_slice::<serde_json::Value>(&o.stdout) {
-                Ok(j) => json!({
-                    "ok": true,
-                    "reachable": true,
-                    "ts": j.get("ts").cloned().unwrap_or(json!(null)),
-                    "warming": j.get("warming").cloned().unwrap_or(json!(false)),
-                    "agents": j.get("agents").cloned().unwrap_or_else(|| json!([])),
-                }),
-                Err(e) => json!({"ok": false, "reachable": false, "err": format!("parse: {e}")}),
-            }
-        }
-        Ok(_) => json!({"ok": false, "reachable": false,
-            "err": format!("no agents API at {url} — is the OpenClaw agents endpoint up on :{OPENCLAW_AGENTS_PORT}?")}),
-        Err(e) => json!({"ok": false, "reachable": false, "err": format!("curl: {e}")}),
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return Err(format!(
+            "no agents API at {url} — is OpenClaw agents up on :{OPENCLAW_AGENTS_PORT}?"
+        ));
     }
+    let j: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse: {e}"))?;
+    let list = j
+        .get("agents")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| tag_agent_source(a, "openclaw"))
+        .collect();
+    let ts = j.get("ts").cloned();
+    let warming = j
+        .get("warming")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((list, ts, warming))
+}
+
+/// Hermes personas live as profile directories under `~/.hermes/profiles/<id>/`
+/// (SOUL.md + IDENTITY.md + config.yaml). There is no OpenClaw-style :9787
+/// roster, so we inventory over SSH via the agent-connect key.
+fn fetch_hermes_agents(sys: &System) -> Result<Vec<serde_json::Value>, String> {
+    // Python on the gateway — keep it stdlib-only (no PyYAML dependency).
+    let remote = r#"python3 - <<'PY'
+import os, re, json
+prof = os.path.expanduser("~/.hermes/profiles")
+out = []
+if not os.path.isdir(prof):
+    print(json.dumps({"ok": False, "err": "no ~/.hermes/profiles directory"}))
+    raise SystemExit(0)
+for name in sorted(os.listdir(prof)):
+    p = os.path.join(prof, name)
+    if not os.path.isdir(p) or name.startswith("."):
+        continue
+    display = name
+    emoji = "📡"
+    model = None
+    id_path = os.path.join(p, "IDENTITY.md")
+    if os.path.isfile(id_path):
+        try:
+            t = open(id_path, encoding="utf-8", errors="replace").read()
+        except Exception:
+            t = ""
+        m = re.search(r"\*\*Name:\*\*\s*(.+)", t)
+        if m:
+            display = m.group(1).strip()
+        m = re.search(r"\*\*Emoji:\*\*\s*(.+)", t)
+        if m:
+            e = m.group(1).strip()
+            if e and "not set" not in e.lower():
+                emoji = e
+    cfg = os.path.join(p, "config.yaml")
+    if os.path.isfile(cfg):
+        try:
+            for line in open(cfg, encoding="utf-8", errors="replace"):
+                s = line.strip()
+                if s.startswith("default:") and "http" not in s:
+                    model = s.split(":", 1)[1].strip().strip("'\"")
+                    if model:
+                        break
+        except Exception:
+            pass
+    out.append({
+        "id": name,
+        "name": display,
+        "emoji": emoji,
+        "model": model,
+        "active": False,
+        "source": "hermes",
+        "gateway": "hermes",
+    })
+print(json.dumps({"ok": True, "agents": out}))
+PY"#;
+    let body = ssh_capture(sys, remote)?;
+    let j: serde_json::Value = serde_json::from_str(body.trim())
+        .map_err(|e| format!("hermes parse: {e}; raw={}", body.chars().take(200).collect::<String>()))?;
+    if j.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(j
+            .get("err")
+            .and_then(|v| v.as_str())
+            .unwrap_or("hermes roster failed")
+            .to_string());
+    }
+    let list = j
+        .get("agents")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| tag_agent_source(a, "hermes"))
+        .collect();
+    Ok(list)
 }
 
 // ── local token-usage history (long-timeframe tracking) ──────────────────
@@ -769,6 +935,9 @@ fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
     let out = Command::new("ssh")
         .arg("-i")
         .arg(key_path())
+        // -n: don't read local stdin (systemd services leave a hung pipe open
+        // which otherwise stalls some remote pipelines until timeout).
+        .arg("-n")
         .args([
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
@@ -777,7 +946,7 @@ fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
             "-o", "ServerAliveInterval=3",
             "-o", "ServerAliveCountMax=3",
             "-p", &sys.port.to_string(),
-            &target, "timeout", "12", "bash", "-lc", &wrapped,
+            &target, "timeout", "20", "bash", "-lc", &wrapped,
         ])
         .output()
         .map_err(|e| e.to_string())?;
@@ -793,7 +962,16 @@ fn ssh_capture(sys: &System, remote: &str) -> Result<String, String> {
         };
         Ok(cleaned.to_string())
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("ssh failed").to_string())
+        let err = String::from_utf8_lossy(&out.stderr);
+        let out_s = String::from_utf8_lossy(&out.stdout);
+        let code = out.status.code().unwrap_or(-1);
+        let last = err
+            .lines()
+            .chain(out_s.lines())
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("ssh failed");
+        Err(format!("ssh exit {code}: {last}"))
     }
 }
 
@@ -867,16 +1045,64 @@ fn save_provisioned(m: &ProvMap) {
 }
 
 /// Read-from-stdin python that extracts one agent's config (skills/voice/corpus/
-/// model) from openclaw.json + lists available shared skills. base64'd over SSH
-/// so there are zero quoting concerns. argv[1] = agent id.
+/// model). Hermes-first: if `~/.hermes/profiles/<id>/` exists, use that profile
+/// (skills dir + config.yaml model/tts + .env). Else OpenClaw openclaw.json +
+/// shared skills. base64'd over SSH. argv[1] = agent id.
 const DETAIL_PY: &str = r#"import json,os,sys
 h=os.path.expanduser('~')
+aid=sys.argv[1]
+hp=os.path.join(h,'.hermes','profiles',aid)
+# ── Hermes profile ────────────────────────────────────────────────────────
+if os.path.isdir(hp):
+    sd=os.path.join(hp,'skills')
+    av=sorted([n for n in os.listdir(sd) if os.path.isdir(os.path.join(sd,n)) and not n.startswith('.')]) if os.path.isdir(sd) else []
+    model=None; voice=None
+    cfg=os.path.join(hp,'config.yaml')
+    if os.path.isfile(cfg):
+        try:
+            cur_sec=None
+            for line in open(cfg,encoding='utf-8',errors='replace'):
+                raw=line.rstrip('\n')
+                s=raw.strip()
+                if not s or s.startswith('#'): continue
+                indent=len(raw)-len(raw.lstrip(' '))
+                if indent==0 and s.endswith(':') and not s.startswith('-'):
+                    cur_sec=s[:-1].strip(); continue
+                if cur_sec=='model' or (indent==0 and s.startswith('default:')):
+                    if s.startswith('default:'):
+                        v=s.split(':',1)[1].strip().strip("'\"")
+                        if v and 'http' not in v: model=v
+                if s.startswith('voice:') and cur_sec in ('tts','openai',None):
+                    v=s.split(':',1)[1].strip().strip("'\"")
+                    if v: voice=v
+                # Also catch top-level default under model:
+                if indent<=2 and s.startswith('default:') and model is None:
+                    v=s.split(':',1)[1].strip().strip("'\"")
+                    if v and 'http' not in v and not v.startswith('{'): model=v
+        except Exception:
+            pass
+    # Prefer env VOXTRAL_VOICE as the per-agent voice if set
+    envp=os.path.join(hp,'.env')
+    if os.path.isfile(envp):
+        try:
+            for ln in open(envp,encoding='utf-8',errors='replace'):
+                if ln.startswith('VOXTRAL_VOICE=') and ln.strip()[len('VOXTRAL_VOICE='):]:
+                    voice=ln.strip()[len('VOXTRAL_VOICE='):]
+                    break
+        except Exception:
+            pass
+    corpus=os.path.join(hp,'memories','corpus')
+    print(json.dumps({
+        'skills':av,'voice':voice,'corpus':corpus if os.path.isdir(corpus) else None,
+        'model':model,'name':aid,'is_default':False,'available_skills':av,
+        'found':True,'gateway':'hermes','workspace':hp}))
+    raise SystemExit(0)
+# ── OpenClaw ──────────────────────────────────────────────────────────────
 try:
     d=json.load(open(h+'/.openclaw/openclaw.json'))
 except Exception as e:
-    print(json.dumps({'err':'config: '+str(e)}))
+    print(json.dumps({'err':'config: '+str(e),'found':False}))
     sys.exit(0)
-aid=sys.argv[1]
 lst=(d.get('agents') or {}).get('list') or []
 a={}
 for x in lst:
@@ -885,7 +1111,7 @@ for x in lst:
         break
 sd=h+'/.openclaw/workspace/skills'
 av=sorted([n for n in os.listdir(sd) if os.path.isdir(os.path.join(sd,n))]) if os.path.isdir(sd) else []
-print(json.dumps({'skills':a.get('skills',[]),'voice':a.get('voice'),'corpus':a.get('corpus'),'model':a.get('model') or a.get('thinkingDefault'),'name':a.get('name'),'is_default':a.get('default',False),'available_skills':av,'found':bool(a)}))
+print(json.dumps({'skills':a.get('skills',[]),'voice':a.get('voice'),'corpus':a.get('corpus'),'model':a.get('model') or a.get('thinkingDefault'),'name':a.get('name'),'is_default':a.get('default',False),'available_skills':av,'found':bool(a),'gateway':'openclaw'}))
 "#;
 
 /// GET /agent/systems/:id/agents/:aid/detail — per-agent skills/voice/corpus/
@@ -907,6 +1133,9 @@ pub async fn agent_detail(Path((id, agent_id)): Path<(String, String)>) -> impl 
     match res {
         Ok(stdout) => {
             let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({}));
+            if let Some(e) = p.get("err").and_then(|x| x.as_str()) {
+                return Json(json!({"ok": false, "err": e, "provisioned": prov, "ssh": ssh}));
+            }
             Json(json!({
                 "ok": true,
                 "skills": p.get("skills").cloned().unwrap_or_else(|| json!([])),
@@ -914,6 +1143,8 @@ pub async fn agent_detail(Path((id, agent_id)): Path<(String, String)>) -> impl 
                 "corpus": p.get("corpus").cloned().unwrap_or(serde_json::Value::Null),
                 "model": p.get("model").cloned().unwrap_or(serde_json::Value::Null),
                 "available_skills": p.get("available_skills").cloned().unwrap_or_else(|| json!([])),
+                "workspace": p.get("workspace").cloned().unwrap_or(serde_json::Value::Null),
+                "gateway": p.get("gateway").cloned().unwrap_or(serde_json::Value::Null),
                 "provisioned": prov,
                 "ssh": ssh.clone(),
             }))
@@ -1274,12 +1505,14 @@ fn send_wol(mac: &str) -> Result<(), String> {
 //
 // Each pantheon agent has its own Matrix account on the gateway's Dendrite
 // homeserver (server_name matrix.unhash.me, reachable as 127.0.0.1:8008 on
-// .155). Creds live in ~/.openclaw_<id>_creds.json (and/or
-// ~/.openclaw/credentials/<id>.json) as {user_id, access_token, ...}. We run
-// the whole avatar flow ON the gateway via ssh_capture so the token + the
-// homeserver never leave .155: resolve creds → POST image to the media repo
-// → PUT the agent's avatar_url. A GET path returns the current avatar_url +
-// a download URL the browser can render. ON_HS is localhost on the gateway.
+// the gateway). Creds live in one of several layouts:
+//
+//   OpenClaw:  ~/voip-<id>/.env  or  ~/.openclaw_<id>_creds.json
+//   Hermes:    ~/.hermes/profiles/<id>/.env  (MATRIX_USER_ID + MATRIX_ACCESS_TOKEN)
+//
+// We run the whole avatar flow ON the gateway via ssh_capture so the token
+// never leaves that host: resolve creds → POST image to the media repo →
+// PUT the agent's avatar_url. ON_HS is localhost on the gateway.
 
 const MATRIX_HS: &str = "http://127.0.0.1:8008";
 
@@ -1287,85 +1520,135 @@ const MATRIX_HS: &str = "http://127.0.0.1:8008";
 /// user_id + access_token, prints them as `USER_ID\nTOKEN` (or `ERR ...`).
 /// base64'd over SSH (argv[1] = agent id).
 ///
-/// Per the create-agentic-personas blueprint, the canonical per-agent
-/// Matrix/VoIP credentials live in a standard `.env` at `~/voip-<id>/.env`
-/// (mode 600) with vars MATRIX_HOMESERVER_URL / MATRIX_USER_ID /
-/// MATRIX_ACCESS_TOKEN (verified on the live gateway: @<id>:matrix.unhash.me,
-/// homeserver http://127.0.0.1:8008). We resolve that .env FIRST and fall back
-/// to the legacy ~/.openclaw_<id>_creds.json record only if the .env is absent
-/// or incomplete.
-const MATRIX_CREDS_PY: &str = r#"import json,os,sys,glob
+/// Lookup order:
+///   1. `~/voip-<id>/.env` (OpenClaw create-agentic-personas layout)
+///   2. `~/.hermes/profiles/<id>/.env` (Hermes profile — MATRIX_* keys)
+///   3. Legacy OpenClaw JSON credential records under `~/.openclaw*`
+// r## so Python can use `"#` fragments without ending the Rust raw string.
+// Prints three lines on success: USER_ID \n ACCESS_TOKEN \n HOMESERVER_URL
+// (homeserver may be empty → caller falls back to local Dendrite).
+const MATRIX_CREDS_PY: &str = r##"import json,os,sys,glob
 aid=sys.argv[1]
-h=os.path.expanduser('~')
+if ":" in aid:
+    aid=aid.split(":",1)[1]
+h=os.path.expanduser("~")
+DEFAULT_HS="http://127.0.0.1:8008"
 
 def parse_env(path):
-    """Minimal .env reader: KEY=VALUE, skipping comments/blanks, stripping
-    surrounding quotes and trailing inline comments on unquoted values."""
     out={}
     try:
         with open(path) as f:
             for line in f:
                 s=line.strip()
-                if not s or s.startswith('#') or '=' not in s: continue
-                k,v=s.split('=',1)
+                if not s or s.startswith("#") or "=" not in s: continue
+                k,v=s.split("=",1)
                 k=k.strip()
-                if k.startswith('export '): k=k[7:].strip()
+                if k.startswith("export "): k=k[7:].strip()
                 v=v.strip()
                 if len(v)>=2 and v[0]==v[-1] and v[0] in ('"',"'"):
                     v=v[1:-1]
                 else:
-                    # drop an inline comment on an unquoted value (" # ...").
-                    hp=v.find(' #')
+                    hp=v.find(" #")
                     if hp>=0: v=v[:hp].rstrip()
                 out[k]=v
     except Exception:
         return {}
     return out
 
-# 1) Standard per-agent .env (the create-agentic-personas layout).
-env=parse_env(h+'/voip-%s/.env'%aid)
-uid=env.get('MATRIX_USER_ID')
-tok=env.get('MATRIX_ACCESS_TOKEN')
-if uid and tok and not tok.startswith('<'):
-    print(uid); print(tok); sys.exit(0)
+def take_matrix(env):
+    uid=env.get("MATRIX_USER_ID") or env.get("MATRIX_USER")
+    tok=env.get("MATRIX_ACCESS_TOKEN") or env.get("MATRIX_TOKEN")
+    hs=(env.get("MATRIX_HOMESERVER_URL") or env.get("MATRIX_HOMESERVER")
+        or env.get("MATRIX_HS") or "").rstrip("/")
+    if uid and tok and not str(tok).startswith("<"):
+        return uid, tok, hs
+    return None
 
-# 2) Fall back to the legacy JSON credential records.
-cands=[h+'/.openclaw_%s_creds.json'%aid,
-       h+'/.openclaw/credentials/%s.json'%aid,
-       h+'/.openclaw/credentials/%s_creds.json'%aid,
-       h+'/.openclaw/matrix/%s.json'%aid]
-cands+= [p for p in glob.glob(h+'/.openclaw/credentials/*%s*.json'%aid) if p not in cands]
+def emit(uid, tok, hs):
+    print(uid); print(tok); print(hs or DEFAULT_HS); sys.exit(0)
+
+got=take_matrix(parse_env(os.path.join(h,"voip-%s"%aid,".env")))
+if got: emit(*got)
+
+got=take_matrix(parse_env(os.path.join(h,".hermes","profiles",aid,".env")))
+if got: emit(*got)
+
+got=take_matrix(parse_env(os.path.join(h,".hermes",".env")))
+if got and aid in ("main","default","hermes",""):
+    emit(*got)
+
+cands=[h+"/.openclaw_%s_creds.json"%aid,
+       h+"/.openclaw/credentials/%s.json"%aid,
+       h+"/.openclaw/credentials/%s_creds.json"%aid,
+       h+"/.openclaw/matrix/%s.json"%aid]
+cands+= [p for p in glob.glob(h+"/.openclaw/credentials/*%s*.json"%aid) if p not in cands]
 for p in cands:
     try:
         d=json.load(open(p))
     except Exception:
         continue
-    uid=d.get('user_id') or d.get('userId') or d.get('mxid')
-    tok=d.get('access_token') or d.get('accessToken') or d.get('token')
+    uid=d.get("user_id") or d.get("userId") or d.get("mxid")
+    tok=d.get("access_token") or d.get("accessToken") or d.get("token")
+    hs=(d.get("homeserver") or d.get("base_url") or d.get("hs") or "").rstrip("/")
     if uid and tok:
-        print(uid); print(tok); sys.exit(0)
-print('ERR no Matrix creds for "%s" (looked in ~/voip-%s/.env and ~/.openclaw_%s_creds.json + ~/.openclaw/credentials/)'%(aid,aid,aid))
-"#;
+        emit(uid, tok, hs)
 
-/// Resolve `(user_id, access_token)` for an agent by running MATRIX_CREDS_PY
-/// on the gateway. Returns a UI-friendly error if creds can't be found.
-fn matrix_creds(sys: &System, agent_id: &str) -> Result<(String, String), String> {
+print("ERR no Matrix creds for %r (looked in ~/voip-%s/.env, ~/.hermes/profiles/%s/.env, and ~/.openclaw* credentials)"%(aid,aid,aid))
+"##;
+
+/// Resolve `(user_id, access_token, homeserver_url)` for an agent.
+fn matrix_creds(sys: &System, agent_id: &str) -> Result<(String, String, String), String> {
+    let aid = agent_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == ':')
+        .collect::<String>();
     let remote = format!(
-        "echo {} | base64 -d | python3 - {}",
+        "echo {} | base64 -d | python3 - '{}'",
         b64(MATRIX_CREDS_PY.as_bytes()),
-        agent_id
+        aid
     );
     let out = ssh_capture(sys, &remote)?;
-    let mut lines = out.lines();
-    let first = lines.next().unwrap_or("").trim();
+    let mut lines = out.lines().map(|l| l.trim()).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("");
     if first.is_empty() || first.starts_with("ERR") {
-        return Err(if first.is_empty() { "no Matrix creds found".into() } else { first[3..].trim().to_string() });
+        return Err(if first.is_empty() {
+            "no Matrix creds found".into()
+        } else {
+            first.trim_start_matches("ERR").trim().to_string()
+        });
     }
-    let tok = lines.next().unwrap_or("").trim().to_string();
+    let tok = lines.next().unwrap_or("").to_string();
     if tok.is_empty() {
         return Err("creds file missing access_token".into());
     }
-    Ok((first.to_string(), tok))
+    let mut hs = lines
+        .next()
+        .unwrap_or(MATRIX_HS)
+        .trim_end_matches('/')
+        .to_string();
+    if hs.is_empty() {
+        hs = MATRIX_HS.to_string();
+    }
+    // Only allow http(s) URLs — never let a crafted .env inject shell.
+    if !(hs.starts_with("http://") || hs.starts_with("https://"))
+        || hs.chars().any(|c| c.is_whitespace() || "\"'`$;&|<>()".contains(c))
+    {
+        hs = MATRIX_HS.to_string();
+    }
+    Ok((first.to_string(), tok, hs))
+}
+
+/// Percent-encode a Matrix user id for use in `/profile/{userId}/…` paths
+/// (`@alice:example.com` → `%40alice%3Aexample.com`).
+fn matrix_uid_path(uid: &str) -> String {
+    uid.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// GET /agent/systems/:id/agents/:aid/avatar — the agent's current Matrix
@@ -1378,12 +1661,13 @@ pub async fn agent_avatar_get(Path((id, agent_id)): Path<(String, String)>) -> i
     };
     let aid = sanitize_id(&agent_id);
     let res = tokio::task::spawn_blocking(move || {
-        let (uid, tok) = matrix_creds(&sys, &aid)?;
+        let (uid, tok, hs) = matrix_creds(&sys, &aid)?;
         // Fetch current avatar_url via the agent's own token (works even if
-        // the profile is non-public).
+        // the profile is non-public). User id MUST be percent-encoded in the path.
+        let uid_enc = matrix_uid_path(&uid);
         let remote = format!(
-            "curl -s --max-time 8 -H 'Authorization: Bearer {tok}' \
-             '{MATRIX_HS}/_matrix/client/v3/profile/{uid}/avatar_url'"
+            "curl -sS --max-time 12 -H 'Authorization: Bearer {tok}' \
+             '{hs}/_matrix/client/v3/profile/{uid_enc}/avatar_url'"
         );
         let body = ssh_capture(&sys, &remote)?;
         Ok::<_, String>((uid, body))
@@ -1393,6 +1677,10 @@ pub async fn agent_avatar_get(Path((id, agent_id)): Path<(String, String)>) -> i
     match res {
         Ok((uid, body)) => {
             let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap_or_else(|_| json!({}));
+            if let Some(ec) = v.get("errcode").and_then(|x| x.as_str()) {
+                let em = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+                return Json(json!({"ok": false, "err": format!("matrix {ec}: {em}"), "user_id": uid}));
+            }
             let mxc = v.get("avatar_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let download = mxc_download_url(&uid, &mxc);
             Json(json!({"ok": true, "user_id": uid, "avatar_url": mxc, "download_url": download}))
@@ -1451,17 +1739,18 @@ pub async fn agent_avatar_set(
     let ct = sanitize_content_type(&req.content_type);
     let aid = sanitize_id(&agent_id);
     let res = tokio::task::spawn_blocking(move || {
-        let (uid, tok) = matrix_creds(&sys, &aid)?;
+        let (uid, tok, hs) = matrix_creds(&sys, &aid)?;
+        let uid_enc = matrix_uid_path(&uid);
         // 1) Upload to the media repo. Write the bytes to a temp file on the
         //    gateway (base64-decoded) and curl --data-binary it. Capture the
         //    content_uri from the JSON response.
         let upload = format!(
             "TMP=$(mktemp); base64 -d > \"$TMP\"; \
-             RESP=$(curl -s --max-time 30 -X POST \
+             RESP=$(curl -sS --max-time 30 -X POST \
                -H 'Authorization: Bearer {tok}' \
                -H 'Content-Type: {ct}' \
                --data-binary @\"$TMP\" \
-               '{MATRIX_HS}/_matrix/media/v3/upload'); \
+               '{hs}/_matrix/media/v3/upload'); \
              rm -f \"$TMP\"; echo \"$RESP\""
         );
         let up_body = ssh_capture_stdin(&sys, &upload, img_b64.into_bytes())?;
@@ -1475,14 +1764,14 @@ pub async fn agent_avatar_set(
                 format!("media upload failed: {err}")
             })?
             .to_string();
-        // 2) Set avatar_url on the agent's profile.
+        // 2) Set avatar_url on the agent's profile (user id percent-encoded).
         let body = json!({"avatar_url": mxc}).to_string();
         let setav = format!(
-            "echo {} | base64 -d | curl -s --max-time 12 -X PUT \
+            "echo {} | base64 -d | curl -sS --max-time 12 -X PUT \
                -H 'Authorization: Bearer {tok}' \
                -H 'Content-Type: application/json' \
                --data-binary @- \
-               '{MATRIX_HS}/_matrix/client/v3/profile/{uid}/avatar_url'",
+               '{hs}/_matrix/client/v3/profile/{uid_enc}/avatar_url'",
             b64(body.as_bytes())
         );
         let set_body = ssh_capture(&sys, &setav)?;
@@ -1531,19 +1820,24 @@ fn sanitize_content_type(ct: &str) -> String {
 const CORPUS_LIST_PY: &str = r#"import json,os,sys
 h=os.path.expanduser('~')
 aid=sys.argv[1]
-# Resolve root from the agent's workspace config, else the convention.
-root=None
-try:
-    d=json.load(open(h+'/.openclaw/openclaw.json'))
-    for a in ((d.get('agents') or {}).get('list') or []):
-        if isinstance(a,dict) and a.get('id')==aid:
-            ws=a.get('workspace')
-            if ws: root=os.path.join(ws,'memory',aid+'-corpus')
-            break
-except Exception:
-    pass
-if not root:
-    root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+def _corpus_root(h,aid):
+    hp=os.path.join(h,'.hermes','profiles',aid)
+    if os.path.isdir(hp):
+        return os.path.join(hp,'memories','corpus')
+    root=None
+    try:
+        d=json.load(open(h+'/.openclaw/openclaw.json'))
+        for a in ((d.get('agents') or {}).get('list') or []):
+            if isinstance(a,dict) and a.get('id')==aid:
+                ws=a.get('workspace')
+                if ws: root=os.path.join(ws,'memory',aid+'-corpus')
+                break
+    except Exception:
+        pass
+    if not root:
+        root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+    return root
+root=_corpus_root(h,aid)
 out={'root':root,'exists':os.path.isdir(root),'files':[]}
 if os.path.isdir(root):
     for dp,_,fns in os.walk(root):
@@ -1563,18 +1857,24 @@ const CORPUS_READ_PY: &str = r#"import json,os,sys,base64
 h=os.path.expanduser('~')
 aid=sys.argv[1]
 rel=base64.b64decode(sys.argv[2]).decode('utf-8','replace')
-root=None
-try:
-    d=json.load(open(h+'/.openclaw/openclaw.json'))
-    for a in ((d.get('agents') or {}).get('list') or []):
-        if isinstance(a,dict) and a.get('id')==aid:
-            ws=a.get('workspace')
-            if ws: root=os.path.join(ws,'memory',aid+'-corpus')
-            break
-except Exception:
-    pass
-if not root:
-    root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+def _corpus_root(h,aid):
+    hp=os.path.join(h,'.hermes','profiles',aid)
+    if os.path.isdir(hp):
+        return os.path.join(hp,'memories','corpus')
+    root=None
+    try:
+        d=json.load(open(h+'/.openclaw/openclaw.json'))
+        for a in ((d.get('agents') or {}).get('list') or []):
+            if isinstance(a,dict) and a.get('id')==aid:
+                ws=a.get('workspace')
+                if ws: root=os.path.join(ws,'memory',aid+'-corpus')
+                break
+    except Exception:
+        pass
+    if not root:
+        root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+    return root
+root=_corpus_root(h,aid)
 rootr=os.path.realpath(root)
 target=os.path.realpath(os.path.join(rootr,rel))
 # Guard: target must stay under the corpus root.
@@ -1599,23 +1899,28 @@ except Exception as e:
 /// list/read scripts. We do NOT require the file to exist (uploads create it),
 /// but the target must stay strictly UNDER the corpus root (never the root
 /// itself), so neither an upload nor a delete can ever escape or nuke the vault.
-const CORPUS_PATH_PY: &str = r#"import os,sys,base64
+const CORPUS_PATH_PY: &str = r#"import os,sys,base64,json
 h=os.path.expanduser('~')
 aid=sys.argv[1]
 rel=base64.b64decode(sys.argv[2]).decode('utf-8','replace')
-import json
-root=None
-try:
-    d=json.load(open(h+'/.openclaw/openclaw.json'))
-    for a in ((d.get('agents') or {}).get('list') or []):
-        if isinstance(a,dict) and a.get('id')==aid:
-            ws=a.get('workspace')
-            if ws: root=os.path.join(ws,'memory',aid+'-corpus')
-            break
-except Exception:
-    pass
-if not root:
-    root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+def _corpus_root(h,aid):
+    hp=os.path.join(h,'.hermes','profiles',aid)
+    if os.path.isdir(hp):
+        return os.path.join(hp,'memories','corpus')
+    root=None
+    try:
+        d=json.load(open(h+'/.openclaw/openclaw.json'))
+        for a in ((d.get('agents') or {}).get('list') or []):
+            if isinstance(a,dict) and a.get('id')==aid:
+                ws=a.get('workspace')
+                if ws: root=os.path.join(ws,'memory',aid+'-corpus')
+                break
+    except Exception:
+        pass
+    if not root:
+        root=h+'/.openclaw/workspace-%s/memory/%s-corpus'%(aid,aid)
+    return root
+root=_corpus_root(h,aid)
 rootr=os.path.realpath(root)
 target=os.path.realpath(os.path.join(rootr,rel))
 # Guard: target must be strictly UNDER the corpus root (never == root).
@@ -1801,12 +2106,92 @@ fn drop_skill(sys: &System, skill: &str, kind: &str, file_b64: &str) -> Result<S
 const TTS_VOICES_DIR: &str = "/home/albert/stacks/pocket-tts-server/voices";
 
 /// VOICE python: resolve the agent's effective voice + its source + the global
-/// default, AND read the agent's `~/voip-<id>/.env` (VOXTRAL_VOICE +
-/// VOXTRAL_VOICE_DESCRIPTION). argv[1] = agent id. base64'd over SSH.
+/// default, AND read the agent's env (VOXTRAL_VOICE + VOXTRAL_VOICE_DESCRIPTION).
+/// Hermes-first: `~/.hermes/profiles/<id>/.env` + config.yaml tts; else OpenClaw
+/// openclaw.json + `~/voip-<id>/.env`. argv[1] = agent id. base64'd over SSH.
 const VOICE_PY: &str = r#"import json,os,sys
 h=os.path.expanduser('~')
 aid=sys.argv[1]
-d=json.load(open(h+'/.openclaw/openclaw.json'))
+def kind(v):
+    if not isinstance(v,str) or not v.strip(): return 'none'
+    s=v.strip()
+    if len(s)>60 or s.count(' ')>=4 or '.' in s: return 'designer'
+    return 'clone'
+def read_env_voice(envp):
+    clone_name=None; descr=None
+    if not os.path.isfile(envp):
+        return None,None,False
+    try:
+        for ln in open(envp,encoding='utf-8',errors='replace'):
+            s=ln.rstrip('\n')
+            if s.startswith('VOXTRAL_VOICE='):
+                clone_name=s[len('VOXTRAL_VOICE='):]
+            elif s.startswith('VOXTRAL_VOICE_DESCRIPTION='):
+                descr=s[len('VOXTRAL_VOICE_DESCRIPTION='):]
+    except Exception:
+        pass
+    return clone_name,descr,True
+# ── Hermes profile ────────────────────────────────────────────────────────
+hp=os.path.join(h,'.hermes','profiles',aid)
+if os.path.isdir(hp):
+    envp=os.path.join(hp,'.env')
+    clone_name,descr,env_exists=read_env_voice(envp)
+    # config.yaml tts.openai.voice / provider / instructions as gateway defaults
+    glob=None; glob_provider=None; cfg_instr=None
+    cfg=os.path.join(hp,'config.yaml')
+    if os.path.isfile(cfg):
+        try:
+            in_tts=False; in_openai=False
+            for line in open(cfg,encoding='utf-8',errors='replace'):
+                raw=line.rstrip('\n')
+                s=raw.strip()
+                if not s or s.startswith('#'): continue
+                indent=len(raw)-len(raw.lstrip(' '))
+                if indent==0 and s.endswith(':'):
+                    in_tts=(s=='tts:'); in_openai=False; continue
+                if in_tts and indent==2 and s.endswith(':'):
+                    in_openai=(s.startswith('openai')); continue
+                if in_tts and indent==2 and s.startswith('provider:'):
+                    glob_provider=s.split(':',1)[1].strip().strip("'\"")
+                if in_openai and s.startswith('voice:'):
+                    glob=s.split(':',1)[1].strip().strip("'\"")
+                if in_openai and s.startswith('instructions:'):
+                    rest=s.split(':',1)[1].strip()
+                    if rest:
+                        cfg_instr=rest.strip("'\"")
+                    else:
+                        # multi-line YAML block starts next lines
+                        cfg_instr=''
+                elif in_openai and cfg_instr is not None and cfg_instr=='':
+                    # continuation of multi-line instructions (simple fold)
+                    if indent>=6:
+                        cfg_instr=(cfg_instr+' '+s).strip() if cfg_instr else s
+                    elif indent<6 and s and not s.startswith('-'):
+                        pass
+        except Exception:
+            pass
+    if not descr and cfg_instr:
+        descr=cfg_instr
+    # effective voice: env clone name, else config voice, else description
+    if clone_name and clone_name.strip():
+        eff=clone_name; src='hermes.env.VOXTRAL_VOICE'; ov=True
+    elif glob:
+        eff=glob; src='hermes.config.yaml tts.openai.voice'; ov=False
+    elif descr:
+        eff=descr; src='hermes.env.VOXTRAL_VOICE_DESCRIPTION'; ov=True
+    else:
+        eff=None; src='hermes-none'; ov=False
+    print(json.dumps({'voice':eff,'source':src,'kind':kind(eff if not descr or (clone_name and clone_name.strip()) else (descr or eff)),
+                      'is_override':ov,'global':glob,'provider':glob_provider,
+                      'found':True,'env_path':envp,'env_exists':env_exists,
+                      'clone_name':clone_name,'description':descr,'gateway':'hermes'}))
+    raise SystemExit(0)
+# ── OpenClaw ──────────────────────────────────────────────────────────────
+try:
+    d=json.load(open(h+'/.openclaw/openclaw.json'))
+except Exception as e:
+    print(json.dumps({'err':'config: '+str(e),'found':False}))
+    sys.exit(0)
 def dig(o,path):
     cur=o
     for k in path:
@@ -1828,29 +2213,12 @@ for name,path in [('voice',['voice']),('identity.voice',['identity','voice']),
         ov=v; ov_src=name; break
 eff = ov if ov is not None else glob
 src = ('agent.'+ov_src) if ov is not None else 'gateway-default (messages.tts.providers.openai.voice)'
-# classify: long sentence-ish => designer description; short token => named clone
-def kind(v):
-    if not isinstance(v,str) or not v.strip(): return 'none'
-    s=v.strip()
-    if len(s)>60 or s.count(' ')>=4 or '.' in s: return 'designer'
-    return 'clone'
-# voip env: VOXTRAL_VOICE + VOXTRAL_VOICE_DESCRIPTION
 envp=os.path.join(h,'voip-%s'%aid,'.env')
-clone_name=None; descr=None; env_exists=os.path.isfile(envp)
-if env_exists:
-    try:
-        for ln in open(envp,encoding='utf-8',errors='replace'):
-            s=ln.rstrip('\n')
-            if s.startswith('VOXTRAL_VOICE='):
-                clone_name=s[len('VOXTRAL_VOICE='):]
-            elif s.startswith('VOXTRAL_VOICE_DESCRIPTION='):
-                descr=s[len('VOXTRAL_VOICE_DESCRIPTION='):]
-    except Exception:
-        pass
+clone_name,descr,env_exists=read_env_voice(envp)
 print(json.dumps({'voice':eff,'source':src,'kind':kind(eff),
                   'is_override':ov is not None,'global':glob,'provider':glob_provider,
                   'found':bool(a),'env_path':envp,'env_exists':env_exists,
-                  'clone_name':clone_name,'description':descr}))
+                  'clone_name':clone_name,'description':descr,'gateway':'openclaw'}))
 "#;
 
 /// GET /agent/systems/:id/agents/:aid/voice — the agent's effective TTS voice
@@ -1871,6 +2239,9 @@ pub async fn agent_voice(Path((id, agent_id)): Path<(String, String)>) -> impl I
     match res {
         Ok(stdout) => {
             let p: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({}));
+            if let Some(e) = p.get("err").and_then(|x| x.as_str()) {
+                return Json(json!({"ok": false, "err": e}));
+            }
             Json(json!({
                 "ok": true,
                 "voice": p.get("voice").cloned().unwrap_or(serde_json::Value::Null),
@@ -1883,6 +2254,7 @@ pub async fn agent_voice(Path((id, agent_id)): Path<(String, String)>) -> impl I
                 "env_exists": p.get("env_exists").cloned().unwrap_or(json!(false)),
                 "clone_name": p.get("clone_name").cloned().unwrap_or(serde_json::Value::Null),
                 "description": p.get("description").cloned().unwrap_or(serde_json::Value::Null),
+                "gateway": p.get("gateway").cloned().unwrap_or(serde_json::Value::Null),
             }))
         }
         Err(e) => Json(json!({"ok": false, "err": e})),
@@ -1890,17 +2262,22 @@ pub async fn agent_voice(Path((id, agent_id)): Path<(String, String)>) -> impl I
 }
 
 /// ENV-SET python: replace-or-append a single `KEY=value` line in the agent's
-/// `$HOME/voip-<id>/.env`, preserving every other line, written atomically
-/// (temp + os.replace). Creates the dir + file if absent. argv[1]=agent id,
-/// argv[2]=env key, argv[3]=base64'd value (so newlines/quotes survive). base64'd
-/// over SSH. Prints `OK <path>` or `ERR <msg>`.
+/// env file (Hermes: `~/.hermes/profiles/<id>/.env`; OpenClaw: `~/voip-<id>/.env`),
+/// preserving every other line, written atomically (temp + os.replace). Creates
+/// the dir + file if absent. argv[1]=agent id, argv[2]=env key, argv[3]=base64'd
+/// value (so newlines/quotes survive). base64'd over SSH. Prints `OK <path>` or
+/// `ERR <msg>`.
 const VOICE_ENV_SET_PY: &str = r#"import os,sys,base64
 h=os.path.expanduser('~')
 aid=sys.argv[1]; key=sys.argv[2]
 val=base64.b64decode(sys.argv[3]).decode('utf-8','replace')
 # Collapse any embedded newlines so the value stays a single env line.
 val=val.replace('\r',' ').replace('\n',' ')
-d=os.path.join(h,'voip-%s'%aid)
+hp=os.path.join(h,'.hermes','profiles',aid)
+if os.path.isdir(hp):
+    d=hp
+else:
+    d=os.path.join(h,'voip-%s'%aid)
 p=os.path.join(d,'.env')
 try:
     os.makedirs(d,exist_ok=True)
@@ -2288,14 +2665,13 @@ pub async fn agent_corpus_file_delete(
 
 // ── E6/F7a: per-agent persona files (Soul + Identity) ─────────────────────
 //
-// A persona's character lives in markdown in its workspace (per the
-// create-agentic-personas blueprint, verified on the gateway):
+// A persona's character lives in markdown in its workspace:
 //   <workspace>/SOUL.md      — the essence: voice, values, manner (the system prompt)
 //   <workspace>/IDENTITY.md  — the facts: name, era, domain, emoji
-// We resolve <workspace> from the agent's `workspace` config (falling back to
-// the ~/.openclaw/workspace-<id> convention, which is what every persona on the
-// gateway actually uses), then read/write exactly SOUL.md or IDENTITY.md. Both
-// paths are traversal-guarded: only the two whitelisted filenames are ever
+// Workspace resolution (Hermes-first):
+//   Hermes:   ~/.hermes/profiles/<id>/   (if that directory exists)
+//   OpenClaw: agent `workspace` config, else ~/.openclaw/workspace-<id>/
+// Both paths are traversal-guarded: only the two whitelisted filenames are ever
 // touched, and the resolved target must stay directly under the workspace root.
 
 /// Map the `which` query value to the exact persona filename. Whitelist-only —
@@ -2313,23 +2689,27 @@ fn persona_filename(which: &str) -> Option<&'static str> {
 const PERSONA_READ_PY: &str = r#"import json,os,sys
 h=os.path.expanduser('~')
 aid=sys.argv[1]; fn=sys.argv[2]
-# Resolve the workspace root from config, else the convention.
-ws=None
-try:
-    d=json.load(open(h+'/.openclaw/openclaw.json'))
-    for a in ((d.get('agents') or {}).get('list') or []):
-        if isinstance(a,dict) and a.get('id')==aid:
-            ws=a.get('workspace'); break
-except Exception:
-    pass
-if not ws:
-    ws=h+'/.openclaw/workspace-%s'%aid
+# Hermes-first workspace resolution.
+hp=os.path.join(h,'.hermes','profiles',aid)
+ws=None; gateway='openclaw'
+if os.path.isdir(hp):
+    ws=hp; gateway='hermes'
+else:
+    try:
+        d=json.load(open(h+'/.openclaw/openclaw.json'))
+        for a in ((d.get('agents') or {}).get('list') or []):
+            if isinstance(a,dict) and a.get('id')==aid:
+                ws=a.get('workspace'); break
+    except Exception:
+        pass
+    if not ws:
+        ws=h+'/.openclaw/workspace-%s'%aid
 rootr=os.path.realpath(ws)
 target=os.path.realpath(os.path.join(rootr,fn))
 # Guard: target must be a direct child of the workspace root.
 if os.path.dirname(target)!=rootr:
     print(json.dumps({'err':'path escapes workspace root'})); sys.exit(0)
-out={'workspace':ws,'path':fn,'exists':os.path.isfile(target)}
+out={'workspace':ws,'path':fn,'exists':os.path.isfile(target),'gateway':gateway}
 if os.path.isfile(target):
     try:
         sz=os.path.getsize(target)
@@ -2351,16 +2731,20 @@ print(json.dumps(out))
 const PERSONA_PATH_PY: &str = r#"import json,os,sys
 h=os.path.expanduser('~')
 aid=sys.argv[1]; fn=sys.argv[2]
+hp=os.path.join(h,'.hermes','profiles',aid)
 ws=None
-try:
-    d=json.load(open(h+'/.openclaw/openclaw.json'))
-    for a in ((d.get('agents') or {}).get('list') or []):
-        if isinstance(a,dict) and a.get('id')==aid:
-            ws=a.get('workspace'); break
-except Exception:
-    pass
-if not ws:
-    ws=h+'/.openclaw/workspace-%s'%aid
+if os.path.isdir(hp):
+    ws=hp
+else:
+    try:
+        d=json.load(open(h+'/.openclaw/openclaw.json'))
+        for a in ((d.get('agents') or {}).get('list') or []):
+            if isinstance(a,dict) and a.get('id')==aid:
+                ws=a.get('workspace'); break
+    except Exception:
+        pass
+    if not ws:
+        ws=h+'/.openclaw/workspace-%s'%aid
 rootr=os.path.realpath(ws)
 target=os.path.realpath(os.path.join(rootr,fn))
 if os.path.dirname(target)!=rootr:

@@ -63,10 +63,85 @@ TOR_REVERT_MARKER=/var/lib/aeon/tor-auto-reverted
 TOR_STALL_GRACE=60
 TOR_DISABLE_GRACE=150
 
+# Soft L2 recovery: interface has an IP but the default gateway is
+# unreachable for this many consecutive netwatch ticks → reapply the
+# wifi connection (no reboot). Clears the "LAN dead, only Tailscale
+# works / hard reboot required" failure mode that brcmfmac power-save
+# + high TX load produces.
+SOFT_FAIL_STATE=/var/lib/aeon/netwatch-softfail.state
+SOFT_FAIL_TICKS=3          # ~3 × timer interval (30s timer → ~90s)
+GATEWAY_PING_TIMEOUT=2
+
 mkdir -p "$(dirname "$STATE_FILE")"
 [[ -f "$STATE_FILE" ]] || echo "0" > "$STATE_FILE"
 
 log() { logger -t aeon-netwatch -- "$*"; }
+
+# brcmfmac defaults to power-save ON and re-enables it after reassoc.
+# Keep it off every tick so a wedged-PSM radio can't silently return.
+ensure_wifi_powersave_off() {
+    local dev
+    for dev in /sys/class/net/*/wireless; do
+        [[ -e "$dev" ]] || continue
+        dev=$(basename "$(dirname "$dev")")
+        iw dev "$dev" set power_save off >/dev/null 2>&1 || true
+    done
+    # Persist the NM property on every saved client wifi profile so a
+    # future reassoc doesn't flip PSM back on via NM's default.
+    local name
+    while IFS= read -r name; do
+        [[ -n "$name" && "$name" != "$AP_CON" ]] || continue
+        nmcli con mod "$name" 802-11-wireless.powersave 2 >/dev/null 2>&1 || true
+    done < <(nmcli -t -f NAME,TYPE con show 2>/dev/null \
+        | awk -F: '$2 ~ /wireless|wifi/ {print $1}')
+}
+
+# Default-gateway reachability from the primary wifi/ethernet device.
+# Used for soft recovery — deliberately NOT used for AP-fallback (LAN
+# without internet must still keep the client link).
+gateway_reachable() {
+    local gw
+    gw=$(ip -4 route show default 2>/dev/null | awk '/default/{print $3; exit}')
+    [[ -n "$gw" ]] || return 1
+    ping -c 1 -W "$GATEWAY_PING_TIMEOUT" "$gw" >/dev/null 2>&1
+}
+
+# Soft-recover a half-dead wifi client: has IP, primary_usable is true,
+# but gateway pings fail for SOFT_FAIL_TICKS consecutive ticks. Reapply
+# the active wifi connection (and force powersave off) instead of
+# waiting for a hard reboot.
+soft_recover_wifi() {
+    if gateway_reachable; then
+        rm -f "$SOFT_FAIL_STATE" 2>/dev/null
+        return 0
+    fi
+    local fails
+    fails=$(cat "$SOFT_FAIL_STATE" 2>/dev/null || echo 0)
+    [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+    fails=$((fails + 1))
+    echo "$fails" > "$SOFT_FAIL_STATE"
+    if (( fails < SOFT_FAIL_TICKS )); then
+        log "gateway unreachable (tick ${fails}/${SOFT_FAIL_TICKS}) — will soft-recover wifi if it persists"
+        return 0
+    fi
+    # Identify the active wifi client connection (not the setup AP).
+    local con
+    con=$(nmcli -t -f NAME,TYPE,DEVICE con show --active 2>/dev/null \
+        | awk -F: -v ap="$AP_CON" '
+            $1 != ap && ($2 ~ /wireless|wifi/) {print $1; exit}')
+    if [[ -z "$con" ]]; then
+        log "gateway unreachable ${fails} ticks but no active wifi client to reapply"
+        return 0
+    fi
+    log "SOFT-RECOVER: gateway unreachable ${fails} ticks — reapplying wifi connection '${con}' (powersave off first)"
+    ensure_wifi_powersave_off
+    # `con up` re-associates; `device reapply` alone doesn't always clear
+    # a wedged brcmfmac PSM state.
+    nmcli -w 20 con up "$con" >/dev/null 2>&1 || true
+    ensure_wifi_powersave_off
+    # Reset counter so we don't thrash every tick if the AP is truly down.
+    echo "0" > "$SOFT_FAIL_STATE"
+}
 
 # v74: read tor.enabled + tor.mode from network.toml. Echoes "ENABLED MODE"
 # (e.g. "true transparent"). python3+tomllib is already a dependency
@@ -431,6 +506,9 @@ fi
 # redirected through Tor). No-op unless Tor is enabled and stalled.
 tor_stall_guard
 
+# Always keep WiFi power-save off (brcmfmac re-enables it after reassoc).
+ensure_wifi_powersave_off
+
 if primary_usable; then
     if [[ "$down_since" != "0" ]]; then
         log "primary link restored after $((now - down_since))s"
@@ -445,6 +523,9 @@ if primary_usable; then
         # lingering captive rules (e.g. after a reboot mid-AP-session).
         [[ -f "$DNSMASQ_CAPTIVE" ]] && remove_captive_portal_hijack
     fi
+    # Soft L2 recovery: link has an IP but the gateway is dead → reapply
+    # wifi instead of leaving the box half-reachable until a hard reboot.
+    soft_recover_wifi
     exit 0
 fi
 

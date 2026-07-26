@@ -364,10 +364,13 @@ fn capture_alsa_device() -> Option<CapturePick> {
         if low.contains("vc4") {
             continue;
         }
-        let dev = format!("plughw:CARD={name},DEV=0");
+        // dsnoop: multi-open so live listen + /record A/V can share Cam Link.
+        // Local mics (wm8960) stay on plughw — plug conversion is more reliable.
+        let shared = format!("dsnoop:CARD={name},DEV=0");
+        let plug = format!("plughw:CARD={name},DEV=0");
         if low.contains("tc358743") {
             return Some(CapturePick {
-                device: dev,
+                device: shared,
                 kind: "hdmi-target",
                 rate: 48000,
                 channels: 2,
@@ -376,7 +379,7 @@ fn capture_alsa_device() -> Option<CapturePick> {
         // Elgato Cam Link 4K (and similar HDMI USB capture) — target HDMI audio.
         if low.contains("c4k") || low.contains("cam link") || low.contains("elgato") {
             return Some(CapturePick {
-                device: dev,
+                device: shared,
                 kind: "camlink-hdmi",
                 rate: 48000,
                 channels: 2,
@@ -384,7 +387,7 @@ fn capture_alsa_device() -> Option<CapturePick> {
         }
         if (low.contains("usb") || low.contains("uac")) && usb.is_none() {
             usb = Some(CapturePick {
-                device: dev.clone(),
+                device: shared.clone(),
                 kind: "usb-mic",
                 rate: 48000,
                 channels: 2,
@@ -392,7 +395,7 @@ fn capture_alsa_device() -> Option<CapturePick> {
         }
         if (low.contains("wm8960") || low.contains("seeed")) && braincraft.is_none() {
             braincraft = Some(CapturePick {
-                device: dev.clone(),
+                device: plug.clone(),
                 kind: "braincraft-mic",
                 rate: 16000,
                 channels: 1,
@@ -400,7 +403,7 @@ fn capture_alsa_device() -> Option<CapturePick> {
         }
         if other.is_none() && !low.contains("hdmi") {
             other = Some(CapturePick {
-                device: dev,
+                device: shared,
                 kind: "alsa-capture",
                 rate: 48000,
                 channels: 2,
@@ -421,103 +424,384 @@ fn capture_alsa_device() -> Option<CapturePick> {
     usb.or(braincraft).or(other)
 }
 
-/// GET /api/audio/stream — continuous low-latency MP3 for the operator console
-/// and agents: **HDMI target audio** when `tc358743` is present, otherwise USB /
-/// BrainCraft mic. The web `<audio>` element plays this beside the video stream.
+/// Best-effort free of prior listen-session ffmpeg processes that hold ALSA
+/// capture exclusive. Matches both the low-latency PCM pump and the legacy
+/// MP3 pump — never the video streamer.
+fn free_stale_listen_ffmpeg() {
+    // Narrow patterns: full argv of our listen encoder only.
+    for pat in [
+        r"ffmpeg.*-f alsa.*-f s16le",
+        r"ffmpeg.*-f alsa.*libmp3lame.*-f mp3",
+    ] {
+        let _ = Command::new("pkill").args(["-9", "-f", pat]).output();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(80));
+}
+
+/// Codec for the shared live-audio hub.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveCodec {
+    /// Raw little-endian signed 16-bit PCM — low latency for Web Audio.
+    PcmS16le,
+    /// MP3 for simple `<audio src>` / curl clients (~seconds of browser buffer).
+    Mp3,
+}
+
+impl LiveCodec {
+    fn from_query(q: Option<&str>) -> Self {
+        match q.map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("mp3") | Some("mpeg") => Self::Mp3,
+            _ => Self::PcmS16le, // default: low-latency
+        }
+    }
+    fn content_type(self) -> &'static str {
+        match self {
+            Self::PcmS16le => "application/octet-stream",
+            Self::Mp3 => "audio/mpeg",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::PcmS16le => "pcm_s16le",
+            Self::Mp3 => "mp3",
+        }
+    }
+}
+
+/// One shared ffmpeg → many HTTP listeners. Cam Link ALSA is exclusive under
+/// plughw; dsnoop shares. Fan-outs raw PCM (default) or MP3 chunks.
+struct LiveAudioHub {
+    tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    kind: &'static str,
+    device: String,
+    codec: LiveCodec,
+    rate: u32,
+    channels: u32,
+    /// Generation counter so a late pump exit does not clear a newer hub.
+    gen: u64,
+}
+
+static AUDIO_HUB: std::sync::OnceLock<tokio::sync::Mutex<Option<LiveAudioHub>>> =
+    std::sync::OnceLock::new();
+static AUDIO_HUB_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn audio_hub() -> &'static tokio::sync::Mutex<Option<LiveAudioHub>> {
+    AUDIO_HUB.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+/// Hub snapshot returned to an HTTP listener.
+struct LiveSub {
+    rx: tokio::sync::broadcast::Receiver<bytes::Bytes>,
+    kind: &'static str,
+    device: String,
+    codec: LiveCodec,
+    rate: u32,
+    channels: u32,
+}
+
+/// Subscribe to the shared live pump, starting ffmpeg if needed.
+async fn subscribe_live_audio(pick: &CapturePick, codec: LiveCodec) -> Result<LiveSub, String> {
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command as TokioCommand;
+    use tokio::time::{timeout, Duration};
+
+    let mut guard = audio_hub().lock().await;
+    if let Some(hub) = guard.as_ref() {
+        // Reuse only when device + codec match (PCM vs MP3 need different ffmpeg).
+        if hub.device == pick.device && hub.codec == codec {
+            return Ok(LiveSub {
+                rx: hub.tx.subscribe(),
+                kind: hub.kind,
+                device: hub.device.clone(),
+                codec: hub.codec,
+                rate: hub.rate,
+                channels: hub.channels,
+            });
+        }
+        // Device/codec changed — drop the old hub (receivers lag-out; pump exits).
+        *guard = None;
+        free_stale_listen_ffmpeg();
+    }
+
+    free_stale_listen_ffmpeg();
+
+    let dev = pick.device.clone();
+    let rate = pick.rate;
+    let ch = pick.channels;
+    let rate_s = rate.to_string();
+    let ch_s = ch.to_string();
+
+    // Low-latency ALSA → PCM (default) or MP3. PCM + Web Audio is ~100–300 ms;
+    // MP3 via <audio> is often multi-second because browsers buffer MPEG.
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-fflags".into(),
+        "nobuffer".into(),
+        "-flags".into(),
+        "low_delay".into(),
+        "-probesize".into(),
+        "32".into(),
+        "-analyzeduration".into(),
+        "0".into(),
+        "-thread_queue_size".into(),
+        "8".into(),
+        "-f".into(),
+        "alsa".into(),
+        "-ar".into(),
+        rate_s.clone(),
+        "-ac".into(),
+        ch_s.clone(),
+        "-i".into(),
+        dev.clone(),
+    ];
+    match codec {
+        LiveCodec::PcmS16le => {
+            args.extend([
+                "-c:a".into(),
+                "pcm_s16le".into(),
+                "-f".into(),
+                "s16le".into(),
+                "-".into(),
+            ]);
+        }
+        LiveCodec::Mp3 => {
+            args.extend([
+                "-c:a".into(),
+                "libmp3lame".into(),
+                "-b:a".into(),
+                "96k".into(),
+                "-compression_level".into(),
+                "0".into(),
+                "-reservoir".into(),
+                "0".into(),
+                "-write_xing".into(),
+                "0".into(),
+                "-f".into(),
+                "mp3".into(),
+                "-".into(),
+            ]);
+        }
+    }
+
+    let mut child = TokioCommand::new("ffmpeg")
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("spawn ffmpeg: {e}"))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ffmpeg stdout missing".to_string())?;
+
+    // Wait for the first audio bytes so we fail fast on busy/missing capture.
+    let mut probe = [0u8; 4096];
+    let n = match timeout(Duration::from_millis(2000), stdout.read(&mut probe)).await {
+        Ok(Ok(0)) => {
+            let err = read_ffmpeg_err(&mut child).await;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(if err.is_empty() {
+                format!(
+                    "no audio from {} ({}) — capture silent or device busy",
+                    pick.kind, pick.device
+                )
+            } else {
+                format!("{err} ({})", pick.device)
+            });
+        }
+        Err(_) => {
+            let err = read_ffmpeg_err(&mut child).await;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(if err.is_empty() {
+                format!(
+                    "timeout opening {} ({}) — is another process holding the mic?",
+                    pick.kind, pick.device
+                )
+            } else {
+                format!("{err} ({})", pick.device)
+            });
+        }
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(format!("ffmpeg read: {e}"));
+        }
+    };
+
+    drop(child.stderr.take()); // don't block on a full stderr pipe
+
+    // Small broadcast depth so a slow client cannot build multi-second backlog
+    // for everyone else (lagged receivers just skip).
+    let (tx, rx) = tokio::sync::broadcast::channel::<bytes::Bytes>(8);
+    let first = bytes::Bytes::copy_from_slice(&probe[..n]);
+    let _ = tx.send(first);
+
+    let gen = AUDIO_HUB_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let kind = pick.kind;
+    let device = pick.device.clone();
+    *guard = Some(LiveAudioHub {
+        tx: tx.clone(),
+        kind,
+        device: device.clone(),
+        codec,
+        rate,
+        channels: ch,
+        gen,
+    });
+    drop(guard);
+
+    // Pump: read ffmpeg → broadcast. Idle (no listeners) for ~15s tears the
+    // capture down so ALSA is not held forever after mute.
+    tokio::spawn(async move {
+        let mut stdout = stdout;
+        // ~10 ms of stereo s16 @ 48 kHz ≈ 1920 bytes; keep chunks small for low delay.
+        let mut buf = [0u8; 2048];
+        let mut idle_ticks: u32 = 0;
+        loop {
+            match timeout(Duration::from_millis(100), stdout.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => break,
+                Err(_) => {
+                    // read timeout — still check idle / generation
+                }
+                Ok(Ok(n)) => {
+                    let _ = tx.send(bytes::Bytes::copy_from_slice(&buf[..n]));
+                }
+            }
+            if tx.receiver_count() == 0 {
+                idle_ticks += 1;
+                // 100ms poll × 150 ≈ 15s with no listeners
+                if idle_ticks >= 150 {
+                    break;
+                }
+            } else {
+                idle_ticks = 0;
+            }
+            let still = {
+                let g = audio_hub().lock().await;
+                g.as_ref().map(|h| h.gen == gen).unwrap_or(false)
+            };
+            if !still {
+                break;
+            }
+        }
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let mut g = audio_hub().lock().await;
+        if g.as_ref().map(|h| h.gen == gen).unwrap_or(false) {
+            *g = None;
+        }
+    });
+
+    Ok(LiveSub {
+        rx,
+        kind,
+        device,
+        codec,
+        rate,
+        channels: ch,
+    })
+}
+
+async fn read_ffmpeg_err(child: &mut tokio::process::Child) -> String {
+    use tokio::io::AsyncReadExt;
+    use tokio::time::{timeout, Duration};
+    let Some(mut err) = child.stderr.take() else {
+        return String::new();
+    };
+    let mut buf = vec![0u8; 1024];
+    match timeout(Duration::from_millis(150), err.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => String::from_utf8_lossy(&buf[..n]).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// GET /api/audio/stream — continuous live capture audio for the operator
+/// console and agents. Default is **raw s16le PCM** (low latency, for Web
+/// Audio); `?codec=mp3` keeps the old MPEG stream for simple players.
 ///
-/// Implementation: `ffmpeg -f alsa -i … -f mp3 -` piped as an HTTP body.
-pub async fn stream_audio(State(_state): State<AppState>) -> impl IntoResponse {
+/// Query:
+/// - `codec=pcm` (default) | `mp3`
+///
+/// One shared ffmpeg per preferred capture device fans out to all listeners.
+pub async fn stream_audio(
+    State(_state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
     use axum::body::Body;
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode as SC};
-    use tokio::process::Command as TokioCommand;
-    use tokio_util::io::ReaderStream;
+
+    let codec = LiveCodec::from_query(q.get("codec").map(|s| s.as_str()));
 
     let Some(pick) = capture_alsa_device() else {
         return (
             SC::SERVICE_UNAVAILABLE,
             Json(json!({
                 "ok": false,
-                "err": "no capture sound card (need tc358743-audio for HDMI, or USB/BrainCraft mic)"
+                "err": "no capture sound card (need Cam Link / tc358743-audio for HDMI, or USB/BrainCraft mic)"
             })),
         )
             .into_response();
     };
-    let dev = pick.device.clone();
-    let rate = pick.rate.to_string();
-    let ch = pick.channels.to_string();
 
-    let mut child = match TokioCommand::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "alsa",
-            "-ar",
-            &rate,
-            "-ac",
-            &ch,
-            "-i",
-            &dev,
-            "-c:a",
-            "libmp3lame",
-            "-b:a",
-            "128k",
-            "-f",
-            "mp3",
-            "-",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
+    let sub = match subscribe_live_audio(&pick, codec).await {
+        Ok(v) => v,
         Err(e) => {
             return (
-                SC::INTERNAL_SERVER_ERROR,
-                Json(json!({"ok": false, "err": format!("spawn ffmpeg: {e}")})),
+                SC::SERVICE_UNAVAILABLE,
+                Json(json!({"ok": false, "err": e, "device": pick.device, "kind": pick.kind})),
             )
                 .into_response();
         }
     };
 
-    let stdout = match child.stdout.take() {
-        Some(s) => s,
-        None => {
-            let _ = child.kill().await;
-            return (
-                SC::INTERNAL_SERVER_ERROR,
-                Json(json!({"ok": false, "err": "ffmpeg stdout missing"})),
-            )
-                .into_response();
+    // Async fan-out of the shared broadcast into an HTTP body stream.
+    // Lagged → drop (prefer live edge over backlog — keeps A/V closer).
+    let stream = futures::stream::unfold(sub.rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(b) => return Some((Ok::<_, std::io::Error>(b), rx)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
         }
-    };
-
-    // Keep the child alive for the life of the stream by moving it into a
-    // background task that waits until the pipe ends (client disconnect or
-    // ffmpeg exit). kill_on_drop on the child is NOT enough once we move
-    // stdout out — so we explicitly kill when the wait finishes.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
     });
 
-    let stream = ReaderStream::new(stdout);
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("audio/mpeg"),
+        HeaderValue::from_static(sub.codec.content_type()),
     );
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-store, no-cache"),
     );
-    // Expose source kind so the UI can show "HDMI target" vs "BrainCraft mic".
-    if let Ok(v) = HeaderValue::from_str(&format!(
-        "{}; device=\"{}\"",
-        pick.kind, pick.device
-    )) {
+    headers.insert(
+        header::HeaderName::from_static("accept-ranges"),
+        HeaderValue::from_static("none"),
+    );
+    // X-Accel / proxy: disable buffering if anything sits in front.
+    headers.insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&format!("{}; device=\"{}\"", sub.kind, sub.device)) {
         headers.insert(header::HeaderName::from_static("x-aeon-audio-source"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(sub.codec.label()) {
+        headers.insert(header::HeaderName::from_static("x-aeon-audio-codec"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&sub.rate.to_string()) {
+        headers.insert(header::HeaderName::from_static("x-aeon-audio-rate"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&sub.channels.to_string()) {
+        headers.insert(header::HeaderName::from_static("x-aeon-audio-channels"), v);
     }
 
     (SC::OK, headers, Body::from_stream(stream)).into_response()

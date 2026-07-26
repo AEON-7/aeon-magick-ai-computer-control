@@ -112,15 +112,14 @@ camera_fps = 24
 camera_pipe = "yuv420"
 
 # ── Recording audio track (A/V mux) ──
-# ALSA capture device muxed into /record MP4s as an AAC track. Empty = video-
-# only for recording (live H.264 is still video-only; live *listen* is a
-# separate GET /api/audio/stream). Tie this to your source:
-#   hdmi-csi   → TC358743 HDMI audio (dtoverlay=tc358743-audio):
-#                "plughw:CARD=tc358743,DEV=0"
-#   camera-csi → BrainCraft WM8960 mic: "plughw:CARD=wm8960soundcard,DEV=0"
-# PUT /api/streamer/config auto-fills when empty and the card is present.
-# Leave empty only if no capture card exists (missing ALSA device fails ffmpeg).
-audio_device = "plughw:CARD=tc358743,DEV=0"
+# ALSA capture device muxed into /record MP4s as an AAC track. Default is A/V
+# whenever a capture card exists: empty string = auto-pick (Cam Link / tc358743
+# / mic). Live H.264 stays video-only; live *listen* is GET /api/audio/stream.
+# Use dsnoop: so record + listen can share the card (plughw is exclusive).
+#   cam-link  → "dsnoop:CARD=C4K,DEV=0"
+#   hdmi-csi  → "dsnoop:CARD=tc358743,DEV=0"
+#   camera    → "plughw:CARD=wm8960soundcard,DEV=0"
+audio_device = "dsnoop:CARD=C4K,DEV=0"
 audio_rate = 48000
 audio_channels = 2
 

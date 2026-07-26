@@ -150,9 +150,10 @@ fn maybe_default_audio_device(table: &mut toml::map::Map<String, toml::Value>, s
 
     // Prefer explicit source match, then fall through to whatever capture card exists.
     if (source == "hdmi-csi" || source == "auto") && low.contains("tc358743") {
+        // dsnoop: share the card with live listen.
         cap_tbl.insert(
             "audio_device".into(),
-            toml::Value::String("plughw:CARD=tc358743,DEV=0".into()),
+            toml::Value::String("dsnoop:CARD=tc358743,DEV=0".into()),
         );
         return;
     }
@@ -161,18 +162,19 @@ fn maybe_default_audio_device(table: &mut toml::map::Map<String, toml::Value>, s
         && (low.contains("c4k") || low.contains("cam link") || low.contains("elgato"))
     {
         // Resolve the bracket id from /proc/asound/cards (e.g. C4K).
+        // dsnoop: multi-open so /record A/V and live listen can run together.
         let alsa = cards
             .lines()
             .find_map(|line| {
                 let name = line.split('[').nth(1)?.split(']').next()?.trim();
                 let n = name.to_ascii_lowercase();
                 if n.contains("c4k") || n.contains("cam") || n.contains("elgato") {
-                    Some(format!("plughw:CARD={name},DEV=0"))
+                    Some(format!("dsnoop:CARD={name},DEV=0"))
                 } else {
                     None
                 }
             })
-            .unwrap_or_else(|| "plughw:CARD=C4K,DEV=0".into());
+            .unwrap_or_else(|| "dsnoop:CARD=C4K,DEV=0".into());
         cap_tbl.insert("audio_device".into(), toml::Value::String(alsa));
         return;
     }

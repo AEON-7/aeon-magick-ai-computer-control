@@ -64,52 +64,52 @@ const GENERIC_POOL: &[IdPick] = &[
     },
 ];
 
-/// Absolute tablet theme for `generic-absolute`.
+/// Absolute tablet theme for `generic-absolute` — **Wacom profile strings**.
 ///
 /// **Important (Windows):** We do **not** use real Wacom VID `0x056a`.
 /// Machines with official Wacom drivers (this studio box has them) claim that
 /// VID and remap the absolute range into a tablet rectangle — agent `click_at`
 /// fractions then miss UI by tens of pixels even on mirrored 1080p.
 ///
-/// Instead: Linux Foundation multifunction VID + absolute pointer report
-/// (0..32767, QEMU usb-tablet style). Product strings still say "Absolute
-/// Tablet" so the host tree is readable. Report path is unchanged (Wacom-style
-/// absolute, not relative mouse).
+/// Identity: Linux Foundation multifunction VID (`0x1d6b`) + Wacom manufacturer
+/// / product / interface strings so System Information and USB trees show a
+/// Wacom tablet, not "USB Absolute Pointer". Report path is absolute HID
+/// (0..32767, QEMU usb-tablet style), not a real Wacom digitizer report.
 const WACOM_POOL: &[IdPick] = &[
     IdPick {
         vid: 0x1d6b, // Linux Foundation — avoid Wacom driver hijack on Windows
         pid: 0x0104,
         bcd: 0x0103,
-        manufacturer: "Generic",
-        product: "USB Absolute Tablet",
+        manufacturer: "Wacom Co., Ltd.",
+        product: "Wacom Intuos",
     },
     IdPick {
         vid: 0x1d6b,
         pid: 0x0105,
         bcd: 0x0107,
-        manufacturer: "Generic",
-        product: "USB Absolute Pointer",
+        manufacturer: "Wacom Co., Ltd.",
+        product: "Wacom Intuos Pro",
     },
     IdPick {
         vid: 0x1d6b,
         pid: 0x0106,
         bcd: 0x0102,
-        manufacturer: "Generic",
-        product: "Absolute HID Tablet",
+        manufacturer: "Wacom Co., Ltd.",
+        product: "Wacom One pen tablet",
     },
     IdPick {
         vid: 0x1d6b,
         pid: 0x0107,
         bcd: 0x0110,
-        manufacturer: "Generic",
-        product: "Agent Absolute Tablet",
+        manufacturer: "Wacom Co., Ltd.",
+        product: "Wacom Intuos S",
     },
     IdPick {
         vid: 0x1d6b,
         pid: 0x0108,
         bcd: 0x0105,
-        manufacturer: "Generic",
-        product: "USB Tablet Absolute",
+        manufacturer: "Wacom Co., Ltd.",
+        product: "Wacom CTL-4100",
     },
 ];
 
@@ -338,12 +338,11 @@ pub fn apply_rotating_identity(
     } else {
         match persona {
             Persona::GenericAbsolute => {
-                // Avoid "Wacom" in interface strings — some Wacom host software
-                // matches names even when VID is not 0x056a.
+                // Wacom-profile interface labels (device VID stays non-Wacom).
                 relabel_interfaces(
                     desc,
-                    "Absolute Keyboard",
-                    "Absolute Pointer",
+                    "Wacom Keyboard",
+                    "Wacom Tablet",
                     "Consumer Control",
                     None,
                 );

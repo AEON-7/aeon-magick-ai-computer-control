@@ -4,19 +4,19 @@
   "patreon": "https://www.patreon.com/AeonForge7",
   "tracks": {
     "pi4": {
-      "version": 113,
-      "name": "v113",
-      "published": "2026-07-09",
+      "version": 114,
+      "name": "v114",
+      "published": "2026-07-25",
       "codename": "bookworm",
-      "notes": "Raspberry Pi 4 (Bookworm). UI ritual-instrument uplift, OrbNet/Conduit memory-safety (supervisor OOM fix), UPS harden, rotating HID identity, latest agentic control stack.",
+      "notes": "Raspberry Pi 4 (Bookworm). Wacom-profile HID absolute identity (safe non-Wacom VID), Cam Link/HDMI A/V record + low-latency live listen (dsnoop share), Hermes+OpenClaw agent pantheon, wifi powersave soft-recovery (brcmfmac), streamer audio group for A/V mux.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     },
     "pi5": {
-      "version": 113,
-      "name": "v113",
-      "published": "2026-07-09",
+      "version": 114,
+      "name": "v114",
+      "published": "2026-07-25",
       "codename": "trixie",
-      "notes": "Raspberry Pi 5 (Trixie). Everything in the Pi 4 v113 image plus Hailo super-app and on-device vision / voice / UPS suite.",
+      "notes": "Raspberry Pi 5 (Trixie). Everything in the Pi 4 v114 image plus Hailo super-app and on-device vision / voice / UPS suite.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     }
   }

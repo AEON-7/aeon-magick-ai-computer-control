@@ -1117,11 +1117,16 @@
     }
   }
 
-  // ── Live audio passthrough (BrainCraft mic / first non-HDMI capture) ──
+  // ── Live audio passthrough (Cam Link / HDMI target / BrainCraft mic) ──
+  // Low-latency path: raw s16le PCM via fetch + Web Audio (not <audio src=mp3>,
+  // which browsers buffer for ~several seconds and drift behind the H.264 view).
   let listenAudio = false;
   let audioVol: api.AudioVolume | null = null;
   let audioBusy = false;
-  let liveAudioEl: HTMLAudioElement | null = null;
+  let listenMsg = '';
+  let listenWatch: ReturnType<typeof setTimeout> | null = null;
+  let listenAbort: AbortController | null = null;
+  let listenCtx: AudioContext | null = null;
 
   async function refreshAudioVol() {
     try {
@@ -1131,21 +1136,158 @@
     }
   }
 
-  async function toggleListenAudio() {
-    listenAudio = !listenAudio;
-    if (listenAudio) {
-      await refreshAudioVol();
-      // Kick the element after the attribute binds.
-      setTimeout(() => {
-        liveAudioEl?.play().catch(() => {
-          listenAudio = false;
-        });
-      }, 50);
-    } else if (liveAudioEl) {
-      liveAudioEl.pause();
-      liveAudioEl.removeAttribute('src');
-      liveAudioEl.load();
+  function stopListenAudio() {
+    listenAudio = false;
+    listenMsg = '';
+    if (listenWatch) {
+      clearTimeout(listenWatch);
+      listenWatch = null;
     }
+    try { listenAbort?.abort(); } catch { /* ignore */ }
+    listenAbort = null;
+    if (listenCtx) {
+      try { listenCtx.close(); } catch { /* ignore */ }
+      listenCtx = null;
+    }
+  }
+
+  /** Play raw little-endian s16 stereo PCM as it arrives; drop backlog to stay
+   *  near the live edge (aligned with the low-latency video stream). */
+  async function playPcmStream(res: Response, ctx: AudioContext) {
+    const rate = Number(res.headers.get('x-aeon-audio-rate') || '48000') || 48000;
+    const channels = Number(res.headers.get('x-aeon-audio-channels') || '2') || 2;
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('no stream body');
+
+    const bytesPerFrame = 2 * channels; // s16le
+    let leftover = new Uint8Array(0);
+    // Schedule slightly ahead of the clock; if we fall behind, jump to now.
+    let nextTime = ctx.currentTime + 0.04;
+    // Max lead we keep in the AudioContext queue (~80 ms). Bigger = smoother
+    // but more A/V skew; smaller = tighter sync, more risk of underrun.
+    const maxLead = 0.08;
+    const minLead = 0.02;
+
+    while (listenAudio) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+
+      // Stitch partial frames across chunk boundaries.
+      let buf: Uint8Array;
+      if (leftover.length) {
+        buf = new Uint8Array(leftover.length + value.length);
+        buf.set(leftover, 0);
+        buf.set(value, leftover.length);
+      } else {
+        buf = value;
+      }
+      const usable = buf.length - (buf.length % bytesPerFrame);
+      if (usable < bytesPerFrame) {
+        leftover = buf;
+        continue;
+      }
+      leftover = buf.subarray(usable);
+      const samples = usable / 2;
+      const i16 = new Int16Array(buf.buffer, buf.byteOffset, samples);
+      const frames = samples / channels;
+      if (frames < 1) continue;
+
+      const abuf = ctx.createBuffer(channels, frames, rate);
+      for (let c = 0; c < channels; c++) {
+        const ch = abuf.getChannelData(c);
+        for (let i = 0, j = c; i < frames; i++, j += channels) {
+          ch[i] = i16[j] / 32768;
+        }
+      }
+
+      // Catch up if the schedule queue grew (network burst / tab throttle).
+      const now = ctx.currentTime;
+      if (nextTime < now + minLead) nextTime = now + minLead;
+      if (nextTime > now + maxLead) {
+        // Drop this chunk to shed latency — prefer live edge over perfect audio.
+        continue;
+      }
+
+      const src = ctx.createBufferSource();
+      src.buffer = abuf;
+      src.connect(ctx.destination);
+      src.start(nextTime);
+      nextTime += abuf.duration;
+    }
+  }
+
+  async function toggleListenAudio() {
+    if (listenAudio) {
+      stopListenAudio();
+      return;
+    }
+    // Create AudioContext inside the click gesture (autoplay policy).
+    listenMsg = 'starting…';
+    listenAudio = true;
+    const abort = new AbortController();
+    listenAbort = abort;
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+      listenCtx = ctx;
+      if (ctx.state === 'suspended') await ctx.resume();
+    } catch (e) {
+      listenMsg = e instanceof Error ? e.message : 'audio context failed';
+      listenAudio = false;
+      return;
+    }
+
+    if (listenWatch) clearTimeout(listenWatch);
+    listenWatch = setTimeout(() => {
+      if (!listenAudio) return;
+      if (listenMsg === 'starting…' || listenMsg === 'buffering…') {
+        listenMsg = 'no audio yet — check target HDMI sound output';
+      }
+    }, 5000);
+
+    // Fire-and-forget the stream pump so we don't await past the gesture.
+    (async () => {
+      try {
+        const url = `${api.audioStreamUrl('pcm')}&t=${Date.now()}`;
+        const res = await fetch(url, {
+          credentials: 'same-origin',
+          signal: abort.signal,
+          cache: 'no-store',
+        });
+        if (!res.ok) {
+          let err = `stream ${res.status}`;
+          try {
+            const j = await res.json();
+            if (j?.err) err = j.err;
+          } catch { /* not json */ }
+          if (listenAudio) {
+            listenMsg = err;
+            listenAudio = false;
+          }
+          return;
+        }
+        const srcHdr = res.headers.get('x-aeon-audio-source') || '';
+        if (listenAudio) {
+          listenMsg = srcHdr
+            ? `live · ${srcHdr.split(';')[0]}`
+            : 'live · low-latency';
+        }
+        await playPcmStream(res, ctx);
+      } catch (e) {
+        if (abort.signal.aborted) return;
+        if (listenAudio) {
+          listenMsg = e instanceof Error ? e.message : 'stream failed';
+          listenAudio = false;
+        }
+      } finally {
+        if (!listenAudio) {
+          try { await ctx.close(); } catch { /* ignore */ }
+          if (listenCtx === ctx) listenCtx = null;
+        }
+      }
+    })();
+
+    refreshAudioVol();
   }
 
   async function onLiveVol(kind: 'playback' | 'capture', ev: Event) {
@@ -1380,16 +1522,15 @@
             <span class="hidden lg:inline text-xs font-mono text-zinc-500">{webcam_message}</span>
           {/if}
         {/if}
-        <!-- Live target audio: always visible (not only lg toolbar). -->
+        <!-- Live target audio: low-latency PCM + Web Audio (tracks video). -->
         <button class="btn text-xs inline-flex items-center gap-1.5 {listenAudio ? 'border-cursed-500/50 text-cursed-200' : ''}"
                 on:click={toggleListenAudio}
-                title="Play live capture audio (Cam Link / HDMI target). On the target OS, set Sound output to this HDMI display.">
+                title="Play live capture audio (Cam Link / HDMI). Low-latency PCM — target OS must route sound to this HDMI display.">
           {listenAudio ? '🔇 mute' : '🔊 listen'}
         </button>
-        {#if listenAudio}
-          <audio bind:this={liveAudioEl} src={api.audioStreamUrl()} autoplay controls
-                 class="h-7 w-28 sm:w-36 opacity-90"
-                 title="Live HDMI / capture audio (MP3)"></audio>
+        {#if listenMsg}
+          <span class="text-[10px] font-mono {listenAudio ? 'text-zinc-500' : 'text-amber-400/90'} max-w-[16rem] truncate"
+                title={listenMsg}>{listenMsg}</span>
         {/if}
         <!-- Hamburger: shown below lg, opens the mobile dropdown. -->
         <button class="btn text-xs lg:hidden"
@@ -1502,11 +1643,11 @@
       <div class="flex items-center gap-2 pl-3">
         <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
         <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
-        <!-- Screen recording — records the live H.264 to MP4 (agents also drive this via MCP/REST). -->
+        <!-- Screen recording — live H.264 + HDMI/capture audio → MP4 (agents: MCP/REST). -->
         <div class="relative flex items-center gap-1">
           <button class="btn text-xs whitespace-nowrap inline-flex items-center gap-1.5 {rec.active ? 'border-red-500 text-red-300 motion-safe:animate-ember' : ''}"
                   on:click={toggleRecord} disabled={recBusy}
-                  title="Record the target screen to MP4 (30s default)">
+                  title="Record target screen + audio to MP4 (until stopped, 3h cap)">
             {#if rec.active}<Icon name="stop" class="w-3 h-3" />stop&nbsp;rec&nbsp;·&nbsp;{rec.active.elapsed_s ?? 0}s{:else}<Icon name="record" class="w-3 h-3 text-red-400" />record{/if}
           </button>
           {#if rec.recordings.length}
@@ -1663,10 +1804,11 @@
           <button class="btn text-xs" on:click={onReleaseAll}>release keys</button>
           <button class="btn text-xs" on:click={onRelaunch}>relaunch streamer</button>
         </div>
-        <!-- Screen recording — records the live H.264 to MP4 (records until stopped; 3h cap). -->
+        <!-- Screen recording — H.264 video + capture audio → MP4 (until stopped; 3h cap). -->
         <button class="btn text-xs w-full inline-flex items-center justify-center gap-1.5 {rec.active ? 'border-red-500 text-red-300' : ''}"
-                on:click={toggleRecord} disabled={recBusy}>
-          {#if rec.active}<Icon name="stop" class="w-3 h-3" />stop recording · {rec.active.elapsed_s ?? 0}s{:else}<Icon name="record" class="w-3 h-3 text-red-400" />record screen{/if}
+                on:click={toggleRecord} disabled={recBusy}
+                title="Record target screen + audio to MP4">
+          {#if rec.active}<Icon name="stop" class="w-3 h-3" />stop recording · {rec.active.elapsed_s ?? 0}s{:else}<Icon name="record" class="w-3 h-3 text-red-400" />record screen+audio{/if}
         </button>
         {#if rec.note}
           <p class="text-red-400 text-[10px] leading-snug">{rec.note}</p>

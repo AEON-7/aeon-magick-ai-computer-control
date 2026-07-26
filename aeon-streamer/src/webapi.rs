@@ -18,7 +18,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use tokio::net::UnixListener;
 use tower::ServiceExt;
@@ -415,17 +415,29 @@ async fn record_start(State(state): State<SharedState>, body: bytes::Bytes) -> i
         .and_then(|r| r.duration_s);
     let fps = state.0.cfg.output.fps;
     let ffmpeg = state.0.cfg.ffmpeg_bin.clone();
-    // Mux the configured ALSA capture (BrainCraft mic for camera-csi, or the
-    // tc358743 HDMI-audio card for hdmi-csi) into the MP4; empty = video-only.
+    // Default: mux video + audio. Configured `audio_device` wins; if empty we
+    // auto-pick Cam Link / HDMI / mic so operators get A/V without TOML edits.
+    // `dsnoop:` is preferred so live listen and record can share the card.
     let cap = &state.0.cfg.capture;
-    let (adev, arate, ach) =
-        (cap.audio_device.clone(), cap.audio_rate, cap.audio_channels);
+    let (adev, arate, ach) = crate::record::resolve_record_audio(
+        &cap.audio_device,
+        cap.audio_rate,
+        cap.audio_channels,
+    );
     match state
         .0
         .record
-        .start(&state.0.h264_tx, ffmpeg, fps, adev, arate, ach, duration_s)
+        .start(&state.0.h264_tx, ffmpeg, fps, adev.clone(), arate, ach, duration_s)
     {
-        Ok(info) => (StatusCode::OK, Json(json!({"ok": true, "recording": info}))),
+        Ok(info) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "recording": info,
+                "audio": !adev.is_empty(),
+                "audio_device": if adev.is_empty() { Value::Null } else { json!(adev) },
+            })),
+        ),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"ok": false, "err": e}))),
     }
 }

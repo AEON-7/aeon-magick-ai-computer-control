@@ -451,6 +451,10 @@
   }
 
   $: openclawSystems = systems.filter((s) => s.roles?.includes('openclaw'));
+  /** Systems that host a pantheon (OpenClaw and/or Hermes personas). */
+  $: pantheonSystems = systems.filter(
+    (s) => s.roles?.includes('openclaw') || s.roles?.includes('hermes'),
+  );
   $: cSysObj = systems.find((s) => s.id === cSys) ?? null;
 
   const inputCls =
@@ -480,13 +484,14 @@
           metrics[s.id] = { reachable: false };
         }
       }),
-      ...openclawSystems.map(async (s) => {
+      ...pantheonSystems.map(async (s) => {
         try {
           agents[s.id] = await api.getSystemAgents(s.id);
         } catch {
           agents[s.id] = { ok: false, reachable: false };
         }
       }),
+      // Token history is OpenClaw-only (samples :9787 counters).
       ...openclawSystems.map(async (s) => {
         try {
           usage[s.id] = await api.getSystemUsage(s.id);
@@ -1921,15 +1926,17 @@
           {/each}
         </div>
 
-        <!-- ── USAGE BANNER + PANTHEON (per OpenClaw system) ──────── -->
-        {#if openclawSystems.length}
-          {#each openclawSystems as s (s.id)}
+        <!-- ── USAGE BANNER + PANTHEON (OpenClaw and/or Hermes systems) ─ -->
+        {#if pantheonSystems.length}
+          {#each pantheonSystems as s (s.id)}
             {@const u = usage[s.id]}
             {@const r = agents[s.id]}
             {@const v = u ? view(u, r) : null}
             {@const sum = rosterSummary(r)}
+            {@const isOpenclaw = s.roles?.includes('openclaw')}
+            {@const isHermes = s.roles?.includes('hermes')}
 
-            {#if u}
+            {#if u && isOpenclaw}
               <div class="usage-banner">
                 <div class="ub-head">
                   <div class="min-w-0">
@@ -1982,18 +1989,29 @@
 
             <div class="space-y-3">
               <div class="flex items-baseline justify-between flex-wrap gap-2">
-                <h2 class="section-title">Pantheon <span class="text-zinc-600 font-normal">· {s.label}</span></h2>
+                <h2 class="section-title">
+                  Pantheon
+                  <span class="text-zinc-600 font-normal">· {s.label}</span>
+                  {#if isOpenclaw}<span class="src-tag src-openclaw" title="OpenClaw gateway">OpenClaw</span>{/if}
+                  {#if isHermes}<span class="src-tag src-hermes" title="Hermes gateway">Hermes</span>{/if}
+                </h2>
                 <div class="flex items-baseline gap-2">
                   {#if r?.reachable}
                     <div class="roster-stats">
                       <span><b>{sum.count}</b> agents</span>
                       <span class="dot-sep">·</span>
                       <span class="text-live-300"><b>{sum.active}</b> active</span>
+                      {#if r.sources?.length}
+                        <span class="dot-sep">·</span>
+                        <span class="text-zinc-500">{r.sources.join(' + ')}</span>
+                      {/if}
                     </div>
-                    <!-- F7b: deploy a new persona on this gateway. -->
-                    <button class="new-persona-btn" title="Deploy a new agent persona" on:click={() => openNewPersona(s.id)}>
-                      <span class="np-plus">+</span> New persona
-                    </button>
+                    {#if isOpenclaw}
+                      <!-- F7b: deploy a new persona (OpenClaw path only for now). -->
+                      <button class="new-persona-btn" title="Deploy a new OpenClaw agent persona" on:click={() => openNewPersona(s.id)}>
+                        <span class="np-plus">+</span> New persona
+                      </button>
+                    {/if}
                   {:else if r}
                     <span class="text-amber-300 text-[11px] font-mono">{r.err || 'roster unavailable'}</span>
                   {:else}
@@ -2001,13 +2019,17 @@
                   {/if}
                 </div>
               </div>
+              {#if r?.partial_err}
+                <p class="text-amber-300/90 text-[11px] font-mono">{r.partial_err}</p>
+              {/if}
 
               {#if r?.reachable}
                 <div class="agent-grid">
                   {#each sortedAgents(r) as a (a.id)}
                     {@const st = agentStatus(a)}
-                    {@const ru = v?.perAgent?.[a.id] ?? 0}
+                    {@const ru = v?.perAgent?.[a.id] ?? v?.perAgent?.[a.raw_id ?? ''] ?? 0}
                     {@const pv = ru > 0 ? ru : a.total_tokens ?? 0}
+                    {@const src = (a.source || a.gateway || (isHermes && !isOpenclaw ? 'hermes' : 'openclaw')).toString()}
                     <div class="agent agent-click" class:is-default={a.is_default} class:is-working={a.working || a.on_call}
                          role="button" tabindex="0" title="Open agent detail"
                          on:click={() => openDetail(s.id, a)}
@@ -2015,7 +2037,13 @@
                       <div class="agent-top">
                         <span class="agent-emoji">{a.emoji || '🤖'}</span>
                         <div class="agent-id">
-                          <div class="agent-name">{a.name}{#if a.is_default}<span class="def-star" title="default agent">★</span>{/if}</div>
+                          <div class="agent-name">
+                            {a.name}{#if a.is_default}<span class="def-star" title="default agent">★</span>{/if}
+                            <span class="src-tag {src === 'hermes' ? 'src-hermes' : 'src-openclaw'}"
+                                  title="Configured on {src === 'hermes' ? 'Hermes' : 'OpenClaw'} Gateway">
+                              {src === 'hermes' ? 'Hermes' : 'OpenClaw'}
+                            </span>
+                          </div>
                           <div class="agent-model">{a.model || '—'}</div>
                         </div>
                         <span class="dot" class:pulse={st.pulse} style="background:{st.color}; box-shadow:0 0 7px {st.color}"></span>
@@ -3419,12 +3447,39 @@
     font-size: 0.78rem;
     color: #f4f4f5;
     font-weight: 600;
-    line-height: 1.15;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.25;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.35rem;
+    min-width: 0;
   }
-  .def-star { color: #fbbf24; margin-left: 0.2rem; font-size: 0.7rem; }
+  .def-star { color: #fbbf24; margin-left: 0.1rem; font-size: 0.7rem; }
+  /* Gateway origin badge on each pantheon persona */
+  .src-tag {
+    display: inline-block;
+    font-family: ui-monospace, monospace;
+    font-size: 0.52rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.05rem 0.3rem;
+    border-radius: 2px;
+    border: 1px solid;
+    line-height: 1.3;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+  .src-openclaw {
+    color: #a5b4fc;
+    border-color: rgba(129, 140, 248, 0.45);
+    background: rgba(99, 102, 241, 0.12);
+  }
+  .src-hermes {
+    color: #67e8f9;
+    border-color: rgba(34, 211, 238, 0.45);
+    background: rgba(6, 182, 212, 0.12);
+  }
   .agent-model {
     font-family: ui-monospace, monospace;
     font-size: 0.55rem;

@@ -1,0 +1,33 @@
+#!/bin/bash
+# NetworkManager dispatcher — force WiFi power-save OFF on every link-up.
+#
+# Pi 4/5 brcmfmac defaults to power-save ON. Under continuous TX (live
+# stream, Tailscale, agent dashboards) that state produces massive TX
+# retries, intermittent LAN unreachability (ARP incomplete from peers),
+# and eventually a wedged radio that only a hard reboot clears.
+#
+# NM connection property `802-11-wireless.powersave=2` alone is not enough:
+# the driver re-enables PSM after reassoc / firmware reloads. Hit the
+# interface directly every time NM brings a wifi device up.
+#
+# Installed as /etc/NetworkManager/dispatcher.d/99-aeon-wifi-powersave
+# (must be root-owned, mode 0755, no world-writable).
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+
+case "$ACTION" in
+    up|dhcp4-change|dhcp6-change|connectivity-change) ;;
+    *) exit 0 ;;
+esac
+
+[[ -n "$IFACE" ]] || exit 0
+# Only act on wireless interfaces.
+if [[ ! -d "/sys/class/net/${IFACE}/wireless" ]] \
+    && ! /usr/sbin/iw dev "$IFACE" info >/dev/null 2>&1; then
+    exit 0
+fi
+
+/usr/sbin/iw dev "$IFACE" set power_save off 2>/dev/null || true
+logger -t aeon-wifi-powersave -- "${IFACE} ${ACTION}: power_save off"
+exit 0

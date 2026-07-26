@@ -351,18 +351,20 @@ fn generic() -> PersonaDescriptors {
 
 /// Absolute pointer persona — QEMU-tablet style 0..32767 via /move_abs.
 ///
-/// **Do not** default to real Wacom VID `0x056a`: Windows Wacom drivers claim
-/// that VID and remap absolute coordinates into a tablet rectangle (agent
-/// clicks miss). Defaults + rotating identity use Linux Foundation `0x1d6b`.
-/// Keyboard stays boot-protocol for pre-OS use.
+/// Present **Wacom profile** manufacturer/product/interface strings so hosts
+/// show a tablet (not "USB Absolute Pointer"). **Do not** use real Wacom VID
+/// `0x056a`: Windows Wacom drivers claim that VID and remap absolute
+/// coordinates into a tablet rectangle (agent clicks miss). Defaults +
+/// rotating identity use Linux Foundation `0x1d6b`. Keyboard stays
+/// boot-protocol for pre-OS use.
 fn generic_absolute() -> PersonaDescriptors {
     PersonaDescriptors {
-        // Overwritten by identity::apply_rotating_identity (absolute pool).
+        // Overwritten by identity::apply_rotating_identity (Wacom string pool).
         id_vendor: 0x1d6b,
         id_product: 0x0104,
         bcd_device: 0x0103,
-        manufacturer: "Generic",
-        product: "USB Absolute Tablet",
+        manufacturer: "Wacom Co., Ltd.",
+        product: "Wacom Intuos",
         serial: String::new(),
         ecm: None,
         mass_storage: None,
@@ -375,7 +377,7 @@ fn generic_absolute() -> PersonaDescriptors {
                 report_length: 8,
                 report_desc: BOOT_KEYBOARD_DESC,
                 kind: HidKind::Keyboard,
-                interface_label: Some("Absolute Keyboard"),
+                interface_label: Some("Wacom Keyboard"),
             },
             HidFunction {
                 // hid.mouse slot → Hid's hidg1; descriptor is absolute.
@@ -385,7 +387,7 @@ fn generic_absolute() -> PersonaDescriptors {
                 report_length: 6,
                 report_desc: ABS_POINTER_DESC,
                 kind: HidKind::Mouse,
-                interface_label: Some("Absolute Pointer"),
+                interface_label: Some("Wacom Tablet"),
             },
             HidFunction {
                 name: "hid.consumer",

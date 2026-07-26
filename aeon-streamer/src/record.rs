@@ -324,6 +324,92 @@ impl Active {
     }
 }
 
+/// Prefer `dsnoop:` over `plughw:` for USB/HDMI capture cards so record and
+/// live listen can open the same ALSA device concurrently (Cam Link is
+/// exclusive under bare `plughw`/`hw`).
+pub fn prefer_shared_capture(dev: &str) -> String {
+    let d = dev.trim();
+    if d.is_empty() {
+        return String::new();
+    }
+    if d.starts_with("dsnoop:") || d.starts_with("plug:dsnoop:") {
+        return d.to_string();
+    }
+    // plughw:CARD=C4K,DEV=0  →  dsnoop:CARD=C4K,DEV=0
+    if let Some(rest) = d.strip_prefix("plughw:") {
+        return format!("dsnoop:{rest}");
+    }
+    if let Some(rest) = d.strip_prefix("hw:") {
+        return format!("dsnoop:{rest}");
+    }
+    d.to_string()
+}
+
+/// Auto-pick an ALSA capture device for A/V recordings when config leaves
+/// `audio_device` empty. Preference: tc358743 HDMI → Cam Link / Elgato →
+/// first non-HDMI capture card. Returns `""` only when nothing suitable is
+/// present (video-only fallback).
+pub fn auto_record_audio_device() -> (String, u32, u32) {
+    let cards = std::fs::read_to_string("/proc/asound/cards").unwrap_or_default();
+    let mut c4k: Option<String> = None;
+    let mut other: Option<String> = None;
+    for line in cards.lines() {
+        let name = line
+            .split('[')
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .unwrap_or("")
+            .trim();
+        if name.is_empty() {
+            continue;
+        }
+        let low = name.to_ascii_lowercase();
+        if low.contains("vc4") {
+            continue; // Pi HDMI *outputs*
+        }
+        let dev = prefer_shared_capture(&format!("plughw:CARD={name},DEV=0"));
+        if low.contains("tc358743") {
+            return (dev, 48000, 2);
+        }
+        if low.contains("c4k") || low.contains("cam") || low.contains("elgato") {
+            c4k = Some(dev);
+            continue;
+        }
+        if other.is_none() && !low.contains("hdmi") {
+            other = Some(dev);
+        }
+    }
+    if let Some(d) = c4k {
+        return (d, 48000, 2);
+    }
+    if let Some(d) = other {
+        // BrainCraft WM8960 is usually mono/16k-capable via plug; keep 48k/2
+        // and let ALSA plug convert (dsnoop may fall back — plughw is fine for
+        // a local mic used only by record).
+        let d = if d.contains("wm8960") || d.contains("seeed") {
+            d.replacen("dsnoop:", "plughw:", 1)
+        } else {
+            d
+        };
+        return (d, 48000, 2);
+    }
+    (String::new(), 48000, 2)
+}
+
+/// Resolve the ALSA device used for this recording: configured value (with
+/// dsnoop sharing when possible), else auto-detect. Empty only when no card.
+pub fn resolve_record_audio(
+    configured: &str,
+    rate: u32,
+    channels: u32,
+) -> (String, u32, u32) {
+    let cfg = configured.trim();
+    if !cfg.is_empty() {
+        return (prefer_shared_capture(cfg), rate.max(1), channels.max(1));
+    }
+    auto_record_audio_device()
+}
+
 /// The capture loop: spawn ffmpeg, wait for a keyframe, pipe AUs until the
 /// deadline / manual stop / stream end / disk-budget guard. Returns final size.
 #[allow(clippy::too_many_arguments)]
@@ -343,97 +429,172 @@ async fn record_loop(
     // Video always arrives as H.264 Annex-B on stdin (the broadcast pipe).
     // With an `audio_device` set we add an ALSA input and mux an AAC track into
     // the MP4 — video stays `-c copy` (already-encoded NALs) so the live
-    // broadcast pipe is untouched. Empty `audio_device` reproduces the exact
-    // historical video-only command, byte-for-byte.
+    // broadcast pipe is untouched. Empty `audio_device` is video-only (only
+    // when no capture card exists).
     let audio = !audio_device.trim().is_empty();
-    let mut args: Vec<String> =
-        vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
     if audio {
-        // Audio = input 0. thread_queue_size absorbs ALSA buffering while
-        // ffmpeg waits for the first video keyframe.
-        args.extend([
-            "-thread_queue_size".into(), "1024".into(),
-            "-f".into(), "alsa".into(),
-            "-ar".into(), audio_rate.to_string(),
-            "-ac".into(), audio_channels.to_string(),
-            "-i".into(), audio_device.clone(),
-        ]);
-    }
-    // Video = input 1 (or 0 when no audio).
-    args.extend([
-        "-fflags".into(), "+genpts".into(),
-        "-f".into(), "h264".into(),
-        "-framerate".into(), fps.to_string(),
-        "-i".into(), "pipe:0".into(),
-    ]);
-    if audio {
-        args.extend([
-            "-map".into(), "1:v:0".into(), "-map".into(), "0:a:0".into(),
-            "-c:v".into(), "copy".into(),
-            "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(),
-            "-async".into(), "1".into(), "-shortest".into(),
-        ]);
+        info!(id, device = %audio_device, rate = audio_rate, ch = audio_channels, "recording with audio track");
     } else {
-        args.extend(["-c".into(), "copy".into()]);
+        info!(id, "recording video-only (no ALSA capture card)");
     }
-    args.extend(["-movflags".into(), "+faststart".into(), "-y".into()]);
+    // Prefer shared ALSA (dsnoop) so live listen can stay open.
+    let audio_dev = if audio {
+        prefer_shared_capture(&audio_device)
+    } else {
+        String::new()
+    };
+    let use_audio = !audio_dev.is_empty();
 
-    let mut child = tokio::process::Command::new(ffmpeg_bin)
-        .args(&args)
-        .arg(out)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn ffmpeg: {e}"))?;
-
-    let mut stdin = child.stdin.take().ok_or("no ffmpeg stdin")?;
-    let deadline = tokio::time::sleep(Duration::from_secs(cap_s));
-    tokio::pin!(deadline);
-    let mut budget_tick = tokio::time::interval(Duration::from_secs(BUDGET_CHECK_S));
-    budget_tick.tick().await; // consume the immediate first tick
-    let mut armed = false; // start writing only once we've seen a keyframe
-
+    // Build ffmpeg argv. If A/V fails to produce output (classic cause: the
+    // streamer user lacks the `audio` group → ALSA open fails → ffmpeg exits
+    // before any video is muxed), fall back to video-only once.
+    let mut tried_audio = use_audio;
+    let mut with_audio = use_audio;
     loop {
-        tokio::select! {
-            _ = &mut deadline => break,
-            _ = stop.notified() => break,
-            _ = budget_tick.tick() => {
-                // Rotating purge keeps the total under budget; if the CURRENT
-                // recording alone still exceeds it, stop with the message.
-                let budget = me.disk_budget();
-                let total = me.enforce_budget(Some(id));
-                if budget > 0 && total > budget {
-                    *me.last_note.lock() = Some(CAPACITY_MSG.to_string());
-                    warn!(id, "stopping recording — disk budget reached");
-                    break;
-                }
-            }
-            au = rx.recv() => match au {
-                Ok(au) => {
-                    if !armed {
-                        if au.key { armed = true; } else { continue; }
-                    }
-                    if stdin.write_all(&au.data).await.is_err() {
+        let mut args: Vec<String> =
+            vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+        if with_audio {
+            args.extend([
+                "-thread_queue_size".into(),
+                "1024".into(),
+                "-f".into(),
+                "alsa".into(),
+                "-ar".into(),
+                audio_rate.to_string(),
+                "-ac".into(),
+                audio_channels.to_string(),
+                "-i".into(),
+                audio_dev.clone(),
+            ]);
+        }
+        args.extend([
+            "-fflags".into(),
+            "+genpts".into(),
+            "-f".into(),
+            "h264".into(),
+            "-framerate".into(),
+            fps.to_string(),
+            "-i".into(),
+            "pipe:0".into(),
+        ]);
+        if with_audio {
+            args.extend([
+                "-map".into(),
+                "1:v:0".into(),
+                "-map".into(),
+                "0:a:0".into(),
+                "-c:v".into(),
+                "copy".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                "128k".into(),
+                "-async".into(),
+                "1".into(),
+                // End when the video pipe closes (operator hits stop) — not when
+                // ALSA briefly underruns.
+                "-shortest".into(),
+            ]);
+        } else {
+            args.extend(["-c".into(), "copy".into()]);
+        }
+        args.extend(["-movflags".into(), "+faststart".into(), "-y".into()]);
+
+        let mut child = tokio::process::Command::new(ffmpeg_bin)
+            .args(&args)
+            .arg(out)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn ffmpeg: {e}"))?;
+
+        let mut stdin = child.stdin.take().ok_or("no ffmpeg stdin")?;
+        let mut stderr = child.stderr.take();
+        let deadline = tokio::time::sleep(Duration::from_secs(cap_s));
+        tokio::pin!(deadline);
+        let mut budget_tick = tokio::time::interval(Duration::from_secs(BUDGET_CHECK_S));
+        budget_tick.tick().await; // consume the immediate first tick
+        let mut armed = false; // start writing only once we've seen a keyframe
+        let mut wrote_any = false;
+
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                _ = stop.notified() => break,
+                _ = budget_tick.tick() => {
+                    let budget = me.disk_budget();
+                    let total = me.enforce_budget(Some(id));
+                    if budget > 0 && total > budget {
+                        *me.last_note.lock() = Some(CAPACITY_MSG.to_string());
+                        warn!(id, "stopping recording — disk budget reached");
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                au = rx.recv() => match au {
+                    Ok(au) => {
+                        if !armed {
+                            if au.key { armed = true; } else { continue; }
+                        }
+                        if stdin.write_all(&au.data).await.is_err() {
+                            break;
+                        }
+                        wrote_any = true;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         }
-    }
 
-    drop(stdin); // EOF → ffmpeg writes the moov atom and exits
-    let _ = child.wait().await;
-    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-    if size == 0 {
-        return Err(format!(
-            "recording produced no data — is {} writable by the streamer (aeon)?",
-            out.display()
-        ));
+        drop(stdin); // EOF → ffmpeg writes the moov atom and exits
+        let status = child.wait().await;
+        let mut err_txt = String::new();
+        if let Some(mut e) = stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 1500];
+            if let Ok(n) = e.read(&mut buf).await {
+                if n > 0 {
+                    err_txt = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                }
+            }
+        }
+        let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+        if size > 0 {
+            if tried_audio && !with_audio {
+                *me.last_note.lock() = Some(
+                    "recorded video-only — capture audio unavailable (check streamer audio group / ALSA device)"
+                        .into(),
+                );
+            }
+            let _ = status;
+            return Ok(size);
+        }
+
+        // Empty output. If we tried A/V and never got a durable write, fall
+        // back to video-only once (ALSA permission / busy is the usual cause).
+        if with_audio && !wrote_any {
+            warn!(
+                id,
+                device = %audio_dev,
+                err = %err_txt,
+                "A/V record produced no data — retrying video-only"
+            );
+            let _ = std::fs::remove_file(out);
+            with_audio = false;
+            continue;
+        }
+
+        let detail = if err_txt.is_empty() {
+            format!(
+                "recording produced no data — is {} writable by the streamer (aeon)?",
+                out.display()
+            )
+        } else {
+            format!("recording failed: {err_txt}")
+        };
+        return Err(detail);
     }
-    Ok(size)
 }
 
 fn now_ms() -> i64 {

@@ -244,7 +244,10 @@ export const setAudioVolume = (p: { playback?: number; capture?: number; capture
 
 /** Live mic passthrough (BrainCraft WM8960 / USB) as continuous MP3.
  *  Cookie-auth'd same-origin URL for an `<audio src>` element. */
-export const audioStreamUrl = () => '/api/audio/stream';
+/** Live capture audio. Default `pcm` = raw s16le for low-latency Web Audio.
+ *  Pass `mp3` only for dumb players that need MPEG. */
+export const audioStreamUrl = (codec: 'pcm' | 'mp3' = 'pcm') =>
+  `/api/audio/stream?codec=${codec}`;
 
 // ── fleet (decentralized roster of peer Orbs over the tailnet/LAN) ──
 // Offline peers come back as { online:false, addr } stubs — the rich fields
@@ -608,6 +611,8 @@ export const getDeployStatus = (sysId: string, name: string) =>
 /** One agent in an OpenClaw gateway's pantheon (from its /agents API). */
 export interface AgentInfo {
   id: string;
+  /** Gateway-native id without the `openclaw:` / `hermes:` prefix. */
+  raw_id?: string;
   name: string;
   emoji?: string;
   model?: string;
@@ -629,6 +634,9 @@ export interface AgentInfo {
   sessions?: number;
   current?: string | null;
   is_default?: boolean;
+  /** Which gateway pantheon this persona belongs to. */
+  source?: 'openclaw' | 'hermes' | string;
+  gateway?: 'openclaw' | 'hermes' | string;
 }
 export interface AgentRoster {
   ok: boolean;
@@ -636,6 +644,10 @@ export interface AgentRoster {
   ts?: number | null;
   warming?: boolean;
   agents?: AgentInfo[];
+  /** Gateways that contributed to this roster. */
+  sources?: string[];
+  /** Non-fatal error when one of two gateways failed. */
+  partial_err?: string | null;
   err?: string;
 }
 export const getSystemAgents = (id: string) =>

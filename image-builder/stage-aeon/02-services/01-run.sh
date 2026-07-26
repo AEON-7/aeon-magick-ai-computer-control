@@ -203,7 +203,18 @@ plugins=keyfile
 
 [device-wlan0]
 managed=true
+
+# Prefer power-save OFF for new wifi connections. The dispatcher
+# 99-aeon-wifi-powersave also forces the driver off on every up —
+# brcmfmac re-enables PSM after reassoc even when the NM property is set.
+[connection]
+wifi.powersave=2
 EOF
+
+# Force power-save OFF whenever a wifi interface comes up (see script header).
+install -d "${ROOTFS_DIR}/etc/NetworkManager/dispatcher.d"
+install -m 0755 "${THIS_DIR}/files/99-aeon-wifi-powersave" \
+    "${ROOTFS_DIR}/etc/NetworkManager/dispatcher.d/99-aeon-wifi-powersave"
 
 # ── WiFi regulatory domain ──
 # Pi 4's brcmfmac chip is soft-blocked by rfkill until a country code is set
