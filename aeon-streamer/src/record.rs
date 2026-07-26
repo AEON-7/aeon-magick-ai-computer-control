@@ -177,20 +177,35 @@ impl RecordManager {
         self.last_note.lock().clone()
     }
 
-    /// Finished recordings on disk, newest first.
+    /// Finished **playable** recordings on disk, newest first.
+    /// Incomplete MP4s (no `moov` — killed mid-write) are deleted so the UI
+    /// never offers a file that every player rejects as "incompatible".
     pub fn list(&self) -> Vec<RecInfo> {
         let mut out = Vec::new();
         let active_id = self.active.lock().as_ref().map(|a| a.id.clone());
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
             for ent in rd.flatten() {
                 let path = ent.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                // Skip in-progress captures (`rec_….partial.mp4`) — purging them
+                // mid-write produced the "incompatible" unplayable files.
+                if !name.starts_with("rec_") || !name.ends_with(".mp4") || name.contains(".partial.")
+                {
                     continue;
                 }
                 let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
+                if !is_safe_id(id) {
+                    continue;
+                }
                 if active_id.as_deref() == Some(id) {
+                    continue;
+                }
+                if !mp4_is_playable(&path) {
+                    warn!(id, path = %path.display(), "purging unplayable recording (missing moov)");
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(self.dir.join(format!("{id}.jpg")));
                     continue;
                 }
                 let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
@@ -214,7 +229,11 @@ impl RecordManager {
             return None;
         }
         let p = self.dir.join(format!("{id}.mp4"));
-        p.is_file().then_some(p)
+        if p.is_file() && mp4_is_playable(&p) {
+            Some(p)
+        } else {
+            None
+        }
     }
 
     pub fn thumb_path(&self, id: &str) -> Option<PathBuf> {
@@ -510,14 +529,20 @@ async fn record_loop(
         } else {
             args.extend(["-c".into(), "copy".into()]);
         }
-        args.extend(["-movflags".into(), "+faststart".into(), "-y".into()]);
+        // Write a normal moov-at-end MP4 first. (+faststart mid-capture is
+        // dangerous: a kill leaves ftyp-only files that every player rejects.)
+        // We remux with +faststart after a clean exit.
+        args.extend(["-y".into()]);
+        let partial = out.with_extension("partial.mp4");
+        let _ = std::fs::remove_file(&partial);
 
         let mut child = tokio::process::Command::new(ffmpeg_bin)
             .args(&args)
-            .arg(out)
+            .arg(&partial)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("spawn ffmpeg: {e}"))?;
 
@@ -567,12 +592,18 @@ async fn record_loop(
             }
         }
 
-        drop(stdin); // EOF on video → with -t (A/V) or video-only, ffmpeg finalizes
-        // Never hang the recorder if ffmpeg sticks on a live ALSA input.
-        let status = match tokio::time::timeout(Duration::from_secs(8), child.wait()).await {
+        drop(stdin); // EOF on video pipe
+        // Graceful stop first (SIGINT) so ffmpeg writes the moov atom. Hard
+        // kill leaves "incompatible" ftyp-only files browsers cannot play.
+        if let Some(pid) = child.id() {
+            let _ = std::process::Command::new("kill")
+                .args(["-INT", &pid.to_string()])
+                .status();
+        }
+        let status = match tokio::time::timeout(Duration::from_secs(12), child.wait()).await {
             Ok(r) => r,
             Err(_) => {
-                warn!(id, "ffmpeg did not exit after record end — killing");
+                warn!(id, "ffmpeg did not finalize after SIGINT — SIGKILL");
                 let _ = child.kill().await;
                 child.wait().await
             }
@@ -589,22 +620,28 @@ async fn record_loop(
                 }
             }
         }
-        let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-        if size > 0 {
+        let _ = status;
+
+        // Promote partial → final only if the file is actually playable.
+        let playable = finalize_mp4(ffmpeg_bin, &partial, out);
+        let size = if playable {
+            std::fs::metadata(out).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let _ = std::fs::remove_file(&partial);
+
+        if size > 0 && playable {
             if tried_audio && !with_audio {
                 *me.last_note.lock() = Some(
                     "recorded video-only — capture audio unavailable (check streamer audio group / ALSA device)"
                         .into(),
                 );
             }
-            let _ = status;
             return Ok(size);
         }
 
-        // Empty output after an A/V attempt → always retry video-only once.
-        // (Previously we only retried when wrote_any==false; if ALSA died after
-        // a few NALs were written to a dead ffmpeg stdin, size stayed 0 and the
-        // UI showed a 0s recording.)
+        // Empty / unplayable after an A/V attempt → retry video-only once.
         if with_audio {
             warn!(
                 id,
@@ -612,26 +649,108 @@ async fn record_loop(
                 wrote_any,
                 armed,
                 err = %err_txt,
-                "A/V record produced no data — retrying video-only"
+                "A/V record unplayable or empty — retrying video-only"
             );
             let _ = std::fs::remove_file(out);
+            let _ = std::fs::remove_file(&partial);
             with_audio = false;
             continue;
         }
 
+        let _ = std::fs::remove_file(out);
         let detail = if !armed {
             "recording produced no data — no H.264 keyframe from the live pipe (is HDMI capture online?)"
                 .into()
-        } else if err_txt.is_empty() {
-            format!(
-                "recording produced no data — is {} writable by the streamer (aeon)?",
-                out.display()
-            )
-        } else {
+        } else if !err_txt.is_empty() {
             format!("recording failed: {err_txt}")
+        } else {
+            "recording incomplete (no playable MP4) — try again; avoid force-stopping mid-write"
+                .into()
         };
         return Err(detail);
     }
+}
+
+/// True if `path` is an MP4 with a `moov` atom (required for any player).
+fn mp4_is_playable(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(len) = f.seek(SeekFrom::End(0)) else {
+        return false;
+    };
+    if len < 16 {
+        return false;
+    }
+    let mut pos = 0u64;
+    while pos + 8 <= len && pos < len {
+        if f.seek(SeekFrom::Start(pos)).is_err() {
+            return false;
+        }
+        let mut hdr = [0u8; 8];
+        if f.read_exact(&mut hdr).is_err() {
+            return false;
+        }
+        let mut size = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
+        let typ = &hdr[4..8];
+        if size == 1 {
+            let mut ext = [0u8; 8];
+            if f.read_exact(&mut ext).is_err() {
+                return false;
+            }
+            size = u64::from_be_bytes(ext);
+        }
+        if size < 8 {
+            return false;
+        }
+        if typ == b"moov" {
+            return true;
+        }
+        // Skip free/ftyp/mdat/… and keep scanning (moov may be after mdat).
+        pos = pos.saturating_add(size);
+        if size == 0 {
+            break;
+        }
+    }
+    false
+}
+
+/// Remux a finalized capture into a web-friendly MP4 (`+faststart`).
+/// Returns true only when the destination is playable.
+fn finalize_mp4(ffmpeg_bin: &Path, partial: &Path, out: &Path) -> bool {
+    if !partial.is_file() {
+        return false;
+    }
+    // Already good (moov present) — faststart remux for progressive download.
+    if mp4_is_playable(partial) {
+        let status = std::process::Command::new(ffmpeg_bin)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+            ])
+            .arg(partial)
+            .args(["-c", "copy", "-movflags", "+faststart"])
+            .arg(out)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.map(|s| s.success()).unwrap_or(false) && mp4_is_playable(out) {
+            return true;
+        }
+        // Remux failed — fall back to the partial if it already plays.
+        if std::fs::rename(partial, out).is_ok() && mp4_is_playable(out) {
+            return true;
+        }
+        if std::fs::copy(partial, out).is_ok() && mp4_is_playable(out) {
+            return true;
+        }
+    }
+    let _ = std::fs::remove_file(out);
+    false
 }
 
 fn now_ms() -> i64 {

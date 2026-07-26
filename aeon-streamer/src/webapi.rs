@@ -520,13 +520,15 @@ async fn get_recording(
             }
         }
     };
+    // `inline` so browsers/QuickTime can play in-place; still named for Save As.
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "video/mp4")
         .header(
             "Content-Disposition",
-            format!("attachment; filename=\"{id}.mp4\""),
+            format!("inline; filename=\"{id}.mp4\""),
         )
+        .header("Accept-Ranges", "bytes")
         .header("Cache-Control", "no-store");
     if let Some(l) = len {
         builder = builder.header("Content-Length", l);
