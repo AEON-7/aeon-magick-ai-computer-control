@@ -3,6 +3,8 @@
 # autosuspend is disabled (so the Cam Link doesn't get suspended on
 # idle), and NetworkManager owns wlan0.
 
+THIS_DIR="$(dirname "$0")"
+
 # config.txt additions. The previous check (`grep -q "^dtoverlay=dwc2"`)
 # was too loose — stock Pi OS config.txt has `[cm5] dtoverlay=dwc2,dr_mode=host`
 # which matches and skips our append. Check for our exact line instead.
