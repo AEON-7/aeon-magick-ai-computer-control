@@ -2,112 +2,132 @@
 name: aeon-bench
 description: >
   Benchmark an open LLM on real hardware and submit an attested run to the AEON
-  Bench leaderboard. Deploy the Aeon Bench Pod (pull → verify → serve →
-  benchmark → sign → submit) onto a connected GPU server, watch it through its
-  phases, and open its dashboard. Load this when the task is to EVALUATE /
-  benchmark / leaderboard a model. The pod needs an NVIDIA GPU, so it deploys to
-  a connected system, not the Orb itself.
+  Bench leaderboard. Deploy the Aeon Bench Pod, drive the verified path (including
+  remote endpoint benches over SSH on any connected system), watch phases, and
+  open the dashboard. Load when the task is to EVALUATE / benchmark / leaderboard
+  a model. Co-located serve needs NVIDIA; remote verified path can use a GPU-less
+  pod as control plane.
 ---
 # aeon-bench
 
-The [Aeon Bench Pod](https://github.com/AEON-7/Aeon-Bench-Pod) runs the whole
-pipeline: **pull → verify weights → serve (vLLM) → benchmark** (text · agentic ×3
-harnesses · vision · audio · arena · perf) **→ ed25519-sign → submit** an attested
-run to the aeon-bench.com leaderboard. It now ships as a **prebuilt GHCR
-container** (`ghcr.io/aeon-7/aeon-pod`): deploy = `docker pull` + a single
-`docker run` (Docker-out-of-Docker — the pod mounts the host docker socket to
-launch its own engine + harness containers). It **serves the model co-located**
-(`--gpus all --network host`), so serving needs an **NVIDIA GPU +
-nvidia-container-toolkit**. The pod deploys onto a **connected GPU server**; this
-Orb is the console/gateway, and its **dashboard (port 8091)** is where you
-pick/scan/paste models and launch runs.
+The [Aeon Bench Pod](https://github.com/AEON-7/Aeon-Bench-Pod) runs:
+
+**pull → verify weights → serve (or point at a live serve) → benchmark → ed25519-sign → submit**
+
+to [aeon-bench.com](https://aeon-bench.com). Image: `ghcr.io/aeon-7/aeon-pod`.
+
+The Orb is the **console**: deploy the pod, authorize its SSH key on serve hosts,
+scan endpoints, and launch **verified** runs without leaving the Pi UI / MCP.
 
 > **Credentials.** `Authorization: Bearer $AEON_TOKEN` against `https://$AEON_HOST`
-> (self-signed → `curl -k`). Each capability is a **first-class MCP tool** (bold
-> names); the REST below is the same handler.
+> (`curl -k`). Bold names are MCP tools.
 
-## 1. pick a GPU host — **`connected_systems`**
+## Two shapes
+
+| Mode | When | Deploy |
+|------|------|--------|
+| **Co-located** | Pod pulls + serves + benches on one NVIDIA box | `bench_deploy` with `gpu:true` (default) on a DGX / GPU system |
+| **Remote verified** | Model already serving on a connected system | Pod on GPU **or** Orb (`target:local`, `gpu:false`); then authorize + scan + `bench_run_verified` |
+
+Remote verified path = `hf_link` + `serve_url` + `remote_host` + `verify_endpoint=true`
+(see pod docs: `docs/remote-endpoint-bench.md`). Ranks as `endpoint_fingerprint` or
+`endpoint_verified` (container-hash over SSH when no local GPU).
+
+## Flow — remote verified (from the Pi)
+
+### 1. Systems — **`connected_systems`**
 
 ```bash
 curl -sk -H "Authorization: Bearer $AEON_TOKEN" "https://$AEON_HOST/api/agent/systems"
 ```
 
-Take the `id` of a system with a GPU (a DGX / gateway). That id is the `target`
-for every call below. **No systems?** There's nowhere to run — an operator must
-link one in the Agent Dashboard first.
+Need at least one **serve** host (GPU gateway). Optionally deploy the pod there too.
 
-## 2. (optional) preview a model — **`bench_model_info`**
+### 2. Deploy pod — **`bench_deploy`**
 
-If pre-loading a model, you can preview what the pod will serve — quantization,
-params, context, gated flag — from its HuggingFace config. This is informational
-only; the pod derives the real recipe itself:
+```bash
+# Co-located on a GPU box:
+curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
+  -d '{"target":"<gpu-system-id>","gpu":true}' \
+  "https://$AEON_HOST/api/bench/deploy"
+
+# Or control plane on this Orb (no --gpus all):
+curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
+  -d '{"target":"local","gpu":false}' \
+  "https://$AEON_HOST/api/bench/deploy"
+```
+
+Poll **`bench_status`** until `phase:"running"`.
+
+### 3. Authorize pod key on the serve host — **`bench_authorize`**
+
+```bash
+curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
+  -d '{"target":"<pod-host-id-or-local>","serve_system":"<serve-system-id>"}' \
+  "https://$AEON_HOST/api/bench/authorize"
+```
+
+Installs the pod’s ed25519 pubkey into that system’s `authorized_keys` over agent-connect.
+
+### 4. Scan endpoints — **`bench_scan_endpoints`**
+
+```bash
+curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
+  "https://$AEON_HOST/api/bench/scan_endpoints?target=<pod-host>&remote=<serve-system-id>"
+# → { endpoints: [{ url, hf_guess, models, … }] }
+```
+
+### 5. Launch verified run — **`bench_run_verified`**
+
+```bash
+curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
+  -d '{
+    "target":"<pod-host>",
+    "hf_link":"org/Exact-Quant-Repo",
+    "serve_url":"http://<serve-ip>:8000/v1",
+    "remote_host":"<serve-system-id>",
+    "verify_endpoint":true,
+    "preset":"comprehensive"
+  }' \
+  "https://$AEON_HOST/api/bench/run_verified"
+# → { job_id: "…" }
+```
+
+Use the **exact quant** HF repo (not the base model). Prefer `hf_guess` from the scan.
+Poll **`bench_jobs`** or open `http://<pod-host>:8091`.
+
+### 6. Keep current — **`bench_updates`** / **`bench_update`**
+
+Same as before: digest check + hot pull/recreate.
+
+### 7. Stop — **`bench_stop`**
+
+`{"target":"…"}` → `docker rm -f aeon-pod`.
+
+## Optional preview — **`bench_model_info`**
 
 ```bash
 curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
   "https://$AEON_HOST/api/bench/model-info?hf_link=Qwen/Qwen2.5-7B-Instruct-AWQ"
-# → {quant:"AWQ", params_b:7.6, native_ctx:32768, effective_ctx:32768,
-#    gated:false, is_gguf:false, warnings:[…]}
 ```
 
-**gated** → the deploy needs an `hf_token`; **GGUF** → vLLM's GGUF path is
-experimental.
+## REST map
 
-## 3. deploy — **`bench_deploy`**
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/bench/deploy` | deploy pod (`gpu` bool) |
+| GET | `/api/bench/status` | phase / log / dash_port |
+| POST | `/api/bench/stop` | remove container |
+| GET | `/api/bench/updates` | GHCR digest check |
+| POST | `/api/bench/update` | pull + recreate |
+| GET | `/api/bench/ssh_key` | pod public key |
+| POST | `/api/bench/authorize` | install key on serve system |
+| GET | `/api/bench/scan_endpoints` | live serves (+ `remote=`) |
+| POST | `/api/bench/run_verified` | verified-path launch |
+| GET | `/api/bench/jobs` | pod job list |
+| GET | `/api/bench/model-info` | HF recipe preview |
 
-```bash
-curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
-  -d '{"target":"<system-id>"}' \
-  "https://$AEON_HOST/api/bench/deploy"
-# with a pre-loaded model (optional):
-#   -d '{"target":"<system-id>","hf_link":"org/Model","hf_token":"<optional>"}'
-```
+**Console:** Orb → **Aeon Bench** page (works on Pi 4 and Pi 5 images).
 
-Pulls `ghcr.io/aeon-7/aeon-pod:latest` and `docker run`s it on the target over the
-Orb's SSH key (installing Docker on first run). **`hf_link` is optional** — leave
-it out and pick models in the dashboard. Extra `env` keys (`AEON_PORT`,
-`AEON_SYSTEM`, `AEON_PAUSE_CONTAINERS`) map to `-e` flags. Returns immediately;
-pulls + starts in the **background**.
-
-## 4. watch it — **`bench_status`**
-
-```bash
-curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
-  "https://$AEON_HOST/api/bench/status?target=<system-id>"
-# → {phase:"pulling"|"starting"|"running"|"failed", log:"…", running:bool,
-#    host:"<addr>", dash_port:8091}
-```
-
-Poll until `phase:"running"`. Pulling the image takes a minute or two on the first
-deploy. When running, the **dashboard** (pick models, launch runs, keys, live
-progress) is a browser page at **`http://<host>:<dash_port>`** (default 8091) —
-surface that URL to the user; it's reachable from a browser or via the Orb console.
-
-## 5. keep it current — **`bench_updates`** / **`bench_update`**
-
-Check whether a newer pod **image** is published (pulled digest vs GHCR latest),
-then hot-update — pull the newest image and recreate the container with the same
-config:
-
-```bash
-curl -sk -H "Authorization: Bearer $AEON_TOKEN" \
-  "https://$AEON_HOST/api/bench/updates?target=<system-id>"
-# → {deployed:"<digest>", latest:"<digest>", update_available:true|false}
-
-curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" -H 'content-type: application/json' \
-  -d '{"target":"<system-id>"}' "https://$AEON_HOST/api/bench/update"
-```
-
-`bench_update` runs `docker pull` + recreate in the **background** (the exact
-`docker run` command is persisted at deploy and re-used, since flags don't survive
-a recreate) — poll **`bench_status`** through `pulling → starting → running`. In
-the console, an **Update Pod** button appears whenever `update_available` is true.
-(Updating with no pod deployed is a no-op error — deploy first.)
-
-## 6. stop — **`bench_stop`**
-
-`{"target":"<system-id>"}` → `docker rm -f aeon-pod` on the target.
-
-**Flow:** **`connected_systems`** (pick a GPU box) → **`bench_deploy`** (optionally
-pre-load a model) → poll **`bench_status`** to `running` → hand off
-`http://<host>:8091` (pick models + launch runs there) →
-**`bench_updates`**/**`bench_update`** to stay current → **`bench_stop`** when done.
+**Never** use raw unverified endpoint-only benches when you can pass `hf_link` +
+`verify_endpoint` — only the verified path ranks on the public board.

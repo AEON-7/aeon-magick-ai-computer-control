@@ -1,22 +1,17 @@
-//! Aeon Bench — deploy the **Aeon Bench Pod** (open LLM benchmarking:
-//! pull → verify → serve → benchmark → ed25519-sign → submit to the
-//! aeon-bench.com leaderboard) onto a **GPU server linked in the Agent
-//! Dashboard** (over the agent-connect SSH key), then reach the pod dashboard
-//! (:8091) from the console or a browser.
+//! Aeon Bench — deploy the **Aeon Bench Pod** and drive its **verified path**
+//! (including remote endpoint benches over SSH) from the Orb console.
 //!
-//! The pod now ships as a **prebuilt GHCR container** (`ghcr.io/aeon-7/aeon-pod`)
-//! rather than a from-source docker-compose build: deploy = `docker pull` + a
-//! single `docker run` (Docker-out-of-Docker — the pod mounts the host docker
-//! socket to launch its own vLLM engine + harness sibling containers). It
-//! co-locates the model server, so it needs an NVIDIA GPU (`--gpus all`) +
-//! `--network host`. A model can be pre-loaded (`AEON_HF_LINK`) but is optional —
-//! the dashboard lets you pick/scan models. The whole deploy is backgrounded
-//! (pull → run), with phases surfaced through a status file the UI polls.
+//! The pod ships as `ghcr.io/aeon-7/aeon-pod`. Deploy = `docker pull` + `docker run`
+//! (Docker-out-of-Docker). Two attested shapes the Orb can drive:
 //!
-//! Update = `docker pull` the newest image + recreate the container. Docker run
-//! flags DON'T persist across a recreate, so the exact `docker run` command is
-//! persisted to `.aeon-pod-run.sh` on the target at deploy time and re-executed
-//! verbatim on update.
+//! 1. **Co-located** — pod on a GPU host, pull/serve/bench there (classic).
+//! 2. **Remote verified** — pod (any host) points at a live OpenAI-compatible
+//!    serve on a *connected system* via `serve_url` + `remote_host` +
+//!    `verify_endpoint` (and optional `deep_verify`). The pod's SSH key is
+//!    authorized on the serving box so it can probe hardware, read the real
+//!    docker recipe, and hash-verify running weights (`endpoint_verified`).
+//!
+//! See Aeon-Bench-Pod `docs/remote-endpoint-bench.md`.
 
 use crate::api::AppState;
 use axum::{extract::Query, extract::State, Json};
@@ -30,16 +25,14 @@ const DEFAULT_DASH_PORT: u16 = 8091;
 const POD_IMAGE: &str = "ghcr.io/aeon-7/aeon-pod:latest";
 const POD_NAME: &str = "aeon-pod";
 
-/// The deploy worker, decoded + nohup-run on the target: ensure docker, pull the
-/// prebuilt image, drop any old container, then exec the persisted `docker run`
-/// command (`.aeon-pod-run.sh`). Writes `PHASE=…` to a status file the UI polls.
+/// Deploy worker: ensure docker, pull image, run persisted `.aeon-pod-run.sh`.
 const RUN_SCRIPT: &str = r#"#!/bin/bash
 WORK="$HOME/aeon-bench-pod"
 S="$WORK/.aeon-bench.status"; L="$WORK/.aeon-bench.log"; : > "$L"
 if ! command -v docker >/dev/null 2>&1; then
   echo PHASE=installing-docker > "$S"
   (apt-get update -y && apt-get install -y docker.io) >> "$L" 2>&1 \
-    || { echo "Docker is not installed and could not be auto-installed — install Docker on the target, or pick a different GPU server." >> "$L"; echo PHASE=failed > "$S"; exit 1; }
+    || { echo "Docker is not installed and could not be auto-installed — install Docker on the target, or pick a different host." >> "$L"; echo PHASE=failed > "$S"; exit 1; }
   command -v systemctl >/dev/null 2>&1 && systemctl start docker >> "$L" 2>&1 || true
 fi
 mkdir -p "$HOME/aeon-models"
@@ -51,14 +44,11 @@ echo PHASE=starting > "$S"
 if bash "$WORK/.aeon-pod-run.sh" >> "$L" 2>&1; then
   echo PHASE=running > "$S"
 else
-  echo "docker run failed — the pod serves the model co-located, so the target needs an NVIDIA GPU + nvidia-container-toolkit (for --gpus all). See the log above." >> "$L"
+  echo "docker run failed — for co-located serve/bench the target needs an NVIDIA GPU + nvidia-container-toolkit (--gpus all). For remote-endpoint-only mode redeploy with gpu=false." >> "$L"
   echo PHASE=failed > "$S"
 fi
 "#;
 
-/// Report the current phase + a log tail + whether the pod container is up + the
-/// dashboard port (persisted at deploy). Markers delimit the sections for a
-/// single round-trip.
 const STATUS_SCRIPT: &str = r#"WORK="$HOME/aeon-bench-pod"
 echo '@PHASE@'; cat "$WORK/.aeon-bench.status" 2>/dev/null
 echo '@PORT@'; cat "$WORK/.aeon-bench.port" 2>/dev/null
@@ -73,9 +63,6 @@ echo PHASE=stopped > "$WORK/.aeon-bench.status"
 echo STOPPED
 "#;
 
-/// Hot-update worker: pull the newest image + recreate the container from the
-/// PERSISTED run command (docker run flags don't survive a recreate). Same status
-/// file as deploy.
 const UPDATE_SCRIPT: &str = r#"#!/bin/bash
 WORK="$HOME/aeon-bench-pod"
 S="$WORK/.aeon-bench.status"; L="$WORK/.aeon-bench.log"; : > "$L"
@@ -93,7 +80,6 @@ else
 fi
 "#;
 
-/// The pulled pod image's digest on the target (empty if never pulled).
 const DEPLOYED_DIGEST_SCRIPT: &str = r#"docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/aeon-7/aeon-pod:latest 2>/dev/null | sed 's/.*@//'; true"#;
 
 #[derive(Deserialize)]
@@ -101,15 +87,22 @@ pub struct DeployReq {
     /// "local" (this Orb) or a connected-system id from the Agent Dashboard.
     pub target: String,
     /// OPTIONAL HuggingFace model id, e.g. "org/Model" — pre-loads AEON_HF_LINK.
-    /// Empty is fine: the dashboard lets you pick/scan models after deploy.
     #[serde(default)]
     pub hf_link: String,
     #[serde(default)]
     pub hf_token: String,
-    /// Extra `-e` env overrides for the pod (AEON_PORT, AEON_SYSTEM,
-    /// AEON_PAUSE_CONTAINERS, …). Keys are validated; values are shell-quoted.
+    /// Extra `-e` env overrides (AEON_PORT, AEON_SYSTEM, AEON_PAUSE_CONTAINERS, …).
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// When true (default), pass `--gpus all` for co-located serve/bench.
+    /// Set false for a GPU-less pod used only as a control plane for **remote
+    /// verified** endpoint benches (`serve_url` + `remote_host`).
+    #[serde(default = "default_true")]
+    pub gpu: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -117,16 +110,83 @@ pub struct TargetQuery {
     pub target: String,
 }
 
+#[derive(Deserialize)]
+pub struct SshKeyQuery {
+    pub target: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+pub struct AuthorizeReq {
+    /// Pod host (local | system id).
+    pub target: String,
+    /// Connected system that will *serve* the model (receives the pod's pubkey).
+    pub serve_system: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+pub struct ScanQuery {
+    /// Pod host (local | system id).
+    pub target: String,
+    /// Optional connected-system id OR raw `user@host` to scan over SSH.
+    #[serde(default)]
+    pub remote: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+pub struct VerifiedRunReq {
+    /// Pod host (local | system id) — where the dashboard/API runs.
+    pub target: String,
+    /// HF repo of the **exact artifact** being served (required for attested).
+    pub hf_link: String,
+    /// Live OpenAI-compatible base URL, e.g. `http://192.168.1.10:8000/v1`.
+    #[serde(default)]
+    pub serve_url: String,
+    /// Connected-system id OR `user@host` of the machine serving `serve_url`.
+    #[serde(default)]
+    pub remote_host: String,
+    /// Served model id when the endpoint has several.
+    #[serde(default)]
+    pub endpoint_model: String,
+    /// Bind the live endpoint to hash-verified weights (default true when serve_url set).
+    #[serde(default = "default_true")]
+    pub verify_endpoint: bool,
+    /// Force container weight sha256 (`endpoint_verified`) even if a GPU fingerprint is possible.
+    #[serde(default)]
+    pub deep_verify: bool,
+    /// Suite preset: comprehensive | hard-bench | god-mode (default comprehensive).
+    #[serde(default = "default_comprehensive")]
+    pub preset: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+fn default_comprehensive() -> String {
+    "comprehensive".into()
+}
+
+#[derive(Deserialize)]
+pub struct JobsQuery {
+    pub target: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
 fn b64(d: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(d)
 }
 
-/// "org/model" shape (also accepts a bare repo id). No shell metacharacters.
 fn valid_hf_link(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 200
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
 }
 
 fn env_key_ok(k: &str) -> bool {
@@ -137,47 +197,132 @@ fn clean_val(v: &str) -> String {
     v.chars().filter(|c| *c != '\n' && *c != '\r').take(500).collect()
 }
 
-/// Single-quote a value for a POSIX shell command line (escaping embedded quotes),
-/// so an env value can't break out into shell — every user-supplied `-e` value is
-/// wrapped with this.
 fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// The exact `docker run` command for the GHCR pod, persisted to the target and
-/// re-executed verbatim on update (flags don't survive a container recreate).
-/// `$HOME` is left for the TARGET shell to expand; user values are shell-quoted.
-/// Dedicated keys (models dir / port / token / hf link) can't be overridden or
-/// duplicated by the free-form env map.
+/// Resolve a connected-system id (or already-formed `user@host`) to an SSH destination.
+fn remote_ssh_dest(id_or_host: &str) -> Result<String, String> {
+    let s = id_or_host.trim();
+    if s.is_empty() {
+        return Err("remote host is empty".into());
+    }
+    if s.contains('@') {
+        // user@host — allow only safe characters
+        if s.len() <= 200
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '-' | '_' | ':'))
+        {
+            return Ok(s.to_string());
+        }
+        return Err("invalid remote host".into());
+    }
+    let t = crate::agent_connect::ssh_target(s).ok_or_else(|| "unknown connected system".to_string())?;
+    Ok(format!("{}@{}", t.ssh_user, t.address))
+}
+
+/// Host + port where the pod dashboard listens for a deploy target.
+fn pod_http_base(target: &str, port: u16) -> Result<String, String> {
+    if target == "local" {
+        return Ok(format!("http://127.0.0.1:{port}"));
+    }
+    let t = crate::agent_connect::ssh_target(target).ok_or_else(|| "unknown deploy target".to_string())?;
+    Ok(format!("http://{}:{port}", t.address))
+}
+
+fn pod_http_get(base: &str, path: &str) -> Result<Value, String> {
+    let url = format!("{base}{path}");
+    match ureq::get(&url)
+        .set("User-Agent", "aeon-magick-orb")
+        .timeout(std::time::Duration::from_secs(45))
+        .call()
+    {
+        Ok(resp) => resp
+            .into_json()
+            .map_err(|e| format!("pod response parse: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("pod HTTP {code}: {}", body.chars().take(300).collect::<String>()))
+        }
+        Err(ureq::Error::Transport(t)) => Err(format!(
+            "cannot reach pod at {base} ({t}) — is it running? open the dashboard or check bench_status"
+        )),
+    }
+}
+
+fn pod_http_post(base: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let url = format!("{base}{path}");
+    match ureq::post(&url)
+        .set("User-Agent", "aeon-magick-orb")
+        .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(60))
+        .send_json(body.clone())
+    {
+        Ok(resp) => resp
+            .into_json()
+            .map_err(|e| format!("pod response parse: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("pod HTTP {code}: {}", body.chars().take(300).collect::<String>()))
+        }
+        Err(ureq::Error::Transport(t)) => Err(format!(
+            "cannot reach pod at {base} ({t}) — is it running? open the dashboard or check bench_status"
+        )),
+    }
+}
+
+/// Resolve dashboard port: query param → status file on target → default.
+fn resolve_dash_port(target: &str, override_port: Option<u16>) -> u16 {
+    if let Some(p) = override_port.filter(|p| *p > 0) {
+        return p;
+    }
+    run_on_target(
+        target,
+        r#"cat "$HOME/aeon-bench-pod/.aeon-bench.port" 2>/dev/null || true"#,
+    )
+    .ok()
+    .and_then(|s| s.trim().parse().ok())
+    .filter(|p: &u16| *p > 0)
+    .unwrap_or(DEFAULT_DASH_PORT)
+}
+
+/// Exact `docker run` for the GHCR pod (persisted + re-used on update).
 fn docker_run_command(req: &DeployReq, port: u16) -> String {
     let mut parts: Vec<String> = vec![
         "docker run -d".into(),
         format!("--name {POD_NAME}"),
-        // Host networking (dashboard on the host port) + GPU passthrough — the
-        // pod serves the model co-located.
+        // Host networking so dashboard binds on the host port.
         "--network host".into(),
-        "--gpus all".into(),
-        // Docker-out-of-Docker: the pod launches its engine + harness containers.
+    ];
+    if req.gpu {
+        // Co-located serve needs GPU passthrough.
+        parts.push("--gpus all".into());
+    }
+    parts.extend([
+        // Docker-out-of-Docker: engine + harness containers.
         "-v /var/run/docker.sock:/var/run/docker.sock".into(),
         // Persistent ed25519 device key + run history.
         "-v aeon-pod-state:/root/.aeon".into(),
         // Validated model weights, shared with sibling containers.
         "-v \"$HOME/aeon-models:/models\"".into(),
         "-e AEON_MODELS_HOST_DIR=\"$HOME/aeon-models\"".into(),
+        // Scan host model homes (HF cache, LM Studio, ~/models) without copy.
+        "-v \"$HOME:/host-home:ro\"".into(),
+        "-e AEON_HOST_HOME_DIR=\"$HOME\"".into(),
         format!("-e AEON_PORT={port}"),
-    ];
+    ]);
     if !req.hf_token.trim().is_empty() {
         parts.push(format!("-e HF_TOKEN={}", shq(&clean_val(&req.hf_token))));
     }
-    // Optional pre-loaded model for the headless pipeline.
     if !req.hf_link.trim().is_empty() {
         parts.push(format!("-e AEON_HF_LINK={}", shq(req.hf_link.trim())));
     }
-    // Free-form AEON_* overrides (system label, pause-containers, …). Dedicated
-    // keys are excluded so they can't be set twice.
     for (k, v) in &req.env {
         if !env_key_ok(k)
-            || matches!(k.as_str(), "HF_TOKEN" | "AEON_HF_LINK" | "AEON_MODELS_HOST_DIR" | "AEON_PORT")
+            || matches!(
+                k.as_str(),
+                "HF_TOKEN" | "AEON_HF_LINK" | "AEON_MODELS_HOST_DIR" | "AEON_PORT" | "AEON_HOST_HOME_DIR"
+            )
         {
             continue;
         }
@@ -187,9 +332,6 @@ fn docker_run_command(req: &DeployReq, port: u16) -> String {
     parts.join(" ")
 }
 
-/// The outer bootstrap: persist the `docker run` command (re-used on update) +
-/// the dashboard port + the deploy worker to disk (base64, so no quoting/heredoc
-/// hazards over SSH), then nohup the worker so it survives the session.
 fn deploy_script(run_cmd_b64: &str, worker_b64: &str, port: u16) -> String {
     format!(
         r#"set -e
@@ -203,8 +345,6 @@ echo STARTED"#
     )
 }
 
-/// Run a script on the target: locally via `bash -lc`, or on a connected system
-/// over the agent-connect SSH key.
 fn run_on_target(target: &str, script: &str) -> Result<String, String> {
     if target == "local" {
         let out = Command::new("bash")
@@ -227,7 +367,9 @@ fn run_on_target(target: &str, script: &str) -> Result<String, String> {
 }
 
 fn section<'a>(out: &'a str, marker: &str, next: &[&str]) -> &'a str {
-    let Some(start) = out.find(marker) else { return "" };
+    let Some(start) = out.find(marker) else {
+        return "";
+    };
     let after = &out[start + marker.len()..];
     let end = next
         .iter()
@@ -237,8 +379,6 @@ fn section<'a>(out: &'a str, marker: &str, next: &[&str]) -> &'a str {
     after[..end].trim_matches(['\n', '\r'].as_ref())
 }
 
-/// Outer bootstrap for a hot-update: refuse (NO_POD) if nothing is deployed
-/// (no persisted run command), else drop the update worker + nohup it.
 fn update_bootstrap(worker_b64: &str) -> String {
     format!(
         r#"set -e
@@ -251,9 +391,6 @@ echo STARTED"#
     )
 }
 
-/// The latest published digest of the GHCR pod image. GHCR needs a (free,
-/// anonymous) bearer token even for a public image; with it, the manifest
-/// request returns the `Docker-Content-Digest` header without pulling the image.
 fn ghcr_latest_digest() -> Option<String> {
     let tok: Value = ureq::get(
         "https://ghcr.io/token?service=ghcr.io&scope=repository:aeon-7/aeon-pod:pull",
@@ -280,8 +417,7 @@ fn ghcr_latest_digest() -> Option<String> {
         .filter(|s| s.starts_with("sha256:"))
 }
 
-/// POST /api/bench/deploy — kick a (backgrounded) pod deploy on the target: pull
-/// the GHCR image + `docker run` it. `hf_link` is optional (pre-load a model).
+/// POST /api/bench/deploy
 pub async fn deploy(State(_s): State<AppState>, Json(req): Json<DeployReq>) -> Json<Value> {
     if !req.hf_link.trim().is_empty() && !valid_hf_link(req.hf_link.trim()) {
         return Json(json!({"ok": false, "err": "invalid model id — expected \"org/model\""}));
@@ -298,8 +434,15 @@ pub async fn deploy(State(_s): State<AppState>, Json(req): Json<DeployReq>) -> J
     let run_cmd = docker_run_command(&req, dash_port);
     let script = deploy_script(&b64(run_cmd.as_bytes()), &b64(RUN_SCRIPT.as_bytes()), dash_port);
     let target = req.target.clone();
+    let gpu = req.gpu;
     let v = tokio::task::spawn_blocking(move || match run_on_target(&target, &script) {
-        Ok(out) => json!({"ok": true, "target": target, "dash_port": dash_port, "out": out.trim()}),
+        Ok(out) => json!({
+            "ok": true,
+            "target": target,
+            "dash_port": dash_port,
+            "gpu": gpu,
+            "out": out.trim(),
+        }),
         Err(e) => json!({"ok": false, "err": e}),
     })
     .await
@@ -307,7 +450,7 @@ pub async fn deploy(State(_s): State<AppState>, Json(req): Json<DeployReq>) -> J
     Json(v)
 }
 
-/// GET /api/bench/status?target= — phase, log tail, running-state, dashboard host+port.
+/// GET /api/bench/status?target=
 pub async fn status(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let host = if target == "local" {
@@ -351,11 +494,6 @@ pub struct ModelInfoQuery {
     pub hf_link: String,
 }
 
-/// Map a HuggingFace `quantization_config.quant_method` to the label we show
-/// (and, if ever forced, what vLLM accepts). We only DISPLAY this — the pod's
-/// derive_recipe() picks the actual (often marlin-accelerated) kernel from the
-/// same config, so we don't override AEON_QUANT and risk a slower path in a
-/// benchmark that measures throughput.
 fn norm_quant(m: &str) -> String {
     match m.to_lowercase().replace('-', "_").as_str() {
         "awq" => "AWQ".into(),
@@ -369,10 +507,7 @@ fn norm_quant(m: &str) -> String {
     }
 }
 
-/// GET /api/bench/model-info?hf_link= — preview the serve recipe the pod will
-/// derive for a model: quantization, context (native + rope-scaled), params,
-/// dtype/arch, gated status, and any warnings (gated → token; context < 64k →
-/// below what Hermes needs; GGUF → vLLM caveat). Uses the stored HF token.
+/// GET /api/bench/model-info?hf_link=
 pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQuery>) -> Json<Value> {
     let id = q.hf_link.trim().trim_end_matches('/').to_string();
     if !valid_hf_link(&id) {
@@ -383,7 +518,6 @@ pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQue
             Ok(v) => v,
             Err(e) => return json!({"ok": false, "err": format!("HuggingFace: {e}")}),
         };
-        // config.json is absent on GGUF-only / non-transformers repos — tolerate that.
         let cfg = crate::ipfs::hf_get_json(&format!("https://huggingface.co/{id}/resolve/main/config.json"))
             .unwrap_or(Value::Null);
 
@@ -401,10 +535,19 @@ pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQue
         let is_gguf = api
             .get("siblings")
             .and_then(|s| s.as_array())
-            .map(|a| a.iter().any(|f| f.get("rfilename").and_then(|r| r.as_str()).is_some_and(|n| n.ends_with(".gguf"))))
+            .map(|a| {
+                a.iter().any(|f| {
+                    f.get("rfilename")
+                        .and_then(|r| r.as_str())
+                        .is_some_and(|n| n.ends_with(".gguf"))
+                })
+            })
             .unwrap_or(false);
         if is_gguf {
-            warnings.push("GGUF weights — vLLM's GGUF path is experimental; a safetensors build benchmarks more reliably.".into());
+            warnings.push(
+                "GGUF weights — vLLM's GGUF path is experimental; a safetensors build benchmarks more reliably."
+                    .into(),
+            );
         }
 
         let quant = cfg
@@ -449,7 +592,7 @@ pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQue
         json!({
             "ok": true,
             "id": id,
-            "quant": quant,               // display label, or null = full-precision
+            "quant": quant,
             "native_ctx": native_ctx,
             "effective_ctx": effective_ctx,
             "gated": gated,
@@ -465,7 +608,7 @@ pub async fn model_info(State(_s): State<AppState>, Query(q): Query<ModelInfoQue
     Json(v)
 }
 
-/// POST /api/bench/stop — `docker rm -f` the pod container on the target.
+/// POST /api/bench/stop
 pub async fn stop(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let v = tokio::task::spawn_blocking(move || match run_on_target(&target, STOP_SCRIPT) {
@@ -477,10 +620,7 @@ pub async fn stop(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Jso
     Json(v)
 }
 
-/// GET /api/bench/updates?target= — is a newer pod IMAGE published than the one
-/// pulled on this target? Compares the pulled image's digest (docker inspect on
-/// the target) against GHCR's latest. `update_available` is true only when an
-/// image IS pulled and the digests differ, so the UI can show/hide the button.
+/// GET /api/bench/updates?target=
 pub async fn updates(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let v = tokio::task::spawn_blocking(move || {
@@ -490,7 +630,6 @@ pub async fn updates(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -
         let deployed_ok = deployed.starts_with("sha256:");
         let latest = ghcr_latest_digest().unwrap_or_default();
         let update_available = deployed_ok && latest.starts_with("sha256:") && deployed != latest;
-        // Show the 12 hex chars after "sha256:" — recognizable, like a short SHA.
         let short = |s: &str| s.trim_start_matches("sha256:").chars().take(12).collect::<String>();
         json!({
             "ok": true,
@@ -504,9 +643,7 @@ pub async fn updates(State(_s): State<AppState>, Query(q): Query<TargetQuery>) -
     Json(v)
 }
 
-/// POST /api/bench/update — hot-update the pod on the target: pull the newest
-/// GHCR image and recreate the container from the persisted run command (same
-/// model config). Backgrounded; the UI polls /api/bench/status through the phases.
+/// POST /api/bench/update
 pub async fn update(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> Json<Value> {
     let target = q.target.clone();
     let script = update_bootstrap(&b64(UPDATE_SCRIPT.as_bytes()));
@@ -520,4 +657,279 @@ pub async fn update(State(_s): State<AppState>, Json(q): Json<TargetQuery>) -> J
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "update task failed"}));
     Json(v)
+}
+
+// ── Remote verified path (pod APIs proxied through the Orb) ────────────────
+
+/// GET /api/bench/ssh_key?target= — the pod's public SSH key (for authorizing on serve hosts).
+pub async fn ssh_key(State(_s): State<AppState>, Query(q): Query<SshKeyQuery>) -> Json<Value> {
+    let target = q.target.clone();
+    let port = q.port;
+    let v = tokio::task::spawn_blocking(move || {
+        if target != "local" && crate::agent_connect::ssh_target(&target).is_none() {
+            return json!({"ok": false, "err": "unknown deploy target"});
+        }
+        let port = resolve_dash_port(&target, port);
+        let base = match pod_http_base(&target, port) {
+            Ok(b) => b,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        match pod_http_get(&base, "/api/pod/ssh_key") {
+            Ok(mut body) => {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("ok".into(), json!(true));
+                    obj.insert("dash_port".into(), json!(port));
+                }
+                body
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "ssh_key task failed"}));
+    Json(v)
+}
+
+/// POST /api/bench/authorize — install the pod's pubkey on a connected serve system.
+pub async fn authorize(State(_s): State<AppState>, Json(req): Json<AuthorizeReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || {
+        if req.target != "local" && crate::agent_connect::ssh_target(&req.target).is_none() {
+            return json!({"ok": false, "err": "unknown pod target"});
+        }
+        if crate::agent_connect::ssh_target(&req.serve_system).is_none() {
+            return json!({"ok": false, "err": "unknown serve system — link it in the Agent Dashboard first"});
+        }
+        let port = resolve_dash_port(&req.target, req.port);
+        let base = match pod_http_base(&req.target, port) {
+            Ok(b) => b,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        let key_json = match pod_http_get(&base, "/api/pod/ssh_key") {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        let pubkey = key_json
+            .get("pubkey")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .trim();
+        if pubkey.is_empty() || !pubkey.starts_with("ssh-") {
+            return json!({"ok": false, "err": "pod returned no public key — is the pod running?"});
+        }
+        // One line only; refuse anything with shell metacharacters.
+        if pubkey.contains('\n')
+            || pubkey.contains(';')
+            || pubkey.contains('`')
+            || pubkey.contains('$')
+            || pubkey.len() > 800
+        {
+            return json!({"ok": false, "err": "invalid pod public key"});
+        }
+        let dest = match remote_ssh_dest(&req.serve_system) {
+            Ok(d) => d,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        // Install via agent-connect on the serve system (not the pod).
+        let script = format!(
+            r#"set -e
+mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys"
+KEY={key}
+if grep -qxF "$KEY" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+  echo ALREADY
+else
+  printf '%s\n' "$KEY" >> "$HOME/.ssh/authorized_keys"
+  echo ADDED
+fi
+"#,
+            key = shq(pubkey)
+        );
+        match crate::agent_connect::run_remote(&req.serve_system, &script) {
+            Ok(out) => {
+                let status = if out.contains("ALREADY") {
+                    "already_authorized"
+                } else {
+                    "authorized"
+                };
+                json!({
+                    "ok": true,
+                    "status": status,
+                    "serve_system": req.serve_system,
+                    "remote_host": dest,
+                    "pubkey": pubkey,
+                })
+            }
+            Err(e) => json!({"ok": false, "err": format!("could not install key on serve system: {e}")}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "authorize task failed"}));
+    Json(v)
+}
+
+/// GET /api/bench/scan_endpoints?target=&remote=
+/// Proxies the pod's endpoint scan; `remote` may be a connected-system id.
+pub async fn scan_endpoints(State(_s): State<AppState>, Query(q): Query<ScanQuery>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || {
+        if q.target != "local" && crate::agent_connect::ssh_target(&q.target).is_none() {
+            return json!({"ok": false, "err": "unknown pod target"});
+        }
+        let port = resolve_dash_port(&q.target, q.port);
+        let base = match pod_http_base(&q.target, port) {
+            Ok(b) => b,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        let path = if q.remote.trim().is_empty() {
+            "/api/pod/scan_endpoints".to_string()
+        } else {
+            let dest = match remote_ssh_dest(q.remote.trim()) {
+                Ok(d) => d,
+                Err(e) => return json!({"ok": false, "err": e}),
+            };
+            format!(
+                "/api/pod/scan_endpoints?remote={}",
+                urlencoding_lite(&dest)
+            )
+        };
+        match pod_http_get(&base, &path) {
+            Ok(body) => {
+                // Pod returns a list or object; wrap consistently.
+                if body.is_array() {
+                    json!({"ok": true, "endpoints": body, "dash_port": port})
+                } else if let Some(obj) = body.as_object() {
+                    let mut out = json!({"ok": true, "dash_port": port});
+                    if let Some(m) = out.as_object_mut() {
+                        for (k, v) in obj {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    out
+                } else {
+                    json!({"ok": true, "result": body, "dash_port": port})
+                }
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "scan task failed"}));
+    Json(v)
+}
+
+/// POST /api/bench/run_verified — verified-path launch via the pod API.
+pub async fn run_verified(State(_s): State<AppState>, Json(req): Json<VerifiedRunReq>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || {
+        if !valid_hf_link(req.hf_link.trim()) {
+            return json!({"ok": false, "err": "hf_link required — exact HF quant repo, e.g. \"org/Model-AWQ\""});
+        }
+        if req.target != "local" && crate::agent_connect::ssh_target(&req.target).is_none() {
+            return json!({"ok": false, "err": "unknown pod target"});
+        }
+        let preset = req.preset.trim();
+        if !preset.is_empty() && !matches!(preset, "comprehensive" | "hard-bench" | "god-mode") {
+            return json!({"ok": false, "err": "preset must be comprehensive, hard-bench, or god-mode"});
+        }
+        let port = resolve_dash_port(&req.target, req.port);
+        let base = match pod_http_base(&req.target, port) {
+            Ok(b) => b,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+
+        let serve_url = req.serve_url.trim().to_string();
+        let remote_host = if req.remote_host.trim().is_empty() {
+            None
+        } else {
+            match remote_ssh_dest(req.remote_host.trim()) {
+                Ok(d) => Some(d),
+                Err(e) => return json!({"ok": false, "err": e}),
+            }
+        };
+
+        // Cross-machine serve_url without remote_host misattributes hardware.
+        if !serve_url.is_empty() && remote_host.is_none() {
+            // Allow same-host endpoint (serve on the pod host) without remote_host.
+        }
+
+        let mut body = json!({
+            "hf_link": req.hf_link.trim(),
+            "preset": if preset.is_empty() { "comprehensive" } else { preset },
+            "verify_endpoint": req.verify_endpoint,
+            "deep_verify": req.deep_verify,
+        });
+        if !serve_url.is_empty() {
+            body.as_object_mut()
+                .unwrap()
+                .insert("serve_url".into(), json!(serve_url));
+        }
+        if let Some(rh) = &remote_host {
+            body.as_object_mut()
+                .unwrap()
+                .insert("remote_host".into(), json!(rh));
+        }
+        if !req.endpoint_model.trim().is_empty() {
+            body.as_object_mut()
+                .unwrap()
+                .insert("endpoint_model".into(), json!(req.endpoint_model.trim()));
+        }
+
+        match pod_http_post(&base, "/api/pod/run/verified", &body) {
+            Ok(resp) => {
+                let job_id = resp.get("job_id").cloned().unwrap_or(Value::Null);
+                json!({
+                    "ok": true,
+                    "job_id": job_id,
+                    "target": req.target,
+                    "dash_port": port,
+                    "remote_host": remote_host,
+                    "preset": body.get("preset"),
+                    "pod": resp,
+                })
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "run_verified task failed"}));
+    Json(v)
+}
+
+/// GET /api/bench/jobs?target= — list jobs on the pod (progress of verified runs).
+pub async fn jobs(State(_s): State<AppState>, Query(q): Query<JobsQuery>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(move || {
+        if q.target != "local" && crate::agent_connect::ssh_target(&q.target).is_none() {
+            return json!({"ok": false, "err": "unknown pod target"});
+        }
+        let port = resolve_dash_port(&q.target, q.port);
+        let base = match pod_http_base(&q.target, port) {
+            Ok(b) => b,
+            Err(e) => return json!({"ok": false, "err": e}),
+        };
+        match pod_http_get(&base, "/api/pod/jobs") {
+            Ok(body) => {
+                if body.is_array() {
+                    json!({"ok": true, "jobs": body, "dash_port": port})
+                } else {
+                    json!({"ok": true, "result": body, "dash_port": port})
+                }
+            }
+            Err(e) => json!({"ok": false, "err": e}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "jobs task failed"}));
+    Json(v)
+}
+
+/// Minimal URL-encoding for query values (user@host).
+fn urlencoding_lite(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }

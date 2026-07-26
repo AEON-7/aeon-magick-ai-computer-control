@@ -237,28 +237,56 @@ fn tools_catalog() -> Value {
             tool("model_purge",
                  "Recover from a FAILED or stuck model download: clears its error, kills any hung fetch of the CID, unpins partial data, and garbage-collects the orphaned IPFS blocks to reclaim the space — so you can retry from scratch. Refuses a CID that's a fully-shared model (use the remove/unshare path for those). Returns freed bytes.",
                  json!({"type":"object","required":["cid"],"properties":{"cid":{"type":"string","description":"the model directory CID whose failed download to purge"}}})),
-            // ── Aeon Bench: deploy the LLM-benchmarking pod to a GPU server + monitor it ──
+            // ── Aeon Bench: deploy pod + verified remote endpoint path ──
             tool("bench_model_info",
                  "Preview the serve recipe the bench pod will derive for a HuggingFace model before you deploy: quantization, params, native + rope-scaled context, dtype, architecture, gated flag, and warnings (gated needs a token; context < 64k limits the Hermes agentic harness; GGUF caveat). `hf_link` = \"org/model\".",
                  json!({"type":"object","required":["hf_link"],"properties":{"hf_link":{"type":"string","description":"HuggingFace model id, e.g. \"org/Model\""}}})),
             tool("bench_deploy",
-                 "Deploy the Aeon Bench Pod (open LLM benchmarking → ed25519-sign → submit to the aeon-bench.com leaderboard) onto a GPU server: pulls the prebuilt `ghcr.io/aeon-7/aeon-pod` container and `docker run`s it (Docker-out-of-Docker). The pod serves the model co-located, so `target` must be a connected system with an NVIDIA GPU + nvidia-container-toolkit (see connected_systems). `hf_link` is OPTIONAL — pre-load a model, or leave it and pick/scan models in the dashboard (port 8091). Runs in the BACKGROUND — poll bench_status.",
+                 "Deploy the Aeon Bench Pod (`ghcr.io/aeon-7/aeon-pod`) on `target` (`local` = this Orb, or a connected system id). Pulls the image and docker-runs it. Set `gpu:true` (default) for co-located serve/bench on NVIDIA; set `gpu:false` for a GPU-less control plane used only for verified remote endpoint benches. `hf_link` is OPTIONAL. Background — poll bench_status.",
                  json!({"type":"object","required":["target"],"properties":{
-                            "target":{"type":"string","description":"connected system id (see connected_systems) — a GPU server"},
-                            "hf_link":{"type":"string","description":"OPTIONAL HuggingFace model id to pre-load, e.g. \"org/Model\""},
-                            "hf_token":{"type":"string","description":"optional HuggingFace token for gated weights"}}})),
+                            "target":{"type":"string","description":"\"local\" or connected system id from connected_systems"},
+                            "hf_link":{"type":"string","description":"OPTIONAL HuggingFace model id to pre-load"},
+                            "hf_token":{"type":"string","description":"optional HuggingFace token for gated weights"},
+                            "gpu":{"type":"boolean","description":"pass --gpus all (default true); false for remote-endpoint-only pod"}}})),
             tool("bench_status",
-                 "Progress of the bench pod on a target: phase (pulling → starting → running / failed), a log tail, running-state, and the dashboard host+port — open it in a browser at http://<host>:<dash_port> (default 8091). Poll after bench_deploy.",
-                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) used for bench_deploy"}}})),
+                 "Progress of the bench pod on a target: phase (pulling → starting → running / failed), log tail, running-state, dashboard host+port (default 8091). Poll after bench_deploy.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
             tool("bench_stop",
-                 "Stop the bench pod on a target (docker compose down).",
+                 "Stop the bench pod on a target (docker rm -f aeon-pod).",
                  json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
             tool("bench_updates",
-                 "Check whether a newer pod IMAGE is published than the one pulled on a target: compares the pulled image digest against the latest on GHCR. Returns {deployed, latest, update_available}. Read-only.",
-                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) whose pod to check"}}})),
+                 "Is a newer pod IMAGE published than the one pulled on a target? Compares digests against GHCR. Read-only.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
             tool("bench_update",
-                 "Hot-update the bench pod on a target: pull the newest ghcr.io/aeon-7/aeon-pod image and recreate the container from the same config. Runs in the BACKGROUND — poll bench_status through pulling → starting → running. Use bench_updates first to see if one is available.",
-                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"the deploy target (system id) whose pod to update"}}})),
+                 "Hot-update the bench pod: pull newest image + recreate from persisted run config. Background — poll bench_status.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
+            tool("bench_ssh_key",
+                 "Fetch the running pod's SSH PUBLIC key (GET /api/pod/ssh_key on the pod). Authorize it on a serve host so the pod can probe hardware / docker over SSH for remote verified benches.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string","description":"pod host: local or system id"}}})),
+            tool("bench_authorize",
+                 "Install the pod's SSH public key on a connected serve system (via agent-connect). Required once per serve host before remote verified endpoint benches.",
+                 json!({"type":"object","required":["target","serve_system"],"properties":{
+                            "target":{"type":"string","description":"pod host"},
+                            "serve_system":{"type":"string","description":"connected system id that is serving the model"}}})),
+            tool("bench_scan_endpoints",
+                 "Scan for live OpenAI-compatible endpoints via the pod (and optional SSH remote on a connected system). Returns urls + hf_guess when autodetected. Then pass url + hf_guess into bench_run_verified.",
+                 json!({"type":"object","required":["target"],"properties":{
+                            "target":{"type":"string","description":"pod host"},
+                            "remote":{"type":"string","description":"optional connected system id or user@host to scan over SSH"}}})),
+            tool("bench_run_verified",
+                 "Launch a VALIDATED benchmark on the pod (POST /api/pod/run/verified). Prefer the remote verified path: hf_link (exact quant repo) + serve_url + remote_host (connected system id) + verify_endpoint=true. Defaults preset=comprehensive (ranks on the board). Returns job_id.",
+                 json!({"type":"object","required":["target","hf_link"],"properties":{
+                            "target":{"type":"string","description":"pod host"},
+                            "hf_link":{"type":"string","description":"exact HF quant repo being served"},
+                            "serve_url":{"type":"string","description":"live OpenAI base URL e.g. http://host:8000/v1"},
+                            "remote_host":{"type":"string","description":"connected system id or user@host of the serving machine"},
+                            "endpoint_model":{"type":"string","description":"served model id when the endpoint has several"},
+                            "verify_endpoint":{"type":"boolean","description":"bind live serve to verified weights (default true)"},
+                            "deep_verify":{"type":"boolean","description":"force container weight sha256 over SSH"},
+                            "preset":{"type":"string","enum":["comprehensive","hard-bench","god-mode"]}}})),
+            tool("bench_jobs",
+                 "List jobs on the running pod (progress of verified runs). Read-only.",
+                 json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
             tool("system_image_updates",
                  "Is a newer Aeon Orb IMAGE published for this Orb's hardware track? Compares the flashed image version (stamped on device) against the published manifest on GitHub. Returns {track, installed, latest, latest_name, update_available, notes, patreon_url}. Notify-only — flashing a new image is a manual Patreon download. Read-only.",
                  json!({"type":"object","properties":{}})),
@@ -790,17 +818,24 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             let target = args
                 .get("target")
                 .and_then(|v| v.as_str())
-                .ok_or("bench_deploy needs a `target` — a GPU server id from connected_systems")?
+                .ok_or("bench_deploy needs a `target` (\"local\" or connected system id)")?
                 .to_string();
             let hf_link = args
                 .get("hf_link")
                 .and_then(|v| v.as_str())
-                .ok_or("bench_deploy needs `hf_link` (\"org/model\")")?
+                .unwrap_or("")
                 .to_string();
             let hf_token = args.get("hf_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let gpu = args.get("gpu").and_then(|v| v.as_bool()).unwrap_or(true);
             let v = crate::bench::deploy(
                 axum::extract::State(state.clone()),
-                axum::Json(crate::bench::DeployReq { target, hf_link, hf_token, env: Default::default() }),
+                axum::Json(crate::bench::DeployReq {
+                    target,
+                    hf_link,
+                    hf_token,
+                    env: Default::default(),
+                    gpu,
+                }),
             )
             .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
@@ -853,6 +888,132 @@ async fn dispatch_tool(state: &AppState, name: &str, args: &Value) -> Result<Val
             let v = crate::bench::update(
                 axum::extract::State(state.clone()),
                 axum::Json(crate::bench::TargetQuery { target }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_ssh_key" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_ssh_key needs a `target`")?
+                .to_string();
+            let v = crate::bench::ssh_key(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::bench::SshKeyQuery { target, port: None }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_authorize" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_authorize needs `target` (pod host)")?
+                .to_string();
+            let serve_system = args
+                .get("serve_system")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_authorize needs `serve_system`")?
+                .to_string();
+            let v = crate::bench::authorize(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::bench::AuthorizeReq {
+                    target,
+                    serve_system,
+                    port: None,
+                }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_scan_endpoints" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_scan_endpoints needs `target`")?
+                .to_string();
+            let remote = args
+                .get("remote")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let v = crate::bench::scan_endpoints(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::bench::ScanQuery {
+                    target,
+                    remote,
+                    port: None,
+                }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_run_verified" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_run_verified needs `target`")?
+                .to_string();
+            let hf_link = args
+                .get("hf_link")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_run_verified needs `hf_link`")?
+                .to_string();
+            let serve_url = args
+                .get("serve_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let remote_host = args
+                .get("remote_host")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let endpoint_model = args
+                .get("endpoint_model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let verify_endpoint = args
+                .get("verify_endpoint")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let deep_verify = args
+                .get("deep_verify")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let preset = args
+                .get("preset")
+                .and_then(|v| v.as_str())
+                .unwrap_or("comprehensive")
+                .to_string();
+            let v = crate::bench::run_verified(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::bench::VerifiedRunReq {
+                    target,
+                    hf_link,
+                    serve_url,
+                    remote_host,
+                    endpoint_model,
+                    verify_endpoint,
+                    deep_verify,
+                    preset,
+                    port: None,
+                }),
+            )
+            .await;
+            Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
+        }
+        "bench_jobs" => {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or("bench_jobs needs a `target`")?
+                .to_string();
+            let v = crate::bench::jobs(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(crate::bench::JobsQuery { target, port: None }),
             )
             .await;
             Ok(text_result(&serde_json::to_string_pretty(&v.0).unwrap_or_default()))
@@ -1385,6 +1546,7 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
         | "wifi_scan" | "list_isos" | "vpn_state" | "vpn_providers_catalog"
         | "vpn_provider_state" | "blocked_log" | "hidden_service_list" | "ipfs_status"
         | "bench_status" | "bench_model_info" | "bench_updates"
+        | "bench_ssh_key" | "bench_scan_endpoints" | "bench_jobs"
         | "system_image_updates" | "os_update_check" | "os_update_status" => Read,
         _ => Full,
     }

@@ -373,10 +373,10 @@ export const registerSystem = (id: string, password: string) =>
 export const testSystem = (id: string) =>
   req<{ ok: boolean; status?: string }>('POST', `/agent/systems/${id}/test`);
 
-// ── Aeon Bench — deploy the benchmarking pod (this Orb or a connected server) ──
+// ── Aeon Bench — deploy pod + verified remote endpoint benches ──
 export interface BenchStatus {
   ok: boolean;
-  phase?: string; // queued|cloning|building|installing-docker|running|failed|stopped|idle
+  phase?: string; // queued|pulling|installing-docker|starting|running|failed|stopped|idle
   log?: string;
   running?: boolean;
   dash_port?: number;
@@ -388,8 +388,10 @@ export const benchDeploy = (body: {
   hf_link?: string; // optional — pre-load a model; the dashboard can also pick one
   hf_token?: string;
   env?: Record<string, string>;
+  /** false = GPU-less control plane for remote verified endpoint benches */
+  gpu?: boolean;
 }) =>
-  req<{ ok: boolean; target?: string; dash_port?: number; out?: string; err?: string }>(
+  req<{ ok: boolean; target?: string; dash_port?: number; gpu?: boolean; out?: string; err?: string }>(
     'POST',
     '/bench/deploy',
     body,
@@ -400,15 +402,13 @@ export const benchStop = (target: string) =>
   req<{ ok: boolean; err?: string }>('POST', '/bench/stop', { target });
 export interface BenchUpdates {
   ok: boolean;
-  deployed?: string | null; // short commit deployed on the target
-  latest?: string | null; // short commit available on GitHub
+  deployed?: string | null; // short digest deployed on the target
+  latest?: string | null; // short digest available on GHCR
   update_available?: boolean;
   err?: string;
 }
-// Is a newer Aeon-Bench-Pod build available for the pod deployed on this target?
 export const benchUpdates = (target: string) =>
   req<BenchUpdates>('GET', `/bench/updates?target=${encodeURIComponent(target)}`);
-// Hot-update the pod in place (fetch latest + rebuild, keep the model config).
 export const benchUpdate = (target: string) =>
   req<{ ok: boolean; target?: string; out?: string; err?: string }>('POST', '/bench/update', {
     target,
@@ -416,7 +416,7 @@ export const benchUpdate = (target: string) =>
 export interface BenchModelInfo {
   ok: boolean;
   id?: string;
-  quant?: string | null; // e.g. "AWQ" / "GPTQ" / "FP8" / null = full precision
+  quant?: string | null;
   native_ctx?: number | null;
   effective_ctx?: number | null;
   gated?: boolean;
@@ -429,6 +429,65 @@ export interface BenchModelInfo {
 }
 export const benchModelInfo = (hfLink: string) =>
   req<BenchModelInfo>('GET', `/bench/model-info?hf_link=${encodeURIComponent(hfLink)}`);
+
+/** Pod's SSH public key — authorize it on a serve host for remote verified benches. */
+export const benchSshKey = (target: string) =>
+  req<{ ok: boolean; pubkey?: string; pub_path?: string; err?: string }>(
+    'GET',
+    `/bench/ssh_key?target=${encodeURIComponent(target)}`,
+  );
+/** Install the pod's pubkey on a connected serve system (agent-connect SSH). */
+export const benchAuthorize = (body: { target: string; serve_system: string }) =>
+  req<{
+    ok: boolean;
+    status?: string;
+    remote_host?: string;
+    pubkey?: string;
+    err?: string;
+  }>('POST', '/bench/authorize', body);
+export interface BenchEndpoint {
+  url?: string;
+  host?: string;
+  port?: number;
+  model?: string;
+  models?: string[];
+  hf_guess?: string | null;
+  confidence?: string | null;
+  format?: string | null;
+  source?: string | null;
+  [k: string]: unknown;
+}
+export const benchScanEndpoints = (target: string, remote?: string) => {
+  const q = new URLSearchParams({ target });
+  if (remote) q.set('remote', remote);
+  return req<{ ok: boolean; endpoints?: BenchEndpoint[]; err?: string }>(
+    'GET',
+    `/bench/scan_endpoints?${q}`,
+  );
+};
+/** Verified-path run: hf_link (+ optional live serve_url + remote_host + verify_endpoint). */
+export const benchRunVerified = (body: {
+  target: string;
+  hf_link: string;
+  serve_url?: string;
+  remote_host?: string;
+  endpoint_model?: string;
+  verify_endpoint?: boolean;
+  deep_verify?: boolean;
+  preset?: string;
+}) =>
+  req<{
+    ok: boolean;
+    job_id?: string;
+    remote_host?: string;
+    dash_port?: number;
+    err?: string;
+  }>('POST', '/bench/run_verified', body);
+export const benchJobs = (target: string) =>
+  req<{ ok: boolean; jobs?: unknown; result?: unknown; err?: string }>(
+    'GET',
+    `/bench/jobs?target=${encodeURIComponent(target)}`,
+  );
 // Devices discovered on the Pi's tailnet (for "+ Add device from Tailscale").
 // `address` is the stable 100.x Tailscale IP we add the system by.
 export interface TailscaleDevice {
