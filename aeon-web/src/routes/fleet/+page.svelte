@@ -84,10 +84,14 @@
   </header>
 
   <main class="max-w-3xl mx-auto px-5 py-6 space-y-5">
+    <!-- The roster is polled every 5 s. A failed poll must NOT replace the page:
+         it renders as a banner above whatever we last knew, so a momentary blip
+         doesn't blank the fleet you're looking at. -->
+    {#if err}
+      <div class="callout-fault">{err} — showing the last known roster.</div>
+    {/if}
     {#if loading}
       <p class="text-ink-400 text-sm font-mono">loading roster…</p>
-    {:else if err}
-      <div class="rounded-sm border border-red-700 bg-red-900/20 p-4 text-red-300 text-sm font-mono">{err}</div>
     {:else if roster}
       {#if !roster.configured}
         <div class="rounded-sm border border-amber-700/60 bg-amber-900/15 p-4 text-amber-200 text-sm leading-relaxed">

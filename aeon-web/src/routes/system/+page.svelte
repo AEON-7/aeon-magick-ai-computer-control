@@ -160,6 +160,8 @@
   async function refresh() {
     try {
       info = await api.getSystemInfo();
+      error = ''; // clear on recovery — this polls every 5 s, and an error that is
+                  // only ever set and never cleared leaves a stale banner forever
       loading = false;
     } catch (e: any) {
       error = e?.message ?? 'failed to load';

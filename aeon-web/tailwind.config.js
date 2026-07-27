@@ -5,14 +5,25 @@ export default {
     extend: {
       colors: {
         // Void chassis — cold near-black, slightly steel-tinted (not purple mud).
-        // Use ink-950 as the page void; ink-900 panels; ink-800 wells; ink-700 hairlines.
+        // 500–950 are SURFACES: ink-950 page void; ink-900 panels; ink-800 wells;
+        // ink-700 hairlines.
+        // 100–400 are the TEXT end of the same ramp (lower = brighter), mirroring
+        // zinc so `text-ink-*` and `text-zinc-*` are interchangeable. These steps
+        // were referenced by ~265 `text-ink-{100..400}` call sites long before they
+        // existed here, so those classes compiled to nothing and the text silently
+        // fell back to the inherited body colour — flattening the hierarchy.
+        // Don't use 100–400 as backgrounds; surfaces stop at 500.
         ink: {
-          950: '#06060a',
-          900: '#0a0b10',
-          800: '#11131a',
-          700: '#1a1c26',
-          600: '#262a36',
+          100: '#f4f4f5',
+          200: '#e4e4e7',
+          300: '#d4d4d8',
+          400: '#a1a1aa',
           500: '#3a3f50',
+          600: '#262a36',
+          700: '#1a1c26',
+          800: '#11131a',
+          900: '#0a0b10',
+          950: '#06060a',
         },
         // Anodized edge / chassis border (industrial, separate from fill).
         steel: {
@@ -32,8 +43,9 @@ export default {
           800: '#5b21b6',
           900: '#3b1d6e',
         },
-        // Phosphor live / success
+        // Phosphor live / success (300 = the lighter step badges/pills already use)
         live: {
+          300: '#6ee7b7',
           400: '#34d399',
           500: '#10b981',
         },

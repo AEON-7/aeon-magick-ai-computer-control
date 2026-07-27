@@ -241,14 +241,25 @@
       placeholder: '@nova:abc…onion',
     });
     if (!uid) return;
-    // Two explicit steps (the old confirm() overloaded Cancel to mean
-    // "kick", leaving no way to abort).
+    // Step 1 is the ABORT gate. A two-option dialog can't express "never mind":
+    // confirmRite resolves false for the cancel button, Escape AND a backdrop
+    // click, so mapping false onto "just kick" meant dismissing the dialog still
+    // removed the member. Confirm the removal first, then pick the severity —
+    // and let the dismissal of step 2 fall to the *less* destructive option.
+    const remove = await confirmRite({
+      title: `Remove ${uid.trim()}?`,
+      body: 'They lose access to this room. You choose kick or ban next.',
+      danger: true,
+      confirmLabel: 'remove',
+      cancelLabel: 'cancel',
+    });
+    if (!remove) return;
     const ban = await confirmRite({
-      title: 'Ban or kick?',
-      body: `Ban blocks ${uid.trim()} from rejoining; kick lets them rejoin later.`,
+      title: 'Ban as well?',
+      body: `Ban blocks ${uid.trim()} from ever rejoining; a kick lets them back in later.`,
       danger: true,
       confirmLabel: 'ban',
-      cancelLabel: 'just kick',
+      cancelLabel: 'kick only',
     });
     const r = await api(`/rooms/${encodeURIComponent(selected.room_id)}/kick`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: uid.trim(), ban }) });
     if (r.ok) toast.success(`${ban ? 'Banned' : 'Kicked'} ${uid}`);

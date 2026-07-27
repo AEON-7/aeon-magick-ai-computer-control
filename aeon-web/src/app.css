@@ -320,7 +320,9 @@
     @apply font-mono text-xs uppercase tracking-instrument text-zinc-500;
   }
   .void-empty-body {
-    @apply text-xs text-zinc-600 max-w-sm mx-auto leading-relaxed;
+    /* zinc-600 on ink-900 is 2.5:1 — below even the 3:1 UI floor, and this is the
+       one line explaining what to do next. zinc-400 is 7.7:1. */
+    @apply text-xs text-zinc-400 max-w-sm mx-auto leading-relaxed;
   }
 
   /* Alert / callout plates */

@@ -1719,7 +1719,7 @@
   {#if menuOpen}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="lg:hidden chrome-header/95 backdrop-blur-sm
+    <div class="lg:hidden chrome-header bg-ink-900/95 backdrop-blur-sm
                 px-3 py-3 space-y-3 z-30"
          in:fly={{ y: -6, duration: reduceMotion ? 0 : 120 }}
          on:click={closeMenu}
@@ -1911,6 +1911,26 @@
           <p class="font-mono text-[11px] text-zinc-500">the orb sees nothing — the capture device is silent</p>
           <button class="btn text-xs inline-flex items-center gap-1.5" on:click={onRelaunch}>
             <Icon name="refresh" class="w-3.5 h-3.5" />relaunch streamer
+          </button>
+        </div>
+      </div>
+    {:else if mounted && !state}
+      <!-- /api/state itself failed, so `state` is null and the SIGNAL LOST overlay
+           above can never render — the designed failure state was gated behind the
+           very data that failed, leaving an unlabelled black rectangle. This is the
+           day-one shape of "supervisor still booting", "self-signed TLS blocked the
+           API" and "this token lacks state scope", so say so. -->
+      <div class="absolute inset-0 z-[6] flex items-center justify-center bg-ink-950/75">
+        <div class="absolute inset-0 aeon-static" aria-hidden="true"></div>
+        <div class="relative text-center space-y-3 px-6 max-w-sm">
+          <OrbMark mode="offline" class="w-12 h-12 mx-auto motion-safe:animate-orb-flicker" />
+          <p class="font-mono text-xs tracking-[0.35em] text-zinc-300">NO ANSWER</p>
+          <p class="font-mono text-[11px] text-zinc-400 leading-relaxed">
+            the supervisor isn't responding — it may still be starting, or this
+            session may not have permission to read device state
+          </p>
+          <button class="btn text-xs inline-flex items-center gap-1.5" on:click={refreshState}>
+            <Icon name="refresh" class="w-3.5 h-3.5" />retry
           </button>
         </div>
       </div>

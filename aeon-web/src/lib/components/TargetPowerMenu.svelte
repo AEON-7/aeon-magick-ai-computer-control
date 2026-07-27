@@ -44,7 +44,7 @@
 
   {#if open}
     <div class="absolute {block ? 'left-0 right-0' : 'right-0'} mt-1 z-40 min-w-[14rem]
-                panel/98 backdrop-blur-sm
+                panel bg-ink-900/98 backdrop-blur-sm
                 shadow-xl shadow-black/40 p-1 space-y-0.5"
          role="menu">
       {#each ACTIONS as a}

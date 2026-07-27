@@ -65,7 +65,7 @@
 
   {#if open}
     <div class="absolute left-0 mt-1 z-40 w-[20rem] max-w-[92vw]
-                panel/98 backdrop-blur-sm
+                panel bg-ink-900/98 backdrop-blur-sm
                 shadow-xl shadow-black/40 p-3 space-y-2.5"
          role="menu">
       <p class="text-[10px] text-zinc-500 leading-snug">

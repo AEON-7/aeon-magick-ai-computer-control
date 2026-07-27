@@ -14,11 +14,16 @@
   let orbnet: any = null; // /orbnet/status — Matrix homeserver
   let poll: ReturnType<typeof setInterval>;
 
+  // `undefined` = this endpoint has not answered (yet, or this round). That is NOT
+  // the same as "the service is off", so it must never overwrite a good payload —
+  // otherwise one dropped poll makes all nine lights claim everything is disabled.
   const get = (p: string) =>
-    fetch(p, { credentials: 'same-origin' }).then((r) => r.json()).catch(() => null);
+    fetch(p, { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : undefined))
+      .catch(() => undefined);
 
   const load = async () => {
-    [vpn, dns, onions, ipfs, myst, orbnet] = await Promise.all([
+    const [v, d, o, i, m, ob] = await Promise.all([
       get('/api/network/vpn'),
       get('/api/network/dnscrypt'),
       get('/api/onions/status'),
@@ -26,7 +31,16 @@
       get('/api/mysterium/status'),
       get('/api/orbnet/status'),
     ]);
+    // Keep the last known good reading when a call fails.
+    if (v !== undefined) vpn = v;
+    if (d !== undefined) dns = d;
+    if (o !== undefined) onions = o;
+    if (i !== undefined) ipfs = i;
+    if (m !== undefined) myst = m;
+    if (ob !== undefined) orbnet = ob;
+    loaded = true;
   };
+  let loaded = false; // false until the first round settles — show "…" not "off"
 
   onMount(() => {
     load();
@@ -207,12 +221,19 @@
         <h2 class="rack-title">Status</h2>
         <span
           class="font-mono text-2xs uppercase tracking-instrument tabular-nums
-                 {enabledCount ? 'text-live-400' : 'text-zinc-600'}"
+                 {!loaded ? 'text-zinc-500' : enabledCount ? 'text-live-400' : 'text-zinc-600'}"
         >
-          {enabledCount} / {indicators.length} armed
+          {#if loaded}{enabledCount} / {indicators.length} armed{:else}reading…{/if}
         </span>
       </div>
       <div class="rack-section-body space-y-4">
+        {#if !loaded}
+          <!-- Until the first round settles every light would read "off", which is a
+               claim we can't make yet. Say we're reading instead of lying. -->
+          <p class="font-mono text-2xs uppercase tracking-instrument text-zinc-500">
+            reading device state…
+          </p>
+        {/if}
         {#each GROUPS as g}
           <div class="space-y-1.5">
             <div class="rack-label">{g}</div>
