@@ -149,7 +149,10 @@
   ];
   $: enabledCount = indicators.filter((i) => i.on).length;
 
-  // Discovery cards — professional icon + protocol tag for instant recognition.
+  // The two GATEWAYS. Every hosted service above is already a live, clickable
+  // status cell, so re-listing Hidden Services / IPFS / Mysterium / Matrix down
+  // here just made the page read as the same list twice. These two are the only
+  // destinations the status board can't express: whole sub-systems, not toggles.
   const cards = [
     {
       icon: 'aether',
@@ -167,45 +170,15 @@
       tagline:
         'Outbound privacy stack in one place — VPN, Tor, I2P, encrypted DNS, Tailscale mesh, and firewall.',
     },
-    {
-      icon: 'onion',
-      name: 'Hidden Services',
-      tech: 'Tor v3 · .onion',
-      href: '/orbnet/onions',
-      tagline:
-        'Host Tor .onion sites and apps — one address per service. Agents can mint them too.',
-    },
-    {
-      icon: 'ipfs',
-      name: 'IPFS',
-      tech: 'libp2p · CID gateway',
-      href: '/orbnet/ipfs',
-      tagline:
-        'Local IPFS node and HTTP gateway — pin content, serve a fleet model library, open CIDs on any device.',
-    },
-    {
-      icon: 'mysterium',
-      name: 'Mysterium',
-      tech: 'dVPN · bandwidth share',
-      href: '/orbnet/mysterium',
-      tagline:
-        'Run a Mysterium node — earn by sharing bandwidth and helping decentralize access.',
-    },
-    {
-      icon: 'matrix',
-      name: 'Matrix Chat',
-      tech: 'Conduit · Tor onion',
-      href: '/orbnet/chat',
-      tagline:
-        'Private Matrix homeserver on this Orb (Conduit) — community rooms and E2EE DMs over Tor.',
-    },
   ];
 </script>
 
 <div class="page-void min-h-screen">
   <PageHeader title="OrbNet" subtitle="decentralized services + privacy hub" index="03" />
 
-  <main class="page-main-narrow">
+  <!-- max-w-4xl: the status board is a 2-column grid, and at 42rem the cells were
+       cramped while the page still read as empty on a wide screen. -->
+  <main class="page-main">
     <div>
       <p class="rite-kicker">the mesh · the cloak · the archive</p>
       <p class="rite-lead">
@@ -215,13 +188,14 @@
     </div>
 
     <!-- Indicator lights -->
-    <section class="rack-section">
+    <section class="rack-section has-aether">
       <div class={enabledCount ? 'status-strip-live' : 'status-strip'} aria-hidden="true"></div>
       <div class="rack-section-head">
         <h2 class="rack-title">Status</h2>
         <span
           class="font-mono text-2xs uppercase tracking-instrument tabular-nums
-                 {!loaded ? 'text-zinc-500' : enabledCount ? 'text-live-400' : 'text-zinc-600'}"
+                 {!loaded ? 'text-zinc-500' : enabledCount ? 'text-live-400'
+                      : 'text-zinc-500'}"
         >
           {#if loaded}{enabledCount} / {indicators.length} armed{:else}reading…{/if}
         </span>
@@ -262,12 +236,12 @@
                       >
                       <span class={ind.on ? 'dot-live' : 'dot bg-steel-600'}></span>
                     </span>
-                    <span class="block font-mono text-2xs text-zinc-600 truncate">{ind.tech}</span>
+                    <span class="block font-mono text-2xs text-zinc-500 truncate">{ind.tech}</span>
                   </span>
                   <span
                     class="font-mono text-2xs shrink-0 uppercase tracking-wide {ind.on
                       ? 'text-live-400'
-                      : 'text-zinc-600'}"
+                      : 'text-zinc-500'}"
                   >
                     {ind.status}
                   </span>
@@ -290,7 +264,8 @@
             </span>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <span class="font-mono text-sm text-cursed-200 tracking-wide truncate">{c.name}</span>
+                <!-- No truncate: this is the product's name. It wraps if it must. -->
+                <span class="font-mono text-sm text-cursed-200 tracking-wide text-balance">{c.name}</span>
                 <span
                   class="ml-auto text-zinc-600 transition group-hover:text-cursed-300 shrink-0"
                   aria-hidden="true">→</span

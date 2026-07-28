@@ -130,7 +130,8 @@
   // Desktop nav dropdowns (Settings / Monitor); a fixed backdrop closes them.
   let settingsOpen = false;
   let monitorOpen = false;
-  function closeDropdowns() { settingsOpen = false; monitorOpen = false; }
+  let sessionOpen = false;
+  function closeDropdowns() { settingsOpen = false; monitorOpen = false; sessionOpen = false; }
 
   let canvas: HTMLDivElement;
   let dragging = false;
@@ -1549,7 +1550,7 @@
     -->
     <div class="hidden lg:flex items-center flex-wrap gap-2 px-5 pb-3">
       <!-- Group A -->
-      <div class="flex items-center gap-2 pr-3">
+      <div class="order-1 flex items-center gap-2 pr-3">
         {#if audioVol?.present && (listenAudio || audioVol.playback)}
           <label class="hidden xl:flex items-center gap-1 text-[10px] font-mono text-zinc-400"
                  title="Speaker / headphone level (BrainCraft WM8960)">
@@ -1588,11 +1589,11 @@
         <SpecialKeys />
       </div>
       <!-- divider -->
-      <span class="h-6 w-px bg-steel-600 mx-1" aria-hidden="true"></span>
+      <span class="order-3 h-6 w-px bg-steel-600 mx-1" aria-hidden="true"></span>
       <!-- Group B (v99): three color-coded "super apps" + Settings/Monitor
            dropdowns. Configuration and monitoring collapse into the dropdowns;
            OrbNet / Agent Dash / GPIO stand alone. -->
-      <div class="flex items-center gap-2 px-3">
+      <div class="order-4 flex items-center gap-2 px-3">
         {#each SUPER_APPS as app}
           <a href={app.href} class="group {APP_BTN}" title={app.title}>
             <Icon name={app.icon} class="w-4 h-4 {APP_ICON}" />{app.label}
@@ -1633,14 +1634,12 @@
         </div>
       </div>
       <!-- divider -->
-      <span class="h-6 w-px bg-steel-600 mx-1" aria-hidden="true"></span>
+      <span class="order-3 h-6 w-px bg-steel-600 mx-1" aria-hidden="true"></span>
       <!-- Group C: target power + session.
            These buttons control the USB-CONNECTED MACHINE, not the Pi.
            They go through the HID Consumer power-button (soft tap or
            8-second hold) + WoL magic packet over usb0. -->
-      <div class="flex items-center gap-2 pl-3">
-        <button class="btn text-xs" on:click={onReleaseAll}>release&nbsp;all&nbsp;keys</button>
-        <button class="btn text-xs" on:click={onRelaunch}>relaunch&nbsp;streamer</button>
+      <div class="order-2 flex items-center gap-2 pl-3">
         <!-- Screen recording — live H.264 + HDMI/capture audio → MP4 (agents: MCP/REST). -->
         <div class="relative flex items-center gap-1">
           <button class="btn text-xs whitespace-nowrap inline-flex items-center gap-1.5 {rec.active ? 'border-red-500 text-red-300 motion-safe:animate-ember' : ''}"
@@ -1678,7 +1677,34 @@
           onTap={onTargetPowerTap}
           onReboot={onTargetReboot}
           onForceOff={onTargetPoweroff} />
-        <button class="btn text-xs" on:click={onLogout}>sign&nbsp;out</button>
+        <!-- Session — recovery + sign-out. These are rare (and two of them are
+             disruptive), so they no longer spend a whole toolbar row competing
+             with the controls you actually reach for. -->
+        <div class="relative">
+          <button class="btn text-xs inline-flex items-center gap-1.5"
+                  aria-haspopup="menu" aria-expanded={sessionOpen}
+                  on:click|stopPropagation={() => { sessionOpen = !sessionOpen; settingsOpen = false; monitorOpen = false; }}>
+            <Icon name="cpu" class="w-3.5 h-3.5 text-zinc-400" />Session <span class="text-zinc-500">▾</span>
+          </button>
+          {#if sessionOpen}
+            <div class="absolute right-0 top-full mt-1 w-56 stele-lit has-aether p-1.5 z-50 space-y-0.5"
+                 role="menu" in:fly={menuIn}>
+              <button role="menuitem" class="w-full text-left flex items-center gap-2ru px-2ru py-1.5 rounded-sm text-xs text-zinc-300 hover:bg-ink-800"
+                      on:click={() => { sessionOpen = false; onReleaseAll(); }}>
+                <Icon name="release" class="w-3.5 h-3.5 text-cursed-300/70" />release all keys
+              </button>
+              <button role="menuitem" class="w-full text-left flex items-center gap-2ru px-2ru py-1.5 rounded-sm text-xs text-zinc-300 hover:bg-ink-800"
+                      on:click={() => { sessionOpen = false; onRelaunch(); }}>
+                <Icon name="refresh" class="w-3.5 h-3.5 text-cursed-300/70" />relaunch streamer
+              </button>
+              <div class="h-px bg-steel-700/70 my-1" aria-hidden="true"></div>
+              <button role="menuitem" class="w-full text-left flex items-center gap-2ru px-2ru py-1.5 rounded-sm text-xs text-zinc-400 hover:bg-ink-800 hover:text-red-300"
+                      on:click={() => { sessionOpen = false; onLogout(); }}>
+                <Icon name="logout" class="w-3.5 h-3.5" />sign out
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
 
@@ -1707,7 +1733,7 @@
   </header>
 
   <!-- Backdrop that closes the desktop Settings/Monitor dropdowns on outside click. -->
-  {#if settingsOpen || monitorOpen}
+  {#if settingsOpen || monitorOpen || sessionOpen}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="fixed inset-0 z-40" on:click={closeDropdowns} role="presentation"></div>
