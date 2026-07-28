@@ -50,6 +50,84 @@
 }
 
 @layer components {
+  /* ═══════════════════════════════════════════════════════════════════════
+   * THE STELE LANGUAGE
+   *
+   * Where the console meets the temple. Brutalist rack hardware and neo-greco-
+   * roman monumentality share three things — inscription, proportion, and
+   * structure — so they're treated as one vocabulary, not two styles stacked:
+   *
+   *   the rack        → a colonnade   (rhythmic vertical rules, not nested boxes)
+   *   the panel       → a stele       (a standing slab, lit from above)
+   *   the label       → an inscription (struck capitals, wide-tracked)
+   *   the status bar  → an entablature (the line that caps a title band)
+   *   the glow        → aether        (light through an oculus; never neon)
+   *
+   * Proportion comes from the modular type scale + rack-unit spacing in
+   * tailwind.config.js, so sizing is chosen from a system, not per element.
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  /* A standing slab: lit along its top edge, seated in shadow below. This is the
+     evolved .panel — same box, but it now reads as a lit object rather than a
+     flat card, which is what separates "instrument" from "div with a border". */
+  .stele {
+    @apply relative bg-ink-900 border border-steel-700 rounded-sm shadow-stele;
+  }
+  .stele-lit {
+    @apply stele border-cursed-500/25 shadow-stele-lit;
+  }
+  /* Aether fall — the oculus light down the face of a slab. Pointer-events-none
+     overlay so it never eats a click. Add to a `.stele` with `.has-aether`. */
+  .has-aether::before {
+    content: '';
+    @apply pointer-events-none absolute inset-x-0 top-0 h-24 rounded-t-sm;
+    background-image: theme('backgroundImage.aether-fall');
+  }
+
+  /* Inscription — struck capitals. The monumental voice: page titles, section
+     headings. Wide tracking is the whole point, so never pair with truncate on
+     a narrow column (the tracking eats the last glyph). */
+  .inscription {
+    @apply font-mono uppercase text-inscription text-zinc-100;
+    text-shadow: 0 1px 0 rgb(0 0 0 / 0.6);
+  }
+  .inscription-sm {
+    @apply font-mono uppercase text-inscription-sm text-zinc-200;
+  }
+  .inscription-lg {
+    @apply font-mono uppercase text-inscription-lg text-zinc-50;
+    text-shadow: 0 1px 0 rgb(0 0 0 / 0.7);
+  }
+  /* The struck line beneath a title band. */
+  .entablature {
+    @apply h-px w-full;
+    background-image: theme('backgroundImage.entablature');
+  }
+
+  /* Colonnade — grouping by rhythm and negative space instead of nesting cards.
+     The taste rule for dense instruments: cards only when elevation carries real
+     hierarchy; otherwise divide. */
+  .colonnade {
+    @apply divide-y divide-steel-700/60;
+  }
+  .colonnade-row {
+    @apply flex items-center gap-4 py-3ru first:pt-0 last:pb-0;
+  }
+
+  /* Readout — large telemetry numerals, tabular so digits don't dance. */
+  .readout {
+    @apply font-mono text-readout tabular-nums text-zinc-50 tracking-tight;
+  }
+  .readout-live {
+    @apply readout text-live-400;
+  }
+  .readout-warn {
+    @apply readout text-rail-400;
+  }
+  .readout-fault {
+    @apply readout text-red-400;
+  }
+
   /* ── Plates / rack modules ───────────────────────────────────────────── */
   .panel {
     @apply bg-ink-900 border border-steel-700 rounded-sm shadow-plate;
@@ -93,12 +171,14 @@
     border-right: 1px solid;
   }
 
-  /* Section title: mono index + label */
+  /* Section title: mono index + label. `.rack-title` is the inscription voice —
+     upgrading it here re-cuts every section heading in the app at once. */
   .rack-label {
     @apply font-mono text-2xs uppercase tracking-instrument text-zinc-500;
   }
   .rack-title {
-    @apply font-mono text-sm uppercase tracking-wider text-zinc-200;
+    @apply font-mono uppercase text-inscription-sm text-zinc-100;
+    text-shadow: 0 1px 0 rgb(0 0 0 / 0.6);
   }
   .rack-divider {
     @apply h-px w-full bg-steel-700;
@@ -122,8 +202,10 @@
   }
 
   /* ── Buttons ─────────────────────────────────────────────────────────── */
+  /* Base control: min-h-8 (32px) so every button clears the touch-target floor
+     on a phone — this console gets driven from a pocket at a rack. */
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5
+    @apply inline-flex items-center justify-center gap-2ru px-3ru py-1.5 min-h-8
            rounded-sm text-sm font-medium font-sans
            bg-ink-800 text-zinc-200
            border border-steel-600
@@ -131,7 +213,7 @@
            active:bg-ink-900
            transition-colors motion-safe:transition-[transform,background-color,border-color,color]
            motion-safe:duration-150 motion-safe:active:scale-[0.98]
-           focus:outline-none focus:ring-1 focus:ring-cursed-500/50 focus:border-cursed-500/40
+           focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cursed-500/50 focus-visible:border-cursed-500/40
            disabled:opacity-45 disabled:pointer-events-none;
   }
   .btn-primary {
@@ -238,28 +320,36 @@
     @apply relative z-[1];
   }
 
+  /* Page shells — spacing on the rack-unit cadence (8ru = 2rem between sections)
+     so vertical rhythm is a system, not an assortment of gaps. Dense instrument
+     pages earn more air between sections than inside them. */
   .page-main {
-    @apply max-w-4xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6;
+    @apply max-w-4xl mx-auto w-full px-4ru sm:px-6ru py-8ru space-y-8ru;
   }
   .page-main-wide {
-    @apply max-w-6xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6;
+    @apply max-w-6xl mx-auto w-full px-4ru sm:px-6ru py-8ru space-y-8ru;
   }
   .page-main-narrow {
-    @apply max-w-2xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6;
+    @apply max-w-2xl mx-auto w-full px-4ru sm:px-6ru py-8ru space-y-8ru;
   }
 
-  /* Hero blurb under headers */
+  /* Hero blurb under headers. Capped near 65ch for readability. */
   .rite-lead {
-    @apply text-sm text-zinc-400 leading-relaxed font-sans max-w-2xl;
+    @apply text-sm text-zinc-400 leading-relaxed font-sans max-w-[65ch];
   }
+  /* EYEBROW — use sparingly. An eyebrow above every section produces the
+     templated rhythm that makes a UI read as generated. Budget: at most one per
+     three sections on a page. Usually the heading alone is enough. */
   .rite-kicker {
     @apply rack-label text-cursed-500/70 mb-1;
   }
 
-  /* Module tile (hub grids) — add class `group` in markup for group-hover icons */
+  /* Module tile (hub grids) — a stele you can walk up to. The aether brightens
+     along the top edge on hover, so the surface responds like a lit object
+     rather than just swapping a border colour. */
   .module-tile {
-    @apply panel flex items-start gap-3 p-4 transition
-           hover:border-cursed-500/45 hover:shadow-plate-cursed
+    @apply stele flex items-start gap-4ru p-4ru transition
+           hover:border-cursed-500/40 hover:shadow-stele-lit
            focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cursed-500/50;
   }
   .module-tile-live {
@@ -361,16 +451,24 @@
            px-3 py-2 rounded-sm;
   }
 
-  /* Section plate with strip */
+  /* Section plate — now a lit stele with an entablature under its title band.
+     Every existing `.rack-section` inherits the new material for free. */
   .rack-section {
-    @apply panel overflow-hidden;
+    @apply stele overflow-hidden;
   }
   .rack-section-body {
-    @apply p-4 sm:p-5 space-y-4;
+    @apply p-4ru sm:p-6ru space-y-4ru;
   }
   .rack-section-head {
-    @apply flex items-center justify-between gap-3 px-4 sm:px-5 py-2.5
-           border-b border-steel-700/80 bg-ink-950/40;
+    @apply relative flex items-center justify-between gap-3 px-4ru sm:px-6ru py-3ru
+           bg-ink-950/40;
+  }
+  /* The struck line — a gradient that fades out to the right, so the band reads
+     as inscribed rather than boxed in. */
+  .rack-section-head::after {
+    content: '';
+    @apply absolute inset-x-0 bottom-0 h-px;
+    background-image: theme('backgroundImage.entablature');
   }
 }
 

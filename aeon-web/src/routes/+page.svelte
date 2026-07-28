@@ -25,19 +25,17 @@
   import { SUPER_APPS, SETTINGS_ITEMS, MONITOR_ITEMS } from '$lib/nav';
   import { inputCaptured } from '$lib/capture';
   // Static class strings (Tailwind scans source text — keep them literal).
-  // Super-apps read as rack modules: hard edges, mono, color as signal only.
-  const APP_BTN: Record<string, string> = {
-    cursed:  'app-module border-cursed-500/45 bg-cursed-600/12 text-cursed-100 hover:bg-cursed-600/22',
-    sky:     'app-module border-sky-500/45 bg-sky-600/12 text-sky-100 hover:bg-sky-600/22',
-    amber:   'app-module border-amber-500/45 bg-amber-600/12 text-amber-100 hover:bg-amber-600/22',
-    emerald: 'app-module border-emerald-500/45 bg-emerald-600/12 text-emerald-100 hover:bg-emerald-600/22',
-    flame:   'app-module border-orange-500/45 bg-orange-600/12 text-orange-100 hover:bg-orange-600/22',
-    violet:  'app-module border-violet-500/45 bg-violet-600/12 text-violet-100 hover:bg-violet-600/22',
-    rose:    'app-module border-rose-500/45 bg-rose-600/12 text-rose-100 hover:bg-rose-600/22',
-  };
-  const APP_ICON: Record<string, string> = {
-    cursed: 'text-cursed-300', sky: 'text-sky-300', amber: 'text-amber-300', emerald: 'text-emerald-300', flame: 'text-orange-300', violet: 'text-violet-300', rose: 'text-rose-300',
-  };
+  //
+  // The super-app row is a COLONNADE: uniform columns, identical treatment, the
+  // icon carries identity. It used to map seven accent colours (cursed/sky/amber/
+  // emerald/flame/violet/rose) onto eight buttons, which made the flagship screen
+  // read as a toy launcher and diluted the one violet sigil that's supposed to
+  // mean "this is the action". One accent, locked — colour now means STATE
+  // (live / warn / fault), never identity.
+  const APP_BTN =
+    'app-module border-steel-700 bg-ink-900/70 text-zinc-300 ' +
+    'hover:border-cursed-500/45 hover:bg-cursed-600/10 hover:text-zinc-100';
+  const APP_ICON = 'text-cursed-300/70 group-hover:text-cursed-200 transition-colors';
 
   let stream_url = '';
   // v64: prefer the low-latency H.264 WebCodecs canvas when the browser
@@ -1596,8 +1594,8 @@
            OrbNet / Agent Dash / GPIO stand alone. -->
       <div class="flex items-center gap-2 px-3">
         {#each SUPER_APPS as app}
-          <a href={app.href} class="{APP_BTN[app.color]}" title={app.title}>
-            <Icon name={app.icon} class="w-4 h-4 {APP_ICON[app.color]}" />{app.label}
+          <a href={app.href} class="group {APP_BTN}" title={app.title}>
+            <Icon name={app.icon} class="w-4 h-4 {APP_ICON}" />{app.label}
           </a>
         {/each}
         <span class="h-5 w-px bg-ink-800 mx-1" aria-hidden="true"></span>
@@ -1767,13 +1765,13 @@
           </a>
         {/if}
       </div>
-      <!-- Nav (v99): super-apps as color-coded tiles, then Settings + Monitor
-           sections. Same source as the desktop toolbar. -->
-      <div class="space-y-3 pt-1 border-t border-ink-800">
-        <div class="grid grid-cols-3 gap-2">
+      <!-- Nav: super-apps as a uniform colonnade of tiles, then Settings +
+           Monitor sections. Same source + same treatment as the desktop row. -->
+      <div class="space-y-3ru pt-1 border-t border-ink-800">
+        <div class="grid grid-cols-3 gap-2ru">
           {#each SUPER_APPS as app}
-            <a href={app.href} class="flex flex-col items-center gap-1 {APP_BTN[app.color]}" title={app.title}>
-              <Icon name={app.icon} class="w-5 h-5 {APP_ICON[app.color]}" />{app.label}
+            <a href={app.href} class="group flex flex-col items-center gap-1 py-2ru {APP_BTN}" title={app.title}>
+              <Icon name={app.icon} class="w-5 h-5 {APP_ICON}" />{app.label}
             </a>
           {/each}
         </div>

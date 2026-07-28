@@ -71,8 +71,29 @@ export default {
         sans: ['"Inter"', 'system-ui', 'sans-serif'],
       },
       fontSize: {
-        // Instrument cluster labels
+        // ── Instrument type scale ────────────────────────────────────────────
+        // A modular scale (perfect fourth, 1.333) anchored at 0.8125rem/13px so
+        // sizes are chosen from a system instead of guessed per element. The
+        // classical half of the language is proportion, not ornament.
+        //   inscription  →  monumental capitals: page + section titles
+        //   readout      →  large telemetry numerals
         '2xs': ['0.625rem', { lineHeight: '0.875rem', letterSpacing: '0.08em' }],
+        readout: ['1.5rem', { lineHeight: '1.75rem', letterSpacing: '-0.01em' }],
+        'inscription-sm': ['0.8125rem', { lineHeight: '1.25rem', letterSpacing: '0.22em' }],
+        inscription: ['1.0625rem', { lineHeight: '1.5rem', letterSpacing: '0.24em' }],
+        'inscription-lg': ['1.4375rem', { lineHeight: '2rem', letterSpacing: '0.26em' }],
+      },
+      spacing: {
+        // Rack units — vertical rhythm in multiples of a 4px chassis unit, so
+        // section spacing is a cadence rather than an assortment of gaps.
+        ru: '0.25rem',
+        '2ru': '0.5rem',
+        '3ru': '0.75rem',
+        '4ru': '1rem',
+        '6ru': '1.5rem',
+        '8ru': '2rem',
+        '12ru': '3rem',
+        '16ru': '4rem',
       },
       boxShadow: {
         // Hard industrial plates — no soft SaaS blobs
@@ -85,6 +106,16 @@ export default {
         'glow-live': '0 0 16px -6px rgb(52 211 153 / 0.4)',
         'depth-void':
           '0 0 0 1px rgb(42 46 60 / 0.8), 0 24px 48px -24px rgb(0 0 0 / 0.75)',
+        // ── Aether ───────────────────────────────────────────────────────────
+        // Light as material: a pale luminous edge along the TOP of a surface, as
+        // if lit from an oculus above, plus depth beneath. Inset only — never an
+        // outer neon halo (that reads as cyberpunk wallpaper, not an instrument).
+        stele:
+          'inset 0 1px 0 0 rgb(221 214 254 / 0.09), inset 0 -1px 0 0 rgb(0 0 0 / 0.4), 0 1px 0 0 rgb(0 0 0 / 0.5)',
+        'stele-lit':
+          'inset 0 1px 0 0 rgb(221 214 254 / 0.16), inset 0 24px 40px -32px rgb(167 139 250 / 0.22), inset 0 -1px 0 0 rgb(0 0 0 / 0.4)',
+        // A struck hairline — the gilt edge on an inscription.
+        gilt: 'inset 0 0 0 1px rgb(196 181 253 / 0.14)',
       },
       backgroundImage: {
         // Faint instrument lattice under pages (use with bg-void-lattice)
@@ -94,6 +125,15 @@ export default {
           'radial-gradient(ellipse 80% 50% at 50% -10%, rgb(124 58 237 / 0.12), transparent 55%)',
         'sigil-fade':
           'linear-gradient(90deg, rgb(139 92 246 / 0.7), rgb(139 92 246 / 0.15), transparent)',
+        // Aether fall — a vertical light gradient down a surface (oculus light).
+        'aether-fall':
+          'linear-gradient(180deg, rgb(167 139 250 / 0.07) 0%, rgb(167 139 250 / 0.015) 38%, transparent 72%)',
+        // Colonnade — the rhythmic vertical rule field that replaces box-in-box.
+        colonnade:
+          'linear-gradient(90deg, rgb(139 92 246 / 0.05) 1px, transparent 1px)',
+        // Entablature — the struck line under a title band.
+        entablature:
+          'linear-gradient(90deg, rgb(196 181 253 / 0.30), rgb(139 92 246 / 0.12) 42%, transparent 88%)',
       },
       backgroundSize: {
         lattice: '28px 28px',
