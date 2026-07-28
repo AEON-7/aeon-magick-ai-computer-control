@@ -1,0 +1,22 @@
+# Pin the cross-compile image.
+#
+# WHY THIS FILE EXISTS: `cross` defaults to the rolling `:main` image. That image
+# was rebuilt on a newer base and silently raised its glibc floor to 2.39, which
+# produces binaries that run on the Pi 5 (Trixie, glibc 2.39) but die on the Pi 4
+# (Bookworm, glibc 2.36) with:
+#
+#     /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+#
+# Nothing in the source changed — the toolchain moved underneath us, and because
+# only ONE of the two shipped tracks broke, it looked like a Pi 4 fault.
+#
+# This project ships BOTH tracks from one binary, so always build against the
+# OLDEST supported glibc (Bookworm's 2.36). glibc is backward compatible, so a
+# binary linked against an older glibc runs fine on the newer track too.
+#
+# If you bump this tag, verify the floor afterwards:
+#     strings -a target/aarch64-unknown-linux-gnu/release/aeon-supervisor \
+#       | grep -oE 'GLIBC_2\.[0-9]+' | sort -uV | tail -1
+# It must be <= 2.36.
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
