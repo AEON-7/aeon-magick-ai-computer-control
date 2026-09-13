@@ -28,7 +28,7 @@ One small box you can hold in a pocket, and you can:
 
 > 🛠️ **Don't want to build it from source?** Premade **Raspberry Pi images — ready to flash** are available to [**AeonForge Patreon members**](https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493). A **3D-print STL enclosure** and a **full build guide** are **coming soon** to members too.
 
-> 🐳 **No Pi?** Headless Magick Orb on any x86 / ARM server (Model Share + Agent Dashboard, no HID/KVM): **[Docker quick start](server/README.md)** — `docker pull ghcr.io/aeon-7/orb-server:latest`.
+> 🐳 **No Pi?** Headless Magick Orb on any x86 / ARM server (Model Share + Agent Dashboard, no HID/KVM): **[Docker quick start](https://github.com/AEON-7/orb-server)** — `docker pull ghcr.io/aeon-7/orb-server:latest`.
 
 This isn't just Agentic AI. It's **_Robo_-Agentic AI** — the disembodied, given a body.
 
