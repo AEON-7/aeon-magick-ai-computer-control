@@ -1,55 +1,97 @@
-# AEON Magick Orb — server container
+# 🐳 Aeon Magick Orb — Docker
 
-A headless release of the Orb for **servers** — Apple Silicon, the NVIDIA DGX
-Spark (GB10), and x86 — as a Docker image. It runs everything that isn't
-Raspberry-Pi hardware:
+Headless Magick Orb for **any server** — x86, Apple Silicon, NVIDIA DGX Spark.
+One public image: `linux/amd64` + `linux/arm64`.
 
-- **IPFS + Model Share** — join the fleet-free model marketplace, host/share
-  models, pull them down, and **push them to connected systems**.
-- **AI Agent Dashboard** — connected systems (DGX / gateways), the persona
-  pantheon, container orchestration, one-click model deploy, token telemetry.
-- **Terminal management** — concurrent SSH panes across your fleet.
-- **Tokens + audit + the MCP + REST API** — drive it all from an agent.
+It is the Orb console **without Pi hardware**: Intergalactic Model Share, Agent
+Dashboard, terminals, tokens, MCP + REST. No USB-HID, no HDMI capture, no GPIO.
 
-It deliberately leaves out the Pi-only surface: the USB-HID keyboard/mouse,
-video capture/streaming, GPIO, and the host-network appliance (WiFi, firewall,
-VPN/Tor/DNSCrypt). Those need a Raspberry Pi or a privileged host and don't
-belong in a portable server container.
+Package: **[ghcr.io/aeon-7/orb-server](https://github.com/users/AEON-7/packages/container/package/orb-server)**
+· source: [`aeon-magick-ai-computer-control`](https://github.com/AEON-7/aeon-magick-ai-computer-control)
+· Pi appliance: [main README](../README.md)
 
-The Agent Dashboard, terminal, and model push all reach other machines over
-**outbound SSH**, so the container needs no special host privileges.
+---
 
-## Build
+## Quick start
+
+No clone. No build. Docker Engine 24+ (Compose v2 is optional).
 
 ```bash
-./build.sh                       # cross-compile + build; loads your host arch locally
-./build.sh --push you/orb:tag    # build linux/arm64 + linux/amd64 and push
+docker run -d --name aeon-orb --restart unless-stopped \
+  -p 8443:443 -p 8080:8080 \
+  -v aeon-etc:/etc/aeon \
+  -v aeon-data:/var/lib/aeon \
+  ghcr.io/aeon-7/orb-server:latest
 ```
 
-`linux/arm64` covers both Apple Silicon and the DGX Spark; `linux/amd64` covers
-x86 — one multi-arch manifest, no per-target images.
+1. Open **https://localhost:8443/** (self-signed cert — accept the warning).
+2. Set an admin password in the setup wizard.
+3. You're on the Agent Dashboard. IPFS + Model Share come up with the container.
 
-## Run
+Pin a version with `:v116` instead of `:latest` if you don't want surprise pulls.
+
+### Compose (same image)
+
+From this directory, or copy `docker-compose.yml` next to you:
 
 ```bash
 docker compose up -d
 ```
 
-Then open **https://localhost:8443/** (self-signed cert — accept the warning),
-set the admin password in the setup wizard, and you're in. The UI lands on the
-Agent Dashboard (there's no KVM control page on a server).
-
 | Port | What |
 |------|------|
 | `8443` → 443 | Web UI + REST + MCP (HTTPS) |
-| `8080` → 8080 | IPFS gateway (once you enable IPFS) |
+| `8080` → 8080 | IPFS gateway (once IPFS is up) |
 
-State persists in two named volumes: `aeon-etc` (admin auth, TLS cert, API
-tokens) and `aeon-data` (IPFS repo + model library).
+State lives in two named volumes: `aeon-etc` (admin auth, TLS cert, API tokens)
+and `aeon-data` (IPFS repo + model library). `docker rm` does not delete them.
 
-## Reaching your fleet by Tailscale name
+Stop / start / wipe:
 
-To let the container address hosts by their `100.x` tailnet names, join it to
-your tailnet — e.g. run `tailscale` as a sidecar and share its network
-namespace (`network_mode: service:tailscale`), or run Tailscale on the host and
-use host networking. Plain LAN/SSH addresses work with no extra setup.
+```bash
+docker stop aeon-orb && docker rm aeon-orb          # keep volumes
+docker volume rm aeon-etc aeon-data                 # factory reset
+```
+
+---
+
+## What you get
+
+- **IPFS + Intergalactic Model Share** — join the fleet-free model marketplace,
+  host/share models, pull them, push them to connected systems.
+- **AI Agent Dashboard** — DGX / gateways, persona pantheon, container
+  orchestration, one-click model deploy, token telemetry.
+- **Terminals** — concurrent SSH panes across your fleet.
+- **Tokens + audit + MCP + REST** — any agent drives it. No SDK.
+
+The Agent Dashboard, terminal, and model push reach other machines over
+**outbound SSH**, so the container needs no extra host privileges.
+
+## What it is not
+
+Pi-only surface stays on the [flashable Pi 4 / Pi 5 images](../README.md):
+USB-HID keyboard/mouse, video capture, GPIO, WiFi / firewall / VPN / Tor /
+DNSCrypt. Those need a Raspberry Pi (or a privileged host).
+
+---
+
+## Reach your fleet by Tailscale name
+
+Plain LAN / SSH addresses work with no extra setup.
+
+To let the container use `100.x` tailnet names, join it to your tailnet —
+e.g. a Tailscale sidecar with `network_mode: service:tailscale`, or Tailscale
+on the host plus host networking.
+
+---
+
+## Build from source
+
+Only if you are changing the Orb itself.
+
+```bash
+./build.sh                       # cross-compile + build; loads your host arch
+./build.sh --push you/orb:tag    # linux/arm64 + linux/amd64, push a manifest
+```
+
+`linux/arm64` = Apple Silicon + DGX Spark. `linux/amd64` = x86.

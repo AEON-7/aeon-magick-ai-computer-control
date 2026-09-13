@@ -56,4 +56,12 @@ VOLUME ["/etc/aeon", "/var/lib/aeon"]
 EXPOSE 443 8080
 
 ENV AEON_SERVER=1
+
+# Links this GHCR package to the Magick Orb repo (GitHub Packages card + README).
+LABEL org.opencontainers.image.source="https://github.com/AEON-7/aeon-magick-ai-computer-control" \
+      org.opencontainers.image.url="https://github.com/AEON-7/aeon-magick-ai-computer-control" \
+      org.opencontainers.image.title="Aeon Magick Orb" \
+      org.opencontainers.image.description="Headless Magick Orb — Intergalactic Model Share, Agent Dashboard, MCP + REST. linux/amd64 + linux/arm64." \
+      org.opencontainers.image.licenses="MIT"
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
