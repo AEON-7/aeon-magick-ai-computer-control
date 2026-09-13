@@ -1,6 +1,6 @@
 services:
   aeon-orb-server:
-    image: aeon-magick/orb-server:latest
+    image: ghcr.io/aeon-7/orb-server:latest
     build:
       context: .
     container_name: aeon-orb-server
