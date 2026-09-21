@@ -53,7 +53,10 @@ RUN chmod 0755 /usr/local/bin/aeon-supervisor /usr/local/bin/aeon-ipfs \
 VOLUME ["/etc/aeon", "/var/lib/aeon"]
 
 # 443 = web UI + REST + MCP (HTTPS, self-signed). 8080 = IPFS gateway.
-EXPOSE 443 8080
+# 4001 tcp+udp = IPFS swarm (needed so other Orbs can hole-punch / dial us;
+# discovery itself uses the Amino DHT rendezvous and does not require this,
+# but WAN *downloads* of models usually do).
+EXPOSE 443 8080 4001/tcp 4001/udp
 
 ENV AEON_SERVER=1
 

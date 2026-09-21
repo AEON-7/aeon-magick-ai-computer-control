@@ -291,12 +291,13 @@ pub async fn add_path(State(_s): State<AppState>, Json(req): Json<AddReq>) -> Js
 // model file plus `model-card.json`, and the resulting dir CID resolves at
 // <gateway>/ipfs/<cid>/<file> and <gateway>/ipfs/<cid>/model-card.json.
 //
-// Discovery is fleet-FREE: the `aeon-modelshare` daemon gossips this Orb's
-// catalog over the libp2p pubsub topic `aeon-model-share/v1` and merges every
-// other Orb's announcements into registry.json. Any Orb on the IPFS network
-// converges on the same global index with no shared token — the fleet
-// heartbeat still carries the catalog too (a fast LAN path) but is not
-// required.
+// Discovery is fleet-FREE: `aeon-modelshare` finds other Orbs via Amino DHT
+// `findprovs` of a well-known rendezvous CID (WAN, no LAN IPs), swarm-connects
+// (direct / hole-punch / circuit-relay), then gossips this Orb's catalog over
+// the libp2p pubsub topic `aeon-model-share/v1` and merges every other Orb's
+// announcements into registry.json. Any Orb on the IPFS network converges on
+// the same global index with no shared token — the fleet heartbeat still
+// carries the catalog too (a fast LAN path) but is not required.
 
 /// The model card — rich metadata written to `model-card.json` inside the
 /// shared directory AND kept in the catalog entry so the index is browsable

@@ -33,6 +33,13 @@ install -m 0755 "${THIS_DIR}/files/aeon-nas.sh" "${ROOTFS_DIR}/usr/local/bin/aeo
 # Model Share: auto-enroll boot oneshot + fleet-free pubsub gossip daemon.
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs-boot.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs-boot"
 install -m 0755 "${THIS_DIR}/files/aeon-modelshare"   "${ROOTFS_DIR}/usr/local/bin/aeon-modelshare"
+# Well-known Model Share rendezvous beacon (same CID on every Orb). aeon-ipfs
+# also writes this at `up`; baking it means a fresh image has the bytes on disk
+# even before the daemon starts.
+install -d -m 0755 "${ROOTFS_DIR}/usr/share/aeon"
+printf '%s\n' '{"protocol":"aeon-model-share","topic":"aeon-model-share/v1","v":1}' \
+  > "${ROOTFS_DIR}/usr/share/aeon/modelshare-rendezvous.json"
+chmod 0644 "${ROOTFS_DIR}/usr/share/aeon/modelshare-rendezvous.json"
 install -m 0644 "${THIS_DIR}/files/aeon-ipfs-boot.service"  "${ROOTFS_DIR}/etc/systemd/system/aeon-ipfs-boot.service"
 install -m 0644 "${THIS_DIR}/files/aeon-modelshare.service" "${ROOTFS_DIR}/etc/systemd/system/aeon-modelshare.service"
 on_chroot <<'MODELSHARE'

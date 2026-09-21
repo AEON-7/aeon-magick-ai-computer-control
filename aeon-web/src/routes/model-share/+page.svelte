@@ -724,15 +724,9 @@
     </div>
 
     {#if node?.enabled}
-      <!-- Storage allocation, external drives + LAN sharing — the same controls
-           as the IPFS page, collapsible so the model grid stays front and centre. -->
-      <details class="panel bg-ink-900/60 group">
-        <summary class="cursor-pointer select-none px-4 py-2.5 font-mono text-sm text-cursed-300 flex items-center gap-2 list-none">
-          <span class="text-ink-500 transition-transform group-open:rotate-90">▸</span>
-          Storage, drives &amp; LAN sharing
-        </summary>
-        <div class="p-3 pt-0"><StorageManager /></div>
-      </details>
+      <!-- Storage drive + LAN share sit as always-open tiles (not a collapsed
+           details) so they're as obvious as "+ Share a model". -->
+      <StorageManager variant="spotlight" />
 
       <!-- publisher identity — signs the models you share -->
       <div class="flex items-center gap-2 text-[12px] font-mono">

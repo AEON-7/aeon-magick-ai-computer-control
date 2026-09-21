@@ -1,7 +1,8 @@
 #!/bin/bash
 # aeon-ipfs — stand up a local IPFS (kubo) node + HTTP gateway on this Orb, so
 # you can host content on the decentralized web and reach the gateway from any
-# device (LAN or Tailscale). Self-bootstrapping: downloads the kubo arm64 binary,
+# device (LAN, Tailscale, or WAN via Amino DHT + hole-punch/relays).
+# Self-bootstrapping: downloads the kubo arm64 binary,
 # inits the repo (lowpower profile — tuned for a Pi), binds the gateway to all
 # interfaces (API stays localhost-only), sets a storage cap, and installs its
 # systemd unit on first `up`. OFF by default.
@@ -20,6 +21,12 @@ IPFSBIN=/usr/local/bin/ipfs
 UNIT=/etc/systemd/system/aeon-ipfs.service
 GATEWAY_PORT=8080
 API_PORT=5001
+# Well-known Model Share rendezvous beacon. Identical bytes on every Orb → the
+# same CID. Amino `routing findprovs` of this CID is how two NATed strangers
+# find each other without knowing IPs (then hole-punch / circuit-relay).
+# MUST stay in lockstep with aeon-modelshare. Bytes are JSON + trailing newline.
+RENDEZVOUS_CID=bafkreidgutrbna4c363izsplxfzimihkz2fv3svoewwqcdqfmtczzfm46i
+RENDEZVOUS_JSON='{"protocol":"aeon-model-share","topic":"aeon-model-share/v1","v":1}'
 # Absolute path to this script, so the systemd unit's ExecStartPre can call back
 # into it (aeon-ipfs prestart) to clear a stale lock before the daemon starts.
 SELF="$(readlink -f "$0" 2>/dev/null || echo /usr/local/bin/aeon-ipfs)"
@@ -54,6 +61,31 @@ ensure_init() {
   ipfs_cmd init --profile=lowpower >/dev/null 2>&1 || { log "ipfs init failed"; return 1; }
 }
 
+# Extra swarm addresses to advertise (Docker host LAN IP, an operator-set WAN
+# IP, etc.). Kubo's own detect often sees only 172.17.0.0/16 inside a container,
+# which other Orbs cannot dial. AEON_IPFS_ANNOUNCE is comma/space-separated
+# IPv4s or multiaddrs. host.docker.internal is appended when it resolves.
+configure_announce() {
+  local items=() tok ip raw
+  raw="${AEON_IPFS_ANNOUNCE:-}"
+  raw=${raw//,/ }
+  for tok in $raw; do
+    [ -z "$tok" ] && continue
+    case "$tok" in
+      /*) items+=("\"$tok\"") ;;
+      *)  items+=("\"/ip4/${tok}/tcp/4001\"" "\"/ip4/${tok}/udp/4001/quic-v1\"") ;;
+    esac
+  done
+  ip=$(getent hosts host.docker.internal 2>/dev/null | awk '{print $1; exit}')
+  case "$ip" in
+    127.*|"") ;;
+    *) items+=("\"/ip4/${ip}/tcp/4001\"" "\"/ip4/${ip}/udp/4001/quic-v1\"") ;;
+  esac
+  [ ${#items[@]} -eq 0 ] && return 0
+  local IFS=,
+  ipfs_cmd config --json Addresses.AppendAnnounce "[${items[*]}]" >/dev/null 2>&1 || true
+}
+
 configure() {
   # Gateway reachable from any device; API stays localhost-only (it's powerful).
   ipfs_cmd config Addresses.Gateway "/ip4/0.0.0.0/tcp/${GATEWAY_PORT}" >/dev/null 2>&1 || true
@@ -76,6 +108,16 @@ configure() {
   # AcceleratedDHTClient makes provider lookups (finding who hosts a CID) far
   # faster on a wide network — worth the modest memory on a Pi 4/5.
   ipfs_cmd config --json Experimental.AcceleratedDHTClient true >/dev/null 2>&1 || true
+  ipfs_cmd config --json Routing.AcceleratedDHTClient true >/dev/null 2>&1 || true
+  # WAN Model Share. lowpower turns off RelayService (we don't *be* a relay) and
+  # AutoNAT-as-a-server; we still need to USE relays, hole-punch, UPnP, and
+  # announce pinned CIDs on the Amino DHT so strangers can find us.
+  ipfs_cmd config --json Swarm.RelayClient.Enabled true >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.EnableHolePunching true >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.DisableNatPortMap false >/dev/null 2>&1 || true
+  ipfs_cmd config --json Provide.Enabled true >/dev/null 2>&1 || true
+  ipfs_cmd config Reprovider.Interval 22h >/dev/null 2>&1 || true
+  configure_announce
   # NB: the branded gateway landing page is NOT set here — it needs to `ipfs add`
   # content, which is unreliable offline (before the daemon is up) on newer kubo.
   # It's handled by ensure_landing() AFTER daemon_up instead.
@@ -106,6 +148,34 @@ ensure_landing() {
   ipfs_cmd config Gateway.RootRedirect "/ipfs/$cid" >/dev/null 2>&1 || true
   # RootRedirect is read at gateway startup — restart once so it takes effect.
   daemon_restart
+}
+
+# Pin + provide the well-known rendezvous beacon so other Orbs can find this
+# node with `routing findprovs` (no shared token, no LAN IP, no port-forward
+# required for *discovery*). Provide runs in the background — it talks to the
+# DHT and can take tens of seconds; must not block boot.
+ensure_rendezvous() {
+  local beacon=/usr/share/aeon/modelshare-rendezvous.json cid
+  install -d -m 0755 /usr/share/aeon 2>/dev/null || true
+  printf '%s\n' "$RENDEZVOUS_JSON" > "$beacon" 2>/dev/null || true
+  chmod 0644 "$beacon" 2>/dev/null || true
+  local i=0
+  while [ $i -lt 30 ] && ! ipfs_cmd id >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+  # block put with raw codec → CIDv1 bafkrei… of the exact bytes (matches RENDEZVOUS_CID).
+  cid=$(printf '%s\n' "$RENDEZVOUS_JSON" | ipfs_cmd block put --cid-codec=raw --mhtype=sha2-256 --pin 2>/dev/null || true)
+  [ -z "$cid" ] && cid=$(ipfs_cmd add -Q --cid-version=1 --raw-leaves --hash=sha2-256 --pin=true "$beacon" 2>/dev/null || true)
+  [ -n "$cid" ] || { log "rendezvous pin failed (daemon not ready?)"; return 0; }
+  if [ "$cid" != "$RENDEZVOUS_CID" ]; then
+    log "rendezvous CID $cid != expected $RENDEZVOUS_CID (providing both)"
+  else
+    log "rendezvous beacon pinned $cid"
+  fi
+  (
+    ipfs_cmd routing provide "$cid" >/dev/null 2>&1 || ipfs_cmd dht provide "$cid" >/dev/null 2>&1 || true
+    if [ "$cid" != "$RENDEZVOUS_CID" ]; then
+      ipfs_cmd routing provide "$RENDEZVOUS_CID" >/dev/null 2>&1 || true
+    fi
+  ) &
 }
 
 landing_html() {
@@ -244,8 +314,12 @@ cmd_up() {
   ensure_init || return 1
   configure
   clear_stale_lock
-  daemon_up
+  # RelayClient / Provide / hole-punch are read at daemon start. If kubo is
+  # already up (hotpatch / `up` on a running Orb), restart so WAN discovery
+  # actually takes effect.
+  if daemon_active; then daemon_restart; else daemon_up; fi
   ensure_landing
+  ensure_rendezvous
 }
 
 cmd_down() { daemon_down; }
@@ -301,6 +375,13 @@ cmd_cat()   { ipfs_cmd cat "${1:-}" 2>/dev/null; }
 # peer's model so LAN/tailnet fetches don't wait on DHT routing.
 cmd_connect() { ipfs_cmd swarm connect "${1:-}" 2>&1 || true; }
 cmd_id()      { ipfs_cmd id -f='<id>' 2>/dev/null; }
+cmd_addrs()   { ipfs_cmd id -f='<addrs>' 2>/dev/null; }
+cmd_peers()   { ipfs_cmd swarm peers 2>/dev/null; }
+# Amino DHT: list PeerIDs currently providing the rendezvous beacon (or a CID).
+cmd_findprovs() {
+  local cid="${1:-$RENDEZVOUS_CID}"
+  ipfs_cmd routing findprovs -n 100 "$cid" 2>/dev/null || ipfs_cmd dht findprovs "$cid" 2>/dev/null
+}
 # Bitswap ledger (bytes served vs received) — powers the Model Karma gauge.
 cmd_bitswap_stat() { ipfs_cmd bitswap stat 2>/dev/null; }
 # Model Share gossip primitives (used by aeon-modelshare):
@@ -376,6 +457,9 @@ case "${1:-}" in
   cat)     shift; cmd_cat "$@" ;;
   connect) shift; cmd_connect "$@" ;;
   id)      cmd_id ;;
+  addrs)   cmd_addrs ;;
+  peers)   cmd_peers ;;
+  findprovs) shift; cmd_findprovs "$@" ;;
   bitswap-stat) cmd_bitswap_stat ;;
   pub)     shift; cmd_pub "$@" ;;
   sub)     shift; cmd_sub "$@" ;;
@@ -387,5 +471,5 @@ case "${1:-}" in
   mfs-hash)  shift; cmd_mfs_hash "$@" ;;
   get)     shift; cmd_get "$@" ;;
   gateway) echo "$GATEWAY_PORT" ;;
-  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|gc|purge <cid>|add <path>|cat <path>|get <cid> <dest>|connect <multiaddr>|id|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
+  *) echo "usage: aeon-ipfs {up|down|status|storage <size>|pin <cid>|unpin <cid>|pins|gc|purge <cid>|add <path>|cat <path>|get <cid> <dest>|connect <multiaddr>|id|addrs|peers|findprovs [cid]|pub <topic>|sub <topic>|mfs-{mkdir,cp,rm,write,hash} <path…>|gateway}" >&2; exit 1 ;;
 esac

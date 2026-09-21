@@ -11,12 +11,14 @@ description: >
 ---
 # aeon-model-share
 
-Every Orb runs an IPFS node and gossips the models it hosts on a well-known
-pubsub topic, so one call sees models contributed by Orbs **everywhere** — no
-account, no central server. A model is an IPFS **directory** (weights +
-`model-card.json` + README + image) resolved by one content-address (CID), so
-you always get exactly the published bytes. Content is fetched in parallel from
-every Orb that holds it (Bitswap), so popular models download faster.
+Every Orb runs an IPFS node, announces itself on the Amino DHT via a well-known
+rendezvous CID, and gossips the models it hosts on a well-known pubsub topic,
+so one call sees models contributed by Orbs **everywhere** — no account, no
+central server, no need for the other Orb's LAN IP. A model is an IPFS
+**directory** (weights + `model-card.json` + README + image) resolved by one
+content-address (CID), so you always get exactly the published bytes. Content
+is fetched in parallel from every Orb that holds it (Bitswap), so popular
+models download faster.
 
 > **Credentials.** `Authorization: Bearer $AEON_TOKEN` against `https://$AEON_HOST`
 > (self-signed → `curl -k`). `export AEON_TOKEN=…` or source

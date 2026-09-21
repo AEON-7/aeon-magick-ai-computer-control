@@ -8,6 +8,14 @@ services:
     ports:
       - "8443:443"    # web UI + REST + MCP (HTTPS, self-signed cert)
       - "8080:8080"   # IPFS gateway
+      - "4001:4001"       # IPFS swarm TCP (WAN Model Share dial / hole-punch)
+      - "4001:4001/udp"   # IPFS swarm QUIC
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Optional: advertise this machine's LAN or public IPv4 (not the container
+    # 172.x address) so other Orbs dial the published 4001:
+    #   environment:
+    #     AEON_IPFS_ANNOUNCE: "192.168.1.50"
     volumes:
       - aeon-etc:/etc/aeon      # admin auth, TLS cert, API tokens
       - aeon-data:/var/lib/aeon # IPFS repo + model library

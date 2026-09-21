@@ -4,19 +4,19 @@
   "patreon": "https://www.patreon.com/AeonForge7",
   "tracks": {
     "pi4": {
-      "version": 115,
-      "name": "v115",
-      "published": "2026-07-26",
+      "version": 117,
+      "name": "v117",
+      "published": "2026-09-21",
       "codename": "bookworm",
-      "notes": "Raspberry Pi 4 (Bookworm). Aeon Bench remote verified-path (SSH authorize/scan/run from the Orb), playable A/V screen recording (moov finalize + no partial purge), Wacom-profile HID, wifi powersave soft-recovery, Hermes+OpenClaw pantheon.",
+      "notes": "Raspberry Pi 4 (Bookworm). WAN Model Share: Amino DHT rendezvous so stranger Orbs find each other without LAN IPs or port-forwards. Storage drive + LAN sharing tiles. Aeon Bench remote verified-path, playable A/V record, Wacom-profile HID.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     },
     "pi5": {
-      "version": 115,
-      "name": "v115",
-      "published": "2026-07-26",
+      "version": 117,
+      "name": "v117",
+      "published": "2026-09-21",
       "codename": "trixie",
-      "notes": "Raspberry Pi 5 (Trixie). Everything in Pi 4 v115 plus Hailo super-app and on-device vision / voice / UPS suite. HDMI-CSI A/V record with playable MP4 finalize.",
+      "notes": "Raspberry Pi 5 (Trixie). WAN Model Share: Amino DHT rendezvous so stranger Orbs find each other without LAN IPs or port-forwards. Storage drive + LAN sharing tiles. Hailo super-app, on-device vision/voice/UPS, HDMI-CSI A/V record.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     }
   }

@@ -37,8 +37,19 @@ chmod 0755 "$HERE/scripts/aeon-ipfs" "$HERE/scripts/aeon-storage" "$HERE/scripts
 echo "== 4. buildx multi-arch =="
 docker buildx inspect aeon-builder >/dev/null 2>&1 || docker buildx create --name aeon-builder --use >/dev/null
 if [ "${1:-}" = "--push" ]; then
-  docker buildx build --builder aeon-builder --platform linux/arm64,linux/amd64 -t "$TAG" --push "$HERE"
-  echo "pushed $TAG (linux/arm64 + linux/amd64)"
+  # No provenance/SBOM attestations — those attach unknown/unknown child images
+  # and GitHub Packages then fails to associate the README. Index-level source
+  # annotation links the GHCR package to AEON-7/orb-server.
+  extra=()
+  case "$TAG" in
+    *:v*) extra+=(-t "${TAG%:*}:latest") ;;
+  esac
+  docker buildx build --builder aeon-builder \
+    --platform linux/arm64,linux/amd64 \
+    --provenance=false --sbom=false \
+    --annotation "index:org.opencontainers.image.source=https://github.com/AEON-7/orb-server" \
+    -t "$TAG" "${extra[@]}" --push "$HERE"
+  echo "pushed $TAG ${extra[*]:-} (linux/arm64 + linux/amd64)"
 else
   # --load can only emit one arch; load the host arch for local testing.
   HOSTARCH="$(uname -m)"; [ "$HOSTARCH" = "x86_64" ] && PLAT=linux/amd64 || PLAT=linux/arm64

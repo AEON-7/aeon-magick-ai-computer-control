@@ -86,6 +86,12 @@
     // Model weights / library — stacked layers with a spark (weights file).
     model:
       '<path d="M4 7h16v3H4zM4 12h16v3H4zM4 17h16v3H4z"/><path d="M8 8.5h.01M8 13.5h.01M8 18.5h.01"/>',
+    // USB / SSD — a 2.5" drive brick with activity LED + connector nubs.
+    drive:
+      '<rect x="2" y="7" width="20" height="11" rx="1.5"/><path d="M6 7V5.5M10 7V5.5"/><circle cx="17" cy="12.5" r="1" fill="currentColor" stroke="none"/><path d="M5 12.5h8"/>',
+    // LAN NAS — shared folder with a network node underneath.
+    nas:
+      '<path d="M4 5h7l2 2h7v10H4z"/><circle cx="12" cy="20" r="1.4" fill="currentColor" stroke="none"/><path d="M12 17v1.5M8 20h8"/>',
     // VPN tunnel shield variant already have shield; wire = link with keyhole.
     vpn:
       '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9.5 12.5 11 14l3.5-3.5"/>',

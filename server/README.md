@@ -19,6 +19,7 @@ No clone. No build. Docker Engine 24+ (Compose v2 is optional).
 ```bash
 docker run -d --name aeon-orb --restart unless-stopped \
   -p 8443:443 -p 8080:8080 \
+  -p 4001:4001 -p 4001:4001/udp \
   -v aeon-etc:/etc/aeon \
   -v aeon-data:/var/lib/aeon \
   ghcr.io/aeon-7/orb-server:latest
@@ -28,7 +29,11 @@ docker run -d --name aeon-orb --restart unless-stopped \
 2. Set an admin password in the setup wizard.
 3. You're on the Agent Dashboard. IPFS + Model Share come up with the container.
 
-Pin a version with `:v116` instead of `:latest` if you don't want surprise pulls.
+**4001 tcp/udp** is the IPFS swarm. Publishing it lets other Magick Orbs (a Pi across the WAN, another container) hole-punch or dial you so Model Share catalogs and downloads work. Discovery itself uses the public Amino DHT (every Orb pins a well-known rendezvous CID) — no account, no fleet token, no need to know the other person's LAN IP. If 4001 is firewalled, catalogs may still arrive over a circuit relay; multi-GB model fetches usually need a direct path (this port, UPnP, IPv6, or hole punch).
+
+Optional: pass `-e AEON_IPFS_ANNOUNCE=<this-machine-ipv4>` so the node advertises the host address instead of Docker's `172.x`.
+
+Pin a version with `:v117` instead of `:latest` if you don't want surprise pulls.
 
 ### Compose (same image)
 
@@ -42,6 +47,7 @@ docker compose up -d
 |------|------|
 | `8443` → 443 | Web UI + REST + MCP (HTTPS) |
 | `8080` → 8080 | IPFS gateway (once IPFS is up) |
+| `4001` tcp+udp | IPFS swarm (WAN Model Share dial / hole-punch) |
 
 State lives in two named volumes: `aeon-etc` (admin auth, TLS cert, API tokens)
 and `aeon-data` (IPFS repo + model library). `docker rm` does not delete them.

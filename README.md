@@ -466,7 +466,7 @@ Open models are only as free as the servers that host them. A repo gets pulled, 
 
 ![Intergalactic Model Share — a decentralized library of AI models contributed by Orbs across the network, with the Model Karma give/take gauge, live swarm-peer count, disk-allocation slider, and HuggingFace / Ollama / Civitai importers](docs/images/aether.png)
 
-Every Orb runs its own IPFS node (kubo, baked into the image), **auto-enrolls at boot** (IPFS is on by default), and gossips the catalog it hosts on a well-known pubsub topic (`aeon-model-share/v1`, floodsub). The library you browse is contributed by Orbs **everywhere**, and it converges with **no shared token and nothing to log in to** — peer catalogs simply expire on a 15-minute TTL, so what you see is who's live right now. Publish a model and it's on the Aether; there's no gatekeeper who can unpublish it.
+Every Orb runs its own IPFS node (kubo, baked into the image), **auto-enrolls at boot** (IPFS is on by default), and gossips the catalog it hosts on a well-known pubsub topic (`aeon-model-share/v1`, floodsub). Orbs find each other on the public Amino DHT by providing a **well-known rendezvous CID** — no shared token, no fleet, no need to know the other person's LAN IP or open a port just to *see* their library. (A direct swarm path — hole punch, UPnP, IPv6, or published TCP/UDP **4001** — still helps for actually downloading multi-GB weights.) Peer catalogs expire on a 15-minute TTL, so what you see is who's live right now. Publish a model and it's on the Aether; there's no gatekeeper who can unpublish it.
 
 **Your Orb becomes a model vault.** Point it at a roomy microSD, an **NVMe SSD**, or an external USB drive (plug-and-play — the console formats and adopts it in a click), set a real allocation **slider** for how much disk you share, and it holds a huge library and serves it to the world. A model isn't a bare file: it's an **IPFS directory** carrying the weights + a `model-card.json` + README + card image + gallery images, so one content-address (**CID**) resolves the whole package, byte-for-byte verified.
 
@@ -474,7 +474,7 @@ Every Orb runs its own IPFS node (kubo, baked into the image), **auto-enrolls at
 
 - **Swarm downloads that get *faster* the more popular a model is.** Content is addressed by hash, so a model is fetched **in parallel from every Orb that holds it** (IPFS Bitswap) — the same load-balancing that makes BitTorrent fast. Ten holders means ten sources: higher throughput for you, no single node bearing the load. Popularity *helps* instead of hurting.
 - **Tamper-proof by construction.** The CID *is* the content hash — you get exactly the bytes that were published, or nothing. No silent swaps, no poisoned mirror, no "trust me": the address itself is the integrity check.
-- **No center to attack.** Discovery is peer-to-peer gossip; hosting is whoever pins it. Take any node offline and the model stays reachable through every other holder.
+- **No center to attack.** Discovery is Amino DHT rendezvous + peer-to-peer gossip; hosting is whoever pins it. Take any node offline and the model stays reachable through every other holder.
 
 ### Bring any open model in — and it's verified on the way
 
