@@ -36,7 +36,7 @@
     <div class="flex items-center gap-3ru min-w-0">
       <a
         href={backHref}
-        class="group flex items-center gap-2ru text-cursed-400 font-mono text-xs tracking-instrument
+        class="group flex items-center gap-2ru text-cursed-400 font-display text-xs tracking-instrument
                hover:text-cursed-300 transition-colors shrink-0"
         title="Back"
       >

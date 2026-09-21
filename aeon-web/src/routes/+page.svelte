@@ -1350,7 +1350,7 @@
     <!-- Row 1: brand + status + persona -->
     <div class="flex items-center justify-between gap-2 px-3 sm:px-5 pt-2.5 pb-2">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-wrap">
-        <span class="flex items-center gap-2 text-cursed-400 font-mono text-2xs sm:text-xs tracking-instrument truncate uppercase">
+        <span class="flex items-center gap-2 text-cursed-400 font-display text-2xs sm:text-xs tracking-instrument truncate uppercase">
           <OrbMark class="w-5 h-5" mode={orbMode} />
           <span class="hidden sm:inline">AEON MAGICK · AI COMPUTER CONTROL</span>
           <span class="sm:hidden">AEON MAGICK</span>

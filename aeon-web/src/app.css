@@ -10,6 +10,21 @@
  * Prefer these primitives over ad-hoc rounded-xl SaaS cards.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+@font-face {
+  font-family: 'AeonDisplay';
+  src: url('/fonts/Orbitron.ttf') format('truetype');
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'AeonMono';
+  src: url('/fonts/ShareTechMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 @layer base {
   html {
     @apply selection:bg-cursed-500/35 selection:text-white;
@@ -88,14 +103,14 @@
      headings. Wide tracking is the whole point, so never pair with truncate on
      a narrow column (the tracking eats the last glyph). */
   .inscription {
-    @apply font-mono uppercase text-inscription text-zinc-100;
+    @apply font-display uppercase text-inscription text-zinc-100;
     text-shadow: 0 1px 0 rgb(0 0 0 / 0.6);
   }
   .inscription-sm {
-    @apply font-mono uppercase text-inscription-sm text-zinc-200;
+    @apply font-display uppercase text-inscription-sm text-zinc-200;
   }
   .inscription-lg {
-    @apply font-mono uppercase text-inscription-lg text-zinc-50;
+    @apply font-display uppercase text-inscription-lg text-zinc-50;
     text-shadow: 0 1px 0 rgb(0 0 0 / 0.7);
   }
   /* The struck line beneath a title band. */
@@ -206,7 +221,7 @@
      on a phone — this console gets driven from a pocket at a rack. */
   .btn {
     @apply inline-flex items-center justify-center gap-2ru px-3ru py-1.5 min-h-8
-           rounded-sm text-sm font-medium font-sans
+           rounded-sm text-sm font-medium font-display tracking-instrument
            bg-ink-800 text-zinc-200
            border border-steel-600
            hover:bg-ink-700 hover:border-steel-500 hover:text-white
@@ -268,7 +283,7 @@
     @apply h-1.5 w-1.5 rounded-full shrink-0;
   }
   .dot-live {
-    @apply dot bg-live-400 shadow-[0_0_6px_rgb(52_211_153/0.7)];
+    @apply dot bg-live-400 shadow-[0_0_6px_rgb(61_231_255/0.7)];
   }
   .dot-off {
     @apply dot bg-red-400/80;
@@ -279,7 +294,7 @@
 
   /* Form labels */
   .field-label {
-    @apply block text-2xs uppercase tracking-instrument text-zinc-500 font-mono mb-1;
+    @apply block text-2xs uppercase tracking-instrument text-zinc-500 font-display mb-1;
   }
   .field {
     @apply w-full px-3 py-2 rounded-sm bg-ink-800 border border-steel-700

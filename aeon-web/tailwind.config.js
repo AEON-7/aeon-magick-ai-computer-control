@@ -23,7 +23,7 @@ export default {
           700: '#1a1c26',
           800: '#11131a',
           900: '#0a0b10',
-          950: '#06060a',
+          950: '#05060D',
         },
         // Anodized edge / chassis border (industrial, separate from fill).
         steel: {
@@ -36,7 +36,7 @@ export default {
         cursed: {
           200: '#ddd6fe',
           300: '#c4b5fd',
-          400: '#a78bfa',
+          400: '#B794FF',
           500: '#8b5cf6',
           600: '#7c3aed',
           700: '#6d28d9',
@@ -44,10 +44,11 @@ export default {
           900: '#3b1d6e',
         },
         // Phosphor live / success (300 = the lighter step badges/pills already use)
+        // Orbit live signal — cyan, not phosphor green. Violet stays the only action accent.
         live: {
-          300: '#6ee7b7',
-          400: '#34d399',
-          500: '#10b981',
+          300: '#8AF4FF',
+          400: '#3DE7FF',
+          500: '#14C4E0',
         },
         // Machine / power rail (rare — power, thermal, arming)
         rail: {
@@ -67,8 +68,11 @@ export default {
         full: '9999px',
       },
       fontFamily: {
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
-        sans: ['"Inter"', 'system-ui', 'sans-serif'],
+        // Orbit voice, licensed OFL, bundled so the Pi works offline.
+        // Display = Orbitron (inscriptions). Mono = Share Tech Mono (readouts).
+        display: ['AeonDisplay', 'Orbitron', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['AeonMono', 'Share Tech Mono', 'ui-monospace', 'monospace'],
+        sans: ['AeonMono', 'Share Tech Mono', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       },
       fontSize: {
         // ── Instrument type scale ────────────────────────────────────────────
@@ -103,7 +107,7 @@ export default {
         bezel:
           'inset 0 0 0 1px rgb(139 92 246 / 0.12), inset 0 0 80px -40px rgb(139 92 246 / 0.25)',
         'glow-cursed': '0 0 18px -6px rgb(139 92 246 / 0.45)',
-        'glow-live': '0 0 16px -6px rgb(52 211 153 / 0.4)',
+        'glow-live': '0 0 16px -6px rgb(61 231 255 / 0.45)',
         'depth-void':
           '0 0 0 1px rgb(42 46 60 / 0.8), 0 24px 48px -24px rgb(0 0 0 / 0.75)',
         // ── Aether ───────────────────────────────────────────────────────────

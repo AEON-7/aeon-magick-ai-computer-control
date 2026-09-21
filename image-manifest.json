@@ -4,19 +4,19 @@
   "patreon": "https://www.patreon.com/AeonForge7",
   "tracks": {
     "pi4": {
-      "version": 117,
-      "name": "v117",
+      "version": 118,
+      "name": "v118",
       "published": "2026-09-21",
       "codename": "bookworm",
-      "notes": "Raspberry Pi 4 (Bookworm). WAN Model Share: Amino DHT rendezvous so stranger Orbs find each other without LAN IPs or port-forwards. Storage drive + LAN sharing tiles. Aeon Bench remote verified-path, playable A/V record, Wacom-profile HID.",
+      "notes": "Raspberry Pi 4 (Bookworm). Orbit console type: Orbitron inscriptions, Share Tech Mono readouts, violet signal, cyan live. Includes v117 WAN Model Share.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     },
     "pi5": {
-      "version": 117,
-      "name": "v117",
+      "version": 118,
+      "name": "v118",
       "published": "2026-09-21",
       "codename": "trixie",
-      "notes": "Raspberry Pi 5 (Trixie). WAN Model Share: Amino DHT rendezvous so stranger Orbs find each other without LAN IPs or port-forwards. Storage drive + LAN sharing tiles. Hailo super-app, on-device vision/voice/UPS, HDMI-CSI A/V record.",
+      "notes": "Raspberry Pi 5 (Trixie). Orbit console type: Orbitron inscriptions, Share Tech Mono readouts, violet signal, cyan live. Includes v117 WAN Model Share, Hailo, vision/voice/UPS.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     }
   }

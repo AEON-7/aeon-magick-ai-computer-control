@@ -33,7 +33,7 @@ docker run -d --name aeon-orb --restart unless-stopped \
 
 Optional: pass `-e AEON_IPFS_ANNOUNCE=<this-machine-ipv4>` so the node advertises the host address instead of Docker's `172.x`.
 
-Pin a version with `:v117` instead of `:latest` if you don't want surprise pulls.
+Pin a version with `:v118` instead of `:latest` if you don't want surprise pulls.
 
 ### Compose (same image)
 
