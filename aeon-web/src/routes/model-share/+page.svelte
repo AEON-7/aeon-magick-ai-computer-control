@@ -44,7 +44,11 @@
   type Task = { phase: string; pct?: number | null; done_bytes?: number; total_bytes?: number };
   let tasks: Record<string, Task> = {};
   let peerCount = 0;
-  let net: { orbs_online: number; models: number; shared_bytes: number; local_bytes: number; seeding: boolean } = {
+  let net: {
+    orbs_online: number; models: number; shared_bytes: number; local_bytes: number; local_models?: number; seeding: boolean;
+    our_pin?: { models: number; bytes: number };
+    our_files?: { count: number; bytes: number };
+  } = {
     orbs_online: 0, models: 0, shared_bytes: 0, local_bytes: 0, seeding: true,
   };
   let selfPeer = '';
@@ -728,7 +732,12 @@
           {net.orbs_online || peerCount} orb{(net.orbs_online || peerCount) === 1 ? '' : 's'} online
           · {net.models || rows.length} model{(net.models || rows.length) === 1 ? '' : 's'}
           · {fmtBytes(net.shared_bytes)} on the beacon
-          · {fmtBytes(net.local_bytes)} seeded here
+        </span>
+        <span class="text-ink-500 text-xs font-mono" title="Directories this Orb is pinning for the mesh, and the weight files inside them">
+          Our pin · {net.our_pin?.models ?? net.local_models ?? 0} model{(net.our_pin?.models ?? 0) === 1 ? '' : 's'}
+          · {fmtBytes(net.our_pin?.bytes || net.local_bytes)}
+          · Our files · {net.our_files?.count ?? 0}
+          · {fmtBytes(net.our_files?.bytes || 0)}
         </span>
       {/if}
       <div class="flex-1"></div>

@@ -1398,6 +1398,9 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
         }
         let shared_bytes: u64 = seen_cids.values().copied().sum();
         let local_bytes: u64 = local.iter().map(|e| e.size_bytes).sum();
+        // One catalog row is one pinned directory. The primary weight file is
+        // the file we can count without walking the blockstore on every poll.
+        let our_files = local.len();
         json!({
             "ok": true, "self_peer_id": me, "models": out, "tasks": tasks,
             "peer_count": orbs_online, "my_star_count": my_stars.len(),
@@ -1411,6 +1414,16 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
                 "local_bytes": local_bytes,
                 "seeding": seed_enabled(),
                 "beacon": mesh.get("beacon").cloned().unwrap_or(Value::Null),
+                "our_pin": {
+                    "beacon": mesh.get("beacon").cloned().unwrap_or(Value::Null),
+                    "models": local.len(),
+                    "bytes": local_bytes,
+                    "on_beacon": beacon_orbs > 0 || !me.is_empty(),
+                },
+                "our_files": {
+                    "count": our_files,
+                    "bytes": local_bytes,
+                },
             }
         })
     })
