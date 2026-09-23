@@ -320,6 +320,11 @@
       {/if}
     </div>
 
+    <!-- Drives stay visible when the daemon is failed or still starting.
+         Gating them on daemon === 'active' hid every storage option the
+         moment kubo crash-looped. -->
+    <StorageManager />
+
     {#if status?.daemon === 'active'}
       <div class="panel p-4 flex gap-4 items-center">
         <div class="bg-white p-1 rounded shrink-0 w-32 h-32 flex items-center justify-center [&_svg]:w-full [&_svg]:h-full">{@html qrSvg}</div>
@@ -336,9 +341,6 @@
           </div>
         </div>
       </div>
-
-      <!-- Storage allocation + external drives + NAS (shared with Model Share). -->
-      <StorageManager />
 
       <div class="panel p-4 space-y-3">
         <h2 class="font-mono text-cursed-300 text-sm">Pin content (host a CID)</h2>

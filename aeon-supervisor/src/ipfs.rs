@@ -509,6 +509,48 @@ pub async fn get_source_tokens(State(_s): State<AppState>) -> Json<Value> {
 
 // ── Mature-content viewing (opt-in, with an 18+ attestation) ────────────────
 const VIEW_JSON: &str = "/etc/aeon/modelshare-view.json";
+/// Seeding is ON unless the operator opts out. A download, import, or pull
+/// then stays pinned and is announced on the beacon. Missing file = seed.
+const SEED_JSON: &str = "/etc/aeon/modelshare-seed.json";
+
+fn seed_enabled() -> bool {
+    std::fs::read_to_string(SEED_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("seed").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
+fn write_seed(on: bool) {
+    if let Some(dir) = std::path::Path::new(SEED_JSON).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(SEED_JSON, serde_json::to_vec_pretty(&json!({"seed": on})).unwrap_or_default());
+}
+
+/// Drop a just-imported CID from the public catalog and keep a private copy.
+fn retain_private(cid: &str, name: &str) {
+    let _ = ensure_in_library(cid, &model_slug(name));
+    let entries: Vec<ModelEntry> = read_catalog().into_iter().filter(|e| e.cid != cid).collect();
+    let _ = write_catalog(&entries);
+    let _ = run_script(&["unpin", cid]);
+}
+
+/// GET /api/ipfs/models/seed — whether downloads are re-pinned onto the swarm.
+pub async fn get_seed(State(_s): State<AppState>) -> Json<Value> {
+    Json(json!({"ok": true, "seed": seed_enabled()}))
+}
+
+#[derive(Deserialize)]
+pub struct SeedReq {
+    pub seed: bool,
+}
+
+/// POST /api/ipfs/models/seed — opt out of (or back into) automatic seeding.
+pub async fn set_seed(State(_s): State<AppState>, Json(req): Json<SeedReq>) -> Json<Value> {
+    tokio::task::spawn_blocking(move || write_seed(req.seed)).await.ok();
+    Json(json!({"ok": true, "seed": req.seed}))
+}
 
 fn read_view() -> Value {
     std::fs::read_to_string(VIEW_JSON)
@@ -1070,11 +1112,19 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
             return fail(&format!("virus scan: {e}"));
         }
 
-        // Clean → already pinned (hosted); index it and drop the scan copy.
-        catalog_add_raw(req.entry); // a peer's model — keep its publisher signature, never re-sign
+        // Clean. Seeding is the default: stay pinned and announce so the next
+        // stranger can fetch it from us. Opting out keeps a private library
+        // copy and drops the pin so we do not provide it.
+        if seed_enabled() {
+            catalog_add_raw(req.entry);
+            announce();
+        } else {
+            let slug = model_slug(&req.entry.name);
+            let _ = ensure_in_library(&cid, &slug);
+            let _ = run_script(&["unpin", &cid]);
+        }
         let _ = std::fs::remove_dir_all(&q);
         task_clear(&cid);
-        announce();
     });
     Json(json!({"ok": true, "fetching": true}))
 }
@@ -1322,8 +1372,47 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
                 bi.cmp(&ai)
             })
         });
-        json!({"ok": true, "self_peer_id": me, "models": out, "tasks": tasks,
-               "peer_count": peers.len(), "my_star_count": my_stars.len()})
+        let now = epoch_ms();
+        let fresh = 15 * 60 * 1000;
+        let gossip_others = peers
+            .values()
+            .filter(|p| p.peer_id != me && now.saturating_sub(p.updated_ms) < fresh)
+            .count();
+        let mesh: Value = std::fs::read_to_string("/var/lib/aeon/ipfs-models/mesh.json")
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(json!({}));
+        let beacon_orbs = mesh.get("orbs_on_beacon").and_then(|n| n.as_u64()).unwrap_or(0);
+        let orbs_online = (1 + gossip_others as u64).max(beacon_orbs);
+        let mut seen_cids: HashMap<String, u64> = HashMap::new();
+        for e in &local {
+            seen_cids.insert(e.cid.clone(), e.size_bytes);
+        }
+        for p in peers.values() {
+            if p.peer_id == me {
+                continue;
+            }
+            for e in &p.models {
+                seen_cids.entry(e.cid.clone()).or_insert(e.size_bytes);
+            }
+        }
+        let shared_bytes: u64 = seen_cids.values().copied().sum();
+        let local_bytes: u64 = local.iter().map(|e| e.size_bytes).sum();
+        json!({
+            "ok": true, "self_peer_id": me, "models": out, "tasks": tasks,
+            "peer_count": orbs_online, "my_star_count": my_stars.len(),
+            "network": {
+                "orbs_online": orbs_online,
+                "orbs_gossiping": 1 + gossip_others,
+                "orbs_on_beacon": beacon_orbs,
+                "models": seen_cids.len(),
+                "shared_bytes": shared_bytes,
+                "local_models": local.len(),
+                "local_bytes": local_bytes,
+                "seeding": seed_enabled(),
+                "beacon": mesh.get("beacon").cloned().unwrap_or(Value::Null),
+            }
+        })
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "registry task failed"}));
@@ -2189,6 +2278,17 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
     if cid.is_empty() {
         return Err("ipfs add produced no CID".into());
     }
+    // Gated/private weights stay on this Orb only. Seeding off does the same
+    // for a public repo: a local library copy, no pin, no announcement.
+    if hf_is_gated(&meta) || !seed_enabled() {
+        let _ = ensure_in_library(&cid, &model_slug(model_name));
+        let _ = run_script(&["unpin", &cid]);
+        let _ = std::fs::remove_dir_all(&dir);
+        if hf_is_gated(&meta) {
+            return Err("this HuggingFace repo is gated or private — kept locally, not seeded".into());
+        }
+        return Ok(());
+    }
     catalog_add(ModelEntry {
         cid, name: model_name.to_string(), file: primary_file, size_bytes: total,
         sha256: primary_sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
@@ -2197,6 +2297,20 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
     });
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+fn hf_is_gated(meta: &Value) -> bool {
+    if meta.get("private").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return true;
+    }
+    match meta.get("gated") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            !s.is_empty() && s != "false"
+        }
+        _ => false,
+    }
 }
 
 // ── Ollama import ───────────────────────────────────────────────────────────
@@ -2326,12 +2440,16 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
     if cid.is_empty() {
         return Err("ipfs add produced no CID".into());
     }
+    let cid_owned = cid.clone();
     catalog_add(ModelEntry {
         cid, name: model_name.to_string(), file: leaf, size_bytes: size,
         sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
         verified, source,
         ..Default::default()
     });
+    if !seed_enabled() {
+        retain_private(&cid_owned, model_name);
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -2526,12 +2644,17 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
     if cid.is_empty() {
         return Err("ipfs add produced no CID".into());
     }
+    let cid_owned = cid.clone();
+    let name_owned = m_name.clone();
     catalog_add(ModelEntry {
         cid, name: m_name, file: leaf, size_bytes: size,
         sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
         verified, source,
         ..Default::default()
     });
+    if !seed_enabled() {
+        retain_private(&cid_owned, &name_owned);
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -2778,9 +2901,23 @@ pub async fn pull_model(State(_s): State<AppState>, Json(req): Json<PullReq>) ->
         let slug = model_slug(&name);
         task_set(&format!("pull:{slug}"), "materializing from IPFS…");
         let out = ensure_in_library(&cid, &slug);
+        if out.is_ok() && seed_enabled() {
+            let _ = run_script(&["pin", &cid]);
+            if find_model(&cid).is_none() {
+                catalog_add_raw(ModelEntry {
+                    cid: cid.clone(),
+                    name: name.clone(),
+                    size_bytes: out.as_ref().copied().unwrap_or(0),
+                    added_at_ms: epoch_ms(),
+                    source: "pull".into(),
+                    ..Default::default()
+                });
+            }
+            announce();
+        }
         task_clear(&format!("pull:{slug}"));
         match out {
-            Ok(sz) => json!({"ok": true, "slug": slug, "name": name, "cid": cid, "size_bytes": sz, "size": human(sz)}),
+            Ok(sz) => json!({"ok": true, "slug": slug, "name": name, "cid": cid, "size_bytes": sz, "size": human(sz), "seeded": seed_enabled()}),
             Err(e) => json!({"ok": false, "err": storage_hint(&e)}),
         }
     })

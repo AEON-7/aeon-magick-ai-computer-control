@@ -148,9 +148,12 @@
   onDestroy(() => clearInterval(poll));
 </script>
 
-{#if status?.daemon === 'active'}
+{#if status}
 <div class="space-y-3">
   {#if err}<p class="text-xs text-red-400 font-mono">{err}</p>{/if}
+  {#if status.daemon !== 'active'}
+    <p class="text-xs text-amber-300/90 font-mono">IPFS is not running. Drive and storage settings still apply — they are picked up when the node starts.</p>
+  {/if}
 
   {#if !spotlight}
     <!-- Storage shared with the network (full / IPFS page) -->

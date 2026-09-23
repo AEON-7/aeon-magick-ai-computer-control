@@ -44,6 +44,9 @@
   type Task = { phase: string; pct?: number | null; done_bytes?: number; total_bytes?: number };
   let tasks: Record<string, Task> = {};
   let peerCount = 0;
+  let net: { orbs_online: number; models: number; shared_bytes: number; local_bytes: number; seeding: boolean } = {
+    orbs_online: 0, models: 0, shared_bytes: 0, local_bytes: 0, seeding: true,
+  };
   let selfPeer = '';
   let err = '';
   let poll: ReturnType<typeof setTimeout>;
@@ -337,6 +340,7 @@
           rows = r.models ?? [];
           tasks = r.tasks ?? {};
           peerCount = r.peer_count ?? 0;
+          if (r.network) net = { ...net, ...r.network, seeding: r.network.seeding !== false };
           selfPeer = r.self_peer_id ?? '';
           myStarCount = r.my_star_count ?? 0;
           err = '';
@@ -345,6 +349,17 @@
     } catch (e: any) {
       err = e?.message ?? 'failed to load';
     }
+  }
+
+  async function toggleSeed() {
+    const next = !net.seeding;
+    try {
+      const r = await api('/models/seed', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seed: next }),
+      });
+      if (r?.ok) net = { ...net, seeding: !!r.seed };
+    } catch {}
   }
 
   async function loadKarma() {
@@ -709,9 +724,12 @@
         {node?.daemon === 'active' ? 'IPFS running' : node?.daemon === 'failed' ? 'IPFS failed' : node?.enabled ? 'IPFS starting' : 'IPFS off'}
       </span>
       {#if node?.daemon === 'active'}
-        <span class="text-ink-500 text-xs font-mono">{node.peers} swarm peers · {fmtBytes(node.repo_bytes)} /
-          <a href="/orbnet/ipfs" class="underline decoration-dotted hover:text-cursed-300"
-             title="This is your IPFS storage allocation, not an upload cap — click to adjust how much storage this Orb shares with the network">{node.storage_max}</a></span>
+        <span class="text-ink-500 text-xs font-mono" title="Orbs currently providing the shared beacon, and the bytes of models pinned on that mesh">
+          {net.orbs_online || peerCount} orb{(net.orbs_online || peerCount) === 1 ? '' : 's'} online
+          · {net.models || rows.length} model{(net.models || rows.length) === 1 ? '' : 's'}
+          · {fmtBytes(net.shared_bytes)} on the beacon
+          · {fmtBytes(net.local_bytes)} seeded here
+        </span>
       {/if}
       <div class="flex-1"></div>
       <!-- on/off switch -->
@@ -721,6 +739,12 @@
         <span class="inline-block h-5 w-5 transform rounded-full bg-white transition-transform {node?.enabled ? 'translate-x-5' : 'translate-x-0.5'}"></span>
       </button>
       <span class="text-xs font-mono text-ink-400 w-16">{toggling ? '…' : node?.enabled ? 'enabled' : 'disabled'}</span>
+      <button
+        class="text-[11px] font-mono px-2 py-1 rounded border {net.seeding ? 'border-emerald-700 text-emerald-300' : 'border-steel-700 text-ink-400'}"
+        on:click={toggleSeed}
+        title="Downloads and imports stay pinned on IPFS so other Orbs can fetch them. Turn this off to keep a private copy instead.">
+        {net.seeding ? 'Seeding on' : 'Seeding off'}
+      </button>
     </div>
 
     {#if node?.enabled}

@@ -38,6 +38,7 @@ SCRIPT = "/usr/local/bin/aeon-ipfs"
 MODELS_DIR = "/var/lib/aeon/ipfs-models"
 CATALOG = os.path.join(MODELS_DIR, "catalog.json")
 REGISTRY = os.path.join(MODELS_DIR, "registry.json")
+MESH = os.path.join(MODELS_DIR, "mesh.json")
 STARS = os.path.join(MODELS_DIR, "stars.json")  # CIDs this Orb starred (gossiped)
 FLEET_TOML = "/etc/aeon/fleet.toml"
 ANNOUNCE_FLAG = "/run/aeon/modelshare-announce"
@@ -47,9 +48,12 @@ ANNOUNCE_FLAG = "/run/aeon/modelshare-announce"
 RENDEZVOUS_CID = "bafkreidgutrbna4c363izsplxfzimihkz2fv3svoewwqcdqfmtczzfm46i"
 
 ANNOUNCE_EVERY = 60       # seconds between periodic re-announcements
-DISCOVER_EVERY = 120      # seconds between DHT rendezvous lookups
+DISCOVER_EVERY = 45       # seconds between DHT rendezvous lookups
+BEACON_EVERY = 300        # re-provide the rendezvous CID so new Orbs find us
 PEER_TTL_MS = 15 * 60_000  # drop a peer not heard from in 15 min
 MAX_MODELS = 500          # cap announcement size
+MAX_SEEN = 128            # peer ids carried in one announcement
+MAX_DIAL = 256            # persistent Orb links one node will hold
 
 _lock = threading.Lock()
 _inflight = set()
@@ -184,12 +188,63 @@ def write_json_atomic(path, obj):
     os.replace(tmp, path)
 
 
+def _private_ip(text):
+    """RFC1918, loopback, link-local, CGNAT. Not a WAN dial target."""
+    import re
+    if not text:
+        return False
+    ips = re.findall(r"(\d+\.\d+\.\d+\.\d+)", text)
+    if not ips and re.match(r"^\d+\.\d+\.\d+\.\d+$", text):
+        ips = [text]
+    for ip in ips:
+        a, b = (int(x) for x in ip.split(".")[:2])
+        if a in (10, 127) or (a == 192 and b == 168) or (a == 169 and b == 254):
+            return True
+        if a == 172 and 16 <= b <= 31:
+            return True
+        if a == 100 and 64 <= b <= 127:
+            return True
+    return False
+
+
+def _wan_addr(addr, pid):
+    """Keep public multiaddrs and relay circuits. Drop another home's LAN IP."""
+    if not addr or addr == pid:
+        return None
+    if addr.startswith("/"):
+        maddr = addr if "/p2p/" in addr else (addr.rstrip("/") + "/p2p/" + pid)
+        if "/ip4/127." in maddr or maddr.startswith("/ip6/::1"):
+            return None
+        if "/p2p-circuit" in maddr:
+            return maddr
+        if _private_ip(maddr):
+            return None
+        return maddr
+    if ":" in addr or addr.startswith("127.") or _private_ip(addr):
+        return None
+    return "/ip4/%s/tcp/4001/p2p/%s" % (addr, pid)
+
+
+def seen_peer_ids():
+    """Orbs we already know. Gossiping this is how a new node learns the rest
+    from the first one it reaches — one DHT answer is not the whole swarm."""
+    reg = read_json(REGISTRY, {"peers": {}})
+    ids = []
+    for pid in (reg.get("peers") or {}):
+        if _looks_like_peer_id(pid):
+            ids.append(pid)
+        if len(ids) >= MAX_SEEN:
+            break
+    return ids
+
+
 def build_announcement():
     return {
         "v": 1,
         "peer_id": self_peer_id(),
         "label": self_label(),
         "addrs": self_addrs(),
+        "seen": seen_peer_ids(),
         "updated_ms": int(time.time() * 1000),
         "models": read_json(CATALOG, [])[:MAX_MODELS],
         "starred": read_json(STARS, [])[:MAX_MODELS],
@@ -207,17 +262,22 @@ def publish():
 
 
 def persist_connected(pid):
-    """After a successful swarm connect, pin the live multiaddr as Peering so
-    ConnMgr doesn't drop the floodsub link."""
+    """Pin every live path to this Orb as Peering so ConnMgr cannot prune it.
+
+    Prefer the relay circuit when both a direct and a relayed connection are
+    up: the circuit still works after a NAT binding expires."""
     try:
         r = sh("peers", timeout=10)
     except Exception:
         return
+    lines = []
     for line in (r.stdout or "").splitlines():
         line = line.strip()
-        if pid in line and line.startswith("/"):
-            sh("peer", line, timeout=10)
-            return
+        if pid in line and line.startswith("/") and "/ip4/127." not in line:
+            lines.append(line)
+    lines.sort(key=lambda a: (0 if "/p2p-circuit" in a else 1))
+    for line in lines[:4]:
+        sh("peer", line, timeout=10)
 
 
 def keep_connected_async(pid, addrs):
@@ -240,31 +300,25 @@ def keep_connected_async(pid, addrs):
 
 
 def keep_connected(pid, addrs):
-    """Make sure we have a libp2p path to this Orb.
+    """Dial an Orb over the public swarm. No LAN IP and no open port required.
 
-    Always try `swarm connect /p2p/<id>` first — kubo resolves via DHT
-    (direct / hole-punch / circuit-relay) so WAN peers work without a LAN IP.
-    Then pin any usable hints as persistent Peering.
+    `swarm connect /p2p/<id>` lets kubo use whatever it knows: a public address,
+    a hole-punched path, or a /p2p-circuit through a relay. Relay circuits are
+    then pinned as Peering so the link survives ConnMgr.
     """
     if not pid or pid == SELF_PID:
         return
-    sh("connect", "/p2p/%s" % pid, timeout=20)
+    sh("connect", "/p2p/%s" % pid, timeout=25)
     persist_connected(pid)
+    wan = []
     for a in addrs or []:
-        if not a or a == pid:
-            continue
-        if a.startswith("/"):
-            maddr = a if "/p2p/" in a else (a.rstrip("/") + "/p2p/" + pid)
-            if "/ip4/127." in maddr:
-                continue
-            sh("peer", maddr, timeout=10)
-            sh("connect", maddr, timeout=20)
-            continue
-        if ":" in a or a.startswith("127."):
-            continue  # skip IPv6-as-bare and loopback
-        maddr = "/ip4/%s/tcp/4001/p2p/%s" % (a, pid)
+        maddr = _wan_addr(a, pid)
+        if maddr and maddr not in wan:
+            wan.append(maddr)
+    wan.sort(key=lambda a: (0 if "/p2p-circuit" in a else 1))
+    for maddr in wan[:4]:
         sh("peer", maddr, timeout=10)
-        sh("connect", maddr, timeout=15)
+        sh("connect", maddr, timeout=20)
 
 
 def merge_peer(ann):
@@ -274,6 +328,11 @@ def merge_peer(ann):
     if pid == SELF_PID:
         return  # our own announcement (floodsub delivers it back) — don't index self
     keep_connected_async(pid, ann.get("addrs"))
+    # One Orb's announcement names the others it has already met, so joining
+    # any single node is enough to learn the rest of the live mesh.
+    for other in ann.get("seen") or []:
+        if isinstance(other, str) and _looks_like_peer_id(other):
+            keep_connected_async(other, [])
     with _lock:
         reg = read_json(REGISTRY, {"peers": {}})
         peers = reg.setdefault("peers", {})
@@ -371,37 +430,88 @@ def _looks_like_peer_id(s):
     return len(s) >= 32 and all(c.isalnum() for c in s)
 
 
-def discover_loop():
-    """Find other Magick Orbs via the Amino DHT and mesh with them.
+def _dial_peers(pids):
+    sem = threading.Semaphore(8)
+    threads = []
 
-    Floodsub only reaches currently-connected subscribers. Public IPFS bootstrap
-    peers are NOT subscribed to our topic, so two Orbs both 'on IPFS' still
-    miss each other until we explicitly swarm-connect. findprovs(rendezvous)
-    is that directory.
+    def one(pid):
+        with sem:
+            keep_connected(pid, [])
+
+    n = 0
+    for pid in pids:
+        if n >= MAX_DIAL:
+            break
+        t = threading.Thread(target=one, args=(pid,), daemon=True)
+        t.start()
+        threads.append(t)
+        n += 1
+    for t in threads:
+        t.join(timeout=50)
+    return n
+
+
+def discover_loop():
+    """Find other Magick Orbs and stay connected to them.
+
+    Floodsub only reaches currently-connected subscribers. Public IPFS peers
+    are not on our topic, so two Orbs both 'on IPFS' still miss each other
+    until we swarm-connect. findprovs(rendezvous) is the directory; peer ids
+    already in the registry are redialed too, in case the DHT answer is partial.
     """
     time.sleep(20)  # let kubo finish boot + first provide
     while True:
         try:
             r = sh("findprovs", RENDEZVOUS_CID, timeout=90)
             lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-            pids = [ln for ln in lines if _looks_like_peer_id(ln)]
-            sem = threading.Semaphore(8)
-            threads = []
-
-            def one(pid):
-                with sem:
-                    keep_connected(pid, [])
-
-            for pid in pids:
-                t = threading.Thread(target=one, args=(pid,), daemon=True)
-                t.start()
-                threads.append(t)
-            for t in threads:
-                t.join(timeout=45)
-            log("dht rendezvous: %d orb(s) (findprovs %d line(s))" % (len(pids), len(lines)))
+            providers = []
+            for ln in lines:
+                if _looks_like_peer_id(ln) and ln != SELF_PID and ln not in providers:
+                    providers.append(ln)
+            pids = []
+            seen = set()
+            for pid in providers + seen_peer_ids():
+                if pid in seen or pid == SELF_PID:
+                    continue
+                seen.add(pid)
+                pids.append(pid)
+            n = _dial_peers(pids)
+            try:
+                write_json_atomic(MESH, {
+                    "beacon": RENDEZVOUS_CID,
+                    "providers": providers,
+                    # This node plus every other provider the DHT just named.
+                    "orbs_on_beacon": len(providers) + (1 if SELF_PID else 0),
+                    "dialed": n,
+                    "updated_ms": int(time.time() * 1000),
+                })
+            except Exception as e:
+                log("mesh write failed:", e)
+            log("mesh: %d on beacon, dialed %d" % (len(providers) + 1, n))
         except Exception as e:
             log("dht rendezvous failed:", e)
         time.sleep(DISCOVER_EVERY)
+
+
+def beacon_loop():
+    """Keep this node in the DHT directory of live Orbs."""
+    time.sleep(10)
+    while True:
+        ok = False
+        try:
+            r = sh("beacon", timeout=40)
+            cid = (r.stdout or "").strip().splitlines()[-1] if (r.stdout or "").strip() else ""
+            if r.returncode == 0 and cid.startswith("ba"):
+                log("rendezvous beacon", cid)
+                ok = True
+            else:
+                err = ((r.stderr or "") or (r.stdout or "")).strip().replace("\n", " ")
+                log("beacon pin failed", err[:180])
+        except Exception as e:
+            log("beacon failed:", e)
+        # A restart often races the first pin. Try again shortly instead of
+        # waiting out the full reprovide interval.
+        time.sleep(BEACON_EVERY if ok else 20)
 
 
 def wait_for_daemon():
@@ -413,10 +523,16 @@ def wait_for_daemon():
 def main():
     global SELF_PID
     os.makedirs(MODELS_DIR, exist_ok=True)
-    wait_for_daemon()
-    SELF_PID = self_peer_id()
+    # `up` restarts kubo once for the gateway page. Don't cache an empty id
+    # from the gap between those two processes.
+    while not SELF_PID:
+        wait_for_daemon()
+        SELF_PID = self_peer_id()
+        if not SELF_PID:
+            time.sleep(2)
     log("online; gossiping on", TOPIC, "as", SELF_PID)
     threading.Thread(target=sub_loop, daemon=True).start()
+    threading.Thread(target=beacon_loop, daemon=True).start()
     threading.Thread(target=discover_loop, daemon=True).start()
     pub_loop()
 

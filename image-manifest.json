@@ -4,19 +4,19 @@
   "patreon": "https://www.patreon.com/AeonForge7",
   "tracks": {
     "pi4": {
-      "version": 118,
-      "name": "v118",
-      "published": "2026-09-21",
+      "version": 119,
+      "name": "v119",
+      "published": "2026-09-23",
       "codename": "bookworm",
-      "notes": "Raspberry Pi 4 (Bookworm). Orbit console type: Orbitron inscriptions, Share Tech Mono readouts, violet signal, cyan live. Includes v117 WAN Model Share.",
+      "notes": "Raspberry Pi 4 (Bookworm). Orbs join one WAN mesh over public relays with no port forward. Downloads seed unless you opt out. Live orb count and shared bytes on Model Share.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     },
     "pi5": {
-      "version": 118,
-      "name": "v118",
-      "published": "2026-09-21",
+      "version": 119,
+      "name": "v119",
+      "published": "2026-09-23",
       "codename": "trixie",
-      "notes": "Raspberry Pi 5 (Trixie). Orbit console type: Orbitron inscriptions, Share Tech Mono readouts, violet signal, cyan live. Includes v117 WAN Model Share, Hailo, vision/voice/UPS.",
+      "notes": "Raspberry Pi 5 (Trixie). Orbs join one WAN mesh over public relays with no port forward. Downloads seed unless you opt out. Live orb count and shared bytes on Model Share. Hailo, vision/voice/UPS.",
       "patreon_url": "https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
     }
   }

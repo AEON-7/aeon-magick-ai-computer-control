@@ -105,18 +105,33 @@ configure() {
   # delivery intermittent. Raise the watermarks so inter-Orb links survive.
   ipfs_cmd config --json Swarm.ConnMgr.LowWater 200 >/dev/null 2>&1 || true
   ipfs_cmd config --json Swarm.ConnMgr.HighWater 500 >/dev/null 2>&1 || true
-  # AcceleratedDHTClient makes provider lookups (finding who hosts a CID) far
-  # faster on a wide network — worth the modest memory on a Pi 4/5.
-  ipfs_cmd config --json Experimental.AcceleratedDHTClient true >/dev/null 2>&1 || true
-  ipfs_cmd config --json Routing.AcceleratedDHTClient true >/dev/null 2>&1 || true
-  # WAN Model Share. lowpower turns off RelayService (we don't *be* a relay) and
-  # AutoNAT-as-a-server; we still need to USE relays, hole-punch, UPnP, and
-  # announce pinned CIDs on the Amino DHT so strangers can find us.
+  # Do NOT enable Routing.AcceleratedDHTClient. It crawls the entire DHT
+  # every hour. Kubo's low-memory guide says that OOM-kills a Pi, and Amino
+  # findprovs of the rendezvous beacon does not need a full routing table.
+  # The old Experimental.AcceleratedDHTClient key was removed in 0.21; setting
+  # it makes `ipfs config` error and must not be written.
+  ipfs_cmd config --json Routing.AcceleratedDHTClient false >/dev/null 2>&1 || true
+  # WAN mesh with no router changes. A node behind NAT dials out to the public
+  # relay network and gets a /p2p-circuit address; other Orbs dial that. Hole
+  # punching and UPnP stay on only as a silent upgrade when the network allows
+  # it — the operator never opens a port. Reachable Orbs also serve a bounded
+  # relay (not the lowpower default of "off") so one public instance can carry
+  # the NATed ones. Do not set RelayClient.StaticRelays: a static list disables
+  # kubo's automatic discovery of the public relays.
+  ipfs_cmd config --json Swarm.Transports.Network.Relay true >/dev/null 2>&1 || true
   ipfs_cmd config --json Swarm.RelayClient.Enabled true >/dev/null 2>&1 || true
   ipfs_cmd config --json Swarm.EnableHolePunching true >/dev/null 2>&1 || true
   ipfs_cmd config --json Swarm.DisableNatPortMap false >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.RelayService.Enabled true >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.RelayService.MaxReservations 24 >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.RelayService.MaxCircuits 48 >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.RelayService.ConnectionDataLimit 1073741824 >/dev/null 2>&1 || true
+  ipfs_cmd config --json Swarm.RelayService.ConnectionDurationLimit '"2h"' >/dev/null 2>&1 || true
   ipfs_cmd config --json Provide.Enabled true >/dev/null 2>&1 || true
-  ipfs_cmd config Reprovider.Interval 22h >/dev/null 2>&1 || true
+  # kubo ≥0.42 deleted Reprovider.*. `ipfs config Reprovider.Interval` writes
+  # that object back, and the daemon then exits immediately with
+  # "Deprecated configuration detected". Provide.DHT.Interval is the replacement.
+  ipfs_cmd config --json Provide.DHT.Interval '"22h"' >/dev/null 2>&1 || true
   configure_announce
   # NB: the branded gateway landing page is NOT set here — it needs to `ipfs add`
   # content, which is unreliable offline (before the daemon is up) on newer kubo.
@@ -308,16 +323,61 @@ daemon_restart() {
   daemon_down; sleep 1; daemon_up
 }
 
+# kubo ≥0.42 refuses to start while the removed Reprovider (or Provider) object
+# is in the repo config. v118's configure() wrote Reprovider.Interval on every
+# `up`, so the daemon crash-looped and the console hid the drive controls
+# (those only render once the daemon is active). Delete the dead keys. Run this
+# with the daemon stopped — a live kubo rewrites config from memory on shutdown.
+scrub_legacy_provide() {
+  [ -f "$DIR/config" ] || return 0
+  python3 - "$DIR/config" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        c = json.load(f)
+except Exception:
+    sys.exit(0)
+changed = False
+for dead in ("Reprovider", "Provider"):
+    if dead in c:
+        c.pop(dead, None)
+        changed = True
+if changed:
+    with open(p, "w") as f:
+        json.dump(c, f, indent=2)
+        f.write("\n")
+    os.chmod(p, 0o600)
+PY
+  chown "$SVCUSER:$SVCUSER" "$DIR/config" 2>/dev/null || true
+}
+
+# Stop without disabling the unit. daemon_down() also `systemctl disable`s,
+# which would turn IPFS off across reboot just to rewrite config.
+stop_daemon_for_reconfig() {
+  if have_systemd; then
+    systemctl stop aeon-ipfs.service 2>/dev/null || true
+    return
+  fi
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$PIDFILE"
+  fi
+  pkill -f "$IPFSBIN daemon" 2>/dev/null || true
+  sleep 0.5
+}
+
 cmd_up() {
   ensure_user || return 1
   ensure_bin || return 1
   ensure_init || return 1
-  configure
+  # RelayClient / Provide / hole-punch are read at daemon start. Stop first so
+  # a crash-looping unit isn't rewriting config while we scrub it.
+  stop_daemon_for_reconfig
   clear_stale_lock
-  # RelayClient / Provide / hole-punch are read at daemon start. If kubo is
-  # already up (hotpatch / `up` on a running Orb), restart so WAN discovery
-  # actually takes effect.
-  if daemon_active; then daemon_restart; else daemon_up; fi
+  configure
+  scrub_legacy_provide
+  daemon_up
   ensure_landing
   ensure_rendezvous
 }
@@ -380,7 +440,20 @@ cmd_peers()   { ipfs_cmd swarm peers 2>/dev/null; }
 # Amino DHT: list PeerIDs currently providing the rendezvous beacon (or a CID).
 cmd_findprovs() {
   local cid="${1:-$RENDEZVOUS_CID}"
-  ipfs_cmd routing findprovs -n 100 "$cid" 2>/dev/null || ipfs_cmd dht findprovs "$cid" 2>/dev/null
+  # -n is a cap, not a guarantee. The modelshare daemon unions this with the
+  # peer ids other Orbs gossip, so one partial DHT answer still reaches the mesh.
+  ipfs_cmd routing findprovs -n 200 "$cid" 2>/dev/null || ipfs_cmd dht findprovs "$cid" 2>/dev/null
+}
+
+# Pin the rendezvous beacon and re-announce it. Safe to call on a live daemon
+# (modelshare does, every few minutes) so a node is findable without waiting
+# for the 22h reprovide cycle. Provide runs in the background.
+cmd_beacon() {
+  local cid
+  cid=$(printf '%s\n' "$RENDEZVOUS_JSON" | ipfs_cmd block put --cid-codec=raw --mhtype=sha2-256 --pin 2>/dev/null || true)
+  [ -n "$cid" ] || { log "beacon pin failed"; return 1; }
+  ( ipfs_cmd routing provide "$RENDEZVOUS_CID" >/dev/null 2>&1 || true ) &
+  echo "$cid"
 }
 # Bitswap ledger (bytes served vs received) — powers the Model Karma gauge.
 cmd_bitswap_stat() { ipfs_cmd bitswap stat 2>/dev/null; }
@@ -445,7 +518,7 @@ cmd_purge() {
 case "${1:-}" in
   up)      cmd_up ;;
   down)    cmd_down ;;
-  prestart) clear_stale_lock ;;
+  prestart) clear_stale_lock; scrub_legacy_provide ;;
   status)  cmd_status ;;
   storage) shift; cmd_storage "$@" ;;
   pin)     shift; cmd_pin "$@" ;;
@@ -460,6 +533,7 @@ case "${1:-}" in
   addrs)   cmd_addrs ;;
   peers)   cmd_peers ;;
   findprovs) shift; cmd_findprovs "$@" ;;
+  beacon)  cmd_beacon ;;
   bitswap-stat) cmd_bitswap_stat ;;
   pub)     shift; cmd_pub "$@" ;;
   sub)     shift; cmd_sub "$@" ;;

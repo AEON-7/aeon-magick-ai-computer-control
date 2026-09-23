@@ -29,11 +29,11 @@ docker run -d --name aeon-orb --restart unless-stopped \
 2. Set an admin password in the setup wizard.
 3. You're on the Agent Dashboard. IPFS + Model Share come up with the container.
 
-**4001 tcp/udp** is the IPFS swarm. Publishing it lets other Magick Orbs (a Pi across the WAN, another container) hole-punch or dial you so Model Share catalogs and downloads work. Discovery itself uses the public Amino DHT (every Orb pins a well-known rendezvous CID) — no account, no fleet token, no need to know the other person's LAN IP. If 4001 is firewalled, catalogs may still arrive over a circuit relay; multi-GB model fetches usually need a direct path (this port, UPnP, IPv6, or hole punch).
+You do not open a port. Every container dials the public IPFS relay network, pins the same rendezvous beacon, and stays peered with every other live Orb it learns about. Catalogs move over that relayed link. Publishing **4001 tcp/udp** is optional: when the host happens to be reachable it makes large downloads faster, and this container can then carry traffic for Orbs that are behind NAT. Nothing has to be configured on the router.
 
 Optional: pass `-e AEON_IPFS_ANNOUNCE=<this-machine-ipv4>` so the node advertises the host address instead of Docker's `172.x`.
 
-Pin a version with `:v118` instead of `:latest` if you don't want surprise pulls.
+Pin a version with `:v120` instead of `:latest` if you don't want surprise pulls.
 
 ### Compose (same image)
 
@@ -47,7 +47,7 @@ docker compose up -d
 |------|------|
 | `8443` → 443 | Web UI + REST + MCP (HTTPS) |
 | `8080` → 8080 | IPFS gateway (once IPFS is up) |
-| `4001` tcp+udp | IPFS swarm (WAN Model Share dial / hole-punch) |
+| `4001` tcp+udp | IPFS swarm. Optional. The mesh joins through public relays with no port opened; publishing this only speeds large downloads |
 
 State lives in two named volumes: `aeon-etc` (admin auth, TLS cert, API tokens)
 and `aeon-data` (IPFS repo + model library). `docker rm` does not delete them.

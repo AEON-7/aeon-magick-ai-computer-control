@@ -23,8 +23,8 @@ install -m 0755 "${THIS_DIR}/files/aeon-update" "${ROOTFS_DIR}/usr/local/bin/aeo
 #    from the target rootfs's own os-release (bookworm for pi4, trixie for pi5).
 TRACK="${AEON_TARGET:-pi5}"
 case "$TRACK" in
-    pi4) DEFV=118 ;;
-    pi5) DEFV=118 ;;
+    pi4) DEFV=119 ;;
+    pi5) DEFV=119 ;;
     *)   DEFV=0 ;;
 esac
 VER="${AEON_IMAGE_VERSION:-$DEFV}"
