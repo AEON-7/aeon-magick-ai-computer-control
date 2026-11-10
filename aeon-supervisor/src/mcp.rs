@@ -288,7 +288,7 @@ fn tools_catalog() -> Value {
                  "List jobs on the running pod (progress of verified runs). Read-only.",
                  json!({"type":"object","required":["target"],"properties":{"target":{"type":"string"}}})),
             tool("system_image_updates",
-                 "Is a newer Aeon Orb IMAGE published for this Orb's hardware track? Compares the flashed image version (stamped on device) against the published manifest on GitHub. Returns {track, installed, latest, latest_name, update_available, notes, patreon_url}. Notify-only — flashing a new image is a manual Patreon download. Read-only.",
+                 "Is a newer Aeon Orb IMAGE published for this Orb's hardware track? Compares the flashed image version (stamped on device) against the published manifest on GitHub. Returns {track, installed, latest, latest_name, update_available, notes, support_url}. Notify-only — flashing a new image is a manual LotusMake download. Read-only.",
                  json!({"type":"object","properties":{}})),
             tool("os_update_check",
                  "Refresh the OS package lists and count how many system packages can be upgraded (how many are security). Returns {count, security, packages}. Read-only.",

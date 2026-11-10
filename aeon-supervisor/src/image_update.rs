@@ -9,8 +9,9 @@
 //! manifest published in the GitHub repo (raw.githubusercontent.com — no auth, no
 //! API rate limit, already a proven-reachable host in this codebase for DNS
 //! blocklists) to decide whether to nudge the operator to grab a newer image from
-//! Patreon. This is NOTIFY-ONLY — the Orb never self-flashes; the button just
-//! guides a backup + opens the Patreon download page.
+//! LotusMake (Patreon wrongfully shut down the AeonForge account, so premade images
+//! moved there). This is NOTIFY-ONLY — the Orb never self-flashes; the button just
+//! guides a backup + opens the LotusMake download page.
 
 use crate::api::AppState;
 use axum::extract::State;
@@ -20,23 +21,23 @@ use serde_json::{json, Value};
 const STAMP_PATH: &str = "/etc/aeon-image-version";
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/AEON-7/aeon-magick-ai-computer-control/main/image-manifest.json";
-const FALLBACK_PATREON: &str = "https://www.patreon.com/AeonForge7";
+const FALLBACK_SUPPORT: &str = "https://lotusmake.com/c/aeon-forge";
 
-/// Only surface a Patreon URL the manifest can't weaponize: it must be `https://`
-/// with a `patreon.com` host. The frontend feeds this straight into `window.open`,
+/// Only surface a LotusMake URL the manifest can't weaponize: it must be `https://`
+/// with a `lotusmake.com` host. The frontend feeds this straight into `window.open`,
 /// so a poisoned/compromised manifest must never be able to redirect the operator
 /// to an arbitrary (phishing) page — anything that doesn't validate falls back to
 /// the hardcoded creator page.
-fn safe_patreon(url: &str) -> String {
+fn safe_support_url(url: &str) -> String {
     let ok = url.trim().strip_prefix("https://").map(|rest| {
         let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        // Drop any userinfo (`user@host`) and port so `patreon.com@evil.com` and
+        // Drop any userinfo (`user@host`) and port so `lotusmake.com@evil.com` and
         // `evil.com:443` can't masquerade as the real host.
         let host = authority.rsplit('@').next().unwrap_or(authority);
         let host = host.split(':').next().unwrap_or(host);
-        host == "patreon.com" || host == "www.patreon.com" || host.ends_with(".patreon.com")
+        host == "lotusmake.com" || host == "www.lotusmake.com" || host.ends_with(".lotusmake.com")
     }).unwrap_or(false);
-    if ok { url.trim().to_string() } else { FALLBACK_PATREON.to_string() }
+    if ok { url.trim().to_string() } else { FALLBACK_SUPPORT.to_string() }
 }
 
 /// Runtime hardware track from the board model (mirrors `fleet::pi_model()`).
@@ -130,23 +131,23 @@ pub async fn image_updates(State(_s): State<AppState>) -> Json<Value> {
                     "installed": installed,
                     "installed_known": installed.is_some(),
                     "update_available": false,
-                    "patreon_url": FALLBACK_PATREON,
+                    "support_url": FALLBACK_SUPPORT,
                 })
             }
         };
-        let top_patreon = manifest
-            .get("patreon")
+        let top_support = manifest
+            .get("support")
             .and_then(|v| v.as_str())
-            .unwrap_or(FALLBACK_PATREON);
+            .unwrap_or(FALLBACK_SUPPORT);
         let t = manifest.get("tracks").and_then(|m| m.get(&track));
         let latest = t.and_then(|x| x.get("version")).and_then(|v| v.as_u64());
         let latest_name = t.and_then(|x| x.get("name")).and_then(|v| v.as_str()).map(String::from);
         let published = t.and_then(|x| x.get("published")).and_then(|v| v.as_str()).map(String::from);
         let notes = t.and_then(|x| x.get("notes")).and_then(|v| v.as_str()).map(String::from);
-        let patreon_url = safe_patreon(
-            t.and_then(|x| x.get("patreon_url"))
+        let support_url = safe_support_url(
+            t.and_then(|x| x.get("support_url"))
                 .and_then(|v| v.as_str())
-                .unwrap_or(top_patreon),
+                .unwrap_or(top_support),
         );
         let update_available = matches!((installed, latest), (Some(i), Some(l)) if l > i);
         json!({
@@ -159,7 +160,7 @@ pub async fn image_updates(State(_s): State<AppState>) -> Json<Value> {
             "update_available": update_available,
             "published": published,
             "notes": notes,
-            "patreon_url": patreon_url,
+            "support_url": support_url,
         })
     })
     .await

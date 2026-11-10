@@ -156,7 +156,7 @@ the `aeon-webcam` skill.
 ### System / OS updates — keep the Orb current + patched
 | Tool | What it does |
 |---|---|
-| `system_image_updates` | is a newer Orb **image** published for this hardware track? (stamped version vs the GitHub manifest) — notify-only; re-flash is a manual Patreon download. Read-only |
+| `system_image_updates` | is a newer Orb **image** published for this hardware track? (stamped version vs the GitHub manifest) — notify-only; re-flash is a manual LotusMake download. Read-only |
 | `os_update_check` | refresh apt + count upgradable / security OS packages. Read-only |
 | `os_update_apply` | apply all pending OS package upgrades (backgrounded; poll `os_update_status`; sets `reboot_required` on a kernel/firmware change) |
 | `os_update_status` | progress of an in-flight (or last) OS update. Read-only |

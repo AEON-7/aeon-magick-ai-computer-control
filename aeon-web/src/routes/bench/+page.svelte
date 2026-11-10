@@ -763,16 +763,16 @@
       class="rounded-sm border border-cursed-700/40 bg-cursed-900/10 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-3"
     >
       <div class="flex-1 text-sm text-ink-300 leading-relaxed">
-        <span class="text-cursed-300 font-mono">Build your own Orb.</span> Join the
-        <span class="text-cursed-200">AeonForge Patreon</span> for full compiled images.
+        <span class="text-cursed-300 font-mono">Build your own Orb.</span> Join
+        <span class="text-cursed-200">AeonForge on LotusMake</span> for full compiled images.
       </div>
       <a
-        href="https://www.patreon.com/AeonForge7/posts/happy-4th-of-162921493"
+        href="https://lotusmake.com/c/aeon-forge"
         target="_blank"
         rel="noopener"
         class="btn-primary text-sm py-2 px-4 rounded shrink-0 inline-flex items-center gap-1.5 self-start sm:self-auto"
       >
-        Join the Patreon <span aria-hidden="true">↗</span>
+        Join on LotusMake <span aria-hidden="true">↗</span>
       </a>
     </div>
   </main>

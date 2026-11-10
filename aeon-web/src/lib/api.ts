@@ -1753,7 +1753,7 @@ export interface ImageUpdates {
   update_available?: boolean;
   published?: string | null;
   notes?: string | null;
-  patreon_url?: string;
+  support_url?: string;
   err?: string;
 }
 export const imageUpdates = () => req<ImageUpdates>('GET', '/system/image-updates');

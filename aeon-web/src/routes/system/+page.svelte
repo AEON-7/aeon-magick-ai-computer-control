@@ -314,7 +314,7 @@
   // ── OS updates + new-image notifier ──
   // Two separate things: (1) keep the underlying Pi OS patched (apt), (2) notice
   // when a whole new Orb IMAGE has been published (v111/v112 → …) and guide the
-  // user to back up + re-flash from Patreon. The Orb never self-flashes.
+  // user to back up + re-flash from LotusMake. The Orb never self-flashes.
   let img: api.ImageUpdates | null = null;
 
   let osCheck: api.OsUpdateCheck | null = null;
@@ -325,7 +325,7 @@
   let autoOn: boolean | null = null;
   let autoBusy = false;
 
-  // Guided image upgrade: back up (encrypted, password) → then open Patreon.
+  // Guided image upgrade: back up (encrypted, password) → then open LotusMake.
   let showUpgrade = false;
   let upgradeStage: 'backup' | 'done' = 'backup';
   let upgradePw = '';
@@ -419,15 +419,15 @@
     } catch (e: any) { upgradeMsg = `✗ ${e?.message ?? 'backup failed'}`; }
     upgradeBusy = false;
   }
-  function goPatreon() {
-    // Defense in depth: the backend already sanitizes patreon_url, but never feed
+  function goSupport() {
+    // Defense in depth: the backend already sanitizes support_url, but never feed
     // an unvalidated (manifest-controlled) URL to window.open — only https +
-    // patreon.com, else the hardcoded creator page.
-    const FALLBACK = 'https://www.patreon.com/AeonForge7';
-    let u = img?.patreon_url || FALLBACK;
+    // lotusmake.com, else the hardcoded creator page.
+    const FALLBACK = 'https://lotusmake.com/c/aeon-forge';
+    let u = img?.support_url || FALLBACK;
     try {
       const p = new URL(u);
-      const okHost = p.hostname === 'patreon.com' || p.hostname.endsWith('.patreon.com');
+      const okHost = p.hostname === 'lotusmake.com' || p.hostname.endsWith('.lotusmake.com');
       if (p.protocol !== 'https:' || !okHost) u = FALLBACK;
     } catch {
       u = FALLBACK;
@@ -468,7 +468,7 @@
                     on:click={openUpgrade}>
               ↑ Back up &amp; get {img.latest_name ?? `v${img.latest}`}
             </button>
-            <span class="text-[11px] text-amber-100/60">Backs up your config first, then opens Patreon to download.</span>
+            <span class="text-[11px] text-amber-100/60">Backs up your config first, then opens LotusMake to download.</span>
           </div>
         </section>
       {:else if img && img.installed_known === false && img.latest != null}
@@ -916,7 +916,7 @@
     </div>
   </main>
 
-  <!-- ─── Guided image upgrade: back up → Patreon ─── -->
+  <!-- ─── Guided image upgrade: back up → LotusMake ─── -->
   {#if showUpgrade}
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
          role="presentation" on:click|self={() => (showUpgrade = false)}>
@@ -928,7 +928,7 @@
           <p class="text-xs text-zinc-500 leading-relaxed">
             Re-flashing wipes the SD card. <strong>Back up your config first</strong> — device +
             network settings, identities, keys, macros, and your Model Share library — then download
-            the new image from Patreon and restore the backup after flashing.
+            the new image from LotusMake and restore the backup after flashing.
           </p>
         </header>
 
@@ -955,14 +955,14 @@
             <p class="text-sm text-live-300 font-mono">{upgradeMsg}</p>
           </div>
           <p class="text-xs text-zinc-500 leading-relaxed">
-            Now grab {img?.latest_name ?? 'the latest image'} from Patreon, flash it with Raspberry Pi
+            Now grab {img?.latest_name ?? 'the latest image'} from LotusMake, flash it with Raspberry Pi
             Imager, boot the Orb, and restore your backup from the <strong>Configuration backup</strong>
             section on this page.
           </p>
           <div class="flex items-center justify-end gap-2 pt-1">
             <button class="text-sm text-zinc-400 hover:text-zinc-200 px-3 py-1.5" on:click={() => (showUpgrade = false)}>Close</button>
-            <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40" on:click={goPatreon}>
-              Open Patreon ↗
+            <button class="btn-primary text-sm hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40" on:click={goSupport}>
+              Open LotusMake ↗
             </button>
           </div>
         {/if}
