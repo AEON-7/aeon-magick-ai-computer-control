@@ -93,8 +93,9 @@ async function req<T>(
 
 export const getMe = () => req<MeResponse>('GET', '/auth/me');
 
-export const setupPassword = (password: string, username = 'admin') =>
+export const setupPassword = (password: string, username = 'admin', code = '') =>
   req<{ ok: boolean; user: string }>('POST', '/setup/password', {
+    code,
     username,
     password,
   });
@@ -2023,6 +2024,7 @@ export interface HailoModel {
   license?: string;
   use_for?: string;       // short "good for OCR / chat / …" blurb
   runtime?: 'npu' | 'cpu' | string;  // cpu = sherpa-onnx voice stack (TTS)
+  shared_cid?: string;    // set when this model is also seeded on Model Share
 }
 
 /** Whole-subsystem snapshot driving the three dashboard states. */

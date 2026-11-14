@@ -128,6 +128,15 @@ async fn main() -> Result<()> {
     // OrbNet self-heal: finish provisioning if activation was interrupted.
     tokio::spawn(orbnet::reconcile_on_boot());
 
+    // Model Share: sign what this Orb shared before it had a device key. Runs on
+    // every flavour (Pi and the headless server container both share models).
+    tokio::spawn(async {
+        let n = tokio::task::spawn_blocking(ipfs::upgrade_catalog_signatures).await.unwrap_or(0);
+        if n > 0 {
+            eprintln!("model share: signed {n} previously unsigned model(s) this Orb originated");
+        }
+    });
+
     // Pi / host-appliance-only background tasks — skipped in the headless
     // server container (no WiFi captive portal, no host iptables/firewall,
     // no Hailo accelerator, no USB-net target file server, no DNSCrypt).
@@ -135,6 +144,13 @@ async fn main() -> Result<()> {
         tokio::spawn(captive::serve());
         tokio::spawn(dns_log::run_refresh_loop());
         tokio::spawn(hailo::reconcile_on_boot());
+        // Put the saved user firewall rules back in force (after the network
+        // services have had a moment to build their own chains).
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            let _ = tokio::task::spawn_blocking(firewall::apply_at_boot).await;
+        });
+        tokio::spawn(hailo::reconcile_model_share_on_boot());
         // Ensure the AEON_DROP iptables chain exists so DROP rules get logged.
         firewall::ensure_drop_chain();
         // Target-facing HTTP file server (USB-net), off by default.

@@ -180,6 +180,13 @@ impl Stores {
     }
 
     pub fn find_macro_path(&self, name: &str) -> Option<PathBuf> {
+        // Enforced HERE, not just in the REST handlers: the MCP resources/read
+        // and prompts/get paths call this directly, and `dir.join` of a name
+        // starting with "/" (or holding "..") leaves the directory entirely —
+        // which let any token, even read-only, read /etc/aeon/auth.toml.
+        if !safe_name(name) {
+            return None;
+        }
         for dir in [&self.user_macros, &self.shipped_macros] {
             let p = dir.join(format!("{name}.toml"));
             if p.exists() {
@@ -190,6 +197,9 @@ impl Stores {
     }
 
     pub fn find_prompt_path(&self, name: &str) -> Option<PathBuf> {
+        if !safe_name(name) {
+            return None;
+        }
         for dir in [&self.user_prompts, &self.shipped_prompts] {
             for ext in ["txt", "md"] {
                 let p = dir.join(format!("{name}.{ext}"));
@@ -519,3 +529,19 @@ pub async fn delete_prompt(
     }
     (StatusCode::NOT_FOUND, "no user prompt by that name").into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_names_are_accepted() {
+        for bad in ["", "/etc/aeon/auth", "../../etc/aeon/auth", "a/b", "a.b", "a b", "..", "a\0b"] {
+            assert!(!safe_name(bad), "{bad:?} should be refused");
+        }
+        for ok in ["open-spotlight", "agent_quickstart", "m1"] {
+            assert!(safe_name(ok), "{ok:?} should be allowed");
+        }
+    }
+}
+

@@ -25,9 +25,20 @@
     origin_id?: string; origin_label?: string;
     verified?: boolean; source?: string;
   };
-  type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[] };
+  type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[]; is_origin?: boolean };
   type Sig = { ok: boolean; name: string; fp: string };
-  type Row = { entry: Entry; hosts: Host[]; local: boolean; host_count?: number; star_count?: number; starred?: boolean; signature?: Sig | null };
+  // Who a model is credited to, and how much this Orb has reason to trust them.
+  // `standing`: unsigned | new | proven (a download from them verified here) |
+  // trusted / blocked (your decision) | failed (their bytes failed verification here).
+  type Origin = {
+    key: string; fp: string; name: string; signed: boolean; delegated: boolean;
+    standing: 'unsigned' | 'new' | 'proven' | 'trusted' | 'blocked' | 'failed' | 'mirror';
+    reputation: number; seeder_online: boolean;
+    upstream?: string; // set on an unmodified mirror of a vendor release (e.g. the Hailo model zoo)
+    content?: { manifest: boolean; files_ok: boolean; origin_ok: boolean; upstream?: string; checked_ms: number } | null;
+    earlier_claim?: { key: string; fp: string; first_seen_ms: number } | null;
+  };
+  type Row = { entry: Entry; hosts: Host[]; local: boolean; host_count?: number; star_count?: number; starred?: boolean; signature?: Sig | null; origin?: Origin; blocked?: boolean };
   type Karma = { served_bytes: number; downloaded_bytes: number; ratio: number };
   type NodeStatus = {
     enabled: boolean; daemon: string; peers: number; gateway_port: number;
@@ -342,6 +353,7 @@
         const r = await api('/models/registry');
         if (r?.ok) {
           rows = r.models ?? [];
+          if (detail) detail = rows.find((x) => x.entry.cid === detail?.entry.cid) ?? detail;
           tasks = r.tasks ?? {};
           peerCount = r.peer_count ?? 0;
           if (r.network) net = { ...net, ...r.network, seeding: r.network.seeding !== false };
@@ -544,6 +556,47 @@
       if (r && r.ok === false) err = r.err || 'edit failed';
     } catch (e: any) { err = e?.message ?? 'edit failed'; }
     saving = false; showShare = false; resetForm(); await load();
+  }
+
+  // ── Origin + publisher trust ───────────────────────────────────────────────
+  const STANDING: Record<string, { icon: string; cls: string; label: string }> = {
+    trusted:  { icon: '🛡', cls: 'text-emerald-300', label: 'trusted by you' },
+    proven:   { icon: '🔏', cls: 'text-emerald-300/80', label: 'a download from this publisher verified on this Orb' },
+    new:      { icon: '🔏', cls: 'text-ink-300', label: 'signed, but this Orb has not verified anything from this publisher yet' },
+    failed:   { icon: '⚠', cls: 'text-red-400', label: 'a download from this publisher FAILED verification on this Orb' },
+    blocked:  { icon: '⛔', cls: 'text-red-400', label: 'blocked by you' },
+    unsigned: { icon: '·', cls: 'text-ink-600', label: 'unsigned — nobody has put a key behind this model' },
+    mirror:   { icon: '⧉', cls: 'text-sky-300', label: 'an unmodified mirror of a vendor release — every Orb that downloads the same file seeds this same copy' },
+  };
+  const standing = (o?: Origin) => STANDING[o?.standing ?? 'unsigned'] ?? STANDING.unsigned;
+  function originTitle(row: Row): string {
+    const o = row.origin;
+    if (o?.upstream) return `Mirror of ${o.upstream}: ${STANDING.mirror.label}. Seeded by ${row.host_count ?? row.hosts.length} Orb(s).`;
+    if (!o?.signed) return STANDING.unsigned.label;
+    const bits = [`Published by ${o.name || 'anon'} (key ${o.fp}${o.delegated ? ', signing through an Orb' : ''}) — ${standing(o).label}.`];
+    bits.push(`Reputation ${o.reputation}/100.`);
+    if (o.seeder_online) bits.push('The original seeder is online now.');
+    if (o.content?.origin_ok) bits.push('Its files matched the signed manifest when this Orb downloaded it.');
+    if (o.earlier_claim) bits.push(`The same weights were first seen here from a different key (${o.earlier_claim.fp}) — this may be a re-publication.`);
+    return bits.join(' ');
+  }
+  // Put this Orb's key behind a model it shared before signing was automatic.
+  async function claimModel(cid: string) {
+    try {
+      const r = await api('/models/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cid }) });
+      if (r?.ok === false) { toast(r.err || 'Could not sign that model', 'error'); return; }
+      toast(`Signed with this Orb's key (${r.signed_by}).`, 'success');
+      await load();
+    } catch (e: any) { toast(e?.message ?? 'Could not sign that model', 'error'); }
+  }
+  async function setTrust(key: string, patch: { trusted?: boolean; blocked?: boolean }) {
+    try {
+      const r = await api('/models/trust', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, ...patch }),
+      });
+      if (r?.ok === false) { toast(r.err || 'Could not save that', 'error'); return; }
+      await load();
+    } catch (e: any) { toast(e?.message ?? 'Could not save that', 'error'); }
   }
 
   // Minimal, XSS-safe markdown → HTML for READMEs from untrusted Orbs: escape
@@ -895,7 +948,7 @@
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-1.5">
                   <button class="font-mono text-sm text-ink-100 truncate hover:text-cursed-300 text-left" on:click={() => (detail = row)} title={row.entry.name}>{row.entry.name}</button>
-                  {#if row.entry.verified}<span class="shrink-0 text-cursed-300" title="Verified — every file's SHA-256 matches the hash HuggingFace published">✓</span>{/if}
+                  {#if row.entry.verified}<span class="shrink-0 text-cursed-300" title={row.local ? "Every file's SHA-256 matched the hash its source published when it was imported" : "The publisher attests every file matched the hash its source published. That claim is part of what they signed, and this Orb re-checks the signed file list when it downloads."}>✓</span>{/if}
                 </div>
                 <div class="text-[11px] text-ink-500 font-mono flex flex-wrap gap-x-2">
                   {#if c.params}<span>{c.params}</span>{/if}
@@ -925,11 +978,16 @@
                 <span class="text-sm leading-none">{row.starred ? '★' : '☆'}</span>{row.star_count ?? 0}
               </button>
               <span class="text-ink-500" title="Orbs hosting this model across the network — wider adoption means faster, more resilient downloads">⬡ {row.host_count ?? row.hosts.length} {(row.host_count ?? row.hosts.length) === 1 ? 'orb' : 'orbs'}</span>
-              {#if row.signature}
-                <span class="{row.signature.ok ? 'text-emerald-300' : 'text-red-400'}"
-                      title={row.signature.ok ? `Signed by @${row.signature.name || 'anon'} (key ${row.signature.fp}) — signature verified against this model` : 'Signature does NOT verify — the claimed author is not proven'}>
-                  {row.signature.ok ? '🔏' : '⚠'} {row.signature.name || 'anon'}·{row.signature.fp}
+              {#if row.origin?.upstream}
+                <span class="{STANDING.mirror.cls}" title={originTitle(row)}>{STANDING.mirror.icon} {row.origin.upstream}</span>
+              {:else if row.origin?.signed}
+                <span class="{standing(row.origin).cls}" title={originTitle(row)}>
+                  {standing(row.origin).icon} {row.origin.name || 'anon'}·{row.origin.fp}{#if row.origin.seeder_online}<span class="text-emerald-400" aria-label="original seeder online"> ●</span>{/if}{#if row.origin.earlier_claim}<span class="text-amber-400"> ⚠</span>{/if}
                 </span>
+              {:else if row.signature && !row.signature.ok}
+                <span class="text-red-400" title="Signature does NOT verify — the claimed author is not proven">⚠ {row.signature.name || 'anon'}·{row.signature.fp}</span>
+              {:else}
+                <span class="text-ink-600" title={STANDING.unsigned.label}>unsigned</span>
               {/if}
             </div>
 
@@ -1055,7 +1113,7 @@
           <div class="flex items-center gap-2">
             <div class="font-mono text-lg text-ink-100 truncate">{detail.entry.name}</div>
             {#if detail.entry.verified}
-              <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cursed-500/15 text-cursed-300 border border-cursed-500/40" title="Every file's SHA-256 matches the hash the source published">✓ verified</span>
+              <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cursed-500/15 text-cursed-300 border border-cursed-500/40" title={detail.local ? "Every file's SHA-256 matched the hash the source published" : "The publisher attests every file matched the hash the source published"}>✓ {detail.local ? 'verified' : 'attested'}</span>
             {/if}
             {#if c.nsfw}
               <span class="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-red-900/50 text-red-300 border border-red-700/50">18+</span>
@@ -1085,6 +1143,69 @@
         {#if detail.entry.origin_label}<div class="text-ink-500">shared by</div><div class="text-ink-200 text-right truncate">{detail.entry.origin_label}</div>{/if}
         <div class="text-ink-500">sha256</div><div class="text-ink-200 text-right truncate" title={detail.entry.sha256}>{(detail.entry.sha256 ?? '').slice(0, 16)}…</div>
       </div>
+      <!-- origin: who first published this, and what this Orb knows about them -->
+      {#if detail.origin}
+        {@const o = detail.origin}
+        <div class="rounded border border-ink-800 bg-ink-950/60 p-3 space-y-2 text-[12px] font-mono">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-ink-500 text-[10px] uppercase tracking-wide">origin</div>
+              {#if o.upstream}
+                <div class="{STANDING.mirror.cls} truncate">{STANDING.mirror.icon} {o.upstream}<span class="text-ink-500"> · vendor release, mirrored</span></div>
+              {:else if o.signed}
+                <div class="{standing(o).cls} truncate">{standing(o).icon} {o.name || 'anon'}<span class="text-ink-500"> · {o.fp}</span></div>
+              {:else}
+                <div class="text-ink-400">unsigned</div>
+              {/if}
+            </div>
+            {#if !o.signed && detail.local}
+              <button class="shrink-0 px-2 py-1 rounded border border-cursed-500/40 text-cursed-300 hover:bg-cursed-500/10"
+                      title="If you shared this model from this Orb, sign it so the network can tell who published it"
+                      on:click={() => detail && claimModel(detail.entry.cid)}>Sign as mine</button>
+            {/if}
+            {#if o.signed && !o.upstream}
+              <div class="shrink-0 text-right" title="Worked out on this Orb. Your own trust decision counts most, then downloads this Orb verified itself, then how many Orbs mirror the publisher's models; stars count least because they are the easiest to fake.">
+                <div class="text-ink-500 text-[10px] uppercase tracking-wide">reputation</div>
+                <div class="text-ink-100">{o.reputation}<span class="text-ink-600">/100</span></div>
+              </div>
+            {/if}
+          </div>
+          <ul class="text-ink-400 space-y-0.5 leading-relaxed">
+            <li>{standing(o).label}</li>
+            {#if o.signed && !o.upstream}
+              <li>{o.seeder_online ? '● the original seeder is online now' : '○ the original seeder is not online — served by mirrors'}</li>
+              {#if o.delegated}<li>signed by an Orb on this publisher's behalf</li>{/if}
+            {/if}
+            {#if o.content}
+              <li class={o.content.files_ok ? 'text-emerald-300/80' : 'text-ink-400'}>
+                {#if o.content.origin_ok}✓ files matched the publisher's signed manifest on this Orb
+                {:else if o.content.upstream}✓ files match the manifest · unmodified mirror of {o.content.upstream}
+                {:else if o.content.files_ok}✓ file hash matched what was advertised (older card, no signed manifest)
+                {:else}not yet checked against a manifest{/if}
+              </li>
+            {:else if !detail.local}
+              <li>not downloaded here yet — the files are checked against the signed manifest when you download</li>
+            {/if}
+            {#if o.earlier_claim}
+              <li class="text-amber-300">⚠ the same weights were first seen on this Orb from a different key ({o.earlier_claim.fp}) — this may be a re-publication</li>
+            {/if}
+          </ul>
+          {#if o.signed && !o.upstream}
+            <div class="flex flex-wrap gap-2 pt-1">
+              {#if o.standing === 'trusted'}
+                <button class="px-2 py-1 rounded border border-ink-700 text-ink-300 hover:text-ink-100" on:click={() => setTrust(o.key, { trusted: false })}>Stop trusting</button>
+              {:else}
+                <button class="px-2 py-1 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10" on:click={() => setTrust(o.key, { trusted: true })}>Trust this publisher</button>
+              {/if}
+              {#if o.standing === 'blocked'}
+                <button class="px-2 py-1 rounded border border-ink-700 text-ink-300 hover:text-ink-100" on:click={() => setTrust(o.key, { blocked: false })}>Unblock</button>
+              {:else}
+                <button class="px-2 py-1 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10" on:click={() => setTrust(o.key, { blocked: true })}>Block</button>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
       {#if c.tags?.length}
         <div class="flex flex-wrap gap-1">
           {#each c.tags as t}<span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-800 text-ink-300">{t}</span>{/each}

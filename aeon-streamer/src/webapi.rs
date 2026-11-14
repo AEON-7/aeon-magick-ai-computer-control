@@ -328,11 +328,38 @@ async fn h264_stream(State(state): State<SharedState>) -> Response<Body> {
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response())
 }
 
+/// A snapshot older than this is not "the screen now". Generous next to the
+/// normal refresh interval (well under a second) so a brief hiccup or a
+/// capture relaunch does not turn into an error.
+const STALE_SNAPSHOT_MS: u64 = 5_000;
+
 /// Serve the latest JPEG that the H.264 pipeline's ffmpeg writes atomically
 /// to the snapshot path. Agents depend on /snapshot returning a frame even
 /// when the live view is H.264.
 async fn serve_snapshot_from_file(state: &SharedState) -> Response<Body> {
     let path = state.0.cfg.output.snapshot_path.clone();
+    // How old the frame is. ffmpeg rewrites this file several times a second
+    // while it has a source; when the source or ffmpeg dies the file simply
+    // stops changing. Serving it regardless meant an agent got 200 and a
+    // picture of the screen as it was minutes ago, and acted on it.
+    let age_ms = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_millis() as u64);
+    if let Some(age) = age_ms {
+        if age > STALE_SNAPSHOT_MS {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("X-Frame-Age-Ms", age.to_string())
+                .header("Cache-Control", "no-store")
+                .body(Body::from(format!(
+                    "no live video — the last frame is {} s old (source disconnected or capture restarting)",
+                    age / 1000
+                )))
+                .unwrap_or_else(|_| (StatusCode::SERVICE_UNAVAILABLE, "stale frame").into_response());
+        }
+    }
     // Tiny tmpfs file; a blocking read here is microseconds. ffmpeg writes
     // with -atomic_writing (temp + rename), so a reader never catches a
     // torn frame.
@@ -341,6 +368,7 @@ async fn serve_snapshot_from_file(state: &SharedState) -> Response<Body> {
             .status(StatusCode::OK)
             .header("Content-Type", "image/jpeg")
             .header("Cache-Control", "no-store")
+            .header("X-Frame-Age-Ms", age_ms.unwrap_or(0).to_string())
             .body(Body::from(b))
             .unwrap_or_else(|_| {
                 (StatusCode::INTERNAL_SERVER_ERROR, "body build").into_response()

@@ -83,7 +83,21 @@ async fn post_type(
     Json(req): Json<TypeReq>,
 ) -> impl IntoResponse {
     let input_chars = req.text.chars().count();
-    match state.0.hid.type_str(&req.text) {
+    if input_chars > input::MAX_TYPE_CHARS {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"ok": false, "err": format!("at most {} characters per request — send the text in pieces", input::MAX_TYPE_CHARS)})),
+        );
+    }
+    // Typing is paced with sleeps. Run it on the blocking pool: on an async
+    // worker it stalls every other request the daemon is serving, including
+    // /release_all.
+    let st = state.clone();
+    let text = req.text;
+    let typed = tokio::task::spawn_blocking(move || st.0.hid.type_str(&text))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("typing task failed: {e}")));
+    match typed {
         Ok((typed, skipped)) => (
             StatusCode::OK,
             // `typed` and `skipped` are character counts (not bytes) — the
@@ -164,7 +178,13 @@ async fn post_key(
             );
         }
     }
-    match state.0.hid.chord(modifier, &keys, req.hold_ms) {
+    let hold_ms = req.hold_ms.min(input::MAX_HOLD_MS);
+    let st = state.clone();
+    let held_keys = keys.clone();
+    let done = tokio::task::spawn_blocking(move || st.0.hid.chord(modifier, &held_keys, hold_ms))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("key task failed: {e}")));
+    match done {
         Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "modifier": modifier, "keys": keys}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -193,8 +213,13 @@ async fn post_click(
         "middle" => 0x04,
         _ => return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "err": "button must be left/right/middle"}))),
     };
-    match state.0.hid.click(mask, req.count) {
-        Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "button": req.button, "count": req.count}))),
+    let count = req.count.min(input::MAX_CLICKS);
+    let st = state.clone();
+    let done = tokio::task::spawn_blocking(move || st.0.hid.click(mask, count))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("click task failed: {e}")));
+    match done {
+        Ok(_) => (StatusCode::OK, Json(json!({"ok": true, "button": req.button, "count": count}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "err": e.to_string()})),

@@ -203,8 +203,15 @@ fn rule_to_invocations(r: &Rule) -> Vec<Vec<String>> {
                 a.push("--to-ports".into());
                 a.push(target_arg.to_string());
             }
-            "DNAT" | "SNAT" if !target_arg.is_empty() => {
+            "DNAT" if !target_arg.is_empty() => {
                 a.push("--to-destination".into());
+                a.push(target_arg.to_string());
+            }
+            // SNAT rewrites the SOURCE. It was given --to-destination, which
+            // iptables rejects — so every SNAT rule failed to load, and (before
+            // apply_rules learned to carry on) took every other rule with it.
+            "SNAT" if !target_arg.is_empty() => {
+                a.push("--to-source".into());
                 a.push(target_arg.to_string());
             }
             _ => { /* nothing */ }
@@ -287,21 +294,43 @@ fn apply_rules(rf: &RulesFile) -> Result<(), String> {
     //    (DROP first, LOG second) — both use -I 1, so LOG lands above
     //    DROP in the chain. End-to-end ordering: [r1-LOG, r1-DROP,
     //    r2-LOG, r2-DROP, ..., system rules].
+    //
+    // A rule iptables refuses must not cost the others. This used to return at
+    // the first failure — after the sweep above had already removed everything
+    // — and since the newest rule is applied first, one bad rule left the
+    // firewall with NO user rules loaded while the console still listed them.
+    let mut failed: Vec<String> = Vec::new();
     for r in rf.rules.iter().rev() {
         for inv in rule_to_invocations(r) {
-            let st = Command::new("iptables")
+            let ok = Command::new("iptables")
                 .args(inv.iter().map(|s| s.as_str()))
                 .status()
-                .map_err(|e| format!("spawn iptables: {e}"))?;
-            if !st.success() {
-                return Err(format!(
-                    "iptables exited non-zero applying rule '{}'",
-                    r.id
-                ));
+                .map(|st| st.success())
+                .unwrap_or(false);
+            if !ok && !failed.contains(&r.id) {
+                failed.push(r.id.clone());
             }
         }
     }
-    Ok(())
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("iptables refused rule(s) {} — the other rules are loaded", failed.join(", ")))
+    }
+}
+
+/// Load the saved user rules into the kernel at startup. They were only ever
+/// applied when a rule was added, removed or moved, so after a reboot the
+/// console went on listing DROP rules that were no longer in force.
+pub fn apply_at_boot() {
+    let rf = read_rules();
+    if rf.rules.is_empty() {
+        return;
+    }
+    match apply_rules(&rf) {
+        Ok(()) => tracing::info!(count = rf.rules.len(), "firewall: saved user rules applied"),
+        Err(e) => tracing::warn!(error = %e, "firewall: some saved user rules could not be applied"),
+    }
 }
 
 /// Parse `iptables -t <table> -nvL <chain>` to extract (packets, bytes)
@@ -712,9 +741,15 @@ pub async fn add_rule(
             .into_response();
     }
     if let Err(e) = apply_rules(&rf) {
+        // Do not keep a rule the kernel would not take: left on disk it would
+        // be listed as active and fail again on every later apply. Drop it,
+        // save, and re-load the rules that were working.
+        rf.rules.pop();
+        let _ = write_rules(&rf);
+        let _ = apply_rules(&rf);
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "err": format!("apply: {e}")})),
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "err": format!("that rule was not accepted and has not been saved ({e})")})),
         )
             .into_response();
     }

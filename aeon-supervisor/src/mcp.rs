@@ -207,8 +207,8 @@ fn tools_catalog() -> Value {
                  "Pin an IPFS CID so this Orb hosts + keeps it available on the decentralized web.",
                  json!({"type":"object","required":["cid"],"properties":{"cid":{"type":"string"}}})),
             tool("ipfs_add",
-                 "Add a local file or directory (by absolute path on the Orb) to IPFS and return its root CID — e.g. to publish a site/app you built here. Reachable at the local gateway and any public IPFS gateway.",
-                 json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Absolute path on the Orb to a file or directory."}}})),
+                 "PUBLISH a file or directory from the Orb to IPFS and return its root CID — e.g. a site/app you built here. Anyone can then fetch it, permanently, so only publishing directories are accepted: the path must be under /var/lib/aeon/files (the staging area — see list_files), /var/lib/aeon/model-library, or /srv. Reachable at the local gateway and any public IPFS gateway.",
+                 json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Absolute path under /var/lib/aeon/files, /var/lib/aeon/model-library or /srv."}}})),
             // ── Model management: pull shared models down, push to connected systems ──
             tool("connected_systems",
                  "List the connected systems (DGX Sparks, agent gateways) this Orb manages over SSH — id, label, address, roles, status. Use the `id` as `system_id` for model_push / model_push_status.",
@@ -1538,6 +1538,11 @@ fn tool_min_scope(name: &str) -> crate::auth::TokenScope {
     match name {
         "issue_token" | "revoke_token" | "list_tokens" | "target_power_tap"
         | "target_power_hold" | "target_wake" | "target_reboot" | "pi_reboot" => Admin,
+        // These write to, or install SSH keys on, the operator's OTHER machines.
+        // The REST side keeps /api/agent/* to the admin session for exactly
+        // that reason; these tools were a way around it for any Full token.
+        "model_push" | "bench_authorize" | "bench_deploy" | "bench_update" | "bench_stop"
+        | "bench_run_verified" => Admin,
         "run_macro" => Macros,
         "state" | "snapshot" | "screen_text" | "recording_state" | "list_recordings" | "list_macros"
         | "network_status" | "security_metrics" | "firewall_rules" | "dns_blacklist"

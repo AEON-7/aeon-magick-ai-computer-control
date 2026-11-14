@@ -137,22 +137,46 @@ pub async fn record_state(State(state): State<AppState>) -> Response<Body> {
 pub async fn list_recordings(State(state): State<AppState>) -> Response<Body> {
     proxy(&state, &state.cfg.streamer_sock, Method::GET, "/recordings", None).await
 }
+/// Recording ids are minted by the streamer as `rec_<digits>`. Anything else
+/// is refused before it is spliced into a URI: `hyperlocal::Uri::new` panics
+/// on an invalid URI and the workspace builds with panic=abort, so an id of
+/// "%20" took the whole supervisor down for any caller with a read token.
+fn recording_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn bad_recording_id() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(Body::from("bad recording id"))
+        .unwrap_or_default()
+}
+
 pub async fn get_recording(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response<Body> {
+    if !recording_id_ok(&id) {
+        return bad_recording_id();
+    }
     proxy(&state, &state.cfg.streamer_sock, Method::GET, &format!("/recordings/{id}"), None).await
 }
 pub async fn delete_recording(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response<Body> {
+    if !recording_id_ok(&id) {
+        return bad_recording_id();
+    }
     proxy(&state, &state.cfg.streamer_sock, Method::DELETE, &format!("/recordings/{id}"), None).await
 }
 pub async fn get_recording_thumb(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response<Body> {
+    if !recording_id_ok(&id) {
+        return bad_recording_id();
+    }
     proxy(&state, &state.cfg.streamer_sock, Method::GET, &format!("/recordings/{id}/thumb"), None).await
 }
 

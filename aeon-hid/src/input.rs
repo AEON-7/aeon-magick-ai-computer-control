@@ -38,7 +38,23 @@ pub struct Hid {
     /// click-and-drag. Carried in every move/scroll/click report so a button
     /// stays pressed across moves; cleared by `button_up` / `release_all`.
     held_buttons: Mutex<u8>,
+    /// Bumped by `release_all`. A long-running type / hold / multi-click
+    /// notes the value when it starts and stops as soon as it changes, so the
+    /// panic button really does interrupt whatever is in flight.
+    abort_gen: std::sync::atomic::AtomicU64,
 }
+
+// Upper bounds on a single input request. These used to be whatever the
+// caller sent: `hold_ms` is a u32, so one request could hold a key down for
+// 49 days, and it did so by sleeping on a tokio worker thread — four such
+// requests occupied every worker and nothing else, including /release_all,
+// could run.
+/// Longest a key chord may be held, in ms.
+pub const MAX_HOLD_MS: u32 = 5_000;
+/// Most clicks one request may perform.
+pub const MAX_CLICKS: u32 = 10;
+/// Most characters one /type request will type.
+pub const MAX_TYPE_CHARS: usize = 10_000;
 
 impl Hid {
     pub fn new() -> Self {
@@ -48,6 +64,7 @@ impl Hid {
             consumer: Mutex::new(Some(PathBuf::from("/dev/hidg2"))),
             trackpad: Mutex::new(None),
             held_buttons: Mutex::new(0),
+            abort_gen: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -63,7 +80,11 @@ impl Hid {
     pub fn type_str(&self, s: &str) -> Result<(usize, usize)> {
         let mut typed = 0usize;
         let mut skipped = 0usize;
-        for ch in s.chars() {
+        let started = self.generation();
+        for ch in s.chars().take(MAX_TYPE_CHARS) {
+            if self.generation() != started {
+                break; // release_all was pressed mid-run
+            }
             // ascii_to_hid returns None for anything outside the
             // mapped printable-ASCII range — skip rather than fail.
             if ascii_to_hid(ch).is_none() {
@@ -104,10 +125,21 @@ impl Hid {
             press[2 + i] = k;
         }
         let path = self.kbd.lock().clone();
+        let started = self.generation();
         let press_result = write_report(&path, &press);
-        std::thread::sleep(std::time::Duration::from_millis(hold_ms.max(1) as u64));
+        // Sleep in short slices so release_all can cut a long hold short.
+        let mut left = hold_ms.clamp(1, MAX_HOLD_MS) as u64;
+        while left > 0 && self.generation() == started {
+            let step = left.min(20);
+            std::thread::sleep(std::time::Duration::from_millis(step));
+            left -= step;
+        }
         let _ = write_report(&path, &[0u8; 8]);
         press_result
+    }
+
+    fn generation(&self) -> u64 {
+        self.abort_gen.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ─── Mouse ────────────────────────────────────────────────────────────
@@ -125,7 +157,11 @@ impl Hid {
         // case → identical to before.
         let held = *self.held_buttons.lock();
         let mut result = Ok(());
-        for _ in 0..count {
+        let started = self.generation();
+        for _ in 0..count.min(MAX_CLICKS) {
+            if self.generation() != started {
+                break;
+            }
             let press = [held | (button_mask & 0x07), 0, 0, 0];
             let release = [held, 0, 0, 0];
             if let Err(e) = write_report(&path, &press) {
@@ -262,6 +298,8 @@ impl Hid {
     /// all-zero report to each available device. Equivalent to PiKVM's
     /// /api/hid/reset.
     pub fn release_all(&self) -> Result<()> {
+        // First: stop any type / hold / click run that is still in flight.
+        self.abort_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         *self.held_buttons.lock() = 0;
         let _ = write_report(&self.kbd.lock(), &[0u8; 8]);
         if let Some(p) = self.mouse.lock().as_ref() {

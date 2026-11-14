@@ -1629,7 +1629,7 @@ detect_vpn_iface() {
         # skipped table 100, and Tor-over-VPN could never route through the
         # tunnel (Tor stalled at bootstrap → transparent mode then
         # blackholed the whole box). All three map to aeon0.
-        wireguard|mullvad|ivpn) ip link show aeon0 >/dev/null 2>&1 && echo "aeon0" ;;
+        wireguard|mullvad|ivpn|azirevpn) ip link show aeon0 >/dev/null 2>&1 && echo "aeon0" ;;
         airvpn)
             # WireGuard rides aeon0; the OpenVPN family (incl. SSL/SSH
             # stealth) rides a tun device.
@@ -1906,12 +1906,45 @@ apply_kill_switch() {
     fi
 
     case "$provider" in
-        wireguard|mullvad|ivpn)
+        wireguard|mullvad|ivpn|azirevpn)
             # v74: mullvad/ivpn ride wg-quick@aeon0 just like "wireguard".
             # They were missing here, so enabling the kill-switch on a
             # commercial provider blocked ALL outbound (including the tunnel
-            # itself) — a self-inflicted lockout. All three exit via aeon0.
+            # itself) — a self-inflicted lockout. All of them exit via aeon0.
+            # (azirevpn was missing in turn: it is dispatched as a WireGuard
+            # provider below but had no case here, so its kill-switch blocked
+            # everything.)
             iptables -A OUTPUT -o aeon0 -j ACCEPT -m comment --comment "aeon-vpn"
+            # The rule above lets traffic INTO the tunnel. The tunnel's own
+            # encrypted packets leave by the real uplink, to the VPN server —
+            # and nothing allowed those. It only worked while a conntrack entry
+            # from before the kill-switch survived; any fresh handshake (a
+            # wg-quick restart, a long uplink outage) was rejected and the box
+            # stayed offline until the switch was turned off from the LAN.
+            # Allow exactly that: packets carrying WireGuard's own fwmark, and
+            # UDP to the configured endpoint(s).
+            local wg_mark; wg_mark="$(wg show aeon0 fwmark 2>/dev/null)"
+            case "$wg_mark" in
+                ''|off) ;;
+                *) iptables -A OUTPUT -m mark --mark "$wg_mark" -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true ;;
+            esac
+            local wg_ep wg_host wg_port wg_ip
+            {
+                wg show aeon0 endpoints 2>/dev/null | awk '{print $2}'
+                sed -n 's/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*//p' /etc/wireguard/aeon0.conf 2>/dev/null
+            } | sort -u | while read -r wg_ep; do
+                case "$wg_ep" in ''|'(none)') continue ;; esac
+                wg_port="${wg_ep##*:}"; wg_host="${wg_ep%:*}"
+                wg_host="${wg_host#[}"; wg_host="${wg_host%]}"
+                case "$wg_port" in ''|*[!0-9]*) continue ;; esac
+                case "$wg_host" in
+                    *:*) continue ;;                          # IPv6 endpoint: v4 chain only
+                    *[!0-9.]*) wg_ip="$(getent ahostsv4 "$wg_host" 2>/dev/null | awk 'NR==1{print $1}')" ;;
+                    *) wg_ip="$wg_host" ;;
+                esac
+                [ -n "$wg_ip" ] || continue
+                iptables -A OUTPUT -p udp -d "$wg_ip" --dport "$wg_port" -j ACCEPT -m comment --comment "aeon-vpn" 2>/dev/null || true
+            done
             ;;
         openvpn)
             iptables -A OUTPUT -o tun0 -j ACCEPT -m comment --comment "aeon-vpn"
@@ -2183,7 +2216,7 @@ reassert_policy_routing() {
     # MAIN table) restarts openvpn-client@aeon. AirVPN is either, per its mode.
     local transport=""
     case "$vpn_provider" in
-        wireguard|mullvad|ivpn) transport="wg" ;;
+        wireguard|mullvad|ivpn|azirevpn) transport="wg" ;;
         openvpn)                transport="ovpn" ;;
         airvpn)
             case "$(airvpn_mode)" in

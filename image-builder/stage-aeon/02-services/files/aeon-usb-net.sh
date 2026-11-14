@@ -178,6 +178,24 @@ apply_isolation_forward() {
     # 10.x is tricky — block all of 10/8 EXCEPT our own usb-net subnet
     # (which contains the Pi and DHCP clients).
     aeon_block_pair_insert FORWARD "usbnet-iso-rfc1918" reject-host -i usb0 -d 10.0.0.0/8 ! -d "$SUBNET"
+    # Not RFC1918, but just as private: 100.64.0.0/10 is the Tailscale tailnet
+    # (and carrier NAT). Without this the controlled target could reach every
+    # machine on the operator's tailnet, NAT'd as the Orb. Link-local too.
+    aeon_block_pair_insert FORWARD "usbnet-iso-rfc1918" reject-host -i usb0 -d 100.64.0.0/10
+    aeon_block_pair_insert FORWARD "usbnet-iso-rfc1918" reject-host -i usb0 -d 169.254.0.0/16
+}
+
+# Keep usb clients off the Pi's OTHER addresses (LAN, tailnet, bridges): they
+# may reach it only on its usb0 gateway address. Insert order matters — the
+# LAST `-I` lands at position 1, so the denies go in first and the ACCEPT for
+# the usb0 address ends up above them.
+apply_isolation_input() {
+    aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 10.0.0.0/8
+    aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 172.16.0.0/12
+    aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 192.168.0.0/16
+    # The Orb's tailnet address (100.x) serves the same console and SSH.
+    aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 100.64.0.0/10
+    iptables -I INPUT -i usb0 -d "$PI_ADDR"     -j ACCEPT -m comment --comment "aeon-usb-net"
 }
 
 case "$MODE" in
@@ -237,12 +255,7 @@ case "$MODE" in
         # its usb0 IP (the rule above this one explicitly ACCEPTs
         # that), so this isn't a stealth defense — it's a clear
         # "use the usb0 IP, not the LAN IP" signal.
-        aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 10.0.0.0/8
-        aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 172.16.0.0/12
-        aeon_block_pair_insert INPUT "usbnet-iso-pi-rfc1918" reject-host -i usb0 -d 192.168.0.0/16
-        # ACCEPT must be inserted LAST so it ends up at position 1
-        # — first match wins, so this gets matched before any DROP.
-        iptables -I INPUT -i usb0 -d "$PI_ADDR"     -j ACCEPT -m comment --comment "aeon-usb-net"
+        apply_isolation_input
         log "isolation active — usb clients reach Pi only via ${PI_ADDR}; all other RFC1918 paths blocked, WAN routed via FORWARD"
         ;;
     sharing)
@@ -251,6 +264,9 @@ case "$MODE" in
     *)
         log "WARN: unknown mode '$MODE' — defaulting to isolation"
         apply_isolation_forward
+        # The fallback used to add only the FORWARD half, leaving the Pi's own
+        # LAN / tailnet addresses reachable from the target.
+        apply_isolation_input
         ;;
 esac
 

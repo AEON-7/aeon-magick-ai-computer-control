@@ -427,6 +427,7 @@
                       {kindLabel(m.kind)}
                       {#if isCpu}<span class="text-violet-400/90"> · CPU</span>{:else}<span class="text-orange-400/80"> · NPU</span>{/if}
                       {#if m.params} · {m.params}{/if}{#if m.quant} · {m.quant}{/if}
+                      {#if m.shared_cid}<a href="/model-share" class="text-cursed-300 hover:underline" title="This model is also being seeded to the Intergalactic Model Share network from this Orb ({m.shared_cid})"> · seeding</a>{/if}
                     </div>
                   </div>
                   <span class="pill text-[10px] shrink-0
