@@ -32,7 +32,17 @@ RENDEZVOUS_JSON='{"protocol":"aeon-model-share","topic":"aeon-model-share/v1","v
 SELF="$(readlink -f "$0" 2>/dev/null || echo /usr/local/bin/aeon-ipfs)"
 
 log() { echo "aeon-ipfs: $*" >&2; }
-ipfs_cmd() { runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" "$@"; }
+# Drop to the service user WITHOUT opening a PAM session. `runuser` logs two
+# journal lines ("session opened" / "session closed") for every call, and the
+# gossip daemon makes these calls all day: on a live Orb that was ~95% of the
+# unit's journal, written to the SD card around the clock. `setpriv` just
+# switches ids. Falls back to runuser where setpriv is missing.
+if command -v setpriv >/dev/null 2>&1; then
+  as_ipfs() { setpriv --reuid "$SVCUSER" --regid "$SVCUSER" --init-groups -- "$@"; }
+else
+  as_ipfs() { runuser -u "$SVCUSER" -- "$@"; }
+fi
+ipfs_cmd() { as_ipfs env IPFS_PATH="$DIR" HOME="$DIR" "$IPFSBIN" "$@"; }
 
 ensure_user() {
   id "$SVCUSER" >/dev/null 2>&1 || \
@@ -293,7 +303,14 @@ clear_stale_lock() {
 
 # Time-boxed ipfs call for status reads: a crash-looping or lock-blocked daemon
 # must never hang GET /api/ipfs/status (which has no timeout upstream).
-ipfs_cmd_to() { timeout "$1" runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" "${@:2}"; }
+ipfs_cmd_to() {
+  local secs="$1"; shift
+  if command -v setpriv >/dev/null 2>&1; then
+    timeout "$secs" setpriv --reuid "$SVCUSER" --regid "$SVCUSER" --init-groups -- env IPFS_PATH="$DIR" HOME="$DIR" "$IPFSBIN" "$@"
+  else
+    timeout "$secs" runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" "$@"
+  fi
+}
 
 daemon_up() {
   if have_systemd; then
@@ -304,7 +321,7 @@ daemon_up() {
   daemon_active && return 0
   clear_stale_lock
   install -d /run/aeon 2>/dev/null || true
-  setsid runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" daemon --migrate=true --enable-gc \
+  setsid runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" HOME="$DIR" "$IPFSBIN" daemon --migrate=true --enable-gc \
     </dev/null >/var/log/aeon-ipfs.log 2>&1 &
   echo $! > "$PIDFILE"
   # Wait (≤10s) for the API socket so a following command doesn't race the boot.
@@ -426,11 +443,33 @@ cmd_storage() {
   echo "$size"
 }
 
-cmd_pin()   { ipfs_cmd pin add "${1:-}" 2>&1; }
-cmd_unpin() { ipfs_cmd pin rm "${1:-}" 2>&1; }
+# A CID is base58/base32 text. Refusing anything else here means an argument
+# can never be read by kubo as an option (a leading "-") no matter who calls.
+is_cid() { case "${1:-}" in ''|*[!A-Za-z0-9]*) return 1 ;; esac; return 0; }
+cmd_pin()   { is_cid "${1:-}" || { log "bad cid"; return 1; }; ipfs_cmd pin add -- "$1" 2>&1; }
+cmd_unpin() { is_cid "${1:-}" || { log "bad cid"; return 1; }; ipfs_cmd pin rm -- "$1" 2>&1; }
 cmd_pins()  { ipfs_cmd pin ls --type=recursive 2>/dev/null | awk '{print $1}'; }
-cmd_add()   { ipfs_cmd add -rQ "${1:-}" 2>/dev/null; }
-cmd_cat()   { ipfs_cmd cat "${1:-}" 2>/dev/null; }
+cmd_add()   { ipfs_cmd add -rQ -- "${1:-}" 2>/dev/null; }
+# add-fixed <path> — add with the import parameters spelled out, so the CID of
+# given bytes is the same on every Orb whatever kubo version or config defaults
+# it runs. Used for vendor mirrors (e.g. Hailo .hef files): every Orb that
+# mirrors the same file must land on the same CID to share one swarm. 1 MiB
+# chunks also mean 4x fewer blocks to store, index and announce than the
+# 256 KiB default.
+cmd_add_fixed() {
+  ipfs_cmd add -rQ --cid-version=1 --raw-leaves=true --chunker=size-1048576 --hash=sha2-256 -- "${1:-}" 2>/dev/null
+}
+# cat <path> [max-bytes] — with a limit, return at most that many bytes and
+# give up after 60 s. Cards, READMEs and thumbnails are fetched just by
+# browsing the index and name content published by strangers, so an unbounded
+# cat let any peer make the caller buffer gigabytes or wait forever.
+cmd_cat() {
+  local path="${1:-}" max="${2:-}"
+  case "$max" in
+    ''|*[!0-9]*) ipfs_cmd_to 300 cat -- "$path" 2>/dev/null ;;
+    *)           ipfs_cmd_to 60 cat --length="$max" -- "$path" 2>/dev/null ;;
+  esac
+}
 # Best-effort direct swarm connection (multiaddr), used before pinning a
 # peer's model so LAN/tailnet fetches don't wait on DHT routing.
 cmd_connect() { ipfs_cmd swarm connect "${1:-}" 2>&1 || true; }
@@ -466,7 +505,22 @@ cmd_pub() { ipfs_cmd pubsub pub "${1:-}" 2>/dev/null; }
 # fd directly. Going through an extra bash+runuser layer buffers the stream so
 # small, infrequent announcements never flush to a reader's pipe — the reason
 # subscribers silently received nothing. `exec` fixes that.
-cmd_sub() { exec runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" pubsub sub "${1:-}"; }
+cmd_sub() {
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid "$SVCUSER" --regid "$SVCUSER" --init-groups -- env IPFS_PATH="$DIR" HOME="$DIR" "$IPFSBIN" pubsub sub "${1:-}"
+  fi
+  exec runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" pubsub sub "${1:-}"
+}
+# sub-json <topic> — the same stream as JSON envelopes, one per line, each with
+# the `from` peer id that libp2p authenticated for the message. Plain `sub`
+# prints only the payload, so a subscriber had to believe whatever peer id the
+# payload claimed — letting any node rewrite any Orb's catalog.
+cmd_sub_json() {
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid "$SVCUSER" --regid "$SVCUSER" --init-groups -- env IPFS_PATH="$DIR" HOME="$DIR" "$IPFSBIN" pubsub sub --enc=json "${1:-}"
+  fi
+  exec runuser -u "$SVCUSER" -- env IPFS_PATH="$DIR" "$IPFSBIN" pubsub sub --enc=json "${1:-}"
+}
 # Keep discovered Orbs persistently connected: kubo's Peering survives the
 # lowpower ConnMgr's aggressive pruning, which otherwise drops the inter-Orb
 # link and makes pubsub delivery intermittent.
@@ -497,6 +551,13 @@ cmd_get() {
   du -sb "$dest" 2>/dev/null | awk '{print $1}'
 }
 
+# NOTE on reclaiming space: both `repo gc` and `block rm` must first work out
+# what is still pinned, which means walking every pinned model's block tree.
+# Measured on an Orb holding ~120 GB of models, EITHER takes minutes, pushes
+# the load average past 30, and stalls every other pin/add behind kubo's lock.
+# So neither is ever run as a side effect (e.g. of rejecting a download) —
+# rejecting just unpins, which is instant. Reclaiming is an explicit action.
+#
 # gc — reclaim unpinned blocks (failed/partial downloads, unshared models) up to
 # the storage cap. Pinned (shared) models are always kept.
 cmd_gc() { ipfs_cmd repo gc >/dev/null 2>&1; echo ok; }
@@ -527,6 +588,7 @@ case "${1:-}" in
   purge)   shift; cmd_purge "$@" ;;
   pins)    cmd_pins ;;
   add)     shift; cmd_add "$@" ;;
+  add-fixed) shift; cmd_add_fixed "$@" ;;
   cat)     shift; cmd_cat "$@" ;;
   connect) shift; cmd_connect "$@" ;;
   id)      cmd_id ;;
@@ -537,6 +599,7 @@ case "${1:-}" in
   bitswap-stat) cmd_bitswap_stat ;;
   pub)     shift; cmd_pub "$@" ;;
   sub)     shift; cmd_sub "$@" ;;
+  sub-json) shift; cmd_sub_json "$@" ;;
   peer)    shift; cmd_peer "$@" ;;
   mfs-mkdir) shift; cmd_mfs_mkdir "$@" ;;
   mfs-cp)    shift; cmd_mfs_cp "$@" ;;

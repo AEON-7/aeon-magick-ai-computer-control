@@ -526,6 +526,18 @@
               <span class="telem-val">{fmtBytesKB(info.mem_available_kb)}</span>
               <p class="text-2xs text-zinc-600 mt-0.5 font-mono">of {fmtBytesKB(info.mem_total_kb)}</p>
             </div>
+            {#if info.entropy}
+              <!-- what signing keys and secrets are made from; spans the row -->
+              <div class="telem-cell" style="grid-column: 1 / -1">
+                <span class="telem-key">randomness for keys</span>
+                <span class={info.entropy.verdict === 'good' ? 'telem-val-live' : info.entropy.verdict === 'ok' ? 'telem-val-warn' : 'telem-val-fault'}>
+                  {info.entropy.verdict === 'good' ? 'system generator + hardware chip' : info.entropy.verdict === 'ok' ? 'system generator only' : 'not ready'}
+                </span>
+                <p class="text-2xs text-zinc-600 mt-0.5 font-mono">
+                  {info.entropy.summary}{info.entropy.hardware_ok && info.entropy.hardware ? ` (${info.entropy.hardware})` : ''}
+                </p>
+              </div>
+            {/if}
           </div>
         </section>
       {/if}

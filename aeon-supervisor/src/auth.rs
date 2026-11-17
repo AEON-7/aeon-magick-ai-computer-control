@@ -110,7 +110,40 @@ pub struct AuthStore {
     tokens_path: PathBuf,
     auth: RwLock<AuthFile>,
     tokens: RwLock<TokensFile>,
+    /// sha256(token) → token id, for tokens that have already passed the full
+    /// argon2 check. Cleared whenever a token is revoked.
+    verified: RwLock<std::collections::HashMap<[u8; 32], String>>,
 }
+
+/// Write a secret file so it is never half-written and never world-readable:
+/// created 0600 beside the target, synced, then renamed over it. A plain
+/// `fs::write` truncates first — a power cut at that moment left an empty
+/// auth.toml, which the device read as "not set up yet".
+fn write_private_atomic(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).ok();
+    }
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// How often a token's "last used" time is written back. Persisting it on
+/// every request rewrote tokens.toml on the SD card for each API call an
+/// agent made.
+const LAST_USED_PERSIST_MS: u64 = 5 * 60 * 1000;
 
 impl AuthStore {
     pub fn load(auth_path: &Path, tokens_path: &Path) -> Self {
@@ -123,9 +156,11 @@ impl AuthStore {
             .and_then(|t| toml::from_str::<TokensFile>(&t).ok())
             .unwrap_or_default();
         if auth.password_hash.is_empty() {
+            let unreadable = std::fs::metadata(auth_path).map(|m| m.len() > 0).unwrap_or(false);
             tracing::warn!(
                 path=%auth_path.display(),
-                "auth.toml missing or empty — device is in OPEN state; portal will demand setup"
+                unreadable,
+                "auth.toml missing, empty or unreadable — device is in OPEN state; the setup wizard will ask for the setup code"
             );
         }
         Self {
@@ -133,6 +168,7 @@ impl AuthStore {
             tokens_path: tokens_path.to_path_buf(),
             auth: RwLock::new(auth),
             tokens: RwLock::new(tokens),
+            verified: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -204,25 +240,51 @@ impl AuthStore {
         if !plain.starts_with("aeon_tok_") {
             return None;
         }
-        let mut tokens = self.tokens.write();
-        for rec in tokens.tokens.iter_mut() {
-            let Ok(hash) = PasswordHash::new(&rec.hash) else {
-                continue;
-            };
-            if Argon2::default()
-                .verify_password(plain.as_bytes(), &hash)
-                .is_ok()
-            {
-                rec.last_used_at_ms = Some(now_ms());
-                let scope = rec.scope;
-                // Persist last_used.
-                let snap = tokens.clone();
-                drop(tokens);
-                let _ = self.save_tokens(&snap);
-                return Some(scope);
+        // Fast path. The full check is argon2 against EVERY stored token —
+        // tens of milliseconds each on a Pi, under a lock, on every request an
+        // agent makes. A token that already passed it is recognised by its
+        // SHA-256 instead (tokens are long random strings, so a fast hash is
+        // safe as a lookup key; the cache lives only in memory).
+        let key: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(plain.as_bytes()).into()
+        };
+        let cached = self.verified.read().get(&key).cloned();
+        let id = match cached {
+            Some(id) => id,
+            None => {
+                // Slow path, without holding the lock across the hashing.
+                let candidates: Vec<(String, String)> =
+                    self.tokens.read().tokens.iter().map(|r| (r.id.clone(), r.hash.clone())).collect();
+                let id = candidates.into_iter().find_map(|(id, stored)| {
+                    let hash = PasswordHash::new(&stored).ok()?;
+                    Argon2::default().verify_password(plain.as_bytes(), &hash).ok().map(|_| id)
+                })?;
+                let mut cache = self.verified.write();
+                if cache.len() > 1024 {
+                    cache.clear();
+                }
+                cache.insert(key, id.clone());
+                id
             }
+        };
+        // The record must still exist — a revoked token is gone from here.
+        let now = now_ms();
+        let mut tokens = self.tokens.write();
+        let Some(rec) = tokens.tokens.iter_mut().find(|r| r.id == id) else {
+            drop(tokens);
+            self.verified.write().remove(&key);
+            return None;
+        };
+        let scope = rec.scope;
+        let stale = rec.last_used_at_ms.map(|t| now.saturating_sub(t) >= LAST_USED_PERSIST_MS).unwrap_or(true);
+        if stale {
+            rec.last_used_at_ms = Some(now);
+            let snap = tokens.clone();
+            drop(tokens);
+            let _ = self.save_tokens(&snap);
         }
-        None
+        Some(scope)
     }
 
     pub fn list_tokens(&self) -> Vec<Value> {
@@ -253,7 +315,7 @@ impl AuthStore {
         let secret = random_alphanumeric(28);
         let plain = format!("aeon_tok_{secret}");
 
-        let salt = SaltString::generate(&mut rand::thread_rng());
+        let salt = SaltString::generate(&mut rand::rngs::OsRng);
         let hash = Argon2::default()
             .hash_password(plain.as_bytes(), &salt)
             .map_err(|e| anyhow::anyhow!("argon2: {e}"))?
@@ -279,6 +341,7 @@ impl AuthStore {
     }
 
     pub fn revoke_token(&self, id: &str) -> Result<bool> {
+        self.verified.write().clear();
         let mut tokens = self.tokens.write();
         let before = tokens.tokens.len();
         tokens.tokens.retain(|t| t.id != id);
@@ -297,7 +360,7 @@ impl AuthStore {
         use argon2::password_hash::SaltString;
         use argon2::PasswordHasher;
 
-        let salt = SaltString::generate(&mut rand::thread_rng());
+        let salt = SaltString::generate(&mut rand::rngs::OsRng);
         let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
             .map_err(|e| anyhow::anyhow!("argon2: {e}"))?
@@ -307,7 +370,7 @@ impl AuthStore {
             let cur = self.auth.read().session_key.clone();
             if cur.is_empty() {
                 let mut bytes = [0u8; 32];
-                rand::thread_rng().fill(&mut bytes);
+                rand::rngs::OsRng.fill(&mut bytes);
                 B64.encode(bytes)
             } else {
                 cur
@@ -331,14 +394,7 @@ impl AuthStore {
         if let Some(p) = self.auth_path.parent() {
             std::fs::create_dir_all(p).ok();
         }
-        std::fs::write(&self.auth_path, text)
-            .with_context(|| format!("writing {}", self.auth_path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.auth_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        write_private_atomic(&self.auth_path, &text)
     }
 
     fn save_tokens(&self, f: &TokensFile) -> Result<()> {
@@ -346,14 +402,7 @@ impl AuthStore {
         if let Some(p) = self.tokens_path.parent() {
             std::fs::create_dir_all(p).ok();
         }
-        std::fs::write(&self.tokens_path, text)
-            .with_context(|| format!("writing {}", self.tokens_path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.tokens_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        write_private_atomic(&self.tokens_path, &text)
     }
 }
 
@@ -476,6 +525,15 @@ pub fn scope_allows(identity: &Identity, method: &Method, path: &str) -> bool {
         || path.starts_with("/api/mysterium/")
         // Lockdown + exposure controls are a human-admin failsafe.
         || path.starts_with("/api/lockdown")
+        // Publisher identities are the keys models are signed with: creating,
+        // unlocking, signing out and revealing a seed phrase are the operator's.
+        || path.starts_with("/api/publisher/")
+        // Bench actions that change a connected machine (deploy/stop/update a
+        // pod, or add an SSH key to it) are the operator's, like /api/agent/*.
+        // Read-only bench endpoints stay available to agent tokens.
+        || matches!(path, "/api/bench/authorize" | "/api/bench/deploy" | "/api/bench/update" | "/api/bench/stop" | "/api/bench/run_verified")
+        // Erasing the audit trail is not something an agent token gets to do.
+        || (path == "/api/audit" && *method == Method::DELETE)
     {
         return false;
     }
@@ -586,6 +644,7 @@ pub async fn me(
             "ok": true,
             "state": "open",
             "needs_setup": true,
+            "setup_code_required": !server && !in_claim_window(),
             "admin_username_default": "admin",
             "server": server,
         }))
@@ -616,6 +675,78 @@ pub struct SetupReq {
     #[serde(default = "default_admin")]
     pub username: String,
     pub password: String,
+    /// The per-device setup code from aeon-credentials.txt on the SD card.
+    /// Needed once the first-boot window has passed.
+    #[serde(default)]
+    pub code: String,
+}
+
+// ── Who may complete first-boot setup ──────────────────────────────────
+//
+// Completing setup sets the admin password, and that password is mirrored to
+// the Unix `admin` account (SSH, passwordless sudo) — so it is a grant of
+// root. It used to be open to anyone who could reach the device for as long
+// as it stayed un-configured: a neighbour on the LAN, anyone in range of the
+// setup hotspot (whose passphrase is the same on every Orb), and equally an
+// Orb whose auth file had been lost or truncated.
+//
+// Now it is open only during the FIRST BOOT, for 30 minutes — the moment the
+// owner is standing next to a device they just plugged in. After that, or
+// after any restart, it takes the per-device setup code that first boot
+// wrote to the SD card, i.e. proof of having the device in hand.
+
+const SETUP_CODE_FILE: &str = "/etc/aeon/setup-code";
+const FIRSTBOOT_MARK: &str = "/var/lib/aeon/firstboot-done";
+const CLAIM_WINDOW_SECS: f64 = 30.0 * 60.0;
+
+/// The decision, separated from where its inputs come from so it can be tested.
+fn claim_window_open(boot_id: &str, firstboot_mark: &str, uptime_secs: f64) -> bool {
+    let boot_id = boot_id.trim();
+    !boot_id.is_empty() && firstboot_mark.trim() == boot_id && (0.0..CLAIM_WINDOW_SECS).contains(&uptime_secs)
+}
+
+fn in_claim_window() -> bool {
+    let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+    let uptime = read("/proc/uptime").split_whitespace().next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::MAX);
+    claim_window_open(&read("/proc/sys/kernel/random/boot_id"), &read(FIRSTBOOT_MARK), uptime)
+}
+
+/// Codes are compared without regard to case, spaces or dashes ("ab12-cd34").
+fn normalize_code(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+}
+
+fn setup_code_matches(expected_file_text: &str, supplied: &str) -> bool {
+    let (want, got) = (normalize_code(expected_file_text), normalize_code(supplied));
+    // No code on the device means nothing can match — never "anything goes".
+    if want.len() < 6 || want.len() != got.len() {
+        return false;
+    }
+    // Constant time over the length.
+    want.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// A device that never got a setup code (an image from before this existed,
+/// still un-configured) is given one now, recorded where the owner can read
+/// it: the boot partition of the SD card.
+pub fn ensure_setup_code() {
+    if crate::api::server_mode() || std::fs::metadata(SETUP_CODE_FILE).map(|m| m.len() > 0).unwrap_or(false) {
+        return;
+    }
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::rngs::OsRng;
+    let code: String = (0..8).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect();
+    if write_private_atomic(Path::new(SETUP_CODE_FILE), &format!("{code}\n")).is_err() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open("/boot/firmware/aeon-credentials.txt") {
+        let _ = writeln!(
+            f,
+            "\n# Setup code: {}-{}\n#     The setup wizard asks for this once the device has been on for more\n#     than 30 minutes, or has been restarted, without setup being completed.",
+            &code[..4], &code[4..]
+        );
+    }
 }
 
 fn default_admin() -> String {
@@ -634,6 +765,25 @@ pub async fn setup_password(
             Json(json!({"ok": false, "err": "device already configured"})),
         )
             .into_response();
+    }
+    // The headless server container has no SD card to read a code from; its
+    // claim flow is unchanged here.
+    if !crate::api::server_mode() && !in_claim_window() {
+        let expected = std::fs::read_to_string(SETUP_CODE_FILE).unwrap_or_default();
+        if !setup_code_matches(&expected, &req.code) {
+            // Slow down guessing; 32^8 codes is far out of reach at this rate.
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            crate::audit::log("anonymous (setup)", "setup_refused", "missing or wrong setup code", "denied", None);
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false,
+                    "code_required": true,
+                    "err": "Enter this device's setup code. It is in aeon-credentials.txt on the SD card's boot partition.",
+                })),
+            )
+                .into_response();
+        }
     }
     if req.password.len() < 8 {
         return (
@@ -879,9 +1029,13 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// Secrets below come straight from the kernel generator (`OsRng`), not from a
+// userspace generator seeded from it. Both are cryptographically sound; for
+// values that live for months — API tokens, the session-signing key — there is
+// simply no reason to put anything between the kernel and the secret.
 fn random_alphanumeric(n: usize) -> String {
     use rand::distributions::Alphanumeric;
-    rand::thread_rng()
+    rand::rngs::OsRng
         .sample_iter(&Alphanumeric)
         .take(n)
         .map(char::from)
@@ -890,7 +1044,7 @@ fn random_alphanumeric(n: usize) -> String {
 
 fn random_hex(n: usize) -> String {
     let mut bytes = vec![0u8; (n + 1) / 2];
-    rand::thread_rng().fill(&mut bytes[..]);
+    rand::rngs::OsRng.fill(&mut bytes[..]);
     bytes
         .iter()
         .map(|b| format!("{:02x}", b))
@@ -906,7 +1060,7 @@ fn random_hex(n: usize) -> String {
 /// we no longer do that; the setup wizard owns first-time credentials.
 pub fn generate_default(path: &Path) -> Result<String> {
     let mut session_key_bytes = [0u8; 32];
-    rand::thread_rng().fill(&mut session_key_bytes);
+    rand::rngs::OsRng.fill(&mut session_key_bytes);
     let session_key = B64.encode(session_key_bytes);
 
     let f = AuthFile {
@@ -932,3 +1086,79 @@ pub fn generate_default(path: &Path) -> Result<String> {
 
 // Re-export Value type used by list_tokens (avoids leaking serde_json::Value).
 pub use serde_json::Value;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_is_open_without_a_code_only_during_the_first_boot() {
+        let boot = "3f2a-boot-id\n";
+        // Same boot that first-boot ran in, a few minutes up: open.
+        assert!(claim_window_open(boot, "3f2a-boot-id\n", 120.0));
+        // …but not once 30 minutes have passed,
+        assert!(!claim_window_open(boot, "3f2a-boot-id", 30.0 * 60.0));
+        // not after a restart (a different boot id),
+        assert!(!claim_window_open("another-boot", "3f2a-boot-id", 60.0));
+        // not when first-boot never recorded a boot (older image: empty marker),
+        assert!(!claim_window_open(boot, "", 60.0));
+        // and not when the running boot id cannot be read.
+        assert!(!claim_window_open("", "", 60.0));
+        assert!(!claim_window_open(boot, "3f2a-boot-id", f64::MAX));
+    }
+
+    #[test]
+    fn the_setup_code_must_actually_match() {
+        assert!(setup_code_matches("ABCD2345\n", "ABCD2345"));
+        assert!(setup_code_matches("ABCD2345\n", "abcd-2345"));
+        assert!(setup_code_matches("ABCD2345", " abcd 2345 "));
+        assert!(!setup_code_matches("ABCD2345", "ABCD2346"));
+        assert!(!setup_code_matches("ABCD2345", "ABCD234"));
+        assert!(!setup_code_matches("ABCD2345", ""));
+        // No code stored on the device must never mean "any code works".
+        assert!(!setup_code_matches("", ""));
+        assert!(!setup_code_matches("\n", ""));
+        assert!(!setup_code_matches("", "ABCD2345"));
+    }
+
+    fn store(tag: &str) -> (AuthStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("aeon-auth-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (AuthStore::load(&dir.join("auth.toml"), &dir.join("tokens.toml")), dir)
+    }
+
+    #[test]
+    fn tokens_verify_from_cache_and_stop_working_once_revoked() {
+        let (s, dir) = store("tok");
+        let (id, plain) = s.create_token("agent", TokenScope::Read).unwrap();
+        assert!(matches!(s.verify_token(&plain), Some(TokenScope::Read)));
+        assert_eq!(s.verified.read().len(), 1);
+        // Second use is served from the cache and does not rewrite the file.
+        let before = std::fs::metadata(dir.join("tokens.toml")).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(matches!(s.verify_token(&plain), Some(TokenScope::Read)));
+        assert_eq!(std::fs::metadata(dir.join("tokens.toml")).unwrap().modified().unwrap(), before);
+        // A wrong token is refused and not cached.
+        assert!(s.verify_token("aeon_tok_definitely-not-a-real-token").is_none());
+        assert_eq!(s.verified.read().len(), 1);
+        // Revoked → refused, even though it had been cached.
+        assert!(s.revoke_token(&id).unwrap());
+        assert!(s.verify_token(&plain).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auth_files_are_written_private_and_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let (s, dir) = store("perm");
+        s.set_password("admin", "correct horse battery").unwrap();
+        let meta = std::fs::metadata(dir.join("auth.toml")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(!dir.join("auth.tmp").exists()); // renamed into place, nothing left behind
+        // Reloading sees a configured device, not an open one.
+        assert!(!AuthStore::load(&dir.join("auth.toml"), &dir.join("tokens.toml")).is_open());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+

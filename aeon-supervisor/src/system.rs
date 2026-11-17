@@ -145,8 +145,14 @@ pub fn snapshot() -> Value {
 /// heavy load) AND as a one-stop health endpoint for agents.
 pub async fn info(State(_state): State<AppState>) -> Json<Value> {
     let mut v = snapshot();
+    // Randomness health rides along so the System page can show it. Probed off
+    // the async workers (it reads the hardware RNG) and cached for 30 s.
+    let entropy = tokio::task::spawn_blocking(crate::entropy::health).await.ok();
     if let Some(o) = v.as_object_mut() {
         o.insert("ok".to_string(), json!(true));
+        if let Some(e) = entropy {
+            o.insert("entropy".to_string(), json!(e));
+        }
     }
     Json(v)
 }

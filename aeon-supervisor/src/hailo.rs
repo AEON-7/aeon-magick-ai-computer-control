@@ -32,6 +32,11 @@ const DEPLOY_LOG_FMT: &str = "/run/aeon/hailo-deploy-{id}.log";
 /// Usable on-device NNC budget (the ledger's mem_total is informational; this is
 /// the practical ceiling for `fits`).
 const USABLE_BUDGET_MB: i64 = 5500;
+/// Where `aeon-hailo deploy` leaves downloaded .hef files.
+const HEF_DIR: &str = "/usr/share/aeon/hailo/hef";
+/// Base URL for library entries that name only a file. MUST match HEF_S3 in
+/// the aeon-hailo script — it is recorded as each mirrored model's source.
+const HEF_S3: &str = "https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v5.3.0/hailo10h";
 
 // ── config ───────────────────────────────────────────────────────────────────
 
@@ -350,6 +355,7 @@ pub async fn get_models(State(_s): State<AppState>) -> Json<Value> {
 
         // Merge: library is the source of truth for catalog metadata; live state
         // overrides `state`; `fits` from the current free budget.
+        let shared = crate::ipfs::vendor_cids();
         let mut out: Vec<Value> = vec![];
         for mut m in read_library() {
             let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -369,6 +375,10 @@ pub async fn get_models(State(_s): State<AppState>) -> Json<Value> {
             // A deploy in flight surfaces as "downloading".
             if task_running(&format!("model:{id}")) {
                 m["state"] = json!("downloading");
+            }
+            // Set when this model is also being seeded on Model Share.
+            if let Some(cid) = shared.get(&hef_source(&m, &id)) {
+                m["shared_cid"] = json!(cid);
             }
             out.push(m);
         }
@@ -397,10 +407,18 @@ pub async fn post_deploy(State(_s): State<AppState>, AxPath(id): AxPath<String>)
         let (phase, percent) = parse_progress(&log_path);
         let log = log_tail(&log_path, 20);
         match res {
-            Ok(_) => set_task(&key, TaskState {
-                phase: "loaded".into(), percent: 100.0, done: true, ok: true,
-                log: if log.is_empty() { "deployed".into() } else { log },
-            }),
+            Ok(_) => {
+                set_task(&key, TaskState {
+                    phase: "loaded".into(), percent: 100.0, done: true, ok: true,
+                    log: if log.is_empty() { "deployed".into() } else { log },
+                });
+                // The model is usable now; seeding it is a bonus that must not
+                // hold up (or fail) the deploy, so it runs after the task is done.
+                match sync_model_share(&id_for_task) {
+                    Ok(cid) => eprintln!("hailo: {id_for_task} is now seeded on Model Share as {cid}"),
+                    Err(e) => eprintln!("hailo: {id_for_task} not mirrored to Model Share: {e}"),
+                }
+            }
             Err(e) => set_task(&key, TaskState {
                 phase: if phase == "starting" { "failed".into() } else { phase },
                 percent, done: true, ok: false,
@@ -429,6 +447,97 @@ pub async fn post_unload(State(_s): State<AppState>, AxPath(id): AxPath<String>)
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "unload task failed"}));
     Json(v)
+}
+
+// ── Model Share mirror ────────────────────────────────────────────────────────
+//
+// Anything the Hailo page downloads is also offered to the Model Share network,
+// so an Orb that installs a model becomes a seeder of it without the operator
+// doing anything. Only models that exist as a .hef on disk can be mirrored:
+// LLMs live inside hailo-ollama's own blob store and the CPU voice models are
+// unpacked archives, so those are skipped (see `sync_model_share`'s Err).
+
+/// The URL a library entry's .hef is downloaded from — same resolution the
+/// aeon-hailo script applies.
+fn hef_source(m: &Value, id: &str) -> String {
+    match m.get("source").and_then(|v| v.as_str()).unwrap_or("") {
+        "" => format!("{HEF_S3}/{id}.hef"),
+        s if s.starts_with("http") => s.to_string(),
+        s => format!("{HEF_S3}/{s}"),
+    }
+}
+
+/// Mirror one downloaded Hailo model into Model Share; returns its CID.
+pub fn sync_model_share(id: &str) -> Result<String, String> {
+    let lib = read_library();
+    let m = lib
+        .iter()
+        .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(id))
+        .ok_or("not in the Hailo library")?;
+    let hef = std::path::Path::new(HEF_DIR).join(format!("{id}.hef"));
+    if !hef.is_file() {
+        return Err("no .hef on disk for this model".into());
+    }
+    let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let kind = s("kind");
+    let name = if s("name").is_empty() { id.to_string() } else { s("name") };
+    // Everything here comes from the shipped library, never from this Orb, so
+    // the resulting card — and therefore the CID — is the same on every Orb.
+    let card = crate::ipfs::ModelCard {
+        kind: match kind.as_str() {
+            "ocr" => "vision".into(),
+            "llm" | "vlm" | "vision" | "stt" | "tts" => kind.clone(),
+            _ => "other".into(),
+        },
+        base_model: name.clone(),
+        params: s("params"),
+        quant: s("quant"),
+        license: s("license"),
+        description: format!("{name}, compiled for the Hailo NPU (.hef) — mirrored unchanged from the Hailo Model Zoo."),
+        intended_use: s("use_for"),
+        tags: vec!["hailo".into(), "hef".into(), kind],
+        format: "hef".into(),
+        ..Default::default()
+    };
+    crate::ipfs::share_vendor_file(&hef, &format!("{id}.hef"), &name, card, &hef_source(m, id), "hailo-model-zoo")
+}
+
+/// Mirror every Hailo model already on disk. Cheap when nothing changed: a
+/// model that is already shared at the same size is skipped without hashing.
+pub fn sync_all_model_share() -> Value {
+    let mut shared = vec![];
+    let mut skipped = vec![];
+    for m in read_library() {
+        let Some(id) = m.get("id").and_then(|v| v.as_str()) else { continue };
+        if !std::path::Path::new(HEF_DIR).join(format!("{id}.hef")).is_file() {
+            continue;
+        }
+        match sync_model_share(id) {
+            Ok(cid) => shared.push(json!({"id": id, "cid": cid})),
+            Err(e) => skipped.push(json!({"id": id, "why": e})),
+        }
+    }
+    json!({"ok": true, "shared": shared, "skipped": skipped})
+}
+
+/// POST /api/hailo/models/sync-share — mirror everything on disk now. Admin-gated.
+pub async fn post_sync_share(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(sync_all_model_share)
+        .await
+        .unwrap_or_else(|_| json!({"ok": false, "err": "sync task failed"}));
+    Json(v)
+}
+
+/// A couple of minutes after boot (once the IPFS node is up), mirror any Hailo
+/// model that is on disk but not yet shared — models installed before this
+/// existed, or while IPFS was off. Best-effort.
+pub async fn reconcile_model_share_on_boot() {
+    tokio::time::sleep(std::time::Duration::from_secs(150)).await;
+    let v = tokio::task::spawn_blocking(sync_all_model_share).await.unwrap_or(Value::Null);
+    let n = v.get("shared").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+    if n > 0 {
+        eprintln!("hailo: {n} model(s) on disk are seeded on Model Share");
+    }
 }
 
 /// On boot, if Hailo is enabled, installed, and an autoload model is configured,

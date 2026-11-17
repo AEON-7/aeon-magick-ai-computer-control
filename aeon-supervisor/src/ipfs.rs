@@ -229,6 +229,9 @@ pub struct CidReq {
 /// POST /api/ipfs/pin — pin a CID so this node hosts + keeps it. Admin over REST;
 /// also the ipfs_pin MCP tool.
 pub async fn pin(State(_s): State<AppState>, Json(req): Json<CidReq>) -> Json<Value> {
+    if !valid_cid(&req.cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
     let v = tokio::task::spawn_blocking(move || -> Value {
         match run_script(&["pin", &req.cid]) {
             Ok(o) => json!({"ok": true, "out": o}),
@@ -242,6 +245,9 @@ pub async fn pin(State(_s): State<AppState>, Json(req): Json<CidReq>) -> Json<Va
 
 /// POST /api/ipfs/unpin — drop a pinned CID. Admin-gated.
 pub async fn unpin(State(_s): State<AppState>, Json(req): Json<CidReq>) -> Json<Value> {
+    if !valid_cid(&req.cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
     let v = tokio::task::spawn_blocking(move || -> Value {
         let _ = run_script(&["unpin", &req.cid]);
         json!({"ok": true})
@@ -268,12 +274,28 @@ pub struct AddReq {
     pub path: String,
 }
 
+/// The only places `/api/ipfs/add` (and the ipfs_add MCP tool) will publish from.
+const ADD_ROOTS: [&str; 3] = ["/var/lib/aeon/files", "/var/lib/aeon/model-library", "/srv"];
+
 /// POST /api/ipfs/add — add a local file/dir to IPFS, returning its root CID (so
 /// it's reachable at <gateway>/ipfs/<cid> and on any IPFS gateway). Admin over
 /// REST; also the ipfs_add MCP tool so an agent can publish a site/app it built.
 pub async fn add_path(State(_s): State<AppState>, Json(req): Json<AddReq>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(move || -> Value {
-        match run_script(&["add", &req.path]) {
+        // Adding to IPFS is PUBLISHING — the bytes become fetchable by anyone,
+        // permanently. An agent token can reach this through the ipfs_add MCP
+        // tool, so it must not be a way to push an arbitrary readable file off
+        // the Orb. Resolve links first, then require a publishing directory.
+        let real = match std::fs::canonicalize(&req.path) {
+            Ok(p) => p,
+            Err(e) => return json!({"ok": false, "err": format!("no such path: {e}")}),
+        };
+        if !ADD_ROOTS.iter().any(|root| real.starts_with(root)) {
+            return json!({"ok": false, "err": format!(
+                "refusing to publish {} — put what you want to share under one of: {}",
+                real.display(), ADD_ROOTS.join(", "))});
+        }
+        match run_script(&["add", &real.to_string_lossy()]) {
             Ok(cid) if !cid.is_empty() => json!({"ok": true, "cid": cid}),
             Ok(_) => json!({"ok": false, "err": "add produced no CID"}),
             Err(e) => json!({"ok": false, "err": e}),
@@ -380,6 +402,21 @@ pub struct ModelEntry {
     pub pub_name: String,
     #[serde(default)]
     pub pub_sig: String,
+    /// Present when `pub_key` is an Orb's device key publishing on behalf of a
+    /// user identity: the user key's signed authorization of that Orb key.
+    /// Verifiers credit the entry to `delegation.user_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<crate::publisher::Delegation>,
+    /// BitTorrent v1 infohash of the same files, when a bridge peer (FrostByte)
+    /// also seeds them there. An Orb only displays it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub btih: String,
+    /// Set on a byte-identical mirror of a vendor's artifact (e.g.
+    /// "hailo-model-zoo"). The Orb announcing it is a SEEDER of the vendor's
+    /// file, not its publisher — the index must not present it as the origin
+    /// or let the vendor's work build the Orb's reputation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub upstream: String,
 }
 
 fn epoch_ms() -> i64 {
@@ -415,21 +452,714 @@ fn catalog_add_raw(entry: ModelEntry) {
     }
 }
 
-/// Sign a model this Orb ORIGINATES (share / publish / import) with the unlocked
-/// publisher identity, if one is unlocked and the entry isn't already signed.
-/// Best-effort: no identity → the model is published unsigned. The name is a
-/// decorative petname; the pubkey/signature is the cryptographic provenance.
+/// Sign a model this Orb ORIGINATES (share / publish / import) unless it is
+/// already signed. The Orb's device key signs, so this works from first boot
+/// with nothing to unlock; when a user identity has delegated to this Orb the
+/// delegation rides along and the entry is credited to that user. The name is
+/// a decorative petname; the key/signature is the cryptographic provenance.
 fn sign_entry(entry: &mut ModelEntry) {
+    sign_entry_with(entry, true)
+}
+
+/// `sign_entry`, choosing whether the signed-in publisher identity is attached.
+fn sign_entry_with(entry: &mut ModelEntry, identity: bool) {
     if !entry.pub_sig.is_empty() {
         return;
     }
     let digest =
         crate::publisher::publication_digest(&entry.cid, &entry.name, &entry.sha256, entry.added_at_ms);
-    if let Ok((pubkey, sig)) = crate::publisher::sign(&digest) {
-        entry.pub_name = crate::publisher::username_for(&pubkey);
-        entry.pub_key = pubkey;
-        entry.pub_sig = sig;
+    if let Ok(s) = crate::publisher::sign_as_orb_with(&digest, identity) {
+        entry.pub_name = if !s.name.is_empty() {
+            s.name
+        } else if !entry.origin_label.is_empty() {
+            entry.origin_label.clone()
+        } else {
+            // No user identity and no fleet label: the hostname beats "anon".
+            std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_default()
+        };
+        entry.pub_key = s.pubkey;
+        entry.pub_sig = s.sig;
+        entry.delegation = s.delegation;
     }
+}
+
+/// True when `entry.pub_key` really signed this entry's cid/name/sha256/time.
+/// Cached: the registry view re-checks every gossiped entry on each poll, and
+/// an ed25519 verify per entry per poll adds up on a Pi.
+fn entry_sig_ok(entry: &ModelEntry) -> bool {
+    if entry.pub_sig.is_empty() || entry.pub_key.is_empty() {
+        return false;
+    }
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let digest =
+        crate::publisher::publication_digest(&entry.cid, &entry.name, &entry.sha256, entry.added_at_ms);
+    let key = format!("{}|{}|{}", entry.pub_key, entry.pub_sig, String::from_utf8_lossy(&digest));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).copied()) {
+        return hit;
+    }
+    let ok = crate::publisher::verify(&entry.pub_key, &digest, &entry.pub_sig);
+    if let Ok(mut c) = cache.lock() {
+        if c.len() > 20_000 {
+            c.clear();
+        }
+        c.insert(key, ok);
+    }
+    ok
+}
+
+/// The identity an entry is credited to: the delegating user key when the
+/// signer carries a valid delegation, else the signer. "" when unsigned or the
+/// signature does not verify.
+fn entry_identity(entry: &ModelEntry) -> String {
+    if entry_sig_ok(entry) {
+        crate::publisher::identity_of(&entry.pub_key, entry.delegation.as_ref())
+    } else {
+        String::new()
+    }
+}
+
+// ── Signed manifest + origin attestation ────────────────────────────────────
+//
+// A model's ORIGIN is whoever first packaged it, and that has to stay
+// checkable no matter how many Orbs later mirror it. So the origin signs a
+// manifest — every file's path, size and SHA-256 — and the signature lives in
+// model-card.json INSIDE the shared directory. Mirrors carry it unchanged (it
+// is part of the content the CID names), nobody can swap it without producing
+// a different CID, and because it names plain file hashes it verifies the
+// same over IPFS, BitTorrent or a copied folder.
+
+const CARD_FILE: &str = "model-card.json";
+const VERIFY_JSON: &str = "/var/lib/aeon/ipfs-models/verify.json";
+const TRUST_JSON: &str = "/var/lib/aeon/ipfs-models/trust.json";
+const BINDING_JSON: &str = "/var/lib/aeon/ipfs-models/orb-binding.json";
+
+/// One file of a shared model, as named in the signed manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRec {
+    pub path: String, // relative to the model dir, '/'-separated
+    pub size: u64,
+    pub sha256: String, // lowercase hex
+}
+
+/// The origin statement stored in model-card.json.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OriginBlock {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String, // signer (an Orb key), hex
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default)]
+    pub signed_ms: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sig: String, // base64 ed25519 over publisher::origin_digest
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<crate::publisher::Delegation>,
+    /// Set INSTEAD of a signature on a byte-identical mirror of a vendor's
+    /// artifact (e.g. "hailo-model-zoo"). Such a card holds nothing specific
+    /// to one Orb, so every Orb mirroring the same file produces the same CID
+    /// and they all seed one swarm.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub upstream: String,
+}
+
+/// The parts of model-card.json that verification reads.
+#[derive(Debug, Default, Deserialize)]
+struct CardDoc {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    files: Option<Vec<FileRec>>,
+    #[serde(default)]
+    origin: Option<OriginBlock>,
+}
+
+fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Every regular file under `dir` except the card, sorted by path. Refuses
+/// symbolic links and special files outright: a link materialized from a
+/// peer's directory could point anywhere on this Orb and would later be
+/// scanned, hashed or rsynced as if it were model data. `known` supplies
+/// hashes already computed while the bytes streamed in, to skip a re-read.
+fn build_manifest(dir: &std::path::Path, known: &HashMap<String, String>) -> Result<Vec<FileRec>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = std::fs::read_dir(&d).map_err(|e| format!("read model dir: {e}"))?;
+        for ent in rd {
+            let ent = ent.map_err(|e| format!("read model dir: {e}"))?;
+            let p = ent.path();
+            let rel = p
+                .strip_prefix(dir)
+                .map_err(|_| "path escapes the model dir".to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            // DirEntry::file_type does NOT follow symlinks.
+            let ft = ent.file_type().map_err(|e| format!("stat “{rel}”: {e}"))?;
+            if ft.is_symlink() {
+                return Err(format!("rejected: “{rel}” is a symbolic link — a model may only contain regular files"));
+            }
+            if ft.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !ft.is_file() {
+                return Err(format!("rejected: “{rel}” is not a regular file"));
+            }
+            if rel.chars().any(|c| c.is_control()) {
+                return Err("rejected: a file name contains control characters".into());
+            }
+            if rel == CARD_FILE {
+                continue;
+            }
+            let size = ent.metadata().map(|m| m.len()).map_err(|e| format!("stat “{rel}”: {e}"))?;
+            let sha256 = match known.get(&rel) {
+                Some(h) => h.to_ascii_lowercase(),
+                None => sha256_file(&p).map_err(|e| format!("hash “{rel}”: {e}"))?,
+            };
+            out.push(FileRec { path: rel, size, sha256 });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+fn manifest_tuples(files: &[FileRec]) -> Vec<(String, u64, String)> {
+    files.iter().map(|f| (f.path.clone(), f.size, f.sha256.clone())).collect()
+}
+
+/// What a share needs beyond the files already sitting in its directory.
+struct ShareSpec {
+    name: String,
+    /// Primary weights file (path inside the dir). "" = the largest file.
+    file: String,
+    card: ModelCard,
+    verified: bool,
+    source: String,
+    /// Non-empty = byte-identical vendor mirror; see `OriginBlock::upstream`.
+    upstream: String,
+    /// Credit the share to the signed-in publisher identity (the default).
+    /// False = signed by this Orb's key alone, with no name attached.
+    identity: bool,
+}
+
+/// Write model-card.json (manifest + origin statement) into `dir` and return
+/// the catalog entry for it, minus the CID. Pure filesystem + signing, so it
+/// is unit-testable without an IPFS node.
+fn prepare_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String, String>) -> Result<ModelEntry, String> {
+    let files = build_manifest(dir, known)?;
+    let primary = files
+        .iter()
+        .find(|f| f.path == spec.file)
+        .or_else(|| files.iter().max_by_key(|f| f.size))
+        .cloned()
+        .ok_or("nothing to share — the model directory is empty")?;
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    let vendor_mirror = !spec.upstream.is_empty();
+    // A vendor mirror must hash identically on every Orb: no clock, no Orb id.
+    let now = if vendor_mirror { 0 } else { epoch_ms() };
+    let (origin_id, origin_label) = crate::fleet::identity();
+
+    let origin = if vendor_mirror {
+        OriginBlock { upstream: spec.upstream.clone(), ..Default::default() }
+    } else {
+        let digest =
+            crate::publisher::origin_digest(&spec.name, &spec.source, spec.verified, now, &manifest_tuples(&files));
+        match crate::publisher::sign_as_orb_with(&digest, spec.identity) {
+            Ok(s) => OriginBlock {
+                key: s.pubkey,
+                name: s.name,
+                signed_ms: now,
+                sig: s.sig,
+                delegation: s.delegation,
+                upstream: String::new(),
+            },
+            Err(_) => OriginBlock { signed_ms: now, ..Default::default() },
+        }
+    };
+
+    let mut doc = json!({
+        "schema": "aeon-model-card/2",
+        "name": spec.name,
+        "file": primary.path,
+        "size_bytes": total,
+        "sha256": primary.sha256,
+        "card": spec.card,
+        "verified": spec.verified,
+        "source": spec.source,
+        "files": files,
+        "origin": origin,
+        "created_ms": now,
+    });
+    if !vendor_mirror {
+        doc["shared_by"] = json!({"id": origin_id, "label": origin_label});
+    }
+    std::fs::write(dir.join(CARD_FILE), serde_json::to_vec_pretty(&doc).unwrap_or_default())
+        .map_err(|e| format!("write card: {e}"))?;
+
+    Ok(ModelEntry {
+        cid: String::new(),
+        name: spec.name,
+        file: primary.path,
+        size_bytes: total,
+        sha256: primary.sha256,
+        card: spec.card,
+        added_at_ms: epoch_ms(),
+        origin_id,
+        origin_label,
+        verified: spec.verified,
+        source: spec.source,
+        upstream: spec.upstream,
+        ..Default::default()
+    })
+}
+
+/// `prepare_share`, then add the directory to IPFS (pinned) and sign the entry.
+/// Every origination path ends here, so every model is shared the same way.
+fn finalize_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String, String>) -> Result<ModelEntry, String> {
+    let vendor_mirror = !spec.upstream.is_empty();
+    let identity = spec.identity;
+    let mut entry = prepare_share(dir, spec, known)?;
+    let d = dir.to_string_lossy().to_string();
+    // Vendor mirrors pin the import parameters so the CID is the same on every
+    // Orb regardless of kubo version or config defaults.
+    let cid = if vendor_mirror {
+        run_script(&["add-fixed", &d]).or_else(|_| run_script(&["add", &d]))?
+    } else {
+        run_script(&["add", &d])?
+    };
+    if !valid_cid(&cid) {
+        return Err("ipfs add produced no CID".into());
+    }
+    entry.cid = cid;
+    sign_entry_with(&mut entry, identity);
+    // We built it from local files, so it is verified by construction.
+    record_check(&entry.cid, &ContentCheck {
+        manifest: true,
+        files_ok: true,
+        origin_key: entry.pub_key.clone(),
+        origin_identity: entry_identity(&entry),
+        origin_ok: entry_sig_ok(&entry),
+        upstream: if vendor_mirror { "local".into() } else { String::new() },
+        checked_ms: epoch_ms(),
+        ..Default::default()
+    });
+    Ok(entry)
+}
+
+/// The outcome of checking a downloaded model directory against its card.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContentCheck {
+    /// The card carried a file manifest (schema /2).
+    #[serde(default)]
+    pub manifest: bool,
+    /// Every file matched its recorded size + SHA-256 and nothing was extra.
+    #[serde(default)]
+    pub files_ok: bool,
+    /// The origin signature verified over that manifest.
+    #[serde(default)]
+    pub origin_ok: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin_key: String,
+    /// Who the origin is credited to (a user key via delegation, or the signer).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin_identity: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub upstream: String,
+    /// What the (signed) card says about an upstream hash check.
+    #[serde(default)]
+    pub claims_verified: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default)]
+    pub checked_ms: i64,
+}
+
+/// Check a materialized model directory before it is trusted: no links, every
+/// file present with the size and hash the manifest promises, nothing extra,
+/// and the origin signature valid over exactly that manifest. `Err` is a hard
+/// rejection (the bytes are not what was signed or advertised). `Ok` with
+/// `origin_ok == false` is honest-but-unsigned content — allowed, shown as
+/// unverified.
+fn verify_model_dir(dir: &std::path::Path, entry: &ModelEntry) -> Result<ContentCheck, String> {
+    let actual = build_manifest(dir, &HashMap::new())?;
+    let mut check = ContentCheck { checked_ms: epoch_ms(), ..Default::default() };
+
+    let card_path = dir.join(CARD_FILE);
+    let card: Option<CardDoc> = match std::fs::symlink_metadata(&card_path) {
+        Ok(m) if m.is_file() && m.len() <= 1024 * 1024 => std::fs::read_to_string(&card_path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok()),
+        Ok(m) if m.is_file() => return Err("rejected: model-card.json is implausibly large".into()),
+        _ => None,
+    };
+
+    if let Some(CardDoc { files: Some(mut files), name, source, verified, origin }) = card {
+        check.manifest = true;
+        for f in &mut files {
+            f.sha256 = f.sha256.to_ascii_lowercase();
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        if files != actual {
+            let odd = actual
+                .iter()
+                .find(|a| !files.contains(a))
+                .map(|a| a.path.clone())
+                .or_else(|| files.iter().find(|f| !actual.contains(f)).map(|f| f.path.clone()))
+                .unwrap_or_default();
+            return Err(format!("rejected: the files do not match the model's signed manifest (“{odd}”)"));
+        }
+        check.files_ok = true;
+        if let Some(o) = origin {
+            check.upstream = o.upstream.clone();
+            if !o.sig.is_empty() {
+                let digest =
+                    crate::publisher::origin_digest(&name, &source, verified, o.signed_ms, &manifest_tuples(&files));
+                if !crate::publisher::verify(&o.key, &digest, &o.sig) {
+                    return Err("rejected: the origin signature does not match this model's contents".into());
+                }
+                check.origin_ok = true;
+                check.origin_identity = crate::publisher::identity_of(&o.key, o.delegation.as_ref());
+                check.origin_name = match &o.delegation {
+                    Some(d) if check.origin_identity == d.user_key => d.user_name.clone(),
+                    _ => o.name.clone(),
+                };
+                check.origin_key = o.key;
+                check.claims_verified = verified;
+                check.source = source;
+            }
+        }
+        return Ok(check);
+    }
+
+    // Older card with no manifest: the one thing the entry promises is the
+    // primary file's hash, so hold it to that.
+    if !entry.sha256.is_empty() && !entry.file.is_empty() {
+        match actual.iter().find(|f| f.path == entry.file) {
+            Some(f) if f.sha256.eq_ignore_ascii_case(&entry.sha256) => check.files_ok = true,
+            Some(_) => {
+                return Err(format!("rejected: “{}” does not match the SHA-256 it was advertised with", entry.file))
+            }
+            None => return Err(format!("rejected: the advertised file “{}” is not in this model", entry.file)),
+        }
+    }
+    Ok(check)
+}
+
+/// Guards read-modify-write of the small local JSON stores below.
+fn store_lock() -> &'static Mutex<()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
+fn write_json_file<T: Serialize>(path: &str, v: &T) {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = format!("{path}.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(v).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+/// cid → what this Orb found when it checked that model's bytes itself. Kept
+/// out of catalog.json on purpose: the catalog is gossiped, and "I verified
+/// it" is only worth anything to the Orb that did the verifying.
+fn read_checks() -> HashMap<String, ContentCheck> {
+    std::fs::read_to_string(VERIFY_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn record_check(cid: &str, check: &ContentCheck) {
+    let _g = store_lock().lock();
+    let mut all = read_checks();
+    all.insert(cid.to_string(), check.clone());
+    write_json_file(VERIFY_JSON, &all);
+}
+
+// ── Publisher trust + reputation (local-first) ──────────────────────────────
+//
+// There is no global authority to say a publisher is good, and anything
+// gossiped can be faked by spinning up identities. So reputation is computed
+// on each Orb, weighted by how hard the evidence is to forge: the operator's
+// own decision outranks everything, then this Orb's own verified downloads,
+// then mirrors (each costs a real Orb real disk), and last and least, stars.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Publisher {
+    /// The operator's own name for this key — the only name worth trusting.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    petname: String,
+    #[serde(default)]
+    trusted: bool,
+    #[serde(default)]
+    blocked: bool,
+    #[serde(default)]
+    first_seen_ms: i64,
+    /// Downloads from this publisher that verified here / that failed here.
+    #[serde(default)]
+    ok: u32,
+    #[serde(default)]
+    bad: u32,
+    /// The name the publisher last used for itself (self-asserted, decorative).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    last_name: String,
+}
+
+/// Which identity this Orb FIRST saw offering a given weights hash. A later,
+/// different identity offering the same bytes is a re-publisher, not the origin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Claim {
+    key: String,
+    first_seen_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct TrustStore {
+    #[serde(default)]
+    publishers: HashMap<String, Publisher>,
+    #[serde(default)]
+    claims: HashMap<String, Claim>,
+}
+
+fn read_trust() -> TrustStore {
+    std::fs::read_to_string(TRUST_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn trust_update(f: impl FnOnce(&mut TrustStore)) {
+    let _g = store_lock().lock();
+    let mut t = read_trust();
+    f(&mut t);
+    write_json_file(TRUST_JSON, &t);
+}
+
+/// 0–100. `starrers` = distinct Orbs starring any of the publisher's models,
+/// `mirrors` = distinct other Orbs hosting any of them.
+fn reputation(p: Option<&Publisher>, signed: bool, starrers: usize, mirrors: usize, now_ms: i64) -> u8 {
+    if !signed {
+        return 0; // nobody to hold to account
+    }
+    let Some(p) = p else { return 20 };
+    if p.blocked {
+        return 0;
+    }
+    if p.trusted {
+        return 100;
+    }
+    if p.bad > 0 {
+        return 5; // served bytes that failed verification here
+    }
+    let mut s = 20.0_f64;
+    s += f64::from(p.ok.min(3)) * 15.0;
+    s += (5.0 * ((1 + starrers) as f64).log2()).min(15.0);
+    s += (mirrors as f64 * 2.0).min(10.0);
+    let age_days = (now_ms - p.first_seen_ms).max(0) / 86_400_000;
+    s += if age_days >= 30 { 10.0 } else if age_days >= 7 { 5.0 } else { 0.0 };
+    s.min(95.0) as u8 // 100 is reserved for the operator's explicit trust
+}
+
+/// GET /api/ipfs/models/trust — every publisher this Orb has seen, with the
+/// operator's decisions and this Orb's own verification tally.
+pub async fn get_trust(State(_s): State<AppState>) -> Json<Value> {
+    let v = tokio::task::spawn_blocking(|| -> Value {
+        let t = read_trust();
+        let now = epoch_ms();
+        let mut list: Vec<Value> = t
+            .publishers
+            .iter()
+            .map(|(key, p)| {
+                json!({
+                    "key": key, "fp": key.get(..12).unwrap_or(key),
+                    "name": if p.petname.is_empty() { &p.last_name } else { &p.petname },
+                    "petname": p.petname, "trusted": p.trusted, "blocked": p.blocked,
+                    "first_seen_ms": p.first_seen_ms, "verified_ok": p.ok, "verified_bad": p.bad,
+                    "reputation": reputation(Some(p), true, 0, 0, now),
+                })
+            })
+            .collect();
+        list.sort_by(|a, b| b["reputation"].as_u64().cmp(&a["reputation"].as_u64()));
+        json!({"ok": true, "publishers": list, "this_orb": crate::publisher::orb_pubkey()})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "trust task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct TrustReq {
+    pub key: String,
+    #[serde(default)]
+    pub trusted: Option<bool>,
+    #[serde(default)]
+    pub blocked: Option<bool>,
+    #[serde(default)]
+    pub petname: Option<String>,
+}
+
+/// POST /api/ipfs/models/trust — trust or block a publisher key, or give it a
+/// local name. Trusting and blocking are mutually exclusive.
+pub async fn set_trust(State(_s): State<AppState>, Json(req): Json<TrustReq>) -> Json<Value> {
+    let key = req.key.trim().to_ascii_lowercase();
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Json(json!({"ok": false, "err": "not a publisher key"}));
+    }
+    tokio::task::spawn_blocking(move || {
+        trust_update(|t| {
+            let p = t.publishers.entry(key).or_insert_with(|| Publisher { first_seen_ms: epoch_ms(), ..Default::default() });
+            if let Some(v) = req.trusted {
+                p.trusted = v;
+                if v {
+                    p.blocked = false;
+                }
+            }
+            if let Some(v) = req.blocked {
+                p.blocked = v;
+                if v {
+                    p.trusted = false;
+                }
+            }
+            if let Some(n) = req.petname {
+                p.petname = n.trim().chars().filter(|c| !c.is_control()).take(40).collect();
+            }
+        });
+    })
+    .await
+    .ok();
+    Json(json!({"ok": true}))
+}
+
+/// Keep `orb-binding.json` current: this Orb's key vouching for its own
+/// libp2p peer id. The gossip daemon copies it into every announcement, which
+/// is what lets another Orb tell that a host IS a model's origin seeder.
+fn ensure_binding() {
+    let peer_id = self_peer_id();
+    let orb_key = crate::publisher::orb_pubkey();
+    if peer_id.is_empty() || orb_key.is_empty() {
+        return;
+    }
+    let delegation = crate::publisher::current_delegation();
+    let current: Value = std::fs::read_to_string(BINDING_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let want_user = delegation.as_ref().map(|d| d.user_key.as_str()).unwrap_or("");
+    let have_user = current.get("delegation").and_then(|d| d.get("user_key")).and_then(|v| v.as_str()).unwrap_or("");
+    if current.get("peer_id").and_then(|v| v.as_str()) == Some(peer_id.as_str())
+        && current.get("orb_key").and_then(|v| v.as_str()) == Some(orb_key.as_str())
+        && want_user == have_user
+    {
+        return;
+    }
+    let Ok(s) = crate::publisher::sign_as_orb(&crate::publisher::peer_binding_digest(&orb_key, &peer_id)) else {
+        return;
+    };
+    let mut doc = json!({"orb_key": orb_key, "peer_id": peer_id, "orb_sig": s.sig});
+    if let Some(d) = delegation {
+        doc["delegation"] = json!(d);
+    }
+    write_json_file(BINDING_JSON, &doc);
+}
+
+/// One-time upgrade at startup: sign the models THIS Orb originated that were
+/// shared while no identity was unlocked. Before the Orb key existed those went
+/// out unsigned (on the Orb this was first run against, 2 of 6). Entries that
+/// came from other Orbs are never touched — their signature, or lack of one,
+/// is theirs.
+pub fn upgrade_catalog_signatures() -> usize {
+    // Also the moment this Orb's key and peer binding come into existence, so
+    // the first announcement after an upgrade already carries them.
+    ensure_binding();
+    let (my_id, _) = crate::fleet::identity();
+    if my_id.is_empty() {
+        return 0;
+    }
+    let mut entries = read_catalog();
+    let mut signed = 0;
+    for e in entries.iter_mut() {
+        if e.pub_sig.is_empty() && e.origin_id == my_id && valid_cid(&e.cid) {
+            sign_entry(e);
+            if !e.pub_sig.is_empty() {
+                signed += 1;
+            }
+        }
+    }
+    if signed > 0 {
+        let _ = write_catalog(&entries);
+        announce();
+    }
+    signed
+}
+
+/// Whether a catalog entry is this Orb's own publication. Decided by KEY where
+/// there is a signature — the fleet id in `origin_id` is derived from
+/// /etc/machine-id and changes when the SD card is re-imaged or cloned, at
+/// which point an Orb would stop recognising models it shared itself.
+fn is_mine(e: &ModelEntry) -> bool {
+    if entry_sig_ok(e) {
+        return crate::publisher::is_local_key(&e.pub_key)
+            || e.delegation.as_ref().is_some_and(|d| crate::publisher::is_local_key(&d.user_key));
+    }
+    let (my_id, _) = crate::fleet::identity();
+    !my_id.is_empty() && e.origin_id == my_id
+}
+
+/// POST /api/ipfs/models/claim — the operator states that an UNSIGNED model in
+/// this Orb's catalog is one this Orb originated, and signs it. This is the
+/// way to put a key behind models shared before signing was automatic when the
+/// Orb's fleet id has since changed (so the startup upgrade cannot tell they
+/// are its own). Refused for anything that already carries a signature.
+pub async fn claim_model(State(_s): State<AppState>, Json(req): Json<CidReq>) -> Json<Value> {
+    if !valid_cid(&req.cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let mut entries = read_catalog();
+        let Some(e) = entries.iter_mut().find(|e| e.cid == req.cid) else {
+            return json!({"ok": false, "err": "not in this Orb's catalog"});
+        };
+        if !e.pub_sig.is_empty() {
+            return json!({"ok": false, "err": "that model is already signed by its publisher"});
+        }
+        let (id, label) = crate::fleet::identity();
+        e.origin_id = id;
+        e.origin_label = label;
+        sign_entry(e);
+        if e.pub_sig.is_empty() {
+            return json!({"ok": false, "err": "this Orb has no signing key available"});
+        }
+        let fp = e.pub_key.get(..12).unwrap_or(&e.pub_key).to_string();
+        let _ = write_catalog(&entries);
+        announce();
+        json!({"ok": true, "signed_by": fp})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "claim task failed"}));
+    Json(v)
 }
 
 /// Add a model this Orb originates — signs it (if an identity is unlocked) then
@@ -482,13 +1212,25 @@ pub async fn set_source_token(State(_s): State<AppState>, Json(req): Json<SetTok
         if let Some(dir) = std::path::Path::new(TOKENS_JSON).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        // Created 0600 from the start — write-then-chmod leaves the tokens
+        // readable by every local user for a moment.
         let tmp = format!("{TOKENS_JSON}.tmp");
-        if std::fs::write(&tmp, serde_json::to_vec_pretty(&t).unwrap_or_default()).is_ok() {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-            let _ = std::fs::rename(&tmp, TOKENS_JSON);
+        let _ = std::fs::remove_file(&tmp);
+        let wrote = {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)
+                .and_then(|mut f| f.write_all(&serde_json::to_vec_pretty(&t).unwrap_or_default()))
+                .and_then(|_| std::fs::rename(&tmp, TOKENS_JSON))
+        };
+        match wrote {
+            Ok(()) => json!({"ok": true}),
+            Err(e) => json!({"ok": false, "err": format!("could not save the token: {e}")}),
         }
-        json!({"ok": true})
     })
     .await
     .unwrap_or_else(|_| json!({"ok": false, "err": "token task failed"}));
@@ -799,57 +1541,30 @@ pub async fn upload_model(
     }
 
     let sha256_hex = hex::encode(hasher.finalize());
-    let (origin_id, origin_label) = crate::fleet::identity();
-
-    // Write the model-card.json into the dir (goes into IPFS with the model).
-    let card_doc = json!({
-        "schema": "aeon-model-card/1",
-        "name": display,
-        "file": safe_file,
-        "size_bytes": bytes_written,
-        "sha256": sha256_hex,
-        "card": card,
-        "shared_by": { "id": origin_id, "label": origin_label },
-        "created_ms": epoch_ms(),
-    });
-    let card_path = share_dir.join("model-card.json");
-    if let Err(e) = tokio::fs::write(&card_path, serde_json::to_vec_pretty(&card_doc).unwrap_or_default()).await {
-        let _ = tokio::fs::remove_dir_all(&share_dir).await;
-        return Json(json!({"ok": false, "err": format!("write card: {e}")}));
-    }
-
-    let entry_seed = ModelEntry {
-        cid: String::new(), // filled after `ipfs add -r`
+    let spec = ShareSpec {
         name: display.clone(),
-        file: safe_file,
-        size_bytes: bytes_written,
-        sha256: sha256_hex.clone(),
+        file: safe_file.clone(),
         card,
-        added_at_ms: epoch_ms(),
-        origin_id,
-        origin_label,
         verified: false,
         source: String::new(),
-        ..Default::default()
+        upstream: String::new(), identity: true,
     };
+    let known: HashMap<String, String> = [(safe_file, sha256_hex)].into_iter().collect();
 
     task_set(&display, "adding to IPFS…");
-    let dir_str = share_dir.to_string_lossy().to_string();
     let key = display.clone();
     tokio::task::spawn_blocking(move || {
-        // `ipfs add -rQ <dir>` → the directory's root CID (weights + card).
-        match run_script(&["add", &dir_str]) {
-            Ok(cid) if !cid.is_empty() => {
-                let mut entry = entry_seed;
-                entry.cid = cid;
+        // Card (manifest + origin signature) written beside the weights, then
+        // the whole directory is added so one CID carries both.
+        match finalize_share(&share_dir, spec, &known) {
+            Ok(entry) => {
                 catalog_add(entry);
-                let _ = std::fs::remove_dir_all(&dir_str); // bytes now in the blockstore
                 task_clear(&key);
                 announce(); // gossip the updated catalog immediately
             }
-            Ok(_) => task_set(&key, "error: add produced no CID"),
             Err(e) => task_set(&key, &format!("error: {e}")),
         }
+        let _ = std::fs::remove_dir_all(&share_dir); // bytes now in the blockstore
     });
 
     Json(json!({"ok": true, "name": display, "size_bytes": bytes_written, "processing": true}))
@@ -859,6 +1574,7 @@ pub async fn upload_model(
 /// share/unshare shows up on peers within seconds instead of the next tick).
 /// Best-effort: the daemon also announces on a timer.
 fn announce() {
+    ensure_binding();
     let _ = std::fs::write("/run/aeon/modelshare-announce", "");
 }
 
@@ -905,8 +1621,22 @@ fn inspect_model_dir(dir: &std::path::Path) -> Result<(), String> {
         let rd = std::fs::read_dir(&d).map_err(|e| format!("read quarantine: {e}"))?;
         for ent in rd.flatten() {
             let p = ent.path();
-            if p.is_dir() { stack.push(p); continue; }
             let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            // file_type() does not follow links; `p.is_dir()` did, so a link to
+            // "/" used to send this walk across the whole filesystem.
+            let Ok(ft) = ent.file_type() else {
+                return Err(format!("rejected: cannot inspect “{name}”"));
+            };
+            if ft.is_symlink() {
+                return Err(format!("rejected: “{name}” is a symbolic link — not a model file"));
+            }
+            // Nothing in a model is hidden. A dot-name is how a directory
+            // smuggles `.ssh/authorized_keys` or `.bashrc` onto whatever
+            // machine the model is later pushed to.
+            if name.starts_with('.') {
+                return Err(format!("rejected: “{name}” is a hidden file or folder — not a model file"));
+            }
+            if ft.is_dir() { stack.push(p); continue; }
             let mut head = [0u8; 16];
             let n = {
                 use std::io::Read;
@@ -1011,6 +1741,21 @@ fn storage_hint(e: &str) -> String {
     }
 }
 
+/// Stop hosting content that failed quarantine. Called AFTER the reason has
+/// been reported, so the operator sees why immediately.
+///
+/// This only UNPINS. It used to run `purge` — a whole-repository garbage
+/// collection — inline, before the error was even shown: on an Orb holding
+/// ~120 GB of models that took minutes per rejection, drove the load average
+/// past 30, and made every other download wait behind kubo's GC lock. (Deleting
+/// just the rejected blocks is no cheaper: kubo has to walk every pinned model
+/// to prove a block is unpinned.) Unpinned, the content is no longer part of
+/// anything this Orb shares; its blocks are reclaimed by the next GC the
+/// operator runs or the storage limit triggers.
+fn discard_rejected(cid: &str) {
+    let _ = run_script(&["unpin", cid]);
+}
+
 /// POST /api/ipfs/models/fetch — download a peer's model through a QUARANTINE
 /// sandbox: fetch to staging → validate every file's magic bytes (fake
 /// extensions / stowaway executables / pickle weights) → ClamAV scan → and only
@@ -1096,30 +1841,72 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
         task_set(&cid, "validating weights (file types)…");
         if let Err(e) = run_script(&["get", &cid, &q.to_string_lossy()]) {
             let _ = std::fs::remove_dir_all(&q);
-            let _ = run_script(&["purge", &cid]);
-            return fail(&e);
+            fail(&e);
+            return discard_rejected(&cid);
         }
+        // Hold the bytes to what was signed and advertised BEFORE anything else
+        // reads them. The entry in this request is whatever the caller sent, so
+        // it proves nothing by itself; the manifest inside the directory does.
+        task_set(&cid, "verifying against the signed manifest…");
+        let credited = entry_identity(&req.entry);
+        let check = match verify_model_dir(&q, &req.entry) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&q);
+                fail(&e);
+                // A publisher whose bytes fail verification here loses standing here.
+                if !credited.is_empty() {
+                    trust_update(|t| {
+                        let p = t.publishers.entry(credited.clone()).or_insert_with(|| Publisher { first_seen_ms: epoch_ms(), ..Default::default() });
+                        p.bad += 1;
+                    });
+                }
+                return discard_rejected(&cid);
+            }
+        };
+        task_set(&cid, "validating weights (file types)…");
         if let Err(e) = inspect_model_dir(&q) {
             let _ = std::fs::remove_dir_all(&q);
-            let _ = run_script(&["purge", &cid]);
-            return fail(&e);
+            fail(&e);
+            return discard_rejected(&cid);
         }
 
         task_set(&cid, "scanning for viruses…");
         if let Err(e) = virus_scan(&q) {
             let _ = std::fs::remove_dir_all(&q);
-            let _ = run_script(&["purge", &cid]);
-            return fail(&format!("virus scan: {e}"));
+            fail(&format!("virus scan: {e}"));
+            return discard_rejected(&cid);
         }
 
         // Clean. Seeding is the default: stay pinned and announce so the next
         // stranger can fetch it from us. Opting out keeps a private library
         // copy and drops the pin so we do not provide it.
+        record_check(&cid, &check);
+        // Verifying our own models says nothing about a publisher's record.
+        if check.origin_ok && !check.origin_identity.is_empty() && !crate::publisher::is_local_key(&check.origin_identity) {
+            let who = check.origin_identity.clone();
+            let name = check.origin_name.clone();
+            trust_update(|t| {
+                let p = t.publishers.entry(who).or_insert_with(|| Publisher { first_seen_ms: epoch_ms(), ..Default::default() });
+                p.ok += 1;
+                if !name.is_empty() {
+                    p.last_name = name;
+                }
+            });
+        }
+        // "Verified against the upstream hash" is a claim. Keep it only when it
+        // is part of what the origin signed; otherwise it is just a flag a peer
+        // set, and re-announcing it from here would launder it.
+        let mut entry = req.entry;
+        entry.verified = check.origin_ok && check.claims_verified;
+        if check.origin_ok {
+            entry.source = check.source.clone();
+        }
         if seed_enabled() {
-            catalog_add_raw(req.entry);
+            catalog_add_raw(entry);
             announce();
         } else {
-            let slug = model_slug(&req.entry.name);
+            let slug = model_slug(&entry.name);
             let _ = ensure_in_library(&cid, &slug);
             let _ = run_script(&["unpin", &cid]);
         }
@@ -1132,6 +1919,9 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
 /// POST /api/ipfs/models/remove — unshare: unpin the CID + drop the catalog
 /// entry. Blocks are reclaimed by kubo GC as the storage cap demands.
 pub async fn remove_model(State(_s): State<AppState>, Json(req): Json<CidReq>) -> Json<Value> {
+    if !valid_cid(&req.cid) {
+        return Json(json!({"ok": false, "err": "invalid CID"}));
+    }
     let v = tokio::task::spawn_blocking(move || -> Value {
         let _ = run_script(&["unpin", &req.cid]);
         let entries: Vec<ModelEntry> =
@@ -1191,6 +1981,21 @@ struct RegPeer {
     /// community star count per model (fleet-free reputation).
     #[serde(default)]
     starred: Vec<String>,
+    /// This peer's Orb key and its signature over (orb_key, peer_id): proof the
+    /// key holder runs this libp2p peer. A host whose bound key signed a model
+    /// is that model's origin seeder.
+    #[serde(default)]
+    orb_key: String,
+    #[serde(default)]
+    orb_sig: String,
+    /// The user identity that authorised this peer's Orb key, if it shows one.
+    #[serde(default)]
+    delegation: Option<crate::publisher::Delegation>,
+}
+
+/// Every model every gossiped peer currently announces, flattened.
+fn registry_models() -> Vec<ModelEntry> {
+    read_registry().into_values().flat_map(|p| p.models).filter(|e| valid_cid(&e.cid)).collect()
 }
 
 const STARS_JSON: &str = "/var/lib/aeon/ipfs-models/stars.json";
@@ -1287,69 +2092,226 @@ fn self_peer_id() -> String {
 /// several Orbs is one row with multiple hosts. Also returns in-flight tasks.
 pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| -> Value {
+        ensure_binding();
         let me = self_peer_id();
         let local = read_catalog();
         let peers = read_registry();
         let tasks: HashMap<String, TaskState> = tasks().lock().map(|g| g.clone()).unwrap_or_default();
+        let checks = read_checks();
+        let now = epoch_ms();
 
-        // cid -> (entry, hosts[])
-        let mut rows: HashMap<String, (ModelEntry, Vec<Value>)> = HashMap::new();
-        let mut push_host = |cid: &str, entry: &ModelEntry, host: Value| {
-            let e = rows.entry(cid.to_string()).or_insert_with(|| (entry.clone(), Vec::new()));
-            e.1.push(host);
-        };
-        for e in &local {
-            push_host(&e.cid, e, json!({"label": "this orb", "is_self": true, "online": true, "peer_id": me}));
+        // One row per CID. Several Orbs may announce the same CID with their own
+        // copy of the metadata, so WHICH copy is shown must not be an accident of
+        // map iteration order (it used to be — a peer could win the coin toss and
+        // have its name / flags displayed for someone else's model). Lowest rank
+        // wins: this Orb's own copy, then the origin seeder's, then any validly
+        // signed copy, then the rest; ties break on the earliest share time.
+        struct Acc {
+            entry: ModelEntry,
+            rank: (u8, i64, String),
+            hosts: Vec<Value>,
         }
-        for (_pid, p) in &peers {
-            // Skip our OWN gossiped announcement — with floodsub self-delivery the
-            // daemon hears its own catalog back, and the local catalog above
-            // already represents "this orb". Without this, every locally-hosted
-            // model shows "this orb" twice.
-            if p.peer_id == me {
-                continue;
+        let mut rows: HashMap<String, Acc> = HashMap::new();
+        {
+            let mut offer = |e: &ModelEntry, class: u8, peer: &str, host: Value| {
+                let rank = (class, e.added_at_ms, peer.to_string());
+                match rows.get_mut(&e.cid) {
+                    Some(a) => {
+                        if rank < a.rank {
+                            a.entry = e.clone();
+                            a.rank = rank;
+                        }
+                        a.hosts.push(host);
+                    }
+                    None => {
+                        rows.insert(e.cid.clone(), Acc { entry: e.clone(), rank, hosts: vec![host] });
+                    }
+                }
+            };
+            for e in &local {
+                // Ours if one of this Orb's keys signed it — the Orb key, or a
+                // user identity that lives here (models signed before Orb keys
+                // existed carry the user key directly).
+                let is_origin = e.upstream.is_empty() && entry_sig_ok(e) && is_mine(e);
+                offer(e, 0, "", json!({"label": "this orb", "is_self": true, "online": true, "peer_id": me, "is_origin": is_origin}));
             }
-            for e in &p.models {
-                let host = json!({
-                    "label": if p.label.is_empty() { p.peer_id.chars().take(12).collect::<String>() } else { p.label.clone() },
-                    "is_self": p.peer_id == me,
-                    "online": true,
-                    "peer_id": p.peer_id,
-                    "addrs": p.addrs,
-                    "updated_ms": p.updated_ms,
-                });
-                push_host(&e.cid, e, host);
+            for p in peers.values() {
+                // Skip our OWN gossiped announcement — with floodsub self-delivery
+                // the daemon hears its own catalog back, and the local catalog
+                // above already represents "this orb".
+                if p.peer_id.is_empty() || p.peer_id == me {
+                    continue;
+                }
+                let bound = !p.orb_key.is_empty()
+                    && crate::publisher::verify(
+                        &p.orb_key,
+                        &crate::publisher::peer_binding_digest(&p.orb_key, &p.peer_id),
+                        &p.orb_sig,
+                    );
+                let label = if p.label.is_empty() { p.peer_id.chars().take(12).collect::<String>() } else { p.label.clone() };
+                // Whose Orb this is: the user identity that delegated to its
+                // key, when the peer shows a valid delegation; else its own key.
+                let peer_identity = if bound {
+                    crate::publisher::identity_of(&p.orb_key, p.delegation.as_ref())
+                } else {
+                    String::new()
+                };
+                for e in p.models.iter().filter(|e| valid_cid(&e.cid)) {
+                    let signed = entry_sig_ok(e);
+                    let is_origin = e.upstream.is_empty()
+                        && bound
+                        && signed
+                        && (e.pub_key == p.orb_key || entry_identity(e) == peer_identity);
+                    let class = if is_origin { 1 } else if signed { 2 } else { 3 };
+                    offer(e, class, &p.peer_id, json!({
+                        "label": label, "is_self": false, "online": true, "peer_id": p.peer_id,
+                        "addrs": p.addrs, "updated_ms": p.updated_ms, "is_origin": is_origin,
+                    }));
+                }
             }
         }
+
         // Community stars: a model's star count = the number of DISTINCT Orbs
-        // that starred its CID (self + every gossiped peer). Keyed by peer_id so
-        // a stale self-entry in the registry can't double-count.
+        // that starred its CID (self + every gossiped peer).
         let my_stars: std::collections::HashSet<String> = read_stars().into_iter().collect();
         let mut starrers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for cid in &my_stars {
             starrers.entry(cid.clone()).or_default().insert(me.clone());
         }
-        for (_pid, p) in &peers {
+        for p in peers.values() {
             for cid in &p.starred {
                 starrers.entry(cid.clone()).or_default().insert(p.peer_id.clone());
+            }
+        }
+
+        // Who each row is credited to, and the network-side evidence about each
+        // publisher (summed over all of that publisher's models).
+        let credited: HashMap<String, String> =
+            rows.iter().map(|(cid, a)| (cid.clone(), entry_identity(&a.entry))).collect();
+        let mut pub_starrers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        let mut pub_mirrors: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (cid, a) in &rows {
+            let id = &credited[cid];
+            if id.is_empty() || !a.entry.upstream.is_empty() {
+                continue;
+            }
+            if let Some(s) = starrers.get(cid) {
+                pub_starrers.entry(id.clone()).or_default().extend(s.iter().cloned());
+            }
+            for h in &a.hosts {
+                if !h["is_origin"].as_bool().unwrap_or(false) {
+                    if let Some(pid) = h["peer_id"].as_str() {
+                        pub_mirrors.entry(id.clone()).or_default().insert(pid.to_string());
+                    }
+                }
+            }
+        }
+
+        // Remember when each publisher, and each weights hash, was first seen
+        // here. Oldest-claimed first so two identities met in the same pass are
+        // ordered the same way on every run.
+        let mut trust = read_trust();
+        {
+            let mut order: Vec<&Acc> = rows.values().collect();
+            order.sort_by(|a, b| (a.entry.added_at_ms, &a.entry.cid).cmp(&(b.entry.added_at_ms, &b.entry.cid)));
+            let mut fresh_pubs: Vec<(String, String)> = Vec::new();
+            let mut fresh_claims: Vec<(String, String)> = Vec::new();
+            for a in order {
+                let id = &credited[&a.entry.cid];
+                if id.is_empty() {
+                    continue;
+                }
+                if !trust.publishers.contains_key(id) && !fresh_pubs.iter().any(|(k, _)| k == id) {
+                    fresh_pubs.push((id.clone(), a.entry.pub_name.clone()));
+                }
+                let sha = &a.entry.sha256;
+                if !sha.is_empty() && !trust.claims.contains_key(sha) && !fresh_claims.iter().any(|(k, _)| k == sha) {
+                    fresh_claims.push((sha.clone(), id.clone()));
+                }
+            }
+            if !fresh_pubs.is_empty() || !fresh_claims.is_empty() {
+                trust_update(|t| {
+                    for (id, name) in &fresh_pubs {
+                        t.publishers.entry(id.clone()).or_insert_with(|| Publisher {
+                            first_seen_ms: now,
+                            last_name: name.chars().filter(|c| !c.is_control()).take(40).collect(),
+                            ..Default::default()
+                        });
+                    }
+                    for (sha, id) in &fresh_claims {
+                        t.claims.entry(sha.clone()).or_insert_with(|| Claim { key: id.clone(), first_seen_ms: now });
+                    }
+                });
+                trust = read_trust();
             }
         }
 
         let local_cids: std::collections::HashSet<String> = local.iter().map(|e| e.cid.clone()).collect();
         let mut out: Vec<Value> = rows
             .into_iter()
-            .map(|(cid, (entry, hosts))| {
+            .map(|(cid, Acc { entry, hosts, .. })| {
                 let host_count = hosts.len();
                 let star_count = starrers.get(&cid).map(|s| s.len()).unwrap_or(0);
-                // Verify-on-receive: re-check the publisher signature against the
-                // digest so a peer can't forge a valid-looking one. `ok=true` means
-                // the pubkey (fp) really signed this cid/name/sha256/time.
+                let id = credited.get(&cid).cloned().unwrap_or_default();
+                let known = trust.publishers.get(&id);
+                let rep = reputation(
+                    known,
+                    !id.is_empty(),
+                    pub_starrers.get(&id).map(|s| s.len()).unwrap_or(0),
+                    pub_mirrors.get(&id).map(|s| s.len()).unwrap_or(0),
+                    now,
+                );
+                let delegated = !id.is_empty() && id != entry.pub_key;
+                // Name precedence: the operator's own petname, then the name in a
+                // verified delegation, then whatever the signer calls itself.
+                let display_name = known
+                    .map(|p| p.petname.clone())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| entry.delegation.as_ref().filter(|_| delegated).map(|d| d.user_name.clone()))
+                    .unwrap_or_else(|| entry.pub_name.clone());
+                let blocked = known.map(|p| p.blocked).unwrap_or(false);
+                let standing = if !entry.upstream.is_empty() {
+                    "mirror"
+                } else if id.is_empty() {
+                    "unsigned"
+                } else if blocked {
+                    "blocked"
+                } else if known.map(|p| p.trusted).unwrap_or(false) {
+                    "trusted"
+                } else if known.map(|p| p.bad > 0).unwrap_or(false) {
+                    "failed"
+                } else if known.map(|p| p.ok > 0).unwrap_or(false) {
+                    "proven"
+                } else {
+                    "new"
+                };
+                let seeder_online = hosts.iter().any(|h| h["is_origin"].as_bool().unwrap_or(false));
+                // Same weights first seen here under a DIFFERENT identity → this
+                // row is a re-publication, not the origin.
+                let earlier = trust
+                    .claims
+                    .get(&entry.sha256)
+                    .filter(|c| !id.is_empty() && c.key != id)
+                    .map(|c| json!({"key": c.key, "fp": c.key.get(..12).unwrap_or(&c.key), "first_seen_ms": c.first_seen_ms}));
+                let origin = json!({
+                    "key": id,
+                    "fp": id.get(..12).unwrap_or(&id),
+                    "name": display_name,
+                    "signed": !id.is_empty(),
+                    "delegated": delegated,
+                    "standing": standing,
+                    "reputation": rep,
+                    "seeder_online": seeder_online,
+                    "upstream": entry.upstream,
+                    "content": checks.get(&cid),
+                    "earlier_claim": earlier,
+                });
+                // Kept for older consoles: the bare signature verdict.
                 let signature = if entry.pub_sig.is_empty() {
                     Value::Null
                 } else {
-                    let digest = crate::publisher::publication_digest(&entry.cid, &entry.name, &entry.sha256, entry.added_at_ms);
                     json!({
-                        "ok": crate::publisher::verify(&entry.pub_key, &digest, &entry.pub_sig),
+                        "ok": entry_sig_ok(&entry),
                         "name": entry.pub_name,
                         "fp": entry.pub_key.get(..12).unwrap_or(&entry.pub_key),
                     })
@@ -1358,18 +2320,28 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
                     "entry": entry, "hosts": hosts, "local": local_cids.contains(&cid),
                     "host_count": host_count, "star_count": star_count,
                     "starred": my_stars.contains(&cid), "signature": signature,
+                    "origin": origin, "blocked": blocked,
                 })
             })
             .collect();
-        // Rank: most-hosted + most-starred first, then newest.
+        // Rank on who published it first and foremost: the origin's standing
+        // outweighs popularity, because stars and host counts are cheap for an
+        // attacker to inflate and a verified track record is not. Blocked
+        // publishers sink to the bottom.
         out.sort_by(|a, b| {
-            let score = |m: &Value| {
-                m["star_count"].as_i64().unwrap_or(0) * 3 + m["host_count"].as_i64().unwrap_or(0)
+            let score = |m: &Value| -> i64 {
+                if m["blocked"].as_bool().unwrap_or(false) {
+                    return i64::MIN;
+                }
+                m["origin"]["reputation"].as_i64().unwrap_or(0) * 2
+                    + m["star_count"].as_i64().unwrap_or(0).min(50) * 3
+                    + m["host_count"].as_i64().unwrap_or(0).min(50)
+                    + if m["origin"]["seeder_online"].as_bool().unwrap_or(false) { 10 } else { 0 }
             };
             score(b).cmp(&score(a)).then_with(|| {
                 let ai = a["entry"]["added_at_ms"].as_i64().unwrap_or(0);
                 let bi = b["entry"]["added_at_ms"].as_i64().unwrap_or(0);
-                bi.cmp(&ai)
+                bi.cmp(&ai).then_with(|| a["entry"]["cid"].as_str().cmp(&b["entry"]["cid"].as_str()))
             })
         });
         let now = epoch_ms();
@@ -1454,8 +2426,8 @@ pub async fn model_card(
         return Json(json!({"ok": false, "err": "invalid CID"}));
     }
     let v = tokio::task::spawn_blocking(move || -> Value {
-        match run_script(&["cat", &format!("{cid}/model-card.json")]) {
-            Ok(s) => serde_json::from_str::<Value>(&s)
+        match cat_capped(&format!("{cid}/model-card.json"), MAX_TEXT_BYTES) {
+            Ok(b) => serde_json::from_slice::<Value>(&b)
                 .map(|card| json!({"ok": true, "card": card}))
                 .unwrap_or_else(|_| json!({"ok": false, "err": "card not valid JSON"})),
             Err(e) => json!({"ok": false, "err": e}),
@@ -1493,22 +2465,29 @@ pub async fn model_image(
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        _ => "application/octet-stream",
+        // No SVG: it is a document that can carry script, this endpoint serves
+        // bytes chosen by strangers, and it does so from the console's own
+        // origin. Opened directly, a hostile SVG would run as the admin.
+        _ => return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported image type").into_response(),
     };
-    let bytes = tokio::task::spawn_blocking(move || run_script_bytes(&["cat", &format!("{cid}/{name}")]))
+    let bytes = tokio::task::spawn_blocking(move || cat_capped(&format!("{cid}/{name}"), MAX_IMAGE_BYTES))
         .await
         .unwrap_or_else(|_| Err("image task failed".into()));
     match bytes {
-        Ok(b) => (
+        // Only bytes that really are a raster image leave here as one.
+        Ok(b) if sniff_kind(&b[..b.len().min(16)]) == "image" => (
             [
                 (header::CONTENT_TYPE, mime.to_string()),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
+                // The response sits behind the console login, so it is not
+                // "public"; content-addressed, so it never changes.
+                (header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_string()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'; sandbox".to_string()),
             ],
             b,
         )
             .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        _ => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
@@ -1525,8 +2504,8 @@ pub async fn model_file(
         return Json(json!({"ok": false, "err": "invalid request"}));
     }
     let v = tokio::task::spawn_blocking(move || -> Value {
-        match run_script(&["cat", &format!("{cid}/{name}")]) {
-            Ok(s) => json!({"ok": true, "text": s}),
+        match cat_capped(&format!("{cid}/{name}"), MAX_TEXT_BYTES) {
+            Ok(b) => json!({"ok": true, "text": String::from_utf8_lossy(&b)}),
             Err(e) => json!({"ok": false, "err": e}),
         }
     })
@@ -1554,12 +2533,26 @@ fn safe_img_ext(ext: &str) -> String {
         "jpg" | "jpeg" => "jpg".into(),
         "webp" => "webp".into(),
         "gif" => "gif".into(),
-        "svg" => "svg".into(),
         _ => "png".into(),
     }
 }
 
 const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+/// Cap for a card / README pulled through the node for display.
+const MAX_TEXT_BYTES: usize = 1024 * 1024;
+
+/// `ipfs cat` with a hard size limit. These paths name content published by
+/// strangers and are fetched just by browsing the index, so an unbounded read
+/// let any peer make the supervisor buffer gigabytes (or wait forever). Asks
+/// for one byte past the limit so "too big" is told apart from "exactly at
+/// the limit"; the script also time-boxes the call.
+fn cat_capped(path: &str, max: usize) -> Result<Vec<u8>, String> {
+    let bytes = run_script_bytes(&["cat", path, &(max + 1).to_string()])?;
+    if bytes.len() > max {
+        return Err(format!("larger than the {} KB limit", max / 1024));
+    }
+    Ok(bytes)
+}
 
 /// Decode a base64 card image, enforcing the size cap. Returns (bytes, ext).
 fn decode_image(image_b64: &str, image_ext: &str) -> Result<Option<(Vec<u8>, String)>, String> {
@@ -1575,6 +2568,9 @@ fn decode_image(image_b64: &str, image_ext: &str) -> Result<Option<(Vec<u8>, Str
         .map_err(|e| format!("bad image base64: {e}"))?;
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(format!("image too large ({} KB, max {} KB)", bytes.len() / 1024, MAX_IMAGE_BYTES / 1024));
+    }
+    if sniff_kind(&bytes[..bytes.len().min(16)]) != "image" {
+        return Err("that file is not a PNG, JPEG, WebP or GIF image".into());
     }
     Ok(Some((bytes, safe_img_ext(image_ext))))
 }
@@ -1678,6 +2674,14 @@ pub struct PublishReq {
     pub image_b64: String,
     #[serde(default)]
     pub image_ext: String,
+    /// Sign with the signed-in publisher identity. Defaults to true; false
+    /// publishes under this Orb's key alone.
+    #[serde(default = "yes")]
+    pub sign_identity: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// POST /api/ipfs/models/publish — phase 2: finalize a draft into a shared
@@ -1725,31 +2729,20 @@ pub async fn publish_model(State(_s): State<AppState>, Json(req): Json<PublishRe
             }
         }
 
-        let (origin_id, origin_label) = crate::fleet::identity();
-        let card_doc = json!({
-            "schema": "aeon-model-card/1", "name": req.name, "file": file,
-            "size_bytes": size_bytes, "sha256": sha256, "card": card,
-            "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
-        });
-        if std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default()).is_err() {
-            return json!({"ok": false, "err": "write card failed"});
-        }
-
-        let dir_str = dir.to_string_lossy().to_string();
-        match run_script(&["add", &dir_str]) {
-            Ok(cid) if !cid.is_empty() => {
-                catalog_add(ModelEntry {
-                    cid: cid.clone(), name: req.name, file, size_bytes, sha256,
-                    card, added_at_ms: epoch_ms(), origin_id, origin_label,
-                    verified: false, source: String::new(),
-                    ..Default::default()
-                });
+        let _ = size_bytes; // the manifest re-derives sizes from the files themselves
+        let known: HashMap<String, String> = [(file.clone(), sha256)].into_iter().collect();
+        let spec = ShareSpec {
+            name: req.name, file, card, verified: false, source: String::new(), upstream: String::new(), identity: req.sign_identity,
+        };
+        match finalize_share(&dir, spec, &known) {
+            Ok(entry) => {
+                let cid = entry.cid.clone();
+                catalog_add(entry);
                 let _ = std::fs::remove_dir_all(&dir);
                 let _ = std::fs::remove_file(&meta_path);
                 announce();
                 json!({"ok": true, "cid": cid})
             }
-            Ok(_) => json!({"ok": false, "err": "add produced no CID"}),
             Err(e) => json!({"ok": false, "err": e}),
         }
     })
@@ -1791,6 +2784,23 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
             Some(e) => e,
             None => return json!({"ok": false, "err": "not a locally-hosted model"}),
         };
+        // Editing rebuilds the directory and re-signs it as ours. Doing that to
+        // a model another Orb originated would erase its origin and put our
+        // name on it, so it is only allowed for what this Orb shared itself.
+        if !is_mine(&old) {
+            return json!({"ok": false, "err": "only its publisher can edit a model — this one is a mirror of someone else's. (If it is yours but unsigned, sign it first.)"});
+        }
+        // The current card's manifest, if it has one, so the edited card can
+        // carry a correct one too (weights hashes reused, sidecars re-hashed).
+        let old_files: Option<Vec<FileRec>> = cat_capped(&format!("{}/{CARD_FILE}", req.cid), MAX_TEXT_BYTES)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<CardDoc>(&b).ok())
+            .and_then(|c| c.files);
+        let mut new_files = old_files.clone().unwrap_or_default();
+        let rec = |path: &str, bytes: &[u8]| -> FileRec {
+            use sha2::{Digest, Sha256};
+            FileRec { path: path.to_string(), size: bytes.len() as u64, sha256: hex::encode(Sha256::digest(bytes)) }
+        };
         let img = match decode_image(&req.image_b64, &req.image_ext) {
             Ok(v) => v,
             Err(e) => return json!({"ok": false, "err": e}),
@@ -1812,6 +2822,7 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
             None => old.card.readme, // keep existing
             Some(md) if md.trim().is_empty() => {
                 let _ = run_script(&["mfs-rm", &format!("{base}/README.md")]);
+                new_files.retain(|f| f.path != "README.md");
                 false
             }
             Some(md) => {
@@ -1819,6 +2830,8 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
                     let _ = run_script(&["mfs-rm", &base]);
                     return json!({"ok": false, "err": format!("write readme: {e}")});
                 }
+                new_files.retain(|f| f.path != "README.md");
+                new_files.push(rec("README.md", md.as_bytes()));
                 true
             }
         };
@@ -1837,6 +2850,8 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
                 match run_script(&["add", &tmp.to_string_lossy()]) {
                     Ok(icid) if !icid.is_empty() => {
                         let _ = run_script(&["mfs-cp", &format!("/ipfs/{icid}"), &format!("{base}/{img_name}")]);
+                        new_files.retain(|f| f.path != old_img && f.path != img_name);
+                        new_files.push(rec(&img_name, &bytes));
                         card.image = img_name;
                     }
                     _ => {}
@@ -1846,19 +2861,36 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
         } else if req.remove_image {
             if !old_img.is_empty() {
                 let _ = run_script(&["mfs-rm", &format!("{base}/{old_img}")]);
+                new_files.retain(|f| f.path != old_img);
             }
             card.image = String::new();
         } else {
             card.image = old_img; // keep
         }
 
-        // Rewrite model-card.json.
-        let card_doc = json!({
+        // Rewrite model-card.json. A card that had a signed manifest gets a
+        // fresh one over the edited file set; an older card without one stays
+        // without (we cannot vouch for hashes of files we never listed).
+        let mut card_doc = json!({
             "schema": "aeon-model-card/1", "name": req.name, "file": old.file,
             "size_bytes": old.size_bytes, "sha256": old.sha256, "card": card,
+            "verified": old.verified, "source": old.source,
             "shared_by": {"id": old.origin_id, "label": old.origin_label},
             "created_ms": old.added_at_ms,
         });
+        if old_files.is_some() {
+            new_files.sort_by(|a, b| a.path.cmp(&b.path));
+            let signed_ms = epoch_ms();
+            let digest = crate::publisher::origin_digest(
+                &req.name, &old.source, old.verified, signed_ms, &manifest_tuples(&new_files));
+            let origin = match crate::publisher::sign_as_orb(&digest) {
+                Ok(s) => OriginBlock { key: s.pubkey, name: s.name, signed_ms, sig: s.sig, delegation: s.delegation, upstream: String::new() },
+                Err(_) => OriginBlock { signed_ms, ..Default::default() },
+            };
+            card_doc["schema"] = json!("aeon-model-card/2");
+            card_doc["files"] = json!(new_files);
+            card_doc["origin"] = json!(origin);
+        }
         let card_bytes = serde_json::to_vec_pretty(&card_doc).unwrap_or_default();
         let _ = run_script(&["mfs-rm", &format!("{base}/model-card.json")]);
         if let Err(e) = run_script_stdin(&["mfs-write", &format!("{base}/model-card.json")], &card_bytes) {
@@ -1905,6 +2937,10 @@ fn hf_agent() -> ureq::Agent {
     ureq::builder()
         .redirects(10)
         .timeout_connect(std::time::Duration::from_secs(20))
+        // Per-read, not whole-request: a multi-GB download may take hours, but
+        // two minutes of total silence means the connection is dead. Without
+        // this a stalled socket held the import (and its task row) forever.
+        .timeout_read(std::time::Duration::from_secs(120))
         .user_agent("aeon-magick-orb/modelshare")
         .build()
 }
@@ -2116,59 +3152,105 @@ pub async fn import_hf(State(_s): State<AppState>, Json(req): Json<ImportHfReq>)
     Json(json!({"ok": true, "importing": importing}))
 }
 
+/// A staging directory that removes itself when dropped, so an import that
+/// fails part-way (network error, hash mismatch, full disk) cannot strand
+/// gigabytes under staging/ the way a bare `?` return used to.
+struct StagingDir(std::path::PathBuf);
+
+impl StagingDir {
+    fn new(prefix: &str) -> Result<Self, String> {
+        let p = staging_root().join(format!("{prefix}-{}", new_draft_id()));
+        std::fs::create_dir_all(&p).map_err(|e| format!("mkdir: {e}"))?;
+        Ok(Self(p))
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A repo-relative path is safe to recreate under a staging dir when every
+/// segment is a plain name — no absolute paths, no `..`, no odd characters.
+fn safe_rel_path(p: &str) -> bool {
+    !p.is_empty()
+        && !p.starts_with('/')
+        && p.split('/').all(|seg| {
+            !seg.is_empty() && seg != "." && seg != ".." && !seg.chars().any(|c| c.is_control() || c == '\\')
+        })
+}
+
+/// Small non-weight files a model needs in order to actually LOAD: tokenizer,
+/// configs, chat template, vocab. Leaving them out (as the importer once did,
+/// taking only config.json) shares weights nobody can run.
+fn is_sidecar(path: &str, size: u64) -> bool {
+    const MAX: u64 = 64 * 1024 * 1024;
+    let leaf = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    size <= MAX
+        && !leaf.starts_with('.')
+        && leaf != "readme.md"
+        && [".json", ".txt", ".model", ".jinja", ".yaml", ".yml", ".vocab", ".spm"].iter().any(|e| leaf.ends_with(e))
+}
+
+/// Replace a secret with dots wherever it appears in a message bound for the UI.
+fn redact(msg: &str, secret: Option<&str>) -> String {
+    match secret {
+        Some(s) if !s.is_empty() => msg.replace(s, "•••"),
+        _ => msg.to_string(),
+    }
+}
+
 fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &str) -> Result<(), String> {
     let meta = hf_get_json(&format!("https://huggingface.co/api/models/{repo}"))?;
-    let tree = hf_get_json(&format!("https://huggingface.co/api/models/{repo}/tree/main"))?;
-    let files = tree.as_array().cloned().unwrap_or_default();
-
-    // (path, size, lfs_sha256)
-    let mut weights: Vec<(String, u64, Option<String>)> = Vec::new();
+    // Recursive: weights and configs often sit in subfolders (unet/, vae/, …).
+    let tree = hf_get_json(&format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true"))?;
     let get = |f: &Value, k: &str| f.get(k).and_then(|v| v.as_str()).map(String::from);
-    let lfs_oid = |f: &Value| f.get("lfs").and_then(|l| l.get("oid")).and_then(|v| v.as_str()).map(String::from);
-    let size_of = |f: &Value| f.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    // (path, size, lfs sha256)
+    let entries: Vec<(String, u64, Option<String>)> = tree
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|f| f.get("type").and_then(|v| v.as_str()) != Some("directory"))
+        .filter_map(|f| {
+            let path = get(f, "path")?;
+            let size = f.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            let oid = f.get("lfs").and_then(|l| l.get("oid")).and_then(|v| v.as_str()).map(String::from);
+            Some((path, size, oid))
+        })
+        .filter(|(p, _, _)| safe_rel_path(p))
+        .collect();
 
+    let ends = |p: &str, ext: &str| p.to_ascii_lowercase().ends_with(ext);
+    let mut picks: Vec<(String, u64, Option<String>)> = Vec::new();
     if let Some(one) = &only_file {
-        let f = files.iter().find(|f| get(f, "path").as_deref() == Some(one.as_str()));
-        let (sz, oid) = f.map(|f| (size_of(f), lfs_oid(f))).unwrap_or((0, None));
-        weights.push((one.clone(), sz, oid));
-    } else {
-        let paths: Vec<String> = files.iter().filter_map(|f| get(f, "path")).collect();
-        let has = |ext: &str| paths.iter().any(|p| p.to_ascii_lowercase().ends_with(ext));
-        if has(".safetensors") {
-            for f in &files {
-                if let Some(p) = get(f, "path") {
-                    let pl = p.to_ascii_lowercase();
-                    if pl.ends_with(".safetensors") || p == "config.json" || p == "generation_config.json" {
-                        weights.push((p, size_of(f), lfs_oid(f)));
-                    }
-                }
-            }
-        } else if has(".gguf") {
-            // one GGUF — prefer a common balanced quant, else the smallest.
-            let prefs = ["q4_k_m", "q4_0", "q5_k_m", "q8_0", "q6_k", "q3_k_m"];
-            let ggufs: Vec<&Value> = files.iter().filter(|f| get(f, "path").map(|p| p.to_ascii_lowercase().ends_with(".gguf")).unwrap_or(false)).collect();
-            let pick = prefs.iter().find_map(|q| ggufs.iter().find(|f| get(f, "path").map(|p| p.to_ascii_lowercase().contains(q)).unwrap_or(false)).copied())
-                .or_else(|| ggufs.iter().min_by_key(|f| size_of(f)).copied());
-            if let Some(f) = pick {
-                if let Some(p) = get(f, "path") {
-                    weights.push((p, size_of(f), lfs_oid(f)));
-                }
-            }
-        } else {
-            for f in &files {
-                if let Some(p) = get(f, "path") {
-                    if is_weight(&p) || p == "config.json" {
-                        weights.push((p, size_of(f), lfs_oid(f)));
-                    }
-                }
-            }
+        if !safe_rel_path(one) {
+            return Err("invalid file path".into());
         }
+        picks.push(entries.iter().find(|(p, _, _)| p == one).cloned().unwrap_or((one.clone(), 0, None)));
+    } else if entries.iter().any(|(p, _, _)| ends(p, ".safetensors")) {
+        picks.extend(entries.iter().filter(|(p, s, _)| ends(p, ".safetensors") || is_sidecar(p, *s)).cloned());
+    } else if entries.iter().any(|(p, _, _)| ends(p, ".gguf")) {
+        // A GGUF is self-contained: take one — a common balanced quant if the
+        // repo has it, else the smallest.
+        let prefs = ["q4_k_m", "q4_0", "q5_k_m", "q8_0", "q6_k", "q3_k_m"];
+        let ggufs: Vec<&(String, u64, Option<String>)> = entries.iter().filter(|(p, _, _)| ends(p, ".gguf")).collect();
+        let pick = prefs
+            .iter()
+            .find_map(|q| ggufs.iter().find(|(p, _, _)| p.to_ascii_lowercase().contains(q)).copied())
+            .or_else(|| ggufs.iter().min_by_key(|(_, s, _)| *s).copied());
+        picks.extend(pick.cloned());
+    } else {
+        picks.extend(entries.iter().filter(|(p, s, _)| is_weight(p) || is_sidecar(p, *s)).cloned());
     }
-    if weights.is_empty() {
+    if !picks.iter().any(|(p, _, _)| is_weight(p)) {
         return Err("no weight files found in the repo".into());
     }
-    let total: u64 = weights.iter().map(|(_, s, _)| *s).sum();
-    let dir = staging_root().join(format!("hf-{}", new_draft_id()));
+    let total: u64 = picks.iter().map(|(_, s, _)| *s).sum();
     let free = free_bytes(MODELS_DIR);
     if total > 0 && total + 512 * 1024 * 1024 > free {
         return Err(format!(
@@ -2176,37 +3258,51 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
             human(total), human(free)
         ));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let staging = StagingDir::new("hf")?;
+    let dir = staging.path();
 
-    // Download weights, verifying each against HF's published sha256.
+    // Download, holding every LFS file to the SHA-256 HuggingFace publishes.
+    let token = source_token("huggingface");
     let mut prior = 0u64;
-    let mut all_verified = true;
     let mut any_verifiable = false;
-    let mut primary_sha = String::new();
-    let mut primary_file = String::new();
-    for (path, size, oid) in &weights {
-        let leaf = path.rsplit('/').next().unwrap_or(path).to_string();
-        let url = format!("https://huggingface.co/{repo}/resolve/main/{path}");
-        let (sha, n) = hf_download(&url, &dir.join(&leaf), key, &leaf, total, prior, source_token("huggingface").as_deref())?;
-        prior += n;
-        if primary_file.is_empty() && is_weight(path) {
-            primary_file = leaf.clone();
-            primary_sha = sha.clone();
+    let mut known: HashMap<String, String> = HashMap::new();
+    for (path, _size, oid) in &picks {
+        let dest = dir.join(path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
         }
+        let url = format!("https://huggingface.co/{repo}/resolve/main/{path}");
+        let (sha, n) = hf_download(&url, &dest, key, path, total, prior, token.as_deref())?;
+        prior += n;
         if let Some(expected) = oid {
             any_verifiable = true;
             if !expected.eq_ignore_ascii_case(&sha) {
-                all_verified = false;
+                // This used to be recorded as "unverified" and shared anyway.
+                // A mismatch means the bytes are not the model: stop.
+                return Err(format!(
+                    "“{path}” does not match the SHA-256 HuggingFace publishes for it — the download was corrupted or altered, so nothing was shared. Retry the import."
+                ));
             }
         }
-        let _ = size; // (size was only for the disk/total estimate)
+        known.insert(path.clone(), sha);
     }
-    let verified = any_verifiable && all_verified;
+    let verified = any_verifiable;
+    // Prefer a top-level weight as the headline file (its name is what the
+    // gateway download link uses).
+    let primary_file = picks
+        .iter()
+        .map(|(p, _, _)| p)
+        .filter(|p| is_weight(p))
+        .min_by_key(|p| p.matches('/').count())
+        .cloned()
+        .unwrap_or_default();
 
     // README (the model card) + author avatar — best-effort.
     task_set(key, "fetching README + image…");
     if let Ok(resp) = hf_agent().get(&format!("https://huggingface.co/{repo}/resolve/main/README.md")).call() {
-        if let Ok(text) = resp.into_string() {
+        let mut text = String::new();
+        use std::io::Read;
+        if resp.into_reader().take(MAX_TEXT_BYTES as u64).read_to_string(&mut text).is_ok() && !text.is_empty() {
             let _ = std::fs::write(dir.join("README.md"), text);
         }
     }
@@ -2219,10 +3315,11 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
                 if let Ok(r) = hf_agent().get(&url).call() {
                     let mut bytes = Vec::new();
                     use std::io::Read;
-                    if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
-                        if std::fs::write(dir.join(&name), &bytes).is_ok() {
-                            image_name = name;
-                        }
+                    if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok()
+                        && sniff_kind(&bytes[..bytes.len().min(16)]) == "image"
+                        && std::fs::write(dir.join(&name), &bytes).is_ok()
+                    {
+                        image_name = name;
                     }
                 }
             }
@@ -2240,9 +3337,9 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
     let tags: Vec<String> = meta.get("tags").and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).filter(|t| !t.contains(':') && t.len() < 24).take(8).collect())
         .unwrap_or_default();
-    let format = if primary_file.to_ascii_lowercase().ends_with(".gguf") { "gguf" }
-        else if primary_file.to_ascii_lowercase().ends_with(".safetensors") { "safetensors" }
-        else if primary_file.to_ascii_lowercase().ends_with(".onnx") { "onnx" }
+    let format = if ends(&primary_file, ".gguf") { "gguf" }
+        else if ends(&primary_file, ".safetensors") { "safetensors" }
+        else if ends(&primary_file, ".onnx") { "onnx" }
         else { "" };
     let quant = if format == "gguf" {
         // e.g. "qwen2.5-0.5b-instruct-q4_k_m.gguf" → "q4_k_m": the last dash/dot
@@ -2275,40 +3372,32 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
         readme: dir.join("README.md").exists(),
         ..Default::default()
     };
-    let (origin_id, origin_label) = crate::fleet::identity();
-    let source = format!("https://huggingface.co/{repo}");
-    let card_doc = json!({
-        "schema": "aeon-model-card/1", "name": model_name, "file": primary_file,
-        "size_bytes": total, "sha256": primary_sha, "card": card,
-        "verified": verified, "source": source,
-        "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
-    });
-    std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default())
-        .map_err(|e| format!("write card: {e}"))?;
 
+    // Hold our own imports to the gate every peer applies on download — no
+    // point sharing something each of them will quarantine and reject.
+    inspect_model_dir(dir)?;
     task_set(key, "adding to IPFS…");
-    let cid = run_script(&["add", &dir.to_string_lossy()])?;
-    if cid.is_empty() {
-        return Err("ipfs add produced no CID".into());
-    }
+    let spec = ShareSpec {
+        name: model_name.to_string(),
+        file: primary_file,
+        card,
+        verified,
+        source: format!("https://huggingface.co/{repo}"),
+        upstream: String::new(), identity: true,
+    };
+    let entry = finalize_share(dir, spec, &known)?;
     // Gated/private weights stay on this Orb only. Seeding off does the same
     // for a public repo: a local library copy, no pin, no announcement.
-    if hf_is_gated(&meta) || !seed_enabled() {
-        let _ = ensure_in_library(&cid, &model_slug(model_name));
-        let _ = run_script(&["unpin", &cid]);
-        let _ = std::fs::remove_dir_all(&dir);
-        if hf_is_gated(&meta) {
+    let gated = hf_is_gated(&meta);
+    if gated || !seed_enabled() {
+        let _ = ensure_in_library(&entry.cid, &model_slug(model_name));
+        let _ = run_script(&["unpin", &entry.cid]);
+        if gated {
             return Err("this HuggingFace repo is gated or private — kept locally, not seeded".into());
         }
         return Ok(());
     }
-    catalog_add(ModelEntry {
-        cid, name: model_name.to_string(), file: primary_file, size_bytes: total,
-        sha256: primary_sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
-        verified, source,
-        ..Default::default()
-    });
-    let _ = std::fs::remove_dir_all(&dir);
+    catalog_add(entry);
     Ok(())
 }
 
@@ -2396,13 +3485,18 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
     if size > 0 && size + 512 * 1024 * 1024 > free {
         return Err(format!("not enough disk: model is {} but only {} free", human(size), human(free)));
     }
-    let dir = staging_root().join(format!("ollama-{}", new_draft_id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let staging = StagingDir::new("ollama")?;
+    let dir = staging.path();
 
     let leaf = format!("{model}-{tag}.gguf");
     let blob_url = format!("https://{host}/v2/{ns}/{model}/blobs/{digest}");
     let (sha, _n) = hf_download(&blob_url, &dir.join(&leaf), key, &leaf, size, 0, source_token("ollama").as_deref())?;
-    let verified = !expected_sha.is_empty() && expected_sha.eq_ignore_ascii_case(&sha);
+    // The layer digest IS the blob's SHA-256; a mismatch means these are not
+    // the model's bytes, so stop rather than share them marked "unverified".
+    if !expected_sha.is_empty() && !expected_sha.eq_ignore_ascii_case(&sha) {
+        return Err("the downloaded weights do not match the registry's layer digest — corrupted or altered, nothing was shared".into());
+    }
+    let verified = !expected_sha.is_empty();
 
     // Small text layers → license + a README from the system prompt.
     let fetch_text = |mt: &str| -> Option<String> {
@@ -2436,34 +3530,20 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
         readme: true,
         ..Default::default()
     };
-    let (origin_id, origin_label) = crate::fleet::identity();
     let ns_seg = if ns == "library" { String::new() } else { format!("{ns}/") };
     let source = format!("https://ollama.com/{ns_seg}{model}:{tag}");
-    let card_doc = json!({
-        "schema": "aeon-model-card/1", "name": model_name, "file": leaf,
-        "size_bytes": size, "sha256": sha, "card": card,
-        "verified": verified, "source": source,
-        "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
-    });
-    std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default())
-        .map_err(|e| format!("write card: {e}"))?;
-
+    inspect_model_dir(dir)?;
     task_set(key, "adding to IPFS…");
-    let cid = run_script(&["add", &dir.to_string_lossy()])?;
-    if cid.is_empty() {
-        return Err("ipfs add produced no CID".into());
-    }
-    let cid_owned = cid.clone();
-    catalog_add(ModelEntry {
-        cid, name: model_name.to_string(), file: leaf, size_bytes: size,
-        sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
-        verified, source,
-        ..Default::default()
-    });
+    let known: HashMap<String, String> = [(leaf.clone(), sha)].into_iter().collect();
+    let spec = ShareSpec {
+        name: model_name.to_string(), file: leaf, card, verified, source, upstream: String::new(), identity: true,
+    };
+    let entry = finalize_share(dir, spec, &known)?;
+    let cid = entry.cid.clone();
+    catalog_add(entry);
     if !seed_enabled() {
-        retain_private(&cid_owned, model_name);
+        retain_private(&cid, model_name);
     }
-    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 
@@ -2557,9 +3637,18 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
         None => return Err("no SafeTensor file on this model — pickle/.ckpt-only models aren't accepted (code-execution risk); pick one with a safetensors version".into()),
     };
 
-    let leaf = {
+    // A name chosen by an uploader: keep it to a plain file name.
+    let leaf: String = {
         let n = file.get("name").and_then(|v| v.as_str()).unwrap_or("model.safetensors");
-        n.rsplit('/').next().unwrap_or(n).to_string()
+        let n: String = n
+            .rsplit('/')
+            .next()
+            .unwrap_or(n)
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let n = n.trim_start_matches('.').to_string();
+        if n.is_empty() { "model.safetensors".to_string() } else { n }
     };
     let size = (file.get("sizeKB").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1024.0) as u64;
     let expected_sha = file.get("hashes").and_then(|h| h.get("SHA256")).and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -2576,17 +3665,22 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
     if size > 0 && size + 512 * 1024 * 1024 > free {
         return Err(format!("not enough disk: model is {} but only {} free", human(size), human(free)));
     }
-    let dir = staging_root().join(format!("civitai-{}", new_draft_id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-    let (sha, _n) = hf_download(&dl, &dir.join(&leaf), key, &leaf, size, 0, None)?;
-    let verified = !expected_sha.is_empty() && expected_sha.eq_ignore_ascii_case(&sha);
+    let staging = StagingDir::new("civitai")?;
+    let dir = staging.path();
+    // The token rides in the URL, and a failed request's error text quotes the
+    // URL — which then showed up verbatim in the task list. Strip it.
+    let (sha, _n) = hf_download(&dl, &dir.join(&leaf), key, &leaf, size, 0, None)
+        .map_err(|e| redact(&e, auth.as_deref()))?;
+    if !expected_sha.is_empty() && !expected_sha.eq_ignore_ascii_case(&sha) {
+        return Err("the downloaded file does not match the SHA-256 Civitai publishes for it — corrupted or altered, nothing was shared".into());
+    }
+    let verified = !expected_sha.is_empty();
 
     // Reject anything that isn't actually a safetensors (fake/mislabelled).
     {
         let mut head = [0u8; 16];
         let hn = { use std::io::Read; std::fs::File::open(dir.join(&leaf)).and_then(|mut f| f.read(&mut head)).unwrap_or(0) };
         if !matches!(sniff_kind(&head[..hn]), "safetensors") {
-            let _ = std::fs::remove_dir_all(&dir);
             return Err("downloaded file is not a valid safetensors".into());
         }
     }
@@ -2602,7 +3696,8 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
             if let Ok(r) = hf_agent().get(url).call() {
                 let mut bytes = Vec::new();
                 use std::io::Read;
-                if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok() && !bytes.is_empty()
+                if r.into_reader().take(MAX_IMAGE_BYTES as u64).read_to_end(&mut bytes).is_ok()
+                    && sniff_kind(&bytes[..bytes.len().min(16)]) == "image"
                     && std::fs::write(dir.join(&name), &bytes).is_ok()
                 {
                     if image_name.is_empty() {
@@ -2641,34 +3736,17 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
         nsfw,
         gallery,
     };
-    let (origin_id, origin_label) = crate::fleet::identity();
     let source = format!("https://civitai.com/models/{}", model_meta.get("id").and_then(|v| v.as_u64()).unwrap_or(vid));
-    let card_doc = json!({
-        "schema": "aeon-model-card/1", "name": m_name, "file": leaf,
-        "size_bytes": size, "sha256": sha, "card": card,
-        "verified": verified, "source": source,
-        "shared_by": {"id": origin_id, "label": origin_label}, "created_ms": epoch_ms(),
-    });
-    std::fs::write(dir.join("model-card.json"), serde_json::to_vec_pretty(&card_doc).unwrap_or_default())
-        .map_err(|e| format!("write card: {e}"))?;
-
+    inspect_model_dir(dir)?;
     task_set(key, "adding to IPFS…");
-    let cid = run_script(&["add", &dir.to_string_lossy()])?;
-    if cid.is_empty() {
-        return Err("ipfs add produced no CID".into());
-    }
-    let cid_owned = cid.clone();
-    let name_owned = m_name.clone();
-    catalog_add(ModelEntry {
-        cid, name: m_name, file: leaf, size_bytes: size,
-        sha256: sha, card, added_at_ms: epoch_ms(), origin_id, origin_label,
-        verified, source,
-        ..Default::default()
-    });
+    let known: HashMap<String, String> = [(leaf.clone(), sha)].into_iter().collect();
+    let spec = ShareSpec { name: m_name.clone(), file: leaf, card, verified, source, upstream: String::new(), identity: true, };
+    let entry = finalize_share(dir, spec, &known)?;
+    let cid = entry.cid.clone();
+    catalog_add(entry);
     if !seed_enabled() {
-        retain_private(&cid_owned, &name_owned);
+        retain_private(&cid, &m_name);
     }
-    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 
@@ -2765,7 +3843,9 @@ pub fn model_slug(name: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c.to_ascii_lowercase() } else { '-' })
         .collect();
-    let s = s.trim_matches('-').to_string();
+    // Trim dots too: a name of "." or ".." must not become a path component
+    // that points at the library itself or its parent.
+    let s = s.trim_matches(|c| c == '-' || c == '.').to_string();
     if s.is_empty() { "model".to_string() } else { s.chars().take(80).collect() }
 }
 
@@ -2779,10 +3859,10 @@ pub fn find_model(id_or_cid: &str) -> Option<ModelEntry> {
     if let Some(e) = read_catalog().into_iter().find(|e| hit(e)) {
         return Some(e);
     }
-    std::fs::read_to_string(REGISTRY_JSON)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<ModelEntry>>(&t).ok())
-        .and_then(|v| v.into_iter().find(|e| hit(e)))
+    // registry.json is {"peers": {<id>: {models: [...]}}}. This used to parse
+    // it as a bare list, which never matched, so nothing on the network could
+    // be found by name and `model_list` always reported an empty network.
+    registry_models().into_iter().find(|e| hit(e))
 }
 
 /// Absolute path of a model's materialized directory in the library (may not
@@ -2805,7 +3885,23 @@ pub fn ensure_in_library(cid: &str, slug: &str) -> Result<u64, String> {
         return Ok(dir_size(&dir));
     }
     let dest = dir.to_string_lossy().to_string();
-    run_script(&["get", cid, &dest]).map(|s| s.trim().parse().unwrap_or_else(|_| dir_size(&dir)))
+    let size = run_script(&["get", cid, &dest]).map(|s| s.trim().parse().unwrap_or_else(|_| dir_size(&dir)))?;
+    // The library is what gets rsynced to connected machines, and a pull can
+    // name any CID on the network — so it passes the same gate a download
+    // does before it is allowed to stay. Content that already went through
+    // quarantine (it is in our catalog) skips the slow virus scan.
+    let gate = inspect_model_dir(&dir).and_then(|_| {
+        if read_catalog().iter().any(|e| e.cid == cid) {
+            Ok(())
+        } else {
+            virus_scan(&dir).map(|_| ()).map_err(|e| format!("virus scan: {e}"))
+        }
+    });
+    if let Err(e) = gate {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    Ok(size)
 }
 
 fn dir_size(p: &std::path::Path) -> u64 {
@@ -2823,6 +3919,96 @@ fn dir_size(p: &std::path::Path) -> u64 {
             .sum()
     }
     walk(p)
+}
+
+/// source URL → CID for everything this Orb shares that came from a URL. Lets
+/// the Hailo page show which of its models are also seeded on Model Share.
+pub fn vendor_cids() -> HashMap<String, String> {
+    read_catalog().into_iter().filter(|e| !e.source.is_empty()).map(|e| (e.source, e.cid)).collect()
+}
+
+/// Mirror a model file that already lives on this Orb — e.g. a .hef the Hailo
+/// page downloaded — into Model Share, so anything fetched for local inference
+/// is also seeded to the network. The card it gets holds nothing specific to
+/// this Orb, so every Orb mirroring the same vendor file arrives at the same
+/// CID: one row in the index, one swarm, more seeders with every Orb that
+/// installs the model. Returns the CID. Idempotent.
+pub fn share_vendor_file(
+    src: &std::path::Path,
+    file_name: &str,
+    name: &str,
+    card: ModelCard,
+    source: &str,
+    upstream: &str,
+) -> Result<String, String> {
+    if !read_config().enabled {
+        return Err("IPFS is off".into());
+    }
+    if !seed_enabled() {
+        return Err("seeding is off on this Orb".into());
+    }
+    let size = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?.len();
+    if size == 0 {
+        return Err("the model file is empty".into());
+    }
+    // Already mirrored at this size → done, without re-hashing gigabytes on
+    // every boot.
+    if let Some(e) = read_catalog().into_iter().find(|e| e.source == source && e.file == file_name && e.size_bytes == size) {
+        if e.upstream != upstream {
+            let mut all = read_catalog();
+            for x in all.iter_mut().filter(|x| x.cid == e.cid) {
+                x.upstream = upstream.to_string();
+            }
+            let _ = write_catalog(&all);
+            announce();
+        }
+        return Ok(e.cid);
+    }
+    if size.saturating_add(512 * 1024 * 1024) > free_bytes(MODELS_DIR) {
+        return Err(format!("not enough disk to seed it ({} needed)", human(size)));
+    }
+    let (repo, smax) = ipfs_repo_usage();
+    if smax > 0 && repo.saturating_add(size) > smax {
+        return Err(format!(
+            "it would not fit under the IPFS storage limit ({} used of {}) — raise the limit to seed it",
+            human(repo), human(smax)
+        ));
+    }
+    let staging = StagingDir::new("vendor")?;
+    let dest = staging.path().join(file_name);
+    // A hard link costs no disk; fall back to a copy across filesystems (e.g.
+    // when the data root lives on an adopted USB drive).
+    if std::fs::hard_link(src, &dest).is_err() {
+        std::fs::copy(src, &dest).map_err(|e| format!("stage {file_name}: {e}"))?;
+    }
+    inspect_model_dir(staging.path())?;
+    let spec = ShareSpec {
+        name: name.to_string(),
+        file: file_name.to_string(),
+        card,
+        verified: false,
+        source: source.to_string(),
+        upstream: upstream.to_string(),
+        identity: true,
+    };
+    let entry = finalize_share(staging.path(), spec, &HashMap::new())?;
+    let cid = entry.cid.clone();
+    // A re-download that changed the file leaves an older mirror behind; drop it.
+    let stale: Vec<String> = read_catalog()
+        .into_iter()
+        .filter(|e| e.source == source && e.file == file_name && e.cid != cid)
+        .map(|e| e.cid)
+        .collect();
+    if !stale.is_empty() {
+        let kept: Vec<ModelEntry> = read_catalog().into_iter().filter(|e| !stale.contains(&e.cid)).collect();
+        let _ = write_catalog(&kept);
+        for c in &stale {
+            let _ = run_script(&["unpin", c]);
+        }
+    }
+    catalog_add(entry);
+    announce();
+    Ok(cid)
 }
 
 /// One library entry for the API: slug, matching catalog name/cid if known, size.
@@ -2865,12 +4051,14 @@ pub fn model_list_value() -> Value {
         .into_iter()
         .map(|e| json!({"cid": e.cid, "name": e.name, "size_bytes": e.size_bytes, "size": human(e.size_bytes), "in_library": library_has(&model_slug(&e.name))}))
         .collect();
-    let registry: Vec<Value> = std::fs::read_to_string(REGISTRY_JSON)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<ModelEntry>>(&t).ok())
-        .unwrap_or_default()
+    let mut seen = std::collections::HashSet::new();
+    let registry: Vec<Value> = registry_models()
         .into_iter()
-        .map(|e| json!({"cid": e.cid, "name": e.name, "size_bytes": e.size_bytes, "size": human(e.size_bytes)}))
+        .filter(|e| seen.insert(e.cid.clone()))
+        .map(|e| json!({
+            "cid": e.cid, "name": e.name, "size_bytes": e.size_bytes, "size": human(e.size_bytes),
+            "signed": entry_sig_ok(&e),
+        }))
         .collect();
     json!({
         "ok": true,
@@ -2908,8 +4096,8 @@ pub async fn pull_model(State(_s): State<AppState>, Json(req): Json<PullReq>) ->
         } else {
             return json!({"ok": false, "err": "unknown model — pass both cid and name, or a cataloged cid/name"});
         };
-        if cid.is_empty() {
-            return json!({"ok": false, "err": "no CID to pull"});
+        if !valid_cid(&cid) {
+            return json!({"ok": false, "err": "no valid CID to pull"});
         }
         let slug = model_slug(&name);
         task_set(&format!("pull:{slug}"), "materializing from IPFS…");
@@ -2938,3 +4126,235 @@ pub async fn pull_model(State(_s): State<AppState>, Json(req): Json<PullReq>) ->
     .unwrap_or_else(|_| json!({"ok": false, "err": "pull task failed"}));
     Json(v)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// A scratch model directory that cleans up after itself.
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("aeon-ipfs-test-{tag}-{}-{}", std::process::id(), new_draft_id()));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn put(&self, rel: &str, bytes: &[u8]) {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn spec(name: &str, file: &str) -> ShareSpec {
+        ShareSpec {
+            name: name.into(),
+            file: file.into(),
+            card: ModelCard { kind: "llm".into(), format: "gguf".into(), ..Default::default() },
+            verified: true,
+            source: "https://example.test/m".into(),
+            upstream: String::new(), identity: true,
+        }
+    }
+
+    /// A shared model as an honest origin would publish it.
+    fn shared(tag: &str) -> (Tmp, ModelEntry) {
+        let t = Tmp::new(tag);
+        t.put("model.gguf", b"GGUF-weights-go-here");
+        t.put("README.md", b"# hello");
+        t.put("sub/tokenizer.json", b"{}");
+        let entry = prepare_share(t.path(), spec("m", "model.gguf"), &HashMap::new()).unwrap();
+        (t, entry)
+    }
+
+    #[test]
+    fn an_honest_share_verifies_and_is_credited_to_its_signer() {
+        let (t, entry) = shared("ok");
+        assert_eq!(entry.file, "model.gguf");
+        assert_eq!(entry.size_bytes, 20 + 7 + 2); // every file, card excluded
+        let c = verify_model_dir(t.path(), &entry).unwrap();
+        assert!(c.manifest && c.files_ok && c.origin_ok);
+        assert_eq!(c.origin_key, crate::publisher::orb_pubkey());
+        assert_eq!(c.origin_identity, c.origin_key); // no delegation in tests
+        assert!(c.claims_verified);
+        assert_eq!(c.source, "https://example.test/m");
+    }
+
+    #[test]
+    fn changed_added_or_missing_files_are_rejected() {
+        // Weights swapped for something else of the same length.
+        let (t, entry) = shared("swap");
+        t.put("model.gguf", b"GGUF-weights-go-HERE");
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("model.gguf"));
+
+        // A stowaway the origin never signed.
+        let (t, entry) = shared("extra");
+        t.put("payload.bin", b"surprise");
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("payload.bin"));
+
+        // A file the manifest promises is gone.
+        let (t, entry) = shared("gone");
+        std::fs::remove_file(t.path().join("sub/tokenizer.json")).unwrap();
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("tokenizer.json"));
+    }
+
+    #[test]
+    fn a_card_rewritten_by_someone_else_fails_the_origin_signature() {
+        let (t, entry) = shared("card");
+        let card_path = t.path().join(CARD_FILE);
+        let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&card_path).unwrap()).unwrap();
+        // Claim a different upstream while keeping the original signature.
+        doc["source"] = json!("https://evil.test/m");
+        std::fs::write(&card_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("origin signature"));
+
+        // Same for flipping the "verified upstream" claim.
+        let (t, entry) = shared("flag");
+        let card_path = t.path().join(CARD_FILE);
+        let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&card_path).unwrap()).unwrap();
+        doc["verified"] = json!(false);
+        std::fs::write(&card_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("origin signature"));
+    }
+
+    #[test]
+    fn symbolic_links_are_refused() {
+        let (t, entry) = shared("link");
+        std::os::unix::fs::symlink("/etc/passwd", t.path().join("weights2.gguf")).unwrap();
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("symbolic link"));
+        // …including a link standing in for a directory.
+        let (t, entry) = shared("dirlink");
+        std::os::unix::fs::symlink("/", t.path().join("everything")).unwrap();
+        assert!(verify_model_dir(t.path(), &entry).unwrap_err().contains("symbolic link"));
+    }
+
+    #[test]
+    fn an_older_card_without_a_manifest_is_held_to_the_advertised_hash() {
+        let t = Tmp::new("legacy");
+        t.put("m.gguf", b"GGUF!");
+        t.put(CARD_FILE, br#"{"schema":"aeon-model-card/1","name":"m"}"#);
+        let good = ModelEntry { file: "m.gguf".into(), sha256: sha256_file(&t.path().join("m.gguf")).unwrap(), ..Default::default() };
+        let c = verify_model_dir(t.path(), &good).unwrap();
+        assert!(c.files_ok && !c.manifest && !c.origin_ok);
+
+        let bad = ModelEntry { file: "m.gguf".into(), sha256: "00".repeat(32), ..Default::default() };
+        assert!(verify_model_dir(t.path(), &bad).is_err());
+        let missing = ModelEntry { file: "other.gguf".into(), sha256: "00".repeat(32), ..Default::default() };
+        assert!(verify_model_dir(t.path(), &missing).is_err());
+    }
+
+    #[test]
+    fn a_vendor_mirror_card_is_identical_wherever_it_is_built() {
+        let build = |tag: &str| {
+            let t = Tmp::new(tag);
+            t.put("yolov8s.hef", b"\x01HEF-bytes");
+            let mut s = spec("YOLOv8s", "yolov8s.hef");
+            s.verified = false;
+            s.upstream = "hailo-model-zoo".into();
+            s.identity = false;
+            prepare_share(t.path(), s, &HashMap::new()).unwrap();
+            let card = std::fs::read(t.path().join(CARD_FILE)).unwrap();
+            (t, card)
+        };
+        let (a, card_a) = build("va");
+        std::thread::sleep(std::time::Duration::from_millis(5)); // a different clock reading
+        let (_b, card_b) = build("vb");
+        // Byte-identical cards → identical directory → identical CID on every Orb.
+        assert_eq!(card_a, card_b);
+        let doc: Value = serde_json::from_slice(&card_a).unwrap();
+        assert_eq!(doc["origin"]["upstream"], "hailo-model-zoo");
+        assert!(doc.get("shared_by").is_none());
+        assert_eq!(doc["created_ms"], 0);
+        // And it still verifies as content (unsigned, upstream-labelled).
+        let c = verify_model_dir(a.path(), &ModelEntry::default()).unwrap();
+        assert!(c.files_ok && !c.origin_ok);
+        assert_eq!(c.upstream, "hailo-model-zoo");
+    }
+
+    #[test]
+    fn entry_signatures_bind_cid_name_and_hash() {
+        let mut e = ModelEntry { cid: "bafytestcid000".into(), name: "m".into(), sha256: "ab".repeat(32), added_at_ms: 7, ..Default::default() };
+        assert!(!entry_sig_ok(&e));
+        assert_eq!(entry_identity(&e), "");
+        sign_entry(&mut e);
+        assert!(entry_sig_ok(&e));
+        assert_eq!(entry_identity(&e), crate::publisher::orb_pubkey());
+        // Re-pointing a signed entry at different content invalidates it.
+        let mut moved = e.clone();
+        moved.cid = "bafyothercid000".into();
+        assert!(!entry_sig_ok(&moved));
+        let mut renamed = e.clone();
+        renamed.name = "m (official)".into();
+        assert!(!entry_sig_ok(&renamed));
+        // An entry survives a JSON round trip (gossip) with its signature intact.
+        let back: ModelEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert!(entry_sig_ok(&back));
+    }
+
+    #[test]
+    fn reputation_weighs_hard_evidence_over_popularity() {
+        let day = 86_400_000_i64;
+        let now = 100 * day;
+        let fresh = Publisher { first_seen_ms: now, ..Default::default() };
+        // Unsigned: nobody to hold to account.
+        assert_eq!(reputation(None, false, 999, 999, now), 0);
+        // Signed but never seen before.
+        assert_eq!(reputation(None, true, 0, 0, now), 20);
+        // The operator's word is final, either way.
+        assert_eq!(reputation(Some(&Publisher { trusted: true, ..fresh.clone() }), true, 0, 0, now), 100);
+        assert_eq!(reputation(Some(&Publisher { blocked: true, ..fresh.clone() }), true, 999, 999, now), 0);
+        // One failed verification here outweighs any number of stars.
+        assert_eq!(reputation(Some(&Publisher { bad: 1, ok: 9, ..fresh.clone() }), true, 9999, 9999, now), 5);
+        // A thousand starring Orbs (cheap to fake) is worth less than ONE
+        // download this Orb verified itself.
+        let stars_only = reputation(Some(&fresh), true, 1000, 0, now);
+        let one_verified = reputation(Some(&Publisher { ok: 1, ..fresh.clone() }), true, 0, 0, now);
+        assert!(stars_only <= one_verified, "{stars_only} vs {one_verified}");
+        // Nothing but explicit trust reaches 100.
+        let maxed = Publisher { ok: 50, first_seen_ms: 0, ..Default::default() };
+        assert_eq!(reputation(Some(&maxed), true, 100_000, 100_000, now), 95);
+    }
+
+    #[test]
+    fn names_and_paths_cannot_escape_their_directories() {
+        for bad in ["", "/etc/passwd", "../x", "a/../b", "a//b", "a/./b", "a\\b", "a/\n"] {
+            assert!(!safe_rel_path(bad), "{bad:?} should be refused");
+        }
+        for ok in ["model.gguf", "unet/diffusion_pytorch_model.safetensors", "a/b/c.json"] {
+            assert!(safe_rel_path(ok), "{ok:?} should be allowed");
+        }
+        assert_eq!(model_slug(".."), "model");
+        assert_eq!(model_slug("."), "model");
+        assert_eq!(model_slug("../../etc"), "etc");
+        assert_eq!(model_slug("Qwen2.5 7B (Q4)"), "qwen2.5-7b--q4");
+    }
+
+    #[test]
+    fn sidecars_cover_what_a_model_needs_to_load() {
+        for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.txt", "spiece.model", "chat_template.jinja", "unet/config.json"] {
+            assert!(is_sidecar(f, 1000), "{f}");
+        }
+        assert!(!is_sidecar("README.md", 10));
+        assert!(!is_sidecar(".gitattributes", 10));
+        assert!(!is_sidecar("model.safetensors", 10));
+        assert!(!is_sidecar("huge.json", 65 * 1024 * 1024));
+    }
+
+    #[test]
+    fn secrets_are_redacted_from_messages() {
+        let msg = "download x: https://civitai.com/api/download/models/1?token=s3cr3t: status code 401";
+        assert!(!redact(msg, Some("s3cr3t")).contains("s3cr3t"));
+        assert_eq!(redact(msg, None), msg);
+        assert_eq!(redact(msg, Some("")), msg);
+    }
+}
+

@@ -16,6 +16,12 @@ services:
     # 172.x address) so other Orbs dial the published 4001:
     #   environment:
     #     AEON_IPFS_ANNOUNCE: "192.168.1.50"
+    # Optional (Linux hosts with a hardware RNG): pass it through so signing keys
+    # mix in a second, direct source of randomness. Without this the Orb still
+    # uses the host kernel's generator — which draws on the same hardware — and
+    # the System page says which sources are in use.
+    #   devices:
+    #     - /dev/hwrng:/dev/hwrng
     volumes:
       - aeon-etc:/etc/aeon      # admin auth, TLS cert, API tokens
       - aeon-data:/var/lib/aeon # IPFS repo + model library

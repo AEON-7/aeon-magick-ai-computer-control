@@ -1,0 +1,75 @@
+{
+  "about": "Model Share signing test vectors. Signatures are Ed25519 (RFC 8032, deterministic) over the exact UTF-8 bytes of `signed_text`; keys are 32-byte hex, signatures standard base64. Secrets here are public test values.",
+  "delegation": {
+    "domain": "aeon-delegate/1",
+    "issued_ms": 1760000000001,
+    "orb_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "sig": "Z8bLxo935wOYCyt2a6gADUrvZjXBNEVsJM7YvxwabSxJ8OXqX9gIqz9f6B7qy/qH8AiQYHEBUowArfRzN4vHAQ==",
+    "signed_text": "aeon-delegate/1\n8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\n197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61\n1760000000001",
+    "signer": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "user_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "user_name": "alice"
+  },
+  "identity_proof": {
+    "block": "-----BEGIN AEON IDENTITY PROOF-----\naeon-identity-proof/1\nkey: 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\nname: alice\nclaim: huggingface.co/alice\nissued: 1760000000003\nsig: iRNh8NIojGnhqKvf0KSrsY5iAc4ex544hMQJAmzcqHxKi0t96MAani+fX25zr9DzR/eBxgBggNlZtIT+tIDnBg==\n-----END AEON IDENTITY PROOF-----",
+    "claim": "huggingface.co/alice",
+    "domain": "aeon-identity-proof/1",
+    "issued_ms": 1760000000003,
+    "key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "name": "alice",
+    "sig": "iRNh8NIojGnhqKvf0KSrsY5iAc4ex544hMQJAmzcqHxKi0t96MAani+fX25zr9DzR/eBxgBggNlZtIT+tIDnBg==",
+    "signed_text": "aeon-identity-proof/1\n8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\nalice\nhuggingface.co/alice\n1760000000003",
+    "signer": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  },
+  "keys": {
+    "orb_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "orb_secret": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+    "user_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "user_secret": "0101010101010101010101010101010101010101010101010101010101010101"
+  },
+  "origin": {
+    "domain": "aeon-origin/1",
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "size": 7
+      },
+      {
+        "path": "example-1b-q4.gguf",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1048576
+      },
+      {
+        "path": "sub/tokenizer.json",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "size": 2
+      }
+    ],
+    "name": "Example 1B Q4",
+    "sig": "B8hGF7PrcmeGILfU2M06rVFNL1z1YkEImEu8dYoIE1dol8gRQc+Mu/1JJKRzoQPl4wqWDr71wdyVvY+41uFSAA==",
+    "signed_ms": 1760000000002,
+    "signed_text": "aeon-origin/1\nExample 1B Q4\nhttps://huggingface.co/example/example-1b\n1\n1760000000002\n1111111111111111111111111111111111111111111111111111111111111111 7 README.md\nabababababababababababababababababababababababababababababababab 1048576 example-1b-q4.gguf\n2222222222222222222222222222222222222222222222222222222222222222 2 sub/tokenizer.json\n",
+    "signer": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "source": "https://huggingface.co/example/example-1b",
+    "verified": true
+  },
+  "peer_binding": {
+    "domain": "aeon-peer/1",
+    "orb_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "peer_id": "12D3KooWExamplePeerExamplePeerExamplePeerExamplePeer1",
+    "sig": "PZYUbweWJs6wopEV1K3YFWPqOyBfHYrbKkZBcmB+5j7C9giPExKdDwi3je/b16bDPIQEKojmYbnS06NgKjAlAA==",
+    "signed_text": "aeon-peer/1\n197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61\n12D3KooWExamplePeerExamplePeerExamplePeerExamplePeer1",
+    "signer": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61"
+  },
+  "publication": {
+    "added_at_ms": 1760000000000,
+    "cid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+    "domain": "aeon-publish/1",
+    "name": "Example 1B Q4",
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "sig": "1Pe125SfXNdsRbFHqO0CfrScp4QnZsJcAps62VVrRxBe1+Co3CQiMIKZ1K+L8bhskt3tCFSlxprJPoDoiKhnCA==",
+    "signed_text": "aeon-publish/1\nbafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi\nExample 1B Q4\nabababababababababababababababababababababababababababababababab\n1760000000000",
+    "signer": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61"
+  }
+}

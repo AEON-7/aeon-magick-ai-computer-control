@@ -12,20 +12,26 @@
   let confirm = '';
   let busy = false;
   let error = '';
+  // The per-device setup code (aeon-credentials.txt on the SD card). Only
+  // asked for once the first-boot window has passed — the server says when.
+  let code = '';
+  let codeRequired = false;
+  api.getMe().then((m: any) => { codeRequired = !!m?.setup_code_required; }).catch(() => {});
 
   $: tooShort = password.length > 0 && password.length < 8;
   $: mismatch = confirm.length > 0 && password !== confirm;
-  $: canSubmit = !busy && password.length >= 8 && password === confirm;
+  $: canSubmit = !busy && password.length >= 8 && password === confirm && (!codeRequired || code.trim().length >= 6);
 
   async function submit() {
     busy = true;
     error = '';
     try {
-      await api.setupPassword(password, username || 'admin');
+      await api.setupPassword(password, username || 'admin', code.trim());
       // Server set the session cookie; head straight to the main UI.
       goto('/');
     } catch (e: any) {
       error = e?.message ?? 'setup failed';
+      if (/setup code/i.test(error)) codeRequired = true;
     } finally {
       busy = false;
     }
@@ -86,6 +92,27 @@
         <span class="text-xs text-red-400 mt-1 block">passwords don't match</span>
       {/if}
     </label>
+
+    {#if codeRequired}
+      <label class="block">
+        <span class="text-xs uppercase tracking-wider text-zinc-500">setup code</span>
+        <input
+          type="text"
+          bind:value={code}
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          placeholder="XXXX-XXXX"
+          class="mt-1 w-full px-3 py-2 rounded-md bg-ink-800 border border-steel-700 font-mono tracking-widest
+                 focus:outline-none focus:ring-1 focus:ring-cursed-500/50"
+        />
+        <span class="text-xs text-zinc-500 mt-1 block">
+          Proves you have this device in hand. It is in <code class="font-mono">aeon-credentials.txt</code>
+          on the SD card's boot partition — asked for because the device has been on for more than
+          30 minutes, or was restarted, before setup was finished.
+        </span>
+      </label>
+    {/if}
 
     {#if error}
       <p class="text-red-400 text-sm">{error}</p>

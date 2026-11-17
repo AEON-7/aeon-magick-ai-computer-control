@@ -5069,6 +5069,14 @@ fn sanitize_dest(dest: &str) -> String {
         .collect();
     if d.contains("..") { return String::new(); }
     let d = d.trim_end_matches('/').to_string();
+    // "." / "./" is the SSH user's home itself — never a model directory.
+    if d.is_empty() || d == "." || d.split('/').all(|seg| seg.is_empty() || seg == ".") {
+        return String::new();
+    }
+    // No hidden path components at all (~/.config, ~/.local, ~/.ssh …).
+    if d.split('/').any(|seg| seg.starts_with('.') && seg != ".") {
+        return String::new();
+    }
     let low = d.to_ascii_lowercase();
     // Any `.ssh` component (authorized_keys injection), and the system roots
     // where a write is arbitrary-code / persistence. NB: /usr/share, /usr/local/
@@ -5199,7 +5207,11 @@ fn push_worker(sys: System, cid: String, name: String, slug: String, dest: Strin
     let child = Command::new("rsync")
         // --chmod forces model files non-executable (data, never code) so a
         // pushed tree can't drop a runnable script/binary on the target.
-        .args(["-a", "--chmod=D755,F644", "--info=progress2", "--no-inc-recursive"])
+        // --no-links / --exclude='.*': a model is plain data files. Without
+        // these, a directory fetched from the network could carry
+        // `.ssh/authorized_keys` or `.bashrc` (or a link to anything) and a
+        // push to the home directory would install it on the target.
+        .args(["-a", "--no-links", "--exclude=.*", "--chmod=D755,F644", "--info=progress2", "--no-inc-recursive"])
         .arg("-e").arg(&ssh_e)
         .arg(&src_arg)
         .arg(format!("{target}:{dest}/"))

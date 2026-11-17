@@ -150,9 +150,14 @@ pub async fn list(
 
 /// DELETE /api/audit — clear the log. Admin-only at the route level.
 pub async fn clear(State(_state): State<AppState>) -> impl IntoResponse {
-    let _g = APPEND_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let _ = std::fs::remove_file(format!("{AUDIT_LOG}.1"));
-    let _ = std::fs::remove_file(AUDIT_LOG);
+    {
+        // Released before log() below, which takes this same (non-reentrant)
+        // lock. Holding it across that call deadlocked the handler, and after
+        // it every later audit write — including every login.
+        let _g = APPEND_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = std::fs::remove_file(format!("{AUDIT_LOG}.1"));
+        let _ = std::fs::remove_file(AUDIT_LOG);
+    }
     log("system", "audit_clear", "", "ok", None);
     Json(json!({"ok": true})).into_response()
 }

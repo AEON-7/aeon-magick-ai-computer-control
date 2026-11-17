@@ -7,26 +7,33 @@ the IPFS network converges on the SAME global model index with NO shared token,
 NO fleet enrollment, and no central server. The supervisor reads the registry
 for the Model Share console; this daemon just keeps it fresh.
 
-Three loops (threads), all driving the `aeon-ipfs` infra script so it runs the
-kubo CLI as the ipfs service user:
-  * SUB: `aeon-ipfs sub <topic>` streams peer announcements → merge into
-    registry.json keyed by PeerID, each with a last-seen timestamp; entries
-    older than PEER_TTL are pruned so orbs that go away drop off the index.
+Loops (threads), all driving the `aeon-ipfs` infra script so the kubo CLI runs
+as the ipfs service user:
+  * SUB: `aeon-ipfs sub-json <topic>` streams peer announcements, each wrapped
+    in an envelope naming the peer libp2p authenticated as its sender. An
+    announcement is merged only when the peer id it claims IS that sender —
+    otherwise any node on the topic could rewrite any Orb's catalog.
   * PUB: every ANNOUNCE_EVERY seconds (or immediately when the supervisor
-    touches /run/aeon/modelshare-announce after a share/unshare) publish this
+    touches <run>/modelshare-announce after a share/unshare) publish this
     Orb's {peer_id, label, addrs, models[]} to the topic.
   * DHT: periodically `routing findprovs` a well-known rendezvous CID that
-    every Magick Orb pins. That returns live Orb PeerIDs on the Amino DHT;
-    we `swarm connect /p2p/<id>` (direct, hole-punch, or circuit-relay) so
-    floodsub actually has a mesh. Without this, two NATed strangers both
-    "on IPFS" never see each other's catalogs.
+    every Magick Orb pins. That returns live Orb PeerIDs on the Amino DHT; the
+    ones we are not already connected to are dialed (direct, hole-punch, or
+    circuit-relay) so floodsub actually has a mesh. Without this, two NATed
+    strangers both "on IPFS" never see each other's catalogs.
+  * DIAL: a small fixed pool of workers does all connecting. Peers we are
+    already connected to are skipped and failures back off, so the cost of
+    staying meshed does not grow with every announcement heard.
 
 The announcement is plain JSON. It carries only public content (CIDs +
 already-public model-card metadata); the weights themselves move over the
 normal IPFS swarm when a peer pins the CID.
 """
+import base64
 import json
 import os
+import queue
+import re
 import socket
 import subprocess
 import sys
@@ -34,14 +41,21 @@ import threading
 import time
 
 TOPIC = "aeon-model-share/v1"
-SCRIPT = "/usr/local/bin/aeon-ipfs"
-MODELS_DIR = "/var/lib/aeon/ipfs-models"
+# Overridable so the logic can be exercised off-device (see tests).
+SCRIPT = os.environ.get("AEON_IPFS_SCRIPT", "/usr/local/bin/aeon-ipfs")
+MODELS_DIR = os.environ.get("AEON_MODELS_DIR", "/var/lib/aeon/ipfs-models")
+RUN_DIR = os.environ.get("AEON_RUN_DIR", "/run/aeon")
 CATALOG = os.path.join(MODELS_DIR, "catalog.json")
 REGISTRY = os.path.join(MODELS_DIR, "registry.json")
 MESH = os.path.join(MODELS_DIR, "mesh.json")
 STARS = os.path.join(MODELS_DIR, "stars.json")  # CIDs this Orb starred (gossiped)
+# Written by the supervisor: this Orb's signing key vouching for its own peer
+# id. Copied into each announcement so other Orbs can recognize this host as
+# the ORIGIN seeder of the models that key signed.
+BINDING = os.path.join(MODELS_DIR, "orb-binding.json")
 FLEET_TOML = "/etc/aeon/fleet.toml"
-ANNOUNCE_FLAG = "/run/aeon/modelshare-announce"
+ANNOUNCE_FLAG = os.path.join(RUN_DIR, "modelshare-announce")
+SUBFILE = os.path.join(RUN_DIR, "modelshare-sub.ndjson")
 
 # Same bytes / CID as aeon-ipfs.sh RENDEZVOUS_* — Amino findprovs of this CID
 # is the WAN directory of live Magick Orbs.
@@ -51,18 +65,32 @@ ANNOUNCE_EVERY = 60       # seconds between periodic re-announcements
 DISCOVER_EVERY = 45       # seconds between DHT rendezvous lookups
 BEACON_EVERY = 300        # re-provide the rendezvous CID so new Orbs find us
 PEER_TTL_MS = 15 * 60_000  # drop a peer not heard from in 15 min
-MAX_MODELS = 500          # cap announcement size
+MAX_MODELS = 500          # models accepted from / sent in one announcement
 MAX_SEEN = 128            # peer ids carried in one announcement
-MAX_DIAL = 256            # persistent Orb links one node will hold
+MAX_SEEN_DIAL = 16        # of those, how many one announcement may make us dial
+MAX_DIAL = 256            # peers one discovery pass will consider
+MAX_PEERS = 2000          # registry size cap (oldest dropped first)
+MAX_ENTRY_BYTES = 16 * 1024      # one model entry, serialized
+# libp2p pubsub drops messages over 1 MiB; stay clear of it, or a large
+# catalog makes this Orb silently vanish from everyone's index.
+MAX_ANNOUNCE_BYTES = 900 * 1024
+FLUSH_CHANGED_S = 5       # write the registry this soon after its content changes
+FLUSH_IDLE_S = 60         # …and this often when only last-seen times moved
+DIAL_WORKERS = 4
+CONNECTED_TTL_S = 20      # how long one `swarm peers` listing is reused
 
-_lock = threading.Lock()
-_inflight = set()
-_inflight_lock = threading.Lock()
 SELF_PID = ""  # our own peer id — cached in main(), used to skip self-announcements
+
+_CID_RE = re.compile(r"^[A-Za-z0-9]{10,128}$")
+_IPV4_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
 
 
 def log(*a):
     print("aeon-modelshare:", *a, file=sys.stderr, flush=True)
+
+
+def now_ms():
+    return int(time.time() * 1000)
 
 
 def sh(*args, stdin=None, timeout=None):
@@ -109,11 +137,15 @@ def _collect_host_ips():
             ips.append(ip)
     except Exception:
         pass
+    return _dedupe(ips)
+
+
+def _dedupe(items):
     seen, out = set(), []
-    for ip in ips:
-        if ip not in seen:
-            seen.add(ip)
-            out.append(ip)
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            out.append(it)
     return out
 
 
@@ -136,12 +168,7 @@ def self_addrs():
             addrs.append(a)
     except Exception:
         pass
-    seen, out = set(), []
-    for a in addrs:
-        if a not in seen:
-            seen.add(a)
-            out.append(a)
-    return out
+    return _dedupe(addrs)
 
 
 def self_label():
@@ -190,13 +217,9 @@ def write_json_atomic(path, obj):
 
 def _private_ip(text):
     """RFC1918, loopback, link-local, CGNAT. Not a WAN dial target."""
-    import re
     if not text:
         return False
-    ips = re.findall(r"(\d+\.\d+\.\d+\.\d+)", text)
-    if not ips and re.match(r"^\d+\.\d+\.\d+\.\d+$", text):
-        ips = [text]
-    for ip in ips:
+    for ip in _IPV4_RE.findall(text):
         a, b = (int(x) for x in ip.split(".")[:2])
         if a in (10, 127) or (a == 192 and b == 168) or (a == 169 and b == 254):
             return True
@@ -225,30 +248,459 @@ def _wan_addr(addr, pid):
     return "/ip4/%s/tcp/4001/p2p/%s" % (addr, pid)
 
 
+def _peer_id_shape(s):
+    """Shape check only: CIDv0 Qm… or CIDv1 PeerIDs (12D3KooW…, bafz…, k51…)."""
+    if not isinstance(s, str) or not s or len(s) > 128 or not s.isalnum():
+        return False
+    if s.startswith("Qm") and len(s) >= 46:
+        return True
+    if s.startswith("12D3Koo") or s.startswith("bafz") or s.startswith("k51"):
+        return True
+    return len(s) >= 32
+
+
+def _looks_like_peer_id(s):
+    """A peer id that is some OTHER Orb's (not ours, not the beacon CID)."""
+    return _peer_id_shape(s) and s != SELF_PID and s != RENDEZVOUS_CID
+
+
+def _clean_text(s, limit):
+    """Printable text, bounded. Peers choose these strings; the console shows them."""
+    if not isinstance(s, str):
+        return ""
+    return "".join(ch for ch in s if ch >= " " and ch != "\x7f")[:limit]
+
+
+# ── What we accept from the network ─────────────────────────────────────────
+
+def decode_envelope(line):
+    """One line of `aeon-ipfs sub-json` → (sender_peer_id, payload_text).
+
+    The sender is the peer libp2p verified the message's signature against —
+    the only trustworthy statement of who said it. (None, None) if the line is
+    not an envelope.
+    """
+    try:
+        env = json.loads(line)
+    except ValueError:
+        return None, None
+    if not isinstance(env, dict):
+        return None, None
+    sender, data = env.get("from"), env.get("data")
+    if not isinstance(sender, str) or not isinstance(data, str):
+        return None, None
+    return sender, _decode_payload(data)
+
+
+def _decode_payload(data):
+    """kubo multibase-encodes pubsub payloads ('u' + unpadded base64url). Older
+    builds used plain base64; accept either, and raw JSON as a last resort."""
+    attempts = []
+    if data.startswith("u"):
+        body = data[1:]
+        attempts.append(lambda: base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    attempts.append(lambda: base64.b64decode(data + "=" * (-len(data) % 4), validate=True))
+    for attempt in attempts:
+        try:
+            text = attempt().decode("utf-8")
+        except Exception:
+            continue
+        if text.lstrip().startswith("{"):
+            return text
+    return data if data.lstrip().startswith("{") else None
+
+
+def sanitize_announcement(ann):
+    """Reduce a peer's announcement to the fields and sizes we accept, or None.
+
+    Model entries pass through verbatim (the supervisor parses and verifies
+    them) but only if they are well-formed and bounded; everything else is
+    rebuilt field by field, so an unexpected or oversized key never reaches
+    the registry.
+    """
+    if not isinstance(ann, dict):
+        return None
+    pid, models = ann.get("peer_id"), ann.get("models")
+    if not _peer_id_shape(pid) or not isinstance(models, list):
+        return None
+    clean = []
+    for m in models[:MAX_MODELS]:
+        if not isinstance(m, dict):
+            continue
+        cid, name = m.get("cid"), m.get("name")
+        if not isinstance(cid, str) or not _CID_RE.match(cid):
+            continue
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            if len(json.dumps(m)) > MAX_ENTRY_BYTES:
+                continue
+        except (TypeError, ValueError):
+            continue
+        clean.append(m)
+    addrs = ann.get("addrs") if isinstance(ann.get("addrs"), list) else []
+    seen = ann.get("seen") if isinstance(ann.get("seen"), list) else []
+    starred = ann.get("starred") if isinstance(ann.get("starred"), list) else []
+    out = {
+        "peer_id": pid,
+        "label": _clean_text(ann.get("label"), 64),
+        "addrs": [a for a in addrs if isinstance(a, str) and 0 < len(a) <= 256][:16],
+        "seen": [s for s in seen if _peer_id_shape(s)][:MAX_SEEN],
+        "models": clean,
+        "starred": [c for c in starred if isinstance(c, str) and _CID_RE.match(c)][:MAX_MODELS],
+        "sent_ms": ann.get("updated_ms") if isinstance(ann.get("updated_ms"), int) else 0,
+    }
+    # The origin binding: opaque here, verified by the supervisor.
+    key, sig = ann.get("orb_key"), ann.get("orb_sig")
+    if isinstance(key, str) and isinstance(sig, str) and len(key) == 64 and len(sig) <= 128:
+        out["orb_key"], out["orb_sig"] = key, sig
+        d = ann.get("delegation")
+        if isinstance(d, dict):
+            clean = {
+                "user_key": d.get("user_key"), "orb_key": d.get("orb_key"), "sig": d.get("sig"),
+                "user_name": _clean_text(d.get("user_name"), 40),
+                "issued_ms": d.get("issued_ms") if isinstance(d.get("issued_ms"), int) else 0,
+            }
+            if all(isinstance(clean[k], str) and 0 < len(clean[k]) <= 128 for k in ("user_key", "orb_key", "sig")):
+                out["delegation"] = clean
+    return out
+
+
+def accept_message(sender, payload):
+    """A sanitized announcement iff `payload` is one AND it speaks for `sender`.
+
+    Returns (announcement, None) or (None, reason-it-was-dropped).
+    """
+    if not payload:
+        return None, "empty"
+    try:
+        raw = json.loads(payload)
+    except ValueError:
+        return None, "not json"
+    ann = sanitize_announcement(raw)
+    if ann is None:
+        return None, "not an announcement"
+    if ann["peer_id"] != sender:
+        # The message is genuine — it just is not from who it says it is.
+        return None, "sender %s claims to be %s" % (sender[-8:], ann["peer_id"][-8:])
+    return ann, None
+
+
+class LineBuffer:
+    """Reassembles lines from a file being appended to.
+
+    `readline()` on a growing file returns a PARTIAL line when it catches the
+    writer mid-write, and the remainder later as if it were its own line — so
+    a large announcement was parsed as two pieces of garbage and lost. Only
+    newline-terminated lines are handed out here.
+    """
+
+    def __init__(self, limit=4 * 1024 * 1024):
+        self._buf = ""
+        self._limit = limit
+
+    def feed(self, chunk):
+        self._buf += chunk
+        if "\n" not in self._buf:
+            if len(self._buf) > self._limit:  # a line that never ends: discard
+                self._buf = ""
+            return []
+        *lines, self._buf = self._buf.split("\n")
+        return [ln.strip() for ln in lines if ln.strip()]
+
+
+# ── The registry ────────────────────────────────────────────────────────────
+
+class Registry:
+    """Every Orb heard on the topic, keyed by peer id.
+
+    Held in memory and written out sparingly. It used to be re-read and
+    re-written in full on every announcement — on an SD card, with the cost
+    growing as (orbs x catalog size) per message.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        peers = read_json(path, {"peers": {}}).get("peers")
+        self.peers = peers if isinstance(peers, dict) else {}
+        self._content_dirty = False
+        self._dirty = False
+        self._flushed_at = 0.0
+
+    @staticmethod
+    def _content(rec):
+        return {k: v for k, v in rec.items() if k not in ("updated_ms", "sent_ms")}
+
+    def merge(self, ann, at_ms):
+        """Record an accepted announcement as heard at local time `at_ms`.
+
+        Freshness is OUR clock, not the sender's: a peer could otherwise claim
+        a time far in the future and never expire, and an Orb whose clock is
+        not yet set (a Pi has no RTC) was pruned by everyone the moment it
+        announced.
+        """
+        rec = {
+            "peer_id": ann["peer_id"],
+            "label": ann["label"],
+            "addrs": ann["addrs"],
+            "updated_ms": at_ms,
+            "sent_ms": ann.get("sent_ms", 0),
+            "models": ann["models"],
+            "starred": ann["starred"],
+        }
+        if "orb_key" in ann:
+            rec["orb_key"], rec["orb_sig"] = ann["orb_key"], ann["orb_sig"]
+            if "delegation" in ann:
+                rec["delegation"] = ann["delegation"]
+        with self._lock:
+            old = self.peers.get(rec["peer_id"])
+            if old is None or self._content(old) != self._content(rec):
+                self._content_dirty = True
+            self.peers[rec["peer_id"]] = rec
+            self._dirty = True
+            self._prune(at_ms)
+
+    def _prune(self, at_ms):
+        stale = [k for k, v in self.peers.items()
+                 if at_ms - (v.get("updated_ms") or 0) > PEER_TTL_MS]
+        for k in stale:
+            del self.peers[k]
+        if len(self.peers) > MAX_PEERS:
+            oldest = sorted(self.peers, key=lambda k: self.peers[k].get("updated_ms") or 0)
+            for k in oldest[: len(self.peers) - MAX_PEERS]:
+                del self.peers[k]
+        if stale:
+            self._content_dirty = True
+
+    def prune(self, at_ms):
+        with self._lock:
+            self._prune(at_ms)
+
+    def peer_ids(self):
+        with self._lock:
+            return list(self.peers)
+
+    def flush(self, now=None, force=False):
+        """Write to disk if due. Returns True when a write happened."""
+        now = time.time() if now is None else now
+        with self._lock:
+            age = now - self._flushed_at
+            due = force or (self._content_dirty and age >= FLUSH_CHANGED_S) \
+                or (self._dirty and age >= FLUSH_IDLE_S)
+            if not due or not (self._dirty or self._content_dirty or force):
+                return False
+            snapshot = {"peers": dict(self.peers)}
+            self._dirty = self._content_dirty = False
+            self._flushed_at = now
+        try:
+            write_json_atomic(self.path, snapshot)
+        except Exception as e:
+            log("registry write failed:", e)
+            return False
+        return True
+
+
+# ── Staying connected, cheaply ──────────────────────────────────────────────
+
+class Dialer:
+    """Keeps this node connected to other Orbs with a bounded amount of work.
+
+    Before: every announcement spawned a thread per peer it mentioned (up to
+    128), each running several kubo CLI processes, and discovery re-dialed
+    every known peer every 45 s whether or not it was already connected — work
+    that grew with the square of the mesh and would have swamped a Pi long
+    before the network got big. Now: one cached `swarm peers` listing answers
+    "already connected?", only the unconnected are dialed, a fixed pool does
+    the dialing, and a peer that cannot be reached is retried on a doubling
+    back-off instead of every pass.
+    """
+
+    def __init__(self, workers=DIAL_WORKERS):
+        self._q = queue.Queue(maxsize=512)
+        self._lock = threading.Lock()
+        self._pending = set()
+        self._fail = {}        # pid → (consecutive failures, retry-not-before)
+        self._peered = set()   # pids whose link we have pinned as Peering
+        self._conn = {}        # pid → [multiaddr lines]
+        self._conn_at = 0.0
+        self._workers = workers
+        self._started = False
+
+    def start(self):
+        if self._started:
+            return
+        self._started = True
+        for _ in range(self._workers):
+            threading.Thread(target=self._work, daemon=True).start()
+
+    def connected(self, force=False):
+        """pid → live multiaddrs, from at most one `swarm peers` per TTL."""
+        with self._lock:
+            fresh = time.time() - self._conn_at < CONNECTED_TTL_S
+            if fresh and not force:
+                return self._conn
+        conn = {}
+        try:
+            r = sh("peers", timeout=10)
+            for line in (r.stdout or "").splitlines():
+                line = line.strip()
+                if line.startswith("/") and "/p2p/" in line:
+                    conn.setdefault(line.rsplit("/p2p/", 1)[-1], []).append(line)
+        except Exception:
+            return self._conn
+        with self._lock:
+            self._conn, self._conn_at = conn, time.time()
+        return conn
+
+    def want(self, pid, addrs=()):
+        """Ask for a link to `pid`. Returns True if a dial was queued."""
+        if not _looks_like_peer_id(pid):
+            return False
+        with self._lock:
+            if pid in self._pending:
+                return False
+            _, not_before = self._fail.get(pid, (0, 0.0))
+            if time.time() < not_before:
+                return False
+            if pid in self._peered and pid in self._conn:
+                return False
+            self._pending.add(pid)
+        try:
+            self._q.put_nowait((pid, list(addrs or ())))
+        except queue.Full:
+            with self._lock:
+                self._pending.discard(pid)
+            return False
+        return True
+
+    def _work(self):
+        while True:
+            pid, addrs = self._q.get()
+            try:
+                ok = self._dial(pid, addrs)
+            except Exception as e:
+                ok = False
+                log("dial error:", e)
+            with self._lock:
+                self._pending.discard(pid)
+                if ok:
+                    self._fail.pop(pid, None)
+                else:
+                    n = self._fail.get(pid, (0, 0.0))[0] + 1
+                    self._fail[pid] = (n, time.time() + min(1800, 60 * 2 ** (n - 1)))
+                    if len(self._fail) > 4096:  # bounded: forget the oldest waits
+                        for k in sorted(self._fail, key=lambda k: self._fail[k][1])[:1024]:
+                            del self._fail[k]
+
+    def _dial(self, pid, addrs):
+        """Dial an Orb over the public swarm. No LAN IP and no open port required.
+
+        `swarm connect /p2p/<id>` lets kubo use whatever it knows: a public
+        address, a hole-punched path, or a /p2p-circuit through a relay. Live
+        paths are then pinned as Peering so ConnMgr cannot prune them.
+        """
+        if pid not in self.connected():
+            sh("connect", "/p2p/%s" % pid, timeout=25)
+        wan = []
+        for a in addrs:
+            maddr = _wan_addr(a, pid)
+            if maddr and maddr not in wan:
+                wan.append(maddr)
+        # Prefer the relay circuit: it still works after a NAT binding expires.
+        wan.sort(key=lambda a: (0 if "/p2p-circuit" in a else 1))
+        live = self.connected(force=True).get(pid, [])
+        if not live:
+            for maddr in wan[:4]:
+                sh("connect", maddr, timeout=20)
+            live = self.connected(force=True).get(pid, [])
+        if not live:
+            return False
+        paths = [p for p in live if "/ip4/127." not in p]
+        paths.sort(key=lambda a: (0 if "/p2p-circuit" in a else 1))
+        for path in (paths + wan)[:4]:
+            sh("peer", path, timeout=10)
+        with self._lock:
+            self._peered.add(pid)
+        return True
+
+
+REG = None       # Registry, created in main()
+DIALER = Dialer()
+_dropped = {}    # reason → last time logged (rate-limits the spoof log)
+
+
+def handle_line(line, at_ms=None):
+    """One line from the subscriber → merged into the registry, or dropped."""
+    sender, payload = decode_envelope(line)
+    if sender is None:
+        return False
+    if sender == SELF_PID:
+        return False  # floodsub delivers our own announcement back
+    ann, why = accept_message(sender, payload)
+    if ann is None:
+        if why and why.startswith("sender") and time.time() - _dropped.get(why, 0) > 300:
+            _dropped[why] = time.time()
+            if len(_dropped) > 256:
+                _dropped.clear()
+            log("dropped announcement:", why)
+        return False
+    REG.merge(ann, now_ms() if at_ms is None else at_ms)
+    DIALER.want(ann["peer_id"], ann["addrs"])
+    # One Orb's announcement names others it has met, so joining any single
+    # node is enough to learn the rest of the live mesh — a few at a time.
+    asked = 0
+    for other in ann["seen"]:
+        if asked >= MAX_SEEN_DIAL:
+            break
+        if DIALER.want(other):
+            asked += 1
+    return True
+
+
 def seen_peer_ids():
     """Orbs we already know. Gossiping this is how a new node learns the rest
     from the first one it reaches — one DHT answer is not the whole swarm."""
-    reg = read_json(REGISTRY, {"peers": {}})
-    ids = []
-    for pid in (reg.get("peers") or {}):
-        if _looks_like_peer_id(pid):
-            ids.append(pid)
-        if len(ids) >= MAX_SEEN:
-            break
-    return ids
+    ids = [pid for pid in (REG.peer_ids() if REG else []) if _looks_like_peer_id(pid)]
+    return ids[:MAX_SEEN]
 
 
-def build_announcement():
-    return {
+def build_announcement(peer_id=None):
+    ann = {
         "v": 1,
-        "peer_id": self_peer_id(),
+        "peer_id": peer_id if peer_id is not None else self_peer_id(),
         "label": self_label(),
         "addrs": self_addrs(),
         "seen": seen_peer_ids(),
-        "updated_ms": int(time.time() * 1000),
+        "updated_ms": now_ms(),
         "models": read_json(CATALOG, [])[:MAX_MODELS],
         "starred": read_json(STARS, [])[:MAX_MODELS],
     }
+    binding = read_json(BINDING, {})
+    if isinstance(binding, dict) and binding.get("peer_id") == ann["peer_id"] and binding.get("orb_key"):
+        ann["orb_key"] = binding["orb_key"]
+        ann["orb_sig"] = binding.get("orb_sig", "")
+        if isinstance(binding.get("delegation"), dict):
+            ann["delegation"] = binding["delegation"]
+    return fit_announcement(ann)
+
+
+def fit_announcement(ann):
+    """Trim an announcement to what pubsub will actually carry.
+
+    Over the limit the publish fails silently and this Orb disappears from
+    every index. Dropping the oldest tail keeps the Orb visible with most of
+    its catalog instead.
+    """
+    if len(json.dumps(ann)) <= MAX_ANNOUNCE_BYTES:
+        return ann
+    ann = dict(ann, seen=[])
+    models = list(ann["models"])
+    while models and len(json.dumps(dict(ann, models=models))) > MAX_ANNOUNCE_BYTES:
+        models = models[: max(0, len(models) - max(1, len(models) // 8))]
+    if len(models) < len(ann["models"]):
+        log("announcement too large: sending %d of %d models" % (len(models), len(ann["models"])))
+    return dict(ann, models=models)
 
 
 def publish():
@@ -256,110 +708,16 @@ def publish():
     if not ann["peer_id"]:
         return
     try:
-        sh("pub", TOPIC, stdin=json.dumps(ann), timeout=15)
+        r = sh("pub", TOPIC, stdin=json.dumps(ann), timeout=15)
+        if r.returncode != 0:
+            log("publish failed (exit %d)" % r.returncode)
     except Exception as e:
         log("publish failed:", e)
 
 
-def persist_connected(pid):
-    """Pin every live path to this Orb as Peering so ConnMgr cannot prune it.
-
-    Prefer the relay circuit when both a direct and a relayed connection are
-    up: the circuit still works after a NAT binding expires."""
-    try:
-        r = sh("peers", timeout=10)
-    except Exception:
-        return
-    lines = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if pid in line and line.startswith("/") and "/ip4/127." not in line:
-            lines.append(line)
-    lines.sort(key=lambda a: (0 if "/p2p-circuit" in a else 1))
-    for line in lines[:4]:
-        sh("peer", line, timeout=10)
-
-
-def keep_connected_async(pid, addrs):
-    """Don't block the pubsub reader on DHT dials (they can take tens of seconds)."""
-    if not pid or pid == SELF_PID:
-        return
-    with _inflight_lock:
-        if pid in _inflight:
-            return
-        _inflight.add(pid)
-
-    def run():
-        try:
-            keep_connected(pid, addrs)
-        finally:
-            with _inflight_lock:
-                _inflight.discard(pid)
-
-    threading.Thread(target=run, daemon=True).start()
-
-
-def keep_connected(pid, addrs):
-    """Dial an Orb over the public swarm. No LAN IP and no open port required.
-
-    `swarm connect /p2p/<id>` lets kubo use whatever it knows: a public address,
-    a hole-punched path, or a /p2p-circuit through a relay. Relay circuits are
-    then pinned as Peering so the link survives ConnMgr.
-    """
-    if not pid or pid == SELF_PID:
-        return
-    sh("connect", "/p2p/%s" % pid, timeout=25)
-    persist_connected(pid)
-    wan = []
-    for a in addrs or []:
-        maddr = _wan_addr(a, pid)
-        if maddr and maddr not in wan:
-            wan.append(maddr)
-    wan.sort(key=lambda a: (0 if "/p2p-circuit" in a else 1))
-    for maddr in wan[:4]:
-        sh("peer", maddr, timeout=10)
-        sh("connect", maddr, timeout=20)
-
-
-def merge_peer(ann):
-    pid = ann.get("peer_id")
-    if not pid or not isinstance(ann.get("models"), list):
-        return
-    if pid == SELF_PID:
-        return  # our own announcement (floodsub delivers it back) — don't index self
-    keep_connected_async(pid, ann.get("addrs"))
-    # One Orb's announcement names the others it has already met, so joining
-    # any single node is enough to learn the rest of the live mesh.
-    for other in ann.get("seen") or []:
-        if isinstance(other, str) and _looks_like_peer_id(other):
-            keep_connected_async(other, [])
-    with _lock:
-        reg = read_json(REGISTRY, {"peers": {}})
-        peers = reg.setdefault("peers", {})
-        peers[pid] = {
-            "peer_id": pid,
-            "label": ann.get("label", ""),
-            "addrs": ann.get("addrs", []),
-            "updated_ms": ann.get("updated_ms", int(time.time() * 1000)),
-            "models": ann["models"],
-            "starred": ann.get("starred", []) if isinstance(ann.get("starred"), list) else [],
-        }
-        # prune stale peers
-        now = int(time.time() * 1000)
-        for k in [k for k, v in peers.items() if now - v.get("updated_ms", 0) > PEER_TTL_MS]:
-            del peers[k]
-        try:
-            write_json_atomic(REGISTRY, reg)
-        except Exception as e:
-            log("registry write failed:", e)
-
-
-SUBFILE = "/run/aeon/modelshare-sub.ndjson"
-
-
 def sub_loop():
-    """Reconnecting subscriber. Each line from `aeon-ipfs sub` is one JSON
-    announcement (kubo emits one pubsub message per line).
+    """Reconnecting subscriber. Each line from `aeon-ipfs sub-json` is one
+    envelope (kubo emits one pubsub message per line).
 
     IMPORTANT: kubo's `pubsub sub` BUFFERS its stdout when it's a pipe, so small,
     infrequent announcements never flush to a reader — a subscriber reading the
@@ -373,20 +731,20 @@ def sub_loop():
         try:
             open(SUBFILE, "w").close()  # truncate
             fout = open(SUBFILE, "wb")
-            p = subprocess.Popen([SCRIPT, "sub", TOPIC], stdout=fout,
+            p = subprocess.Popen([SCRIPT, "sub-json", TOPIC], stdout=fout,
                                  stderr=subprocess.DEVNULL)
             fout.close()
             start = time.time()
+            lines = LineBuffer()
             with open(SUBFILE, "r") as fin:
                 while p.poll() is None:
-                    line = fin.readline()
-                    if line:
-                        line = line.strip()
-                        if line:
+                    chunk = fin.read(256 * 1024)
+                    if chunk:
+                        for line in lines.feed(chunk):
                             try:
-                                merge_peer(json.loads(line))
-                            except Exception:
-                                pass  # malformed / foreign message
+                                handle_line(line)
+                            except Exception as e:
+                                log("bad message:", e)
                     else:
                         if time.time() - start > 600:
                             break  # recycle: truncate the tmpfs file + re-mesh
@@ -416,39 +774,9 @@ def pub_loop():
         if flag or (now - last) >= ANNOUNCE_EVERY:
             publish()
             last = now
+        REG.prune(now_ms())
+        REG.flush()
         time.sleep(2)
-
-
-def _looks_like_peer_id(s):
-    # CIDv0 Qm… or CIDv1 PeerIDs (12D3KooW…, bafz…, etc.)
-    if not s or s == SELF_PID or s == RENDEZVOUS_CID:
-        return False
-    if s.startswith("Qm") and len(s) >= 46:
-        return True
-    if s.startswith("12D3Koo") or s.startswith("bafz") or s.startswith("k51"):
-        return True
-    return len(s) >= 32 and all(c.isalnum() for c in s)
-
-
-def _dial_peers(pids):
-    sem = threading.Semaphore(8)
-    threads = []
-
-    def one(pid):
-        with sem:
-            keep_connected(pid, [])
-
-    n = 0
-    for pid in pids:
-        if n >= MAX_DIAL:
-            break
-        t = threading.Thread(target=one, args=(pid,), daemon=True)
-        t.start()
-        threads.append(t)
-        n += 1
-    for t in threads:
-        t.join(timeout=50)
-    return n
 
 
 def discover_loop():
@@ -457,37 +785,33 @@ def discover_loop():
     Floodsub only reaches currently-connected subscribers. Public IPFS peers
     are not on our topic, so two Orbs both 'on IPFS' still miss each other
     until we swarm-connect. findprovs(rendezvous) is the directory; peer ids
-    already in the registry are redialed too, in case the DHT answer is partial.
+    already in the registry are considered too, in case the DHT answer is
+    partial. Only the ones not already connected cost a dial.
     """
     time.sleep(20)  # let kubo finish boot + first provide
     while True:
         try:
             r = sh("findprovs", RENDEZVOUS_CID, timeout=90)
-            lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-            providers = []
-            for ln in lines:
-                if _looks_like_peer_id(ln) and ln != SELF_PID and ln not in providers:
-                    providers.append(ln)
-            pids = []
-            seen = set()
-            for pid in providers + seen_peer_ids():
-                if pid in seen or pid == SELF_PID:
-                    continue
-                seen.add(pid)
-                pids.append(pid)
-            n = _dial_peers(pids)
+            providers = _dedupe(
+                ln.strip() for ln in (r.stdout or "").splitlines() if _looks_like_peer_id(ln.strip())
+            )
+            DIALER.connected(force=True)
+            queued = sum(1 for pid in _dedupe(providers + seen_peer_ids())[:MAX_DIAL] if DIALER.want(pid))
+            connected = DIALER.connected()
             try:
                 write_json_atomic(MESH, {
                     "beacon": RENDEZVOUS_CID,
                     "providers": providers,
                     # This node plus every other provider the DHT just named.
                     "orbs_on_beacon": len(providers) + (1 if SELF_PID else 0),
-                    "dialed": n,
-                    "updated_ms": int(time.time() * 1000),
+                    "connected": sum(1 for pid in providers if pid in connected),
+                    "dialed": queued,
+                    "updated_ms": now_ms(),
                 })
             except Exception as e:
                 log("mesh write failed:", e)
-            log("mesh: %d on beacon, dialed %d" % (len(providers) + 1, n))
+            log("mesh: %d on beacon, %d connected, %d dialing" % (
+                len(providers) + 1, sum(1 for pid in providers if pid in connected), queued))
         except Exception as e:
             log("dht rendezvous failed:", e)
         time.sleep(DISCOVER_EVERY)
@@ -521,8 +845,9 @@ def wait_for_daemon():
 
 
 def main():
-    global SELF_PID
+    global SELF_PID, REG
     os.makedirs(MODELS_DIR, exist_ok=True)
+    REG = Registry(REGISTRY)
     # `up` restarts kubo once for the gateway page. Don't cache an empty id
     # from the gap between those two processes.
     while not SELF_PID:
@@ -531,6 +856,7 @@ def main():
         if not SELF_PID:
             time.sleep(2)
     log("online; gossiping on", TOPIC, "as", SELF_PID)
+    DIALER.start()
     threading.Thread(target=sub_loop, daemon=True).start()
     threading.Thread(target=beacon_loop, daemon=True).start()
     threading.Thread(target=discover_loop, daemon=True).start()

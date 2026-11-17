@@ -2,9 +2,11 @@
 Description=Aeon Magick AI Computer Control — HTTPS supervisor / web UI
 After=network-online.target aeon-firstboot.service aeon-streamer.service aeon-hid.service
 Wants=network-online.target
-# Don't start until firstboot has generated /etc/aeon/auth.toml — otherwise
-# supervisor exits and systemd restart-storms it until journald is full.
-Requires=aeon-firstboot.service
+# Wait for firstboot (it generates /etc/aeon/auth.toml), but do not REQUIRE it
+# to succeed: with Requires=, a first-boot run that failed or timed out meant
+# the web UI never started — and the web UI is how you fix whatever went wrong.
+# The supervisor creates auth.toml itself if it is missing.
+Wants=aeon-firstboot.service
 # After 5 fast failures in a row, give up (keeps the journal sane).
 # These keys belong in [Unit] in modern systemd; if left in [Service]
 # the unit still works but the journal gets spammed with deprecation

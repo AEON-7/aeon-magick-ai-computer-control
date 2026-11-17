@@ -256,9 +256,17 @@ impl RecordManager {
             .map_err(|e| format!("delete: {e}"))
     }
 
-    /// 50% of the recordings filesystem's total size, in bytes (0 if unknown).
+    /// What recordings may occupy, in bytes (0 if unknown): half the
+    /// filesystem, but never more than what is actually there to use. Half of
+    /// the TOTAL size ignored how full the disk already was, so on a card
+    /// mostly taken up by something else (models, the OS) a recording could
+    /// run the system out of space while still "within budget".
     fn disk_budget(&self) -> u64 {
-        (disk_total_bytes(&self.dir) as f64 * DISK_BUDGET_FRACTION) as u64
+        let half = (disk_total_bytes(&self.dir) as f64 * DISK_BUDGET_FRACTION) as u64;
+        match disk_avail_bytes(&self.dir) {
+            Some(avail) => half.min((self.dir_total_bytes() + avail).saturating_sub(DISK_RESERVE_BYTES)),
+            None => half,
+        }
     }
 
     /// Total bytes of everything in the recordings dir (mp4s + thumbnails).
@@ -290,7 +298,7 @@ impl RecordManager {
                 let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else {
                     continue;
                 };
-                if keep == Some(id.as_str()) {
+                if !purge_candidate(&id, keep) {
                     continue;
                 }
                 let mp4 = ent.metadata().map(|m| m.len()).unwrap_or(0);
@@ -760,6 +768,16 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether a file stem in the recordings dir may be purged to make room.
+/// Never the recording in progress — neither by its id nor as the
+/// `rec_<n>.partial` file it is being written to. The purge used to compare
+/// only the id, saw `rec_<n>.partial` as some other recording with timestamp
+/// 0, and so deleted the ACTIVE recording first; ffmpeg kept writing to the
+/// unlinked file, invisible to the budget, and the recording was lost.
+fn purge_candidate(stem: &str, keep: Option<&str>) -> bool {
+    is_safe_id(stem) && keep != Some(stem)
+}
+
 fn id_to_ms(id: &str) -> i64 {
     id.strip_prefix("rec_")
         .and_then(|s| s.parse::<i64>().ok())
@@ -770,6 +788,15 @@ fn is_safe_id(id: &str) -> bool {
     id.strip_prefix("rec_")
         .map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
         .unwrap_or(false)
+}
+
+/// Kept free on the recordings filesystem no matter what.
+const DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Bytes still available on the filesystem holding `dir`, via `df`.
+fn disk_avail_bytes(dir: &Path) -> Option<u64> {
+    let out = std::process::Command::new("df").args(["-B1", "--output=avail"]).arg(dir).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().nth(1)?.trim().parse().ok()
 }
 
 /// Total bytes of the filesystem holding `dir`, via `df` (no extra crates).
@@ -783,3 +810,24 @@ fn disk_total_bytes(dir: &Path) -> u64 {
         .and_then(|s| s.lines().nth(1).and_then(|l| l.trim().parse::<u64>().ok()))
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+
+    #[test]
+    fn the_recording_in_progress_is_never_a_purge_candidate() {
+        // Finished recordings other than the active one may go.
+        assert!(purge_candidate("rec_1700000000000", Some("rec_1700000009999")));
+        assert!(purge_candidate("rec_1700000000000", None));
+        // The active one may not — by id…
+        assert!(!purge_candidate("rec_1700000009999", Some("rec_1700000009999")));
+        // …nor as the partial file it is still being written to.
+        assert!(!purge_candidate("rec_1700000009999.partial", Some("rec_1700000009999")));
+        assert!(!purge_candidate("rec_1700000009999.partial", None));
+        // Anything that is not a recording id is left alone.
+        assert!(!purge_candidate("notes", None));
+        assert!(!purge_candidate("rec_", None));
+    }
+}
+

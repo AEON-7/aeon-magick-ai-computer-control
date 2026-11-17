@@ -106,6 +106,10 @@ pub fn build_router(cfg: Config) -> Router {
     use hyper_util::rt::TokioExecutor;
 
     let auth = crate::auth::AuthStore::load(&cfg.auth_path, &cfg.tokens_path);
+    if auth.is_open() {
+        // Not set up yet: make sure there is a setup code for the wizard to ask for.
+        crate::auth::ensure_setup_code();
+    }
     let stores = crate::macros::Stores::default();
     stores.ensure_dirs();
     let uds_client_empty: Client<_, http_body_util::Empty<bytes::Bytes>> =
@@ -459,6 +463,8 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/hailo/models",            get(crate::hailo::get_models))
         .route("/hailo/models/:id/deploy", post(crate::hailo::post_deploy))
         .route("/hailo/models/:id/unload", post(crate::hailo::post_unload))
+        // Mirror every Hailo model already on disk into Model Share.
+        .route("/hailo/models/sync-share", post(crate::hailo::post_sync_share))
         // BrainCraft HAT — AI interface + camera viewfinder + local/hosted voice.
         // The aeon-braincraft daemon owns the device; this is the control plane
         // (status relay + config + transient photo/record/say + the button-driven
@@ -539,7 +545,14 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/publisher/unlock", post(crate::publisher::unlock_account))
         .route("/publisher/lock",   post(crate::publisher::lock_account))
         .route("/publisher/seed",   post(crate::publisher::export_seed))
+        // Signed "this key is <account>" statements for posting elsewhere.
+        .route("/publisher/proof",  post(crate::publisher::create_proof))
+        .route("/publisher/verify", post(crate::publisher::verify_proof))
         .route("/ipfs/models/star",     post(crate::ipfs::star_model))
+        // Publisher trust: who this Orb has seen sign models, the operator's
+        // trust / block decisions, and this Orb's own verification tally.
+        .route("/ipfs/models/trust",    get(crate::ipfs::get_trust).post(crate::ipfs::set_trust))
+        .route("/ipfs/models/claim",    post(crate::ipfs::claim_model))
         .route("/ipfs/models/card",     get(crate::ipfs::model_card))
         .route("/ipfs/models/file",     get(crate::ipfs::model_file))
         .route("/ipfs/models/image",    get(crate::ipfs::model_image))

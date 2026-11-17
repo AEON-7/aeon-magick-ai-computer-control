@@ -97,10 +97,13 @@ fn list_live() -> HashMap<String, String> {
 }
 
 fn rand_hex(bytes: usize) -> String {
-    std::fs::read("/dev/urandom")
-        .ok()
-        .map(|b| b.into_iter().take(bytes).map(|x| format!("{x:02x}")).collect())
-        .unwrap_or_else(|| "0".repeat(bytes * 2))
+    // NOT std::fs::read("/dev/urandom"): that reads to end-of-file, and the
+    // device has none, so the call never returned and grew until the unit's
+    // memory limit killed the supervisor.
+    use rand::RngCore;
+    let mut buf = vec![0u8; bytes];
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    buf.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn sanitize_nick(s: &str) -> String {

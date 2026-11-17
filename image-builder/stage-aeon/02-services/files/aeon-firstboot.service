@@ -1,10 +1,15 @@
 [Unit]
 Description=Aeon Magick AI Computer Control — first-boot setup
-After=local-fs.target
+# After NetworkManager: a pre-seeded Wi-Fi network is applied with nmcli.
+After=local-fs.target NetworkManager.service
+Wants=NetworkManager.service
 ConditionPathExists=!/var/lib/aeon/firstboot-done
 
 [Service]
 Type=oneshot
+# The supervisor is ordered after this unit; a step that hangs must not hold
+# the web UI back indefinitely.
+TimeoutStartSec=240
 ExecStart=/usr/local/bin/aeon-firstboot
 RemainAfterExit=yes
 
