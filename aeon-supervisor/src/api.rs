@@ -545,6 +545,9 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/publisher/unlock", post(crate::publisher::unlock_account))
         .route("/publisher/lock",   post(crate::publisher::lock_account))
         .route("/publisher/seed",   post(crate::publisher::export_seed))
+        // Signed "this key is <account>" statements for posting elsewhere.
+        .route("/publisher/proof",  post(crate::publisher::create_proof))
+        .route("/publisher/verify", post(crate::publisher::verify_proof))
         .route("/ipfs/models/star",     post(crate::ipfs::star_model))
         // Publisher trust: who this Orb has seen sign models, the operator's
         // trust / block decisions, and this Orb's own verification tally.

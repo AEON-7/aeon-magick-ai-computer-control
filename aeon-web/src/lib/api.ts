@@ -1728,6 +1728,17 @@ export const clearAudit = () =>
 
 // ── System (reboot / poweroff / health) ────────────────────────────────
 
+/** State of the Orb's randomness: what keys are made from, and whether it is healthy. */
+export interface EntropyHealth {
+  verdict: 'good' | 'ok' | 'not_ready';
+  summary: string;
+  kernel_ready: boolean;
+  entropy_avail?: number | null;
+  hardware?: string | null;   // the hardware RNG the kernel uses, if any
+  hardware_ok: boolean;
+  sources: string[];          // 'kernel' | 'hardware'
+}
+
 export interface SystemInfo {
   ok: boolean;
   uptime_seconds: number;
@@ -1739,6 +1750,8 @@ export interface SystemInfo {
   image_version?: number | null; // flashed image version (null on a legacy image)
   track?: string; // pi4 | pi5 | other
   codename?: string | null; // bookworm | trixie
+  /** What signing keys and secrets are made from, and whether it is healthy. */
+  entropy?: EntropyHealth;
 }
 
 export const getSystemInfo = () => req<SystemInfo>('GET', '/system/info');

@@ -103,3 +103,26 @@ export function verifyPeerBinding({ orbKey, peerId, orbSig }) {
   if (typeof peerId !== 'string' || !/^[A-Za-z0-9]{32,128}$/.test(peerId)) return false;
   return verifyEd25519(orbKey, Buffer.from(`aeon-peer/1\n${orbKey}\n${peerId}`, 'utf8'), orbSig);
 }
+
+/** aeon-identity-proof/1 — a user key claiming an account elsewhere. Finds the
+ * block inside arbitrary pasted text and returns its fields when the
+ * signature is the key's own; null otherwise. It cannot tell WHERE the block
+ * was posted — that half of the check belongs to the caller. */
+export function verifyIdentityProof(text) {
+  if (typeof text !== 'string' || text.length > 16384) return null;
+  const m = text.match(/-----BEGIN AEON IDENTITY PROOF-----\s*([\s\S]*?)-----END AEON IDENTITY PROOF-----/);
+  if (!m) return null;
+  const lines = m[1].split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.shift() !== 'aeon-identity-proof/1') return null;
+  const out = {};
+  for (const label of ['key', 'name', 'claim', 'issued', 'sig']) {
+    const line = lines.shift();
+    if (typeof line !== 'string' || !line.startsWith(`${label}:`)) return null;
+    out[label] = line.slice(label.length + 1).trim();
+  }
+  const key = out.key.toLowerCase();
+  const issuedMs = Number(out.issued);
+  if (!HEX64.test(key) || !Number.isSafeInteger(issuedMs)) return null;
+  const bytes = Buffer.from(`aeon-identity-proof/1\n${key}\n${out.name}\n${out.claim}\n${issuedMs}`, 'utf8');
+  return verifyEd25519(key, bytes, out.sig) ? { key, name: out.name, claim: out.claim, issuedMs } : null;
+}

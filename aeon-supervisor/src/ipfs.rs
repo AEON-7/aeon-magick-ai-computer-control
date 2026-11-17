@@ -458,12 +458,17 @@ fn catalog_add_raw(entry: ModelEntry) {
 /// delegation rides along and the entry is credited to that user. The name is
 /// a decorative petname; the key/signature is the cryptographic provenance.
 fn sign_entry(entry: &mut ModelEntry) {
+    sign_entry_with(entry, true)
+}
+
+/// `sign_entry`, choosing whether the signed-in publisher identity is attached.
+fn sign_entry_with(entry: &mut ModelEntry, identity: bool) {
     if !entry.pub_sig.is_empty() {
         return;
     }
     let digest =
         crate::publisher::publication_digest(&entry.cid, &entry.name, &entry.sha256, entry.added_at_ms);
-    if let Ok(s) = crate::publisher::sign_as_orb(&digest) {
+    if let Ok(s) = crate::publisher::sign_as_orb_with(&digest, identity) {
         entry.pub_name = if !s.name.is_empty() {
             s.name
         } else if !entry.origin_label.is_empty() {
@@ -651,6 +656,9 @@ struct ShareSpec {
     source: String,
     /// Non-empty = byte-identical vendor mirror; see `OriginBlock::upstream`.
     upstream: String,
+    /// Credit the share to the signed-in publisher identity (the default).
+    /// False = signed by this Orb's key alone, with no name attached.
+    identity: bool,
 }
 
 /// Write model-card.json (manifest + origin statement) into `dir` and return
@@ -675,7 +683,7 @@ fn prepare_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String,
     } else {
         let digest =
             crate::publisher::origin_digest(&spec.name, &spec.source, spec.verified, now, &manifest_tuples(&files));
-        match crate::publisher::sign_as_orb(&digest) {
+        match crate::publisher::sign_as_orb_with(&digest, spec.identity) {
             Ok(s) => OriginBlock {
                 key: s.pubkey,
                 name: s.name,
@@ -728,6 +736,7 @@ fn prepare_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String,
 /// Every origination path ends here, so every model is shared the same way.
 fn finalize_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String, String>) -> Result<ModelEntry, String> {
     let vendor_mirror = !spec.upstream.is_empty();
+    let identity = spec.identity;
     let mut entry = prepare_share(dir, spec, known)?;
     let d = dir.to_string_lossy().to_string();
     // Vendor mirrors pin the import parameters so the CID is the same on every
@@ -741,7 +750,7 @@ fn finalize_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String
         return Err("ipfs add produced no CID".into());
     }
     entry.cid = cid;
-    sign_entry(&mut entry);
+    sign_entry_with(&mut entry, identity);
     // We built it from local files, so it is verified by construction.
     record_check(&entry.cid, &ContentCheck {
         manifest: true,
@@ -1538,7 +1547,7 @@ pub async fn upload_model(
         card,
         verified: false,
         source: String::new(),
-        upstream: String::new(),
+        upstream: String::new(), identity: true,
     };
     let known: HashMap<String, String> = [(safe_file, sha256_hex)].into_iter().collect();
 
@@ -2085,7 +2094,6 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| -> Value {
         ensure_binding();
         let me = self_peer_id();
-        let my_key = crate::publisher::orb_pubkey();
         let local = read_catalog();
         let peers = read_registry();
         let tasks: HashMap<String, TaskState> = tasks().lock().map(|g| g.clone()).unwrap_or_default();
@@ -2666,6 +2674,14 @@ pub struct PublishReq {
     pub image_b64: String,
     #[serde(default)]
     pub image_ext: String,
+    /// Sign with the signed-in publisher identity. Defaults to true; false
+    /// publishes under this Orb's key alone.
+    #[serde(default = "yes")]
+    pub sign_identity: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// POST /api/ipfs/models/publish — phase 2: finalize a draft into a shared
@@ -2716,7 +2732,7 @@ pub async fn publish_model(State(_s): State<AppState>, Json(req): Json<PublishRe
         let _ = size_bytes; // the manifest re-derives sizes from the files themselves
         let known: HashMap<String, String> = [(file.clone(), sha256)].into_iter().collect();
         let spec = ShareSpec {
-            name: req.name, file, card, verified: false, source: String::new(), upstream: String::new(),
+            name: req.name, file, card, verified: false, source: String::new(), upstream: String::new(), identity: req.sign_identity,
         };
         match finalize_share(&dir, spec, &known) {
             Ok(entry) => {
@@ -3367,7 +3383,7 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
         card,
         verified,
         source: format!("https://huggingface.co/{repo}"),
-        upstream: String::new(),
+        upstream: String::new(), identity: true,
     };
     let entry = finalize_share(dir, spec, &known)?;
     // Gated/private weights stay on this Orb only. Seeding off does the same
@@ -3520,7 +3536,7 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
     task_set(key, "adding to IPFS…");
     let known: HashMap<String, String> = [(leaf.clone(), sha)].into_iter().collect();
     let spec = ShareSpec {
-        name: model_name.to_string(), file: leaf, card, verified, source, upstream: String::new(),
+        name: model_name.to_string(), file: leaf, card, verified, source, upstream: String::new(), identity: true,
     };
     let entry = finalize_share(dir, spec, &known)?;
     let cid = entry.cid.clone();
@@ -3724,7 +3740,7 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
     inspect_model_dir(dir)?;
     task_set(key, "adding to IPFS…");
     let known: HashMap<String, String> = [(leaf.clone(), sha)].into_iter().collect();
-    let spec = ShareSpec { name: m_name.clone(), file: leaf, card, verified, source, upstream: String::new() };
+    let spec = ShareSpec { name: m_name.clone(), file: leaf, card, verified, source, upstream: String::new(), identity: true, };
     let entry = finalize_share(dir, spec, &known)?;
     let cid = entry.cid.clone();
     catalog_add(entry);
@@ -3973,6 +3989,7 @@ pub fn share_vendor_file(
         verified: false,
         source: source.to_string(),
         upstream: upstream.to_string(),
+        identity: true,
     };
     let entry = finalize_share(staging.path(), spec, &HashMap::new())?;
     let cid = entry.cid.clone();
@@ -4145,7 +4162,7 @@ mod tests {
             card: ModelCard { kind: "llm".into(), format: "gguf".into(), ..Default::default() },
             verified: true,
             source: "https://example.test/m".into(),
-            upstream: String::new(),
+            upstream: String::new(), identity: true,
         }
     }
 
@@ -4243,6 +4260,7 @@ mod tests {
             let mut s = spec("YOLOv8s", "yolov8s.hef");
             s.verified = false;
             s.upstream = "hailo-model-zoo".into();
+            s.identity = false;
             prepare_share(t.path(), s, &HashMap::new()).unwrap();
             let card = std::fs::read(t.path().join(CARD_FILE)).unwrap();
             (t, card)

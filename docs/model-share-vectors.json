@@ -10,6 +10,17 @@
     "user_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "user_name": "alice"
   },
+  "identity_proof": {
+    "block": "-----BEGIN AEON IDENTITY PROOF-----\naeon-identity-proof/1\nkey: 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\nname: alice\nclaim: huggingface.co/alice\nissued: 1760000000003\nsig: iRNh8NIojGnhqKvf0KSrsY5iAc4ex544hMQJAmzcqHxKi0t96MAani+fX25zr9DzR/eBxgBggNlZtIT+tIDnBg==\n-----END AEON IDENTITY PROOF-----",
+    "claim": "huggingface.co/alice",
+    "domain": "aeon-identity-proof/1",
+    "issued_ms": 1760000000003,
+    "key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "name": "alice",
+    "sig": "iRNh8NIojGnhqKvf0KSrsY5iAc4ex544hMQJAmzcqHxKi0t96MAani+fX25zr9DzR/eBxgBggNlZtIT+tIDnBg==",
+    "signed_text": "aeon-identity-proof/1\n8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\nalice\nhuggingface.co/alice\n1760000000003",
+    "signer": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  },
   "keys": {
     "orb_key": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
     "orb_secret": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",

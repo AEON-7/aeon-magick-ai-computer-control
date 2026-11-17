@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   compareToManifest, identityOf, manifestFromRelease, originSigningBytes, sortManifest,
-  verifyDelegation, verifyOrigin, verifyPeerBinding,
+  verifyDelegation, verifyIdentityProof, verifyOrigin, verifyPeerBinding,
 } from '../src/shared/aeon-origin.js';
 
 // In FrostByte the fixture sits in tests/fixtures; in the Orb repo it is docs/model-share-vectors.json.
@@ -79,4 +79,14 @@ test('downloaded files are held to the manifest exactly', () => {
   assert.equal(compareToManifest(m.slice(1), m).mismatch, m[0].path);
   assert.equal(compareToManifest([...m, { path: 'x', size: 1, sha256: '00'.repeat(32) }], m).mismatch, 'x');
   assert.equal(compareToManifest(m.map((f, i) => i ? f : { ...f, size: f.size + 1 }), m).ok, false);
+});
+
+test('an identity proof verifies as posted and not when edited', () => {
+  const p = v.identity_proof;
+  const found = verifyIdentityProof(`my bio\n\n${p.block}\n\nmore text`);
+  assert.deepEqual(found, { key: p.key, name: p.name, claim: p.claim, issuedMs: p.issued_ms });
+  assert.equal(verifyIdentityProof(p.block.replace(p.claim, 'huggingface.co/mallory')), null);
+  assert.equal(verifyIdentityProof(p.block.replace(`name: ${p.name}`, 'name: bob')), null);
+  assert.equal(verifyIdentityProof('nothing here'), null);
+  assert.equal(verifyIdentityProof(p.block.replace('-----END AEON IDENTITY PROOF-----', '')), null);
 });

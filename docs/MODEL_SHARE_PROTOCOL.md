@@ -49,6 +49,26 @@ made it.
 
     aeon-peer/1\n<orb_key>\n<peer_id>
 
+**Identity proof** — signed by the *user* key itself (never an Orb key), to
+tie the identity to an account on another platform:
+
+    aeon-identity-proof/1\n<user_key>\n<name>\n<claim>\n<issued_ms>
+
+`claim` is one line naming the account, e.g. `huggingface.co/your-name`. It is
+published as a text block the owner posts **on that account**:
+
+    -----BEGIN AEON IDENTITY PROOF-----
+    aeon-identity-proof/1
+    key: <user_key>
+    name: <name>
+    claim: <claim>
+    issued: <issued_ms>
+    sig: <base64>
+    -----END AEON IDENTITY PROOF-----
+
+The signature shows the key holder wrote it; where it is posted shows the
+account holder did. A verifier checks the first and must look at the second.
+
 ## 3. `model-card.json` (schema `aeon-model-card/2`)
 
 ```json

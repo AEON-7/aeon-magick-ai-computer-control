@@ -315,7 +315,7 @@ impl AuthStore {
         let secret = random_alphanumeric(28);
         let plain = format!("aeon_tok_{secret}");
 
-        let salt = SaltString::generate(&mut rand::thread_rng());
+        let salt = SaltString::generate(&mut rand::rngs::OsRng);
         let hash = Argon2::default()
             .hash_password(plain.as_bytes(), &salt)
             .map_err(|e| anyhow::anyhow!("argon2: {e}"))?
@@ -360,7 +360,7 @@ impl AuthStore {
         use argon2::password_hash::SaltString;
         use argon2::PasswordHasher;
 
-        let salt = SaltString::generate(&mut rand::thread_rng());
+        let salt = SaltString::generate(&mut rand::rngs::OsRng);
         let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
             .map_err(|e| anyhow::anyhow!("argon2: {e}"))?
@@ -370,7 +370,7 @@ impl AuthStore {
             let cur = self.auth.read().session_key.clone();
             if cur.is_empty() {
                 let mut bytes = [0u8; 32];
-                rand::thread_rng().fill(&mut bytes);
+                rand::rngs::OsRng.fill(&mut bytes);
                 B64.encode(bytes)
             } else {
                 cur
@@ -734,7 +734,7 @@ pub fn ensure_setup_code() {
         return;
     }
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let code: String = (0..8).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect();
     if write_private_atomic(Path::new(SETUP_CODE_FILE), &format!("{code}\n")).is_err() {
         return;
@@ -1029,9 +1029,13 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// Secrets below come straight from the kernel generator (`OsRng`), not from a
+// userspace generator seeded from it. Both are cryptographically sound; for
+// values that live for months — API tokens, the session-signing key — there is
+// simply no reason to put anything between the kernel and the secret.
 fn random_alphanumeric(n: usize) -> String {
     use rand::distributions::Alphanumeric;
-    rand::thread_rng()
+    rand::rngs::OsRng
         .sample_iter(&Alphanumeric)
         .take(n)
         .map(char::from)
@@ -1040,7 +1044,7 @@ fn random_alphanumeric(n: usize) -> String {
 
 fn random_hex(n: usize) -> String {
     let mut bytes = vec![0u8; (n + 1) / 2];
-    rand::thread_rng().fill(&mut bytes[..]);
+    rand::rngs::OsRng.fill(&mut bytes[..]);
     bytes
         .iter()
         .map(|b| format!("{:02x}", b))
@@ -1056,7 +1060,7 @@ fn random_hex(n: usize) -> String {
 /// we no longer do that; the setup wizard owns first-time credentials.
 pub fn generate_default(path: &Path) -> Result<String> {
     let mut session_key_bytes = [0u8; 32];
-    rand::thread_rng().fill(&mut session_key_bytes);
+    rand::rngs::OsRng.fill(&mut session_key_bytes);
     let session_key = B64.encode(session_key_bytes);
 
     let f = AuthFile {

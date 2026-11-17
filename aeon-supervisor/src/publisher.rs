@@ -32,7 +32,23 @@ struct Account {
     kdf_salt: String,   // base64(16)
     nonce: String,      // base64(12)
     enc_secret: String, // base64(chacha20poly1305(32-byte ed25519 secret))
+    /// Argon2id cost the password was stretched with: memory in KiB and passes.
+    /// 0 = an account made before these were recorded (the library defaults).
+    #[serde(default)]
+    kdf_m_kib: u32,
+    #[serde(default)]
+    kdf_t: u32,
 }
+
+// How hard the identity password is stretched before it unlocks the key. The
+// key itself has 256 bits; someone holding a copy of this Orb's storage
+// attacks the PASSWORD, so this cost is the real barrier. 64 MiB x 3 passes is
+// RFC 9106's second recommended setting and takes well under a second on a
+// Pi 5. It is paid only when signing in, creating a proof or revealing the
+// recovery phrase — never per request, which is why the admin password (checked
+// on every Basic-auth call) is deliberately NOT raised to this.
+const KDF_M_KIB: u32 = if cfg!(test) { 8 * 1024 } else { 64 * 1024 };
+const KDF_T: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Store {
@@ -75,12 +91,22 @@ fn epoch_ms() -> i64 {
 }
 
 /// Derive a 32-byte symmetric key from a password + salt (argon2id).
-fn kdf(password: &[u8], salt: &[u8]) -> Result<[u8; 32], String> {
+fn kdf(password: &[u8], salt: &[u8], m_kib: u32, t: u32) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
-    argon2::Argon2::default()
-        .hash_password_into(password, salt, &mut out)
-        .map_err(|e| format!("kdf: {e}"))?;
+    let hasher = if m_kib == 0 {
+        // An account from before the cost was recorded.
+        argon2::Argon2::default()
+    } else {
+        let params = argon2::Params::new(m_kib, t.max(1), 1, Some(32)).map_err(|e| format!("kdf params: {e}"))?;
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+    };
+    hasher.hash_password_into(password, salt, &mut out).map_err(|e| format!("kdf: {e}"))?;
     Ok(out)
+}
+
+/// True when an account's key is locked with less than the current cost.
+fn kdf_outdated(a: &Account) -> bool {
+    a.kdf_m_kib < KDF_M_KIB || a.kdf_t < KDF_T
 }
 
 /// Build an encrypted Account from a raw 32-byte ed25519 secret (= BIP39 entropy).
@@ -89,7 +115,7 @@ fn from_secret(username: &str, password: &str, secret: &[u8; 32]) -> Result<Acco
     let pubkey = hex::encode(sk.verifying_key().to_bytes());
     let mut salt = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut salt);
-    let key = kdf(password.as_bytes(), &salt)?;
+    let key = kdf(password.as_bytes(), &salt, KDF_M_KIB, KDF_T)?;
     let cipher = ChaCha20Poly1305::new((&key).into());
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -103,6 +129,8 @@ fn from_secret(username: &str, password: &str, secret: &[u8; 32]) -> Result<Acco
         kdf_salt: B64.encode(salt),
         nonce: B64.encode(nonce),
         enc_secret: B64.encode(ct),
+        kdf_m_kib: KDF_M_KIB,
+        kdf_t: KDF_T,
     })
 }
 
@@ -110,7 +138,7 @@ fn decrypt_key(acct: &Account, password: &str) -> Result<SigningKey, String> {
     let salt = B64.decode(&acct.kdf_salt).map_err(|_| "bad salt")?;
     let nonce = B64.decode(&acct.nonce).map_err(|_| "bad nonce")?;
     let ct = B64.decode(&acct.enc_secret).map_err(|_| "bad ciphertext")?;
-    let key = kdf(password.as_bytes(), &salt)?;
+    let key = kdf(password.as_bytes(), &salt, acct.kdf_m_kib, acct.kdf_t)?;
     let cipher = ChaCha20Poly1305::new((&key).into());
     let pt = cipher
         .decrypt(Nonce::from_slice(&nonce), ct.as_ref())
@@ -235,8 +263,8 @@ fn orb_key_from_disk() -> Result<SigningKey, String> {
             if std::path::Path::new(ORB_KEY_FILE).exists() {
                 return Err(format!("{ORB_KEY_FILE} exists but is not a valid key"));
             }
-            let mut secret = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut secret);
+            // Kernel generator + hardware RNG, hashed together (see entropy.rs).
+            let secret = crate::entropy::strong_secret("")?.bytes;
             write_private(ORB_KEY_FILE, hex::encode(secret).as_bytes())
                 .map_err(|e| format!("write orb key: {e}"))?;
             SigningKey::from_bytes(&secret)
@@ -269,8 +297,15 @@ pub struct Signed {
 /// Sign as this Orb. Always available (no unlock needed); carries the user
 /// delegation when one is active so verifiers credit the user identity.
 pub fn sign_as_orb(msg: &[u8]) -> Result<Signed, String> {
+    sign_as_orb_with(msg, true)
+}
+
+/// As `sign_as_orb`, but `with_identity = false` leaves the user delegation
+/// off: the signature is then credited to this Orb's key alone. This is the
+/// "don't put my name on this one" choice in the share dialog.
+pub fn sign_as_orb_with(msg: &[u8], with_identity: bool) -> Result<Signed, String> {
     let k = orb_key()?;
-    let delegation = current_delegation();
+    let delegation = if with_identity { current_delegation() } else { None };
     Ok(Signed {
         pubkey: hex::encode(k.verifying_key().to_bytes()),
         sig: B64.encode(k.sign(msg).to_bytes()),
@@ -318,13 +353,177 @@ pub fn verify(pubkey_hex: &str, msg: &[u8], sig_b64: &str) -> bool {
 /// True when `pubkey` is one of this Orb's own signing keys: its device key or
 /// a user identity stored here.
 pub fn is_local_key(pubkey: &str) -> bool {
-    !pubkey.is_empty() && (pubkey == orb_pubkey() || load().accounts.iter().any(|a| a.pubkey == pubkey))
+    !pubkey.is_empty()
+        && (pubkey == orb_pubkey()
+            || load().accounts.iter().any(|a| a.pubkey == pubkey)
+            || current_delegation().is_some_and(|d| d.user_key == pubkey))
+}
+
+/// Sign this Orb in as a user identity: authorise the Orb key to publish in
+/// the identity's name and keep that on disk, so it holds across restarts
+/// without the identity's own key staying in memory. Returns whether the
+/// authorisation was stored.
+fn sign_in(sk: &SigningKey, username: &str) -> bool {
+    let orb = orb_pubkey();
+    !orb.is_empty() && {
+        let d = issue_delegation(sk, username, &orb, epoch_ms());
+        serde_json::to_vec_pretty(&d)
+            .ok()
+            .map(|b| write_private(DELEGATION_FILE, &b).is_ok())
+            .unwrap_or(false)
+    }
+}
+
+// ── Identity proofs: tying the key to accounts elsewhere ─────────────────────
+//
+// A publisher key means little to someone who only knows you as an account on
+// another site. A proof is a short signed statement — "the holder of this key
+// is <claim>" — that you post ON that account (a bio, a pinned post, a gist).
+// Anyone can then check both halves: the signature shows the key holder wrote
+// it, and where it is posted shows the account holder did.
+
+const PROOF_BEGIN: &str = "-----BEGIN AEON IDENTITY PROOF-----";
+const PROOF_END: &str = "-----END AEON IDENTITY PROOF-----";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Proof {
+    pub key: String,
+    pub name: String,
+    pub claim: String,
+    pub issued_ms: i64,
+    pub sig: String,
+}
+
+/// One printable line, trimmed and bounded — the only shape a proof field takes.
+fn one_line(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(max).collect()
+}
+
+/// Canonical bytes an identity signs to claim an account or statement.
+pub fn proof_digest(key: &str, name: &str, claim: &str, issued_ms: i64) -> Vec<u8> {
+    format!("aeon-identity-proof/1\n{key}\n{name}\n{claim}\n{issued_ms}").into_bytes()
+}
+
+fn make_proof(sk: &SigningKey, name: &str, claim: &str, issued_ms: i64) -> Proof {
+    let key = hex::encode(sk.verifying_key().to_bytes());
+    let (name, claim) = (one_line(name, 40), one_line(claim, 200));
+    let sig = B64.encode(sk.sign(&proof_digest(&key, &name, &claim, issued_ms)).to_bytes());
+    Proof { key, name, claim, issued_ms, sig }
+}
+
+/// The block a user pastes onto the account they are claiming.
+pub fn format_proof(p: &Proof) -> String {
+    format!(
+        "{PROOF_BEGIN}\naeon-identity-proof/1\nkey: {}\nname: {}\nclaim: {}\nissued: {}\nsig: {}\n{PROOF_END}",
+        p.key, p.name, p.claim, p.issued_ms, p.sig
+    )
+}
+
+/// Find and check a proof block inside arbitrary pasted text. `Ok` only when
+/// the signature verifies for exactly the fields shown.
+pub fn verify_proof_text(text: &str) -> Result<Proof, String> {
+    let start = text.find(PROOF_BEGIN).ok_or("no identity proof found in that text")?;
+    let body = &text[start + PROOF_BEGIN.len()..];
+    let body = &body[..body.find(PROOF_END).ok_or("the proof is cut off (no END line)")?];
+    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
+    if lines.next() != Some("aeon-identity-proof/1") {
+        return Err("not an identity proof this version understands".into());
+    }
+    let mut field = |label: &str| -> Result<String, String> {
+        lines
+            .next()
+            .and_then(|l| l.strip_prefix(label))
+            .map(|v| v.trim().to_string())
+            .ok_or_else(|| format!("the proof is missing its “{}” line", label.trim_end_matches(':')))
+    };
+    let p = Proof {
+        key: field("key:")?.to_ascii_lowercase(),
+        name: field("name:")?,
+        claim: field("claim:")?,
+        issued_ms: field("issued:")?.parse().map_err(|_| "the proof has a malformed date".to_string())?,
+        sig: field("sig:")?,
+    };
+    if !is_pubkey_hex(&p.key) {
+        return Err("the proof's key is not a publisher key".into());
+    }
+    if verify(&p.key, &proof_digest(&p.key, &p.name, &p.claim, p.issued_ms), &p.sig) {
+        Ok(p)
+    } else {
+        Err("the signature does not match — this proof was altered, or was not made by that key".into())
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProofReq {
+    pub pubkey: String,
+    #[serde(default)]
+    pub password: String,
+    pub claim: String,
+}
+
+/// POST /api/publisher/proof — sign "<this identity> is <claim>" with the
+/// identity's OWN key (not the Orb's), so the proof stands by itself anywhere.
+/// Needs the identity's password unless it is unlocked in memory.
+pub async fn create_proof(State(_s): State<AppState>, Json(req): Json<ProofReq>) -> Json<Value> {
+    let claim = one_line(&req.claim, 200);
+    if claim.len() < 3 {
+        return Json(json!({"ok": false, "err": "say what you are claiming, e.g. huggingface.co/your-name"}));
+    }
+    let v = tokio::task::spawn_blocking(move || -> Value {
+        let s = load();
+        let Some(acct) = s.accounts.iter().find(|a| a.pubkey == req.pubkey) else {
+            return json!({"ok": false, "err": "that identity is not stored on this Orb — restore it from its recovery phrase first"});
+        };
+        let in_memory = unlocked().lock().ok().and_then(|g| g.as_ref().filter(|(pk, _)| *pk == acct.pubkey).map(|(_, sk)| sk.clone()));
+        let sk = match in_memory {
+            Some(sk) => sk,
+            None => match decrypt_key(acct, &req.password) {
+                Ok(sk) => sk,
+                Err(e) => return json!({"ok": false, "err": e, "needs_password": true}),
+            },
+        };
+        let p = make_proof(&sk, &acct.username, &claim, epoch_ms());
+        json!({"ok": true, "proof": format_proof(&p), "key": p.key, "claim": p.claim})
+    })
+    .await
+    .unwrap_or_else(|_| json!({"ok": false, "err": "proof task failed"}));
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct VerifyProofReq {
+    pub proof: String,
+}
+
+/// POST /api/publisher/verify — check a proof someone posted. Says who signed
+/// it and what they claim; it cannot say WHERE it was posted — that half is
+/// for the person checking.
+pub async fn verify_proof(State(_s): State<AppState>, Json(req): Json<VerifyProofReq>) -> Json<Value> {
+    if req.proof.len() > 16 * 1024 {
+        return Json(json!({"ok": true, "valid": false, "why": "that is too long to be a proof"}));
+    }
+    Json(match verify_proof_text(&req.proof) {
+        Ok(p) => json!({
+            "ok": true, "valid": true, "key": p.key, "fingerprint": p.key.get(..12).unwrap_or(&p.key),
+            "name": p.name, "claim": p.claim, "issued_ms": p.issued_ms,
+            "is_mine": is_local_key(&p.key),
+        }),
+        Err(why) => json!({"ok": true, "valid": false, "why": why}),
+    })
 }
 
 /// The active identity as (pubkey, username), if one is set.
 pub fn active() -> Option<(String, String)> {
     let s = load();
     s.accounts.iter().find(|a| a.pubkey == s.active).map(|a| (a.pubkey.clone(), a.username.clone()))
+}
+
+fn make_active(pubkey: &str) {
+    let mut s = load();
+    if s.active != pubkey {
+        s.active = pubkey.to_string();
+        let _ = save(&s);
+    }
 }
 
 // ── REST handlers (mounted under /api/publisher/*) ──────────────────────────
@@ -335,13 +534,19 @@ pub struct CreateReq {
     pub password: String,
     #[serde(default)]
     pub seed_phrase: String, // present → recover/import instead of create
+    /// Optional randomness the person adds themselves (dice rolls, mashed
+    /// keys). Hashed in with the Orb's own sources; it can only add.
+    #[serde(default)]
+    pub extra_entropy: String,
 }
 
 /// POST /api/publisher/accounts — create a NEW identity (returns the one-time
 /// seed phrase to back up), or recover one from a `seed_phrase`.
 pub async fn create_account(State(_s): State<AppState>, Json(req): Json<CreateReq>) -> Json<Value> {
-    if req.username.trim().is_empty() || req.password.len() < 6 {
-        return Json(json!({"ok": false, "err": "username required and password ≥ 6 chars"}));
+    // The password is all that protects the identity's key if this Orb's
+    // storage is ever copied, so it gets the same floor as the admin password.
+    if req.username.trim().is_empty() || req.password.chars().count() < 8 {
+        return Json(json!({"ok": false, "err": "choose a name and a password of at least 8 characters"}));
     }
     let v = tokio::task::spawn_blocking(move || -> Value {
         if !req.seed_phrase.trim().is_empty() {
@@ -357,19 +562,34 @@ pub async fn create_account(State(_s): State<AppState>, Json(req): Json<CreateRe
             let mut secret = [0u8; 32];
             secret.copy_from_slice(&ent);
             match from_secret(&req.username, &req.password, &secret).and_then(|a| upsert(load(), a)) {
-                Ok(pk) => json!({"ok": true, "pubkey": pk, "recovered": true}),
+                Ok(pk) => {
+                    // Restoring is also signing in: no separate unlock step.
+                    let signed_in = sign_in(&SigningKey::from_bytes(&secret), &req.username);
+                    make_active(&pk);
+                    json!({"ok": true, "pubkey": pk, "recovered": true, "signed_in": signed_in})
+                }
                 Err(e) => json!({"ok": false, "err": e}),
             }
         } else {
-            let mut secret = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut secret);
+            // The identity key: kernel generator + hardware RNG + anything the
+            // person added, hashed together. Refused if the kernel generator
+            // has not finished seeding.
+            let made = match crate::entropy::strong_secret(&req.extra_entropy) {
+                Ok(m) => m,
+                Err(e) => return json!({"ok": false, "err": e}),
+            };
+            let (secret, sources) = (made.bytes, made.sources);
             let phrase = match bip39::Mnemonic::from_entropy(&secret) {
                 Ok(m) => m.to_string(),
                 Err(e) => return json!({"ok": false, "err": e.to_string()}),
             };
             match from_secret(&req.username, &req.password, &secret).and_then(|a| upsert(load(), a)) {
                 // seed_phrase is returned ONCE — the UI must prompt the user to write it down.
-                Ok(pk) => json!({"ok": true, "pubkey": pk, "seed_phrase": phrase}),
+                Ok(pk) => {
+                    let signed_in = sign_in(&SigningKey::from_bytes(&secret), &req.username);
+                    make_active(&pk);
+                    json!({"ok": true, "pubkey": pk, "seed_phrase": phrase, "signed_in": signed_in, "entropy_sources": sources})
+                }
                 Err(e) => json!({"ok": false, "err": e}),
             }
         }
@@ -382,6 +602,9 @@ pub async fn create_account(State(_s): State<AppState>, Json(req): Json<CreateRe
 /// GET /api/publisher/accounts — list local identities (no secrets) + which is
 /// active + which (if any) is currently unlocked for signing.
 pub async fn list_accounts(State(_s): State<AppState>) -> Json<Value> {
+    // What a new key would be made from right now (cached; probed off the
+    // async workers because it reads the hardware RNG).
+    let entropy = tokio::task::spawn_blocking(crate::entropy::health).await.ok();
     let s = load();
     // "unlocked" = the user identity shares are credited to right now. That is
     // the delegating identity when one is stored (it survives a reboot), else
@@ -396,13 +619,18 @@ pub async fn list_accounts(State(_s): State<AppState>) -> Json<Value> {
     Json(json!({
         "orb_key": orb,
         "orb_fingerprint": orb.get(..12).unwrap_or(&orb),
+        "entropy": entropy,
         "delegated": delegated,
+        // When this Orb was signed in as that identity (0 if it is not).
+        "signed_in_since_ms": current_delegation().map(|d| d.issued_ms).unwrap_or(0),
         "ok": true,
         "accounts": s.accounts.iter().map(|a| json!({
             "pubkey": a.pubkey,
             "username": a.username,
             "created_ms": a.created_ms,
             "fingerprint": a.pubkey.get(..12).unwrap_or(&a.pubkey),
+            // False = locked with an older setting; fixed at the next sign-in.
+            "protection_current": !kdf_outdated(a),
         })).collect::<Vec<_>>(),
         "active": s.active,
         "unlocked": unlocked_pk,
@@ -429,20 +657,25 @@ pub async fn unlock_account(State(_s): State<AppState>, Json(req): Json<PubkeyPw
                 // Authorize this Orb's device key to publish as this identity, and
                 // persist that — signing then survives a reboot without the user's
                 // secret having to stay unlocked in memory.
-                let orb = orb_pubkey();
-                let delegated = !orb.is_empty() && {
-                    let d = issue_delegation(&sk, &acct.username, &orb, epoch_ms());
-                    serde_json::to_vec_pretty(&d)
-                        .ok()
-                        .map(|b| write_private(DELEGATION_FILE, &b).is_ok())
-                        .unwrap_or(false)
-                };
+                let delegated = sign_in(&sk, &acct.username);
+                // The password is in hand, so if this account's key is locked
+                // with an older, cheaper setting, re-lock it with the current one.
+                let mut upgraded = false;
+                if kdf_outdated(&acct) {
+                    if let Ok(mut fresh) = from_secret(&acct.username, &req.password, &sk.to_bytes()) {
+                        fresh.created_ms = acct.created_ms;
+                        if let Some(slot) = s.accounts.iter_mut().find(|a| a.pubkey == acct.pubkey) {
+                            *slot = fresh;
+                            upgraded = true;
+                        }
+                    }
+                }
                 if let Ok(mut g) = unlocked().lock() {
                     *g = Some((acct.pubkey.clone(), sk));
                 }
                 s.active = acct.pubkey.clone();
                 let _ = save(&s);
-                json!({"ok": true, "active": acct.pubkey, "username": acct.username, "delegated": delegated})
+                json!({"ok": true, "active": acct.pubkey, "username": acct.username, "delegated": delegated, "protection_upgraded": upgraded})
             }
             Err(e) => json!({"ok": false, "err": e}),
         }
@@ -601,6 +834,9 @@ mod tests {
         let peer = "12D3KooWExamplePeerExamplePeerExamplePeerExamplePeer1";
         let binding = peer_binding_digest(&orb_pk, peer);
 
+        let proof = make_proof(&user, "alice", "huggingface.co/alice", 1_760_000_000_003);
+        let proof_bytes = proof_digest(&user_pk, "alice", "huggingface.co/alice", proof.issued_ms);
+
         let v = json!({
             "about": "Model Share signing test vectors. Signatures are Ed25519 (RFC 8032, deterministic) over the exact UTF-8 bytes of `signed_text`; keys are 32-byte hex, signatures standard base64. Secrets here are public test values.",
             "keys": {
@@ -629,10 +865,16 @@ mod tests {
                 "orb_key": orb_pk, "peer_id": peer,
                 "signed_text": text(&binding), "signer": orb_pk, "sig": sign(&orb, &binding),
             },
+            "identity_proof": {
+                "domain": "aeon-identity-proof/1",
+                "key": user_pk, "name": "alice", "claim": "huggingface.co/alice", "issued_ms": proof.issued_ms,
+                "signed_text": text(&proof_bytes), "signer": user_pk, "sig": proof.sig,
+                "block": format_proof(&proof),
+            },
         });
 
         // Self-consistency: everything in the vector verifies.
-        for section in ["publication", "delegation", "origin", "peer_binding"] {
+        for section in ["publication", "delegation", "origin", "peer_binding", "identity_proof"] {
             let s = &v[section];
             assert!(
                 verify(s["signer"].as_str().unwrap(), s["signed_text"].as_str().unwrap().as_bytes(), s["sig"].as_str().unwrap()),
@@ -648,6 +890,70 @@ mod tests {
         }
         let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("docs/model-share-vectors.json")).unwrap();
         assert_eq!(on_disk, v, "docs/model-share-vectors.json is out of date");
+    }
+
+    #[test]
+    fn an_older_accounts_key_still_opens_and_is_flagged_for_upgrade() {
+        // An account as stored before the cost was recorded: library defaults,
+        // no kdf fields in the file.
+        let secret = [9u8; 32];
+        let mut salt = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let key = kdf(b"old password", &salt, 0, 0).unwrap();
+        let nonce = [3u8; 12];
+        let ct = ChaCha20Poly1305::new((&key).into()).encrypt(Nonce::from_slice(&nonce), secret.as_ref()).unwrap();
+        let stored = serde_json::json!({
+            "pubkey": hex::encode(SigningKey::from_bytes(&secret).verifying_key().to_bytes()),
+            "username": "alice", "created_ms": 1,
+            "kdf_salt": B64.encode(salt), "nonce": B64.encode(nonce), "enc_secret": B64.encode(ct),
+        });
+        let old: Account = serde_json::from_value(stored).unwrap();
+        assert!(kdf_outdated(&old));
+        assert_eq!(decrypt_key(&old, "old password").unwrap().to_bytes(), secret);
+        assert!(decrypt_key(&old, "wrong").is_err());
+
+        // Re-locked with the current cost: same key, same password, now current.
+        let fresh = from_secret("alice", "old password", &secret).unwrap();
+        assert!(!kdf_outdated(&fresh));
+        assert_eq!((fresh.kdf_m_kib, fresh.kdf_t), (KDF_M_KIB, KDF_T));
+        assert_eq!(fresh.pubkey, old.pubkey);
+        assert_eq!(decrypt_key(&fresh, "old password").unwrap().to_bytes(), secret);
+        assert!(decrypt_key(&fresh, "wrong").is_err());
+        // The cost is part of what unlocks it: the right password with the
+        // wrong cost does not open the key.
+        let mut tampered = fresh.clone();
+        tampered.kdf_t += 1;
+        assert!(decrypt_key(&tampered, "old password").is_err());
+    }
+
+    #[test]
+    fn identity_proofs_verify_only_as_written() {
+        let (user, user_pk) = key(1);
+        let p = make_proof(&user, " alice\n", "huggingface.co/alice\r\n", 1_760_000_000_003);
+        assert_eq!((p.name.as_str(), p.claim.as_str()), ("alice", "huggingface.co/alice"));
+        let text = format_proof(&p);
+
+        // Found and verified inside surrounding text (a bio, a README).
+        let wrapped = format!("my models are signed.\n\n{text}\n\nthanks!");
+        assert_eq!(verify_proof_text(&wrapped).unwrap(), p);
+        assert_eq!(verify_proof_text(&wrapped).unwrap().key, user_pk);
+
+        // Any edit to what is claimed, or by whom, breaks it.
+        assert!(verify_proof_text(&text.replace("huggingface.co/alice", "huggingface.co/mallory")).is_err());
+        assert!(verify_proof_text(&text.replace("name: alice", "name: bob")).is_err());
+        let (_, other_pk) = key(2);
+        assert!(verify_proof_text(&text.replace(&user_pk, &other_pk)).is_err());
+        // Things that are not proofs.
+        assert!(verify_proof_text("hello").is_err());
+        assert!(verify_proof_text(&text.replace(PROOF_END, "")).is_err());
+        assert!(verify_proof_text(&text.replace("aeon-identity-proof/1", "aeon-identity-proof/9")).is_err());
+    }
+
+    #[test]
+    fn signing_without_identity_carries_no_delegation() {
+        let s = sign_as_orb_with(b"m", false).unwrap();
+        assert!(s.delegation.is_none() && s.name.is_empty());
+        assert!(verify(&s.pubkey, b"m", &s.sig));
     }
 
     #[test]

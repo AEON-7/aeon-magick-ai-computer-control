@@ -30,6 +30,7 @@ mod captive;
 mod dns_log;
 mod dnscrypt_relays;
 mod dnscrypt_servers;
+mod entropy;
 mod firewall;
 mod fleet;
 mod hailo;
