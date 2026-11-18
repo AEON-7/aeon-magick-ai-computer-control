@@ -32,7 +32,7 @@ export function sortManifest(files) {
   return [...files].sort((a, b) => Buffer.compare(Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')));
 }
 
-/** A `frostbyte.release` already lists files as {path, size, sha256}: sorted,
+/** Any release record that lists its files as {path, size, sha256}: sorted,
  * that list IS the origin manifest. */
 export function manifestFromRelease(release) {
   return sortManifest(release.files.map(({ path, size, sha256 }) => ({ path, size, sha256: sha256.toLowerCase() })));

@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl bash python3 openssh-client rsync \
       iproute2 procps tar xz-utils tini \
       clamav clamav-freshclam \
+      transmission-daemon \
  && rm -rf /var/lib/apt/lists/*
 
 # Pre-install kubo (IPFS) for the target arch so the first "enable IPFS" is
@@ -44,10 +45,11 @@ COPY scripts/aeon-ipfs       /usr/local/bin/aeon-ipfs
 COPY scripts/aeon-storage    /usr/local/bin/aeon-storage
 COPY scripts/aeon-nas        /usr/local/bin/aeon-nas
 COPY scripts/aeon-modelshare /usr/local/bin/aeon-modelshare
+COPY scripts/aeon-torrent    /usr/local/bin/aeon-torrent
 COPY entrypoint.sh           /entrypoint.sh
 RUN chmod 0755 /usr/local/bin/aeon-supervisor /usr/local/bin/aeon-ipfs \
       /usr/local/bin/aeon-storage /usr/local/bin/aeon-nas \
-      /usr/local/bin/aeon-modelshare /entrypoint.sh
+      /usr/local/bin/aeon-modelshare /usr/local/bin/aeon-torrent /entrypoint.sh
 
 # Persist admin auth + TLS cert + tokens, and the IPFS repo + model library.
 VOLUME ["/etc/aeon", "/var/lib/aeon"]

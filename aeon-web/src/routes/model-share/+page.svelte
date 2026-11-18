@@ -25,6 +25,7 @@
     sha256?: string; card?: Card; added_at_ms?: number;
     origin_id?: string; origin_label?: string;
     verified?: boolean; source?: string;
+    btih?: string; // BitTorrent infohash when the same files are also seeded as a torrent
   };
   type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[]; is_origin?: boolean };
   type Sig = { ok: boolean; name: string; fp: string };
@@ -108,6 +109,34 @@
   let toggling = false;
   let hfUrl = '';
   let hfBusy = false;
+
+  // Model directories: search a service the operator added, pull a listing over
+  // BitTorrent, and (once every file has been checked) seed it on both networks.
+  type DirFile = { path: string; size: number; sha256: string };
+  type DirItem = {
+    id: string; name: string; description: string; publisher: string; license: string; source: string;
+    btih: string; cid: string; file_count: number; total_bytes: number; primary: string;
+    files: DirFile[]; have: boolean; blocked: string;
+  };
+  type Dir = { id: string; name: string; url: string };
+  type Torrent = { btih: string; name: string; state: string; up: number; peers: number; uploaded: number };
+  let dirs: Dir[] = [];
+  let torrentSvc: { installed?: boolean; state?: string; version?: string } = {};
+  let seedingTorrents: Torrent[] = [];
+  let dirOpen = false;
+  let dirSel = '';
+  let dirQuery = '';
+  let dirItems: DirItem[] = [];
+  let dirCursor = '';
+  let dirBusy = false;
+  let dirErr = '';
+  let dirSkipped = 0;
+  let dirSearched = false;
+  let dirExpanded = '';
+  let dirStarted: Record<string, boolean> = {};
+  let newDirUrl = '';
+  let newDirName = '';
+  let addingDir = false;
   let ollamaRef = '';
   let ollamaBusy = false;
   let civitaiRef = '';
@@ -237,6 +266,78 @@
     } catch (e: any) { err = e?.message ?? 'import failed'; }
     hfBusy = false; await load();
   }
+
+  const jsonPost = (body: unknown): RequestInit => ({
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  async function loadDirs() {
+    try {
+      const r = await api('/directories');
+      if (r?.ok) {
+        dirs = r.directories ?? [];
+        torrentSvc = r.torrent ?? {};
+        if (!dirs.some((d) => d.id === dirSel)) dirSel = dirs[0]?.id ?? '';
+      }
+      const t = await api('/torrents');
+      if (t?.ok) seedingTorrents = t.torrents ?? [];
+    } catch { /* the panel just stays empty */ }
+  }
+
+  async function toggleDirs() {
+    dirOpen = !dirOpen;
+    if (dirOpen) await loadDirs();
+  }
+
+  async function addDir() {
+    const url = newDirUrl.trim();
+    if (!url) return;
+    addingDir = true; dirErr = '';
+    try {
+      const r = await api('/directories', jsonPost({ url, name: newDirName.trim() }));
+      if (r?.ok) { newDirUrl = ''; newDirName = ''; await loadDirs(); dirSel = r.directory.id; dirItems = []; dirSearched = false; }
+      else dirErr = r?.err || 'could not add that directory';
+    } catch (e: any) { dirErr = e?.message ?? 'could not add that directory'; }
+    addingDir = false;
+  }
+
+  async function removeDir(d: Dir) {
+    if (!confirm(`Remove the directory “${d.name}”? Models you already pulled from it stay.`)) return;
+    await api('/directories/remove', jsonPost({ id: d.id }));
+    dirItems = []; dirSearched = false;
+    await loadDirs();
+  }
+
+  async function searchDir(more = false) {
+    if (!dirSel) return;
+    dirBusy = true; dirErr = '';
+    try {
+      const q = new URLSearchParams({ dir: dirSel, q: dirQuery.trim() });
+      if (more && dirCursor) q.set('cursor', dirCursor);
+      const r = await api(`/directory/search?${q}`);
+      if (r?.ok) {
+        dirItems = more ? [...dirItems, ...(r.items ?? [])] : (r.items ?? []);
+        dirCursor = r.cursor || '';
+        dirSkipped = (more ? dirSkipped : 0) + (r.skipped || 0);
+        dirSearched = true;
+      } else dirErr = r?.err || 'search failed';
+    } catch (e: any) { dirErr = e?.message ?? 'search failed'; }
+    dirBusy = false;
+  }
+
+  async function pullDir(item: DirItem) {
+    dirErr = '';
+    dirStarted = { ...dirStarted, [item.id]: true };
+    try {
+      const r = await api('/directory/pull', jsonPost({ dir: dirSel, id: item.id }));
+      if (r && r.ok === false) { dirErr = r.err || 'could not start the pull'; dirStarted = { ...dirStarted, [item.id]: false }; }
+    } catch (e: any) { dirErr = e?.message ?? 'could not start the pull'; dirStarted = { ...dirStarted, [item.id]: false }; }
+    await load();
+  }
+
+  // A model pulled from a directory is recorded as a mirror named "directory:<publisher>".
+  const fromDirectory = (u?: string) => !!u && u.startsWith('directory:');
+  const upstreamName = (u?: string) => (u ?? '').replace(/^directory:/, '');
 
   async function importOllama() {
     const reference = ollamaRef.trim();
@@ -746,6 +847,7 @@
   const standing = (o?: Origin) => STANDING[o?.standing ?? 'unsigned'] ?? STANDING.unsigned;
   function originTitle(row: Row): string {
     const o = row.origin;
+    if (fromDirectory(o?.upstream)) return `Pulled from a directory (publisher “${upstreamName(o?.upstream)}”) and checked file by file against its listing. A directory listing is not a signed origin. Seeded by ${row.host_count ?? row.hosts.length} Orb(s).`;
     if (o?.upstream) return `Mirror of ${o.upstream}: ${STANDING.mirror.label}. Seeded by ${row.host_count ?? row.hosts.length} Orb(s).`;
     if (!o?.signed) return STANDING.unsigned.label;
     const bits = [`Published by ${o.name || 'anon'} (key ${o.fp}${o.delegated ? ', signing through an Orb' : ''}) — ${standing(o).label}.`];
@@ -1116,6 +1218,134 @@
       </div>
       <p class="text-[11px] text-ink-600 -mt-2">Generative models for ComfyUI / Stable Diffusion. Prefers the SafeTensor file (never a pickle) and verifies the SHA-256. Gated + mature (“red”) content needs a Civitai token below.</p>
 
+      <!-- search a model directory, pull over BitTorrent, seed on both networks -->
+      <div class="rounded-md border border-steel-700/70 bg-ink-900/40">
+        <button class="w-full flex items-center gap-2 px-3 py-2 text-left flex-wrap" on:click={toggleDirs}>
+          <span class="text-lg">🧭</span>
+          <span class="text-sm text-ink-100">Search a model directory</span>
+          <span class="text-[11px] text-ink-500">find a model shared on BitTorrent, pull it, and seed it on both networks</span>
+          <span class="ml-auto text-ink-500 text-xs">{dirOpen ? '▾' : '▸'}</span>
+        </button>
+        {#if dirOpen}
+          <div class="px-3 pb-3 pt-3 space-y-3 border-t border-steel-700/50">
+            <p class="text-[12px] text-ink-300 leading-relaxed">
+              A directory is a search service that lists models together with the exact files they contain.
+              None is built in: add the address of one you trust. A listing says what the files should be;
+              it is not a signature, so a model pulled this way is labelled a mirror, not a verified publisher.
+            </p>
+
+            <!-- configured directories -->
+            {#if dirs.length}
+              <div class="flex items-center gap-2 flex-wrap">
+                {#each dirs as d (d.id)}
+                  <span class="inline-flex items-center gap-1 rounded border px-2 py-1 text-[12px] font-mono
+                               {dirSel === d.id ? 'border-cursed-400 text-ink-100' : 'border-steel-700 text-ink-300'}">
+                    <button on:click={() => { dirSel = d.id; dirItems = []; dirSearched = false; }} title={d.url}>{d.name}</button>
+                    <button class="text-ink-600 hover:text-red-400" title="Remove this directory" on:click={() => removeDir(d)}>✕</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
+            <div class="flex items-center gap-2 flex-wrap">
+              <input class="flex-1 min-w-[14rem] bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm font-mono"
+                     bind:value={newDirUrl} placeholder="Add a directory — https://…"
+                     on:keydown={(e) => e.key === 'Enter' && addDir()} />
+              <input class="w-40 bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm"
+                     bind:value={newDirName} placeholder="Name (optional)" maxlength="60" />
+              <button class="btn text-sm px-4 py-2 rounded-md" on:click={addDir} disabled={addingDir || !newDirUrl.trim()}>{addingDir ? 'Adding…' : 'Add'}</button>
+            </div>
+
+            {#if dirSel}
+              <div class="flex items-center gap-2 flex-wrap">
+                <input class="flex-1 min-w-[14rem] bg-ink-800 border border-steel-700 rounded px-3 py-2 text-ink-100 text-sm"
+                       bind:value={dirQuery} placeholder="Search this directory — a model name, or leave empty to browse" maxlength="80"
+                       on:keydown={(e) => e.key === 'Enter' && searchDir()} />
+                <button class="btn text-sm px-4 py-2 rounded-md" on:click={() => searchDir()} disabled={dirBusy}>{dirBusy ? 'Searching…' : 'Search'}</button>
+              </div>
+            {/if}
+            {#if dirErr}<p class="text-[12px] text-red-400">{dirErr}</p>{/if}
+
+            {#if dirSearched}
+              {#if dirItems.length === 0}
+                <p class="text-[12px] text-ink-500">Nothing found.</p>
+              {:else}
+                <div class="rounded border border-ink-800 bg-ink-900/60 px-3 py-2 text-[11px] text-ink-300 leading-relaxed">
+                  <span class="text-ink-100">What a pull does.</span>
+                  The torrent must hold exactly the listed files, or it is refused before anything is downloaded.
+                  Once downloaded, every file is checked against the listing's SHA-256, then passed through the file-type check and the malware scan.
+                  Only after that is it added to IPFS and left seeding on BitTorrent; if any check fails, the torrent and its files are removed.
+                  While it downloads, the Orb trades pieces of that torrent with other peers, as BitTorrent works.
+                  {#if net.seeding}Seeding is on, so it will be shared on both networks.{:else}Seeding is off, so it will be kept privately and shared on neither.{/if}
+                  It needs about three times the model's size while it is being added, and twice afterwards.
+                </div>
+                <div class="space-y-2">
+                  {#each dirItems as it (it.id)}
+                    <div class="rounded border border-ink-800 bg-ink-900/60 px-3 py-2">
+                      <div class="flex items-start gap-3 flex-wrap">
+                        <div class="min-w-0 flex-1">
+                          <div class="text-sm text-ink-100 truncate">{it.name}</div>
+                          <div class="text-[11px] text-ink-500 font-mono flex gap-3 flex-wrap">
+                            {#if it.publisher}<span title="The name the directory gives for who listed it — not a verified identity">by {it.publisher}</span>{/if}
+                            <span>{fmtBytes(it.total_bytes)} · {it.file_count} {it.file_count === 1 ? 'file' : 'files'}</span>
+                            {#if it.license}<span>{it.license}</span>{/if}
+                            {#if it.btih}<span class="text-sky-300" title="Available as a torrent">BitTorrent</span>{/if}
+                            {#if it.cid}<span class="text-sky-300" title="Also available on IPFS">IPFS</span>{/if}
+                          </div>
+                          {#if it.description}<p class="text-[12px] text-ink-300 mt-1 line-clamp-2">{it.description}</p>{/if}
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <button class="text-[11px] text-cursed-400 hover:underline font-mono"
+                                  on:click={() => (dirExpanded = dirExpanded === it.id ? '' : it.id)}>
+                            {dirExpanded === it.id ? 'hide files' : 'files + hashes'}
+                          </button>
+                          {#if it.have}
+                            <span class="text-[12px] text-emerald-400">✓ in Model Share</span>
+                          {:else if it.blocked}
+                            <span class="text-[11px] text-amber-300 max-w-[16rem]">{it.blocked}</span>
+                          {:else}
+                            <button class="btn text-sm px-4 py-2 rounded-md" on:click={() => pullDir(it)} disabled={dirStarted[it.id] || !!tasks[it.name]}>
+                              {dirStarted[it.id] || tasks[it.name] ? 'Pulling…' : net.seeding ? 'Pull and seed' : 'Pull (keep private)'}
+                            </button>
+                          {/if}
+                        </div>
+                      </div>
+                      {#if dirExpanded === it.id}
+                        <div class="mt-2 text-[11px] font-mono text-ink-300 space-y-0.5 break-all">
+                          {#each it.files as f (f.path)}
+                            <div>{f.path} <span class="text-ink-500">· {fmtBytes(f.size)} · sha256 {f.sha256}</span></div>
+                          {/each}
+                          {#if it.file_count > it.files.length}<div class="text-ink-500">… and {it.file_count - it.files.length} more</div>{/if}
+                          {#if it.btih}<div class="text-ink-500">torrent {it.btih}</div>{/if}
+                          {#if it.source}<div class="text-ink-500">source {it.source}</div>{/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+                {#if dirCursor}
+                  <button class="text-[12px] text-cursed-400 hover:underline font-mono" on:click={() => searchDir(true)} disabled={dirBusy}>more results…</button>
+                {/if}
+                {#if dirSkipped}
+                  <p class="text-[11px] text-ink-500">{dirSkipped} {dirSkipped === 1 ? 'listing was' : 'listings were'} left out because the file list was unsafe or incomplete.</p>
+                {/if}
+              {/if}
+            {/if}
+
+            <!-- what the torrent service is doing -->
+            <p class="text-[11px] text-ink-500 font-mono">
+              {#if !torrentSvc.installed}
+                The torrent service installs itself the first time you pull.
+              {:else if torrentSvc.state !== 'active'}
+                Torrent service: {torrentSvc.state ?? 'off'} — it starts when you pull.
+              {:else}
+                Torrent service: on · {seedingTorrents.filter((t) => t.state === 'seeding').length} seeding
+                {#if seedingTorrents.length} · {seedingTorrents.reduce((n, t) => n + (t.peers || 0), 0)} peers connected{/if}
+              {/if}
+            </p>
+          </div>
+        {/if}
+      </div>
+
       <!-- optional per-source auth tokens for gated / mature pulls -->
       <div class="text-[11px]">
         <button class="text-cursed-400 hover:underline font-mono" on:click={() => (showTokens = !showTokens)}>
@@ -1213,7 +1443,8 @@
               </button>
               <span class="text-ink-500" title="Orbs hosting this model across the network — wider adoption means faster, more resilient downloads">⬡ {row.host_count ?? row.hosts.length} {(row.host_count ?? row.hosts.length) === 1 ? 'orb' : 'orbs'}</span>
               {#if row.origin?.upstream}
-                <span class="{STANDING.mirror.cls}" title={originTitle(row)}>{STANDING.mirror.icon} {row.origin.upstream}</span>
+                <span class="{STANDING.mirror.cls}" title={originTitle(row)}>{STANDING.mirror.icon} {upstreamName(row.origin.upstream)}</span>
+                {#if row.entry.btih}<span class="text-ink-500" title="The same files are also seeded as a torrent">⇄ torrent</span>{/if}
               {:else if row.origin?.signed}
                 <span class="{standing(row.origin).cls}" title={originTitle(row)}>
                   {standing(row.origin).icon} {row.origin.name || 'anon'}·{row.origin.fp}{#if row.origin.seeder_online}<span class="text-emerald-400" aria-label="original seeder online"> ●</span>{/if}{#if row.origin.earlier_claim}<span class="text-amber-400"> ⚠</span>{/if}
@@ -1418,7 +1649,7 @@
             <div class="min-w-0">
               <div class="text-ink-500 text-[10px] uppercase tracking-wide">origin</div>
               {#if o.upstream}
-                <div class="{STANDING.mirror.cls} truncate">{STANDING.mirror.icon} {o.upstream}<span class="text-ink-500"> · vendor release, mirrored</span></div>
+                <div class="{STANDING.mirror.cls} truncate">{STANDING.mirror.icon} {upstreamName(o.upstream)}<span class="text-ink-500"> · {fromDirectory(o.upstream) ? 'pulled from a directory, checked against its listing' : 'vendor release, mirrored'}</span></div>
               {:else if o.signed}
                 <div class="{standing(o).cls} truncate">{standing(o).icon} {o.name || 'anon'}<span class="text-ink-500"> · {o.fp}</span></div>
               {:else}

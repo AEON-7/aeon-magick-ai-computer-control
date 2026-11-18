@@ -6,7 +6,7 @@ import {
   verifyDelegation, verifyIdentityProof, verifyOrigin, verifyPeerBinding,
 } from '../src/shared/aeon-origin.js';
 
-// In FrostByte the fixture sits in tests/fixtures; in the Orb repo it is docs/model-share-vectors.json.
+// The vectors are read from a local fixtures folder when one exists, else from the Orb repo's docs/.
 const fixture = ['./fixtures/model-share-vectors.json', '../../../model-share-vectors.json']
   .map(p => new URL(p, import.meta.url)).find(u => fs.existsSync(u));
 const v = JSON.parse(fs.readFileSync(fixture));
