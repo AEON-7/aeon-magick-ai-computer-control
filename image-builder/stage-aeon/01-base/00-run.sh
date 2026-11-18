@@ -39,7 +39,13 @@ apt-get install -y --no-install-recommends \
     i2pd \
     clamav \
     clamav-freshclam \
+    transmission-daemon \
     unattended-upgrades
+# transmission-daemon is the BitTorrent side of Model Share. It is driven by
+# aeon-torrent under its own user, unit and settings, and stays off until the
+# first pull from a directory. The package's own always-on instance must not run.
+systemctl disable transmission-daemon.service 2>/dev/null || true
+systemctl mask transmission-daemon.service 2>/dev/null || true
 # Tailscale via their official repo. Derive the suite from THIS image's
 # /etc/os-release (in-chroot) so the same stage works for a Bookworm (pi4) or a
 # Trixie (pi5) bake — don't hardcode the codename (it would break the other track).

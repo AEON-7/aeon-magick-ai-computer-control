@@ -2,8 +2,8 @@
 
 What two implementations must agree on to share one index and verify each
 other's models. The Orb implements all of it (`aeon-supervisor/src/ipfs.rs`,
-`publisher.rs`, and the `aeon-modelshare` gossip daemon); a bridge such as
-FrostByte implements the parts it needs. Test vectors for every signature are
+`ipfs/directory.rs`, `publisher.rs`, and the `aeon-modelshare` gossip daemon);
+a bridge to another network implements the parts it needs. Test vectors for every signature are
 in [`model-share-vectors.json`](./model-share-vectors.json) and are checked
 against the Orb's code by `cargo test -p aeon-supervisor published_vectors`.
 
@@ -162,17 +162,84 @@ the publisher at 5. Unsigned content scores 0. A node also remembers which
 identity it *first* saw offering a given weights hash and flags a later,
 different identity offering the same bytes as a re-publication.
 
-## 8. Notes for a BitTorrent bridge (FrostByte)
+## 8. BitTorrent alongside IPFS
 
-- `frostbyte.release` already has the same `files: [{path, size, sha256}]`
-  list. Sort it by path and it is the `aeon-origin/1` manifest; put the IPFS
-  directory CID in `cid`. Store the origin statement beside the release.
-- Verify `aeon-origin/1` after a download by **either** transport. That is
-  what makes the first seeder checkable on both networks.
-- A ready-to-port verifier (node:crypto only, in FrostByte's module and test
-  style) is in [`bridge/frostbyte/`](./bridge/frostbyte/): `src/shared/aeon-origin.js`
-  and `tests/aeon-origin.test.js`, passing against the shared vectors.
-- To appear in the Orb index: pin + provide the rendezvous block, subscribe
-  and publish on the topic, and include `btih` in entries you also seed over
-  BitTorrent. An Orb shows `btih`; it does not fetch over BitTorrent.
-- Dual seeding stays an explicit, per-collection choice on the bridge.
+The same model can be seeded as a torrent. Nothing about verification changes:
+the origin statement and the file manifest name plain per-file hashes, so they
+hold whichever network delivered the bytes.
+
+- An entry may carry `btih`, the BitTorrent v1 infohash of a torrent holding
+  exactly the model's files. An Orb carries the field through its catalog and
+  gossip, and seeds that torrent itself when it pulled the model from one (§9).
+- A torrent's piece hashes prove the bytes match *that torrent*. They say
+  nothing about who published it or whether it is the model it claims to be;
+  only the manifest check in §6 and, where present, the origin signature do.
+- A bridge that speaks both networks verifies `aeon-origin/1` after a download
+  by **either** transport. A verifier using only `node:crypto`, with tests that
+  run against the shared vectors, is in [`bridge/frostbyte/`](./bridge/frostbyte/).
+- To appear in the Orb index, a bridge pins and provides the rendezvous block,
+  subscribes and publishes on the topic, and includes `btih` in entries it also
+  seeds as torrents.
+
+## 9. Directories (`aeon-directory/1`)
+
+A directory is a search service that lists models and says where to get them.
+It is deliberately small so that any catalogue can offer it. An Orb has none
+configured out of the box; the operator adds the address of each one they
+trust. The address must be `https://` (plain `http://` is accepted only for a
+directory on the Orb itself), without credentials, query or fragment.
+
+    GET {base}/search?q=<text>&limit=<n>&cursor=<opaque>
+        → { "items": [ <listing>, … ], "cursor": "<opaque or empty>" }
+    GET {base}/listings/{id}
+        → <listing>
+
+```json
+{ "schema": "aeon-directory/1",
+  "id": "<1–128 chars of A-Z a-z 0-9 . _ - :>",
+  "name": "…", "description": "…", "publisher": "…", "license": "…",
+  "source": "<https URL of the upstream, or empty>",
+  "files": [ { "path": "weights/model.gguf", "size": 0, "sha256": "<hex64>" } ],
+  "btih": "<hex40, optional>", "cid": "<IPFS CID, optional>",
+  "trackers": [ "<http, https or udp announce URL>" ],
+  "updated_ms": 0 }
+```
+
+`files` is the whole contract: every file of the model, 1–5000 of them, as a
+relative path with its size and SHA-256. At least one of `btih` and `cid` is
+required. `publisher` is a display name supplied by the directory. **A listing
+is a claim about content, not an identity** — it carries no signature, so a
+model pulled from a directory is recorded as a mirror
+(`origin.upstream = "directory:<publisher>"`), never as a signed origin.
+
+A receiver rebuilds each listing field by field and drops any that names a
+path outside the model folder, a hidden file, a duplicate or overlapping path,
+or a file without a valid hash. Answers over 2 MiB and redirects are refused.
+
+**Pulling a listing over BitTorrent**, in this order:
+
+1. Add the torrent by `btih` (and `trackers`).
+2. As soon as the torrent's metadata arrives, its file list — each path and
+   size, with or without one wrapping folder — must equal `files` exactly. A
+   mismatch is rejected before any content is downloaded. When the download
+   completes the torrent is stopped; it does not seed during steps 3–5.
+3. Copy each listed file out of the torrent's folder without following a
+   symbolic link at any step, hashing as it is written. Size and SHA-256 must
+   match the listing.
+4. Apply the format gate and malware scan from §6 to the copy.
+5. Add the copy to IPFS as a mirror: the card holds nothing specific to this
+   node and the import parameters are the fixed ones from §3, so every node
+   that pulls the same listing produces the same CID.
+6. With seeding on: announce the entry with its `btih` and start the torrent
+   again so it seeds. With seeding off: keep a private copy, unpin, and remove
+   the torrent — nothing is provided on either network.
+
+A failed check at any step removes the torrent and everything it downloaded.
+Removing the model later stops both networks. BitTorrent is not run while all
+traffic is routed through Tor.
+
+While a torrent downloads, a client trades pieces of that same torrent with
+other peers. That is inherent to BitTorrent (an upload limit of zero also
+blocks the request messages and stalls the download), and those pieces are
+held to the torrent's own piece hashes. What the checks above control is what
+a node keeps, what it adds to IPFS, and what it goes on seeding.

@@ -33,6 +33,9 @@ install -m 0755 "${THIS_DIR}/files/aeon-nas.sh" "${ROOTFS_DIR}/usr/local/bin/aeo
 # Model Share: auto-enroll boot oneshot + fleet-free pubsub gossip daemon.
 install -m 0755 "${THIS_DIR}/files/aeon-ipfs-boot.sh" "${ROOTFS_DIR}/usr/local/bin/aeon-ipfs-boot"
 install -m 0755 "${THIS_DIR}/files/aeon-modelshare"   "${ROOTFS_DIR}/usr/local/bin/aeon-modelshare"
+# Model Share's BitTorrent side: pull a directory listing from a torrent swarm
+# and seed it back. Off until the first pull.
+install -m 0755 "${THIS_DIR}/files/aeon-torrent.sh"   "${ROOTFS_DIR}/usr/local/bin/aeon-torrent"
 # Well-known Model Share rendezvous beacon (same CID on every Orb). aeon-ipfs
 # also writes this at `up`; baking it means a fresh image has the bytes on disk
 # even before the daemon starts.

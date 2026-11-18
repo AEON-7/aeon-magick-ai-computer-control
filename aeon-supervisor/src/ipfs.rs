@@ -21,6 +21,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::api::AppState;
 
+pub mod directory;
+
 const CONFIG_TOML: &str = "/etc/aeon/ipfs.toml";
 const SCRIPT: &str = "/usr/local/bin/aeon-ipfs";
 const MODELS_DIR: &str = "/var/lib/aeon/ipfs-models";
@@ -407,8 +409,9 @@ pub struct ModelEntry {
     /// Verifiers credit the entry to `delegation.user_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<crate::publisher::Delegation>,
-    /// BitTorrent v1 infohash of the same files, when a bridge peer (FrostByte)
-    /// also seeds them there. An Orb only displays it.
+    /// BitTorrent v1 infohash of a torrent holding exactly these files. Set
+    /// when this Orb pulled the model from a directory (it then seeds that
+    /// torrent too), or by another node that says it seeds one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub btih: String,
     /// Set on a byte-identical mirror of a vendor's artifact (e.g.
@@ -1290,7 +1293,13 @@ pub struct SeedReq {
 
 /// POST /api/ipfs/models/seed — opt out of (or back into) automatic seeding.
 pub async fn set_seed(State(_s): State<AppState>, Json(req): Json<SeedReq>) -> Json<Value> {
-    tokio::task::spawn_blocking(move || write_seed(req.seed)).await.ok();
+    tokio::task::spawn_blocking(move || {
+        write_seed(req.seed);
+        // One switch for both networks.
+        directory::torrents_seed(req.seed);
+    })
+    .await
+    .ok();
     Json(json!({"ok": true, "seed": req.seed}))
 }
 
@@ -1924,8 +1933,12 @@ pub async fn remove_model(State(_s): State<AppState>, Json(req): Json<CidReq>) -
     }
     let v = tokio::task::spawn_blocking(move || -> Value {
         let _ = run_script(&["unpin", &req.cid]);
-        let entries: Vec<ModelEntry> =
-            read_catalog().into_iter().filter(|e| e.cid != req.cid).collect();
+        let all = read_catalog();
+        // Unsharing covers both networks: stop seeding its torrent too.
+        if let Some(gone) = all.iter().find(|e| e.cid == req.cid && !e.btih.is_empty()) {
+            directory::torrent_forget(&gone.btih);
+        }
+        let entries: Vec<ModelEntry> = all.into_iter().filter(|e| e.cid != req.cid).collect();
         let _ = write_catalog(&entries);
         task_clear(&req.cid);
         announce();
