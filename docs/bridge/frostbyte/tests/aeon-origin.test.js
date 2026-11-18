@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   compareToManifest, identityOf, manifestFromRelease, originSigningBytes, sortManifest,
-  verifyDelegation, verifyIdentityProof, verifyOrigin, verifyPeerBinding,
+  verifyDelegation, verifyIdentityProof, verifyOrigin, verifyPeerBinding, verifyWitness, witnessSigningBytes,
 } from '../src/shared/aeon-origin.js';
 
 // The vectors are read from a local fixtures folder when one exists, else from the Orb repo's docs/.
@@ -89,4 +89,36 @@ test('an identity proof verifies as posted and not when edited', () => {
   assert.equal(verifyIdentityProof(p.block.replace(`name: ${p.name}`, 'name: bob')), null);
   assert.equal(verifyIdentityProof('nothing here'), null);
   assert.equal(verifyIdentityProof(p.block.replace('-----END AEON IDENTITY PROOF-----', '')), null);
+});
+
+test('a witness verifies for the record it signed, and only for that', () => {
+  const w = v.witness;
+  const record = { provider: w.provider, repo: w.repo, revision: w.revision, files: w.files };
+  const witness = { key: w.signer, observed_ms: w.observed_ms, sig: w.sig };
+  // Byte for byte what the Orb signs: only the provider-published files, in path order.
+  assert.equal(witnessSigningBytes({ ...record, files: [...w.files].reverse() }, w.observed_ms).toString('utf8'), w.signed_text);
+  assert.equal(w.signed_text.includes('tokenizer.json'), false);
+  assert.deepEqual(verifyWitness(record, witness), { ok: true, signer: w.signer, identity: w.signer, delegated: false, name: '', observedMs: w.observed_ms });
+  // With a delegation it is credited to the user identity.
+  const credited = verifyWitness(record, { ...witness, delegation });
+  assert.deepEqual([credited.ok, credited.identity, credited.delegated, credited.name], [true, v.delegation.user_key, true, 'alice']);
+  // Another time, repository, revision, provider or published hash: not what was signed.
+  assert.equal(verifyWitness(record, { ...witness, observed_ms: w.observed_ms + 1 }).ok, false);
+  assert.equal(verifyWitness({ ...record, repo: 'famous-lab/model' }, witness).ok, false);
+  assert.equal(verifyWitness({ ...record, revision: 'f'.repeat(40) }, witness).ok, false);
+  assert.equal(verifyWitness({ ...record, provider: 'civitai' }, witness).ok, false);
+  const swapped = w.files.map(f => f.path === 'example-1b-q4.gguf' ? { ...f, sha256: 'cd'.repeat(32) } : f);
+  assert.equal(verifyWitness({ ...record, files: swapped }, witness).ok, false);
+  // Calling a computed hash provider-published changes the statement too.
+  assert.equal(verifyWitness({ ...record, files: w.files.map(f => ({ ...f, hash_from: 'provider' })) }, witness).ok, false);
+  // The computed file itself is outside the statement.
+  const recomputed = w.files.map(f => f.hash_from === 'computed' ? { ...f, sha256: 'cd'.repeat(32) } : f);
+  assert.equal(verifyWitness({ ...record, files: recomputed }, witness).ok, true);
+  // Malformed input is a clean false, never a throw.
+  for (const bad of [null, {}, { ...witness, sig: '' }, { ...witness, key: 'zz' }, { ...witness, observed_ms: 'now' }]) {
+    assert.equal(verifyWitness(record, bad).ok, false);
+  }
+  for (const bad of [null, {}, { ...record, repo: 'a\nb' }, { ...record, files: [] }, { ...record, files: w.files.filter(f => f.hash_from === 'computed') }, { ...record, files: w.files.map(f => ({ ...f, hash_from: 'trust me' })) }]) {
+    assert.equal(verifyWitness(bad, witness).ok, false);
+  }
 });

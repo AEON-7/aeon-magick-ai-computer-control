@@ -326,6 +326,19 @@ pub fn origin_digest(name: &str, source: &str, verified: bool, signed_ms: i64, f
     s.into_bytes()
 }
 
+/// Canonical bytes of a WITNESS statement: "this key saw `provider` publish
+/// these hashes for `repo` at `revision`, at `observed_ms`". `files` holds only
+/// the files whose SHA-256 the provider itself published — never a hash that
+/// was computed locally — and must be sorted by path. The signature proves who
+/// made the statement; the time inside it is that signer's own claim.
+pub fn witness_digest(provider: &str, repo: &str, revision: &str, observed_ms: i64, files: &[(String, u64, String)]) -> Vec<u8> {
+    let mut s = format!("aeon-witness/1\n{provider}\n{repo}\n{revision}\n{observed_ms}\n");
+    for (path, size, sha256) in files {
+        s.push_str(&format!("{sha256} {size} {path}\n"));
+    }
+    s.into_bytes()
+}
+
 /// Static proof that the holder of an Orb key runs a given libp2p peer, so a
 /// gossiped host can be recognized as a model's ORIGIN seeder.
 pub fn peer_binding_digest(orb_key: &str, peer_id: &str) -> Vec<u8> {
@@ -357,6 +370,17 @@ pub fn is_local_key(pubkey: &str) -> bool {
         && (pubkey == orb_pubkey()
             || load().accounts.iter().any(|a| a.pubkey == pubkey)
             || current_delegation().is_some_and(|d| d.user_key == pubkey))
+}
+
+/// Every signing key that is this Orb's own: its device key, the identities
+/// stored here, and the identity it is signed in as. For telling "this Orb
+/// said so" apart from "someone else said so" over many signatures at once.
+pub fn local_keys() -> Vec<String> {
+    let mut keys: Vec<String> = load().accounts.into_iter().map(|a| a.pubkey).collect();
+    keys.push(orb_pubkey());
+    keys.extend(current_delegation().map(|d| d.user_key));
+    keys.retain(|k| !k.is_empty());
+    keys
 }
 
 /// Sign this Orb in as a user identity: authorise the Orb key to publish in
@@ -807,6 +831,39 @@ mod tests {
         assert!(!verify(&pk, &origin_digest("m", "https://x", true, 5, &swapped), &sig));
     }
 
+    #[test]
+    fn witness_digest_binds_the_provider_the_revision_the_time_and_every_hash() {
+        let files = vec![
+            ("model.safetensors".to_string(), 4096u64, "bb".repeat(32)),
+            ("unet/model.safetensors".to_string(), 12u64, "aa".repeat(32)),
+        ];
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let base = witness_digest("huggingface", "org/m", rev, 5, &files);
+        assert_eq!(
+            String::from_utf8(base.clone()).unwrap(),
+            format!(
+                "aeon-witness/1\nhuggingface\norg/m\n{rev}\n5\n{} 4096 model.safetensors\n{} 12 unet/model.safetensors\n",
+                "bb".repeat(32),
+                "aa".repeat(32)
+            )
+        );
+        let mut swapped = files.clone();
+        swapped[0].2 = "cc".repeat(32);
+        assert_ne!(base, witness_digest("huggingface", "org/m", rev, 5, &swapped));
+        assert_ne!(base, witness_digest("civitai", "org/m", rev, 5, &files));
+        assert_ne!(base, witness_digest("huggingface", "org/other", rev, 5, &files));
+        assert_ne!(base, witness_digest("huggingface", "org/m", &rev.replace('0', "f"), 5, &files));
+        assert_ne!(base, witness_digest("huggingface", "org/m", rev, 6, &files));
+        assert_ne!(base, witness_digest("huggingface", "org/m", rev, 5, &files[..1]));
+        // It is not an origin statement and cannot be passed off as one.
+        assert_ne!(base, origin_digest("huggingface", "org/m", true, 5, &files));
+
+        let (sk, pk) = key(9);
+        let sig = B64.encode(sk.sign(&base).to_bytes());
+        assert!(verify(&pk, &base, &sig));
+        assert!(!verify(&pk, &witness_digest("huggingface", "org/m", rev, 5, &swapped), &sig));
+    }
+
     /// The published test vectors are the contract other implementations
     /// (FrostByte's bridge) verify against. This rebuilds every signature from
     /// the fixed keys and fails if the file and the code ever disagree.
@@ -836,6 +893,22 @@ mod tests {
 
         let proof = make_proof(&user, "alice", "huggingface.co/alice", 1_760_000_000_003);
         let proof_bytes = proof_digest(&user_pk, "alice", "huggingface.co/alice", proof.issued_ms);
+
+        // An upstream record as an importing Orb keeps it: two files whose
+        // SHA-256 the provider published and one it did not. Only the first
+        // two are in the witness statement.
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let record_files = vec![
+            ("example-1b-q4.gguf", 1_048_576u64, "ab".repeat(32), "provider"),
+            ("sub/tokenizer.json", 2u64, "22".repeat(32), "computed"),
+            ("sub/weights.safetensors", 4_096u64, "33".repeat(32), "provider"),
+        ];
+        let published: Vec<(String, u64, String)> = record_files
+            .iter()
+            .filter(|f| f.3 == "provider")
+            .map(|(p, s, h, _)| (p.to_string(), *s, h.clone()))
+            .collect();
+        let witness = witness_digest("huggingface", "example/example-1b", revision, 1_760_000_000_004, &published);
 
         let v = json!({
             "about": "Model Share signing test vectors. Signatures are Ed25519 (RFC 8032, deterministic) over the exact UTF-8 bytes of `signed_text`; keys are 32-byte hex, signatures standard base64. Secrets here are public test values.",
@@ -871,10 +944,17 @@ mod tests {
                 "signed_text": text(&proof_bytes), "signer": user_pk, "sig": proof.sig,
                 "block": format_proof(&proof),
             },
+            "witness": {
+                "domain": "aeon-witness/1",
+                "provider": "huggingface", "repo": "example/example-1b", "revision": revision,
+                "observed_ms": 1_760_000_000_004_i64,
+                "files": record_files.iter().map(|(p, s, h, from)| json!({"path": p, "size": s, "sha256": h, "hash_from": from})).collect::<Vec<_>>(),
+                "signed_text": text(&witness), "signer": orb_pk, "sig": sign(&orb, &witness),
+            },
         });
 
         // Self-consistency: everything in the vector verifies.
-        for section in ["publication", "delegation", "origin", "peer_binding", "identity_proof"] {
+        for section in ["publication", "delegation", "origin", "peer_binding", "identity_proof", "witness"] {
             let s = &v[section];
             assert!(
                 verify(s["signer"].as_str().unwrap(), s["signed_text"].as_str().unwrap().as_bytes(), s["sig"].as_str().unwrap()),

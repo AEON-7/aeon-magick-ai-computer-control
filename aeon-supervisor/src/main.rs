@@ -138,6 +138,11 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Model Share: about once a week per imported model, ask its provider
+    // what it publishes now and note the answer in the upstream history.
+    // Metadata only; the first pass is at least half an hour after startup.
+    tokio::spawn(ipfs::upstream::recheck_loop());
+
     // Pi / host-appliance-only background tasks — skipped in the headless
     // server container (no WiFi captive portal, no host iptables/firewall,
     // no Hailo accelerator, no USB-net target file server, no DNSCrypt).

@@ -577,6 +577,11 @@ pub fn build_router(cfg: Config) -> Router {
         .route("/ipfs/directory/search", get(crate::ipfs::directory::search))
         .route("/ipfs/directory/pull", post(crate::ipfs::directory::pull))
         .route("/ipfs/torrents", get(crate::ipfs::directory::torrents))
+        // Upstream hash records: what a provider published for an imported
+        // model, this Orb's history of asking it again, and the re-check.
+        .route("/ipfs/models/upstream", get(crate::ipfs::upstream::get_upstream))
+        .route("/ipfs/models/upstream/recheck", post(crate::ipfs::upstream::post_recheck))
+        .route("/ipfs/models/upstream/auto", get(crate::ipfs::upstream::get_auto).post(crate::ipfs::upstream::set_auto))
         .route("/ipfs/models/import-ollama", post(crate::ipfs::import_ollama))
         .route("/ipfs/models/import-civitai", post(crate::ipfs::import_civitai))
         .route("/ipfs/models/tokens", get(crate::ipfs::get_source_tokens).post(crate::ipfs::set_source_token))

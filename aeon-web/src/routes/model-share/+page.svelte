@@ -5,6 +5,10 @@
   import DownloadProgress from '$lib/components/DownloadProgress.svelte';
   import { toast } from '$lib/toast';
   import { createScribble, personalEntropy, readDice, sha256Hex } from '$lib/entropy-collect.js';
+  import {
+    chainSummary, checkSummary, hashSource, headLabel, historyLine, providerName, repoLabel, revisionLabel,
+    shortRevision, splitFiles, whoRecorded, witnessSummary,
+  } from '$lib/upstream-view.js';
 
   // Intergalactic Model Share — a decentralized, censorship-resistant network of
   // AI models shared over IPFS (the InterPlanetary File System — we think
@@ -26,6 +30,29 @@
     origin_id?: string; origin_label?: string;
     verified?: boolean; source?: string;
     btih?: string; // BitTorrent infohash when the same files are also seeded as a torrent
+    upstream_record?: UpstreamRecord; // what the provider published, for a model imported from one
+  };
+  // For a model imported from a provider: the revision that was pinned and, per
+  // file, the SHA-256 the provider published — or, where it published none,
+  // the hash the importing Orb computed (`hash_from: 'computed'`).
+  type UpstreamFile = { path: string; size: number; sha256: string; hash_from: 'provider' | 'computed' };
+  type UpstreamRecord = { provider: string; repo: string; revision: string; files: UpstreamFile[] };
+  // Signed statements about that record. `others` counts publishers that are
+  // not this Orb; their dates are their own claims.
+  type Witnessed = {
+    identities: number; others: number; mine: boolean; earliest_ms: number; earliest_other_ms: number; differing: number;
+    list?: { key: string; fp: string; name: string; observed_ms: number; mine: boolean }[];
+  };
+  type CheckEvent = {
+    line?: number; at_ms: number; event: string; pinned?: string; head?: string; head_revision?: string;
+    detail?: string; by?: string; diff?: { path: string; scope: string; what: string; was: string; now?: string }[];
+  };
+  // GET /api/ipfs/models/upstream — `recorded_here_ms` / `confirmed_here_ms` /
+  // `last_check` / `history` come from THIS Orb's own history file.
+  type Upstream = {
+    ok: boolean; cid: string; local: boolean; auto: boolean; record: UpstreamRecord | null; link?: string;
+    recorded_here_ms?: number; confirmed_here_ms?: number; last_check?: CheckEvent | null; history?: CheckEvent[];
+    chain?: { ok: boolean; lines: number; broken: number[] }; witnessed?: Witnessed;
   };
   type Host = { label: string; is_self: boolean; online: boolean; peer_id?: string; addrs?: string[]; is_origin?: boolean };
   type Sig = { ok: boolean; name: string; fp: string };
@@ -876,6 +903,56 @@
     } catch (e: any) { toast(e?.message ?? 'Could not save that', 'error'); }
   }
 
+  // ── Original weights: what the provider published, and who else saw it ────
+  // Loaded when a model's detail view opens. The sentences come from
+  // $lib/upstream-view.js, which keeps "this Orb checked" apart from "another
+  // publisher says".
+  let upstream: Upstream | null = null;
+  let upstreamFor = '';          // the CID the block was loaded for
+  let upstreamChecking = false;
+  let upstreamAllFiles = false;  // also list tokenizer / config files
+  let upstreamHistory = false;
+  const TONE: Record<string, string> = { ok: 'text-emerald-300/80', warn: 'text-amber-300', bad: 'text-red-400', muted: 'text-ink-400' };
+  const fmtWhen = (ms: number) => new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  async function loadUpstream(cid: string) {
+    try {
+      const r = await api(`/models/upstream?cid=${cid}`);
+      if (detail?.entry.cid === cid) upstream = r?.ok ? r : null;
+    } catch {
+      if (detail?.entry.cid === cid) upstream = null;
+    }
+  }
+  $: if (detail && upstreamFor !== detail.entry.cid) {
+    upstreamFor = detail.entry.cid;
+    upstream = null; upstreamAllFiles = false; upstreamHistory = false;
+    // A model that carries a record, or one this Orb holds (its own history may hold one).
+    if (detail.entry.upstream_record || detail.local) loadUpstream(detail.entry.cid);
+  }
+  $: if (!detail) { upstreamFor = ''; upstream = null; }
+  // Ask the provider now. Metadata only; the answer is appended to the history.
+  async function checkUpstream() {
+    if (!detail || upstreamChecking) return;
+    const cid = detail.entry.cid;
+    upstreamChecking = true;
+    try {
+      const r = await api('/models/upstream/recheck', postJson({ cid }));
+      if (r?.ok === false) toast(r.err || 'Could not ask the provider', 'error');
+      else {
+        const s = checkSummary(r.event, upstream?.record?.provider ?? '');
+        toast(s.headline, s.tone === 'ok' ? 'success' : 'info');
+      }
+      await loadUpstream(cid);
+      await load(); // a first confirmation adds this Orb's own signed statement
+    } catch (e: any) { toast(e?.message ?? 'Could not ask the provider', 'error'); }
+    upstreamChecking = false;
+  }
+  async function setUpstreamAuto(on: boolean) {
+    try {
+      const r = await api('/models/upstream/auto', postJson({ auto: on }));
+      if (r?.ok && upstream) upstream = { ...upstream, auto: !!r.auto };
+    } catch {}
+  }
+
   // Minimal, XSS-safe markdown → HTML for READMEs from untrusted Orbs: escape
   // ALL html first, then re-introduce only a fixed, safe tag set. Links are
   // autolinked http(s) only.
@@ -1702,6 +1779,90 @@
               {/if}
             </div>
           {/if}
+        </div>
+      {/if}
+      <!-- original weights: what the provider published, what this Orb checked itself, what others signed -->
+      {#if upstream?.record}
+        {@const u = upstream}
+        {@const rec = upstream.record}
+        {@const files = splitFiles(rec)}
+        {@const check = checkSummary(u.last_check, rec.provider)}
+        {@const wit = witnessSummary(u.witnessed, fmtWhen)}
+        {@const chain = chainSummary(u.chain)}
+        <div class="rounded border border-ink-800 bg-ink-950/60 p-3 space-y-2.5 text-[12px] font-mono">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-ink-500 text-[10px] uppercase tracking-wide">original weights</div>
+              <div class="text-ink-200 truncate">
+                {#if u.link}<a href={u.link} target="_blank" rel="noreferrer" class="text-cursed-300 hover:underline">{repoLabel(rec)}</a>{:else}{repoLabel(rec)}{/if}<span class="text-ink-500 ml-1.5">on {providerName(rec.provider)}</span>
+              </div>
+              <div class="text-ink-500 truncate" title={rec.revision}>pinned {revisionLabel(rec.provider)} {shortRevision(rec.revision)}</div>
+            </div>
+            {#if u.local}
+              <button class="shrink-0 px-2 py-1 rounded border border-cursed-500/40 text-cursed-300 hover:bg-cursed-500/10 disabled:opacity-50"
+                      disabled={upstreamChecking}
+                      title="Ask {providerName(rec.provider)} what it publishes for these files right now. It reads the file list only and downloads nothing. The answer is added to this Orb's history."
+                      on:click={checkUpstream}>{upstreamChecking ? 'Asking…' : 'Check again'}</button>
+            {/if}
+          </div>
+          <ul class="space-y-0.5 leading-relaxed">
+            {#each whoRecorded(u, fmtWhen) as l}<li class={TONE[l.tone]}>{l.text}</li>{/each}
+          </ul>
+          <div class="space-y-1">
+            {#each (upstreamAllFiles ? [...files.weights, ...files.others] : files.weights) as f (f.path)}
+              {@const src = hashSource(f, rec.provider, !!u.recorded_here_ms)}
+              <div class="rounded bg-ink-900/70 px-2 py-1.5">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-ink-200 truncate" title={f.path}>{f.path}</span>
+                  <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border {src.published ? 'border-emerald-500/40 text-emerald-300' : 'border-ink-600 text-ink-400'}" title={src.title}>{src.label}</span>
+                </div>
+                <button class="block w-full text-left text-[11px] text-ink-500 hover:text-ink-300 break-all" title="SHA-256 · click to copy" on:click={() => copyText(f.sha256, 'SHA-256')}>{f.sha256}</button>
+              </div>
+            {/each}
+            {#if files.others.length}
+              <button class="text-ink-500 hover:text-cursed-300" on:click={() => (upstreamAllFiles = !upstreamAllFiles)}>
+                {upstreamAllFiles ? 'show the weights only' : `+ ${files.others.length} tokenizer and config file${files.others.length === 1 ? '' : 's'}`}
+              </button>
+            {/if}
+          </div>
+          <div>
+            <div class="text-ink-500 text-[10px] uppercase tracking-wide">last re-check by this Orb{u.last_check ? ` · ${fmtWhen(u.last_check.at_ms)}` : ''}</div>
+            <div class={TONE[check.tone]}>{check.headline}</div>
+            {#each check.lines as line}<div class="text-ink-400">{line}</div>{/each}
+            {#if u.last_check?.diff?.length}
+              {#each u.last_check.diff.slice(0, 4) as d}
+                <div class="text-ink-500 break-all">{d.scope === 'head' ? headLabel(rec.provider) : `pinned ${revisionLabel(rec.provider)}`} · {d.path} · {d.what === 'gone' ? 'no longer listed' : d.what === 'unpublished' ? 'no SHA-256 published now' : d.now ? `now ${d.now.slice(0, 16)}…` : 'different size'}</div>
+              {/each}
+            {/if}
+          </div>
+          <div>
+            <div class="text-ink-500 text-[10px] uppercase tracking-wide">other publishers · signed statements</div>
+            <div class={TONE[wit.tone]}>{wit.headline}</div>
+            {#if wit.note}<div class="text-ink-400 leading-relaxed">{wit.note}</div>{/if}
+            {#each (u.witnessed?.list ?? []).filter((w) => !w.mine).slice(0, 5) as w}
+              <div class="text-ink-500 truncate" title={w.key}>{w.name || 'unnamed'} · {w.fp} · says {fmtWhen(w.observed_ms)}</div>
+            {/each}
+            {#if wit.warning}<div class="text-amber-300 leading-relaxed">⚠ {wit.warning}</div>{/if}
+          </div>
+          <div>
+            <button class="text-ink-500 hover:text-cursed-300" on:click={() => (upstreamHistory = !upstreamHistory)}>{upstreamHistory ? '▾' : '▸'} this Orb's history for these weights ({u.history?.length ?? 0})</button>
+            {#if !u.chain?.ok}<div class={TONE[chain.tone]}>⚠ {chain.text}</div>{/if}
+            {#if upstreamHistory}
+              <ul class="mt-1 space-y-0.5">
+                {#each u.history ?? [] as e}
+                  {@const h = historyLine(e, rec.provider)}
+                  <li class="leading-relaxed"><span class="text-ink-500">{fmtWhen(e.at_ms)}</span> · <span class={TONE[h.tone]}>{h.label}</span> <span class="text-ink-400 break-words">· {h.text}</span></li>
+                {:else}
+                  <li class="text-ink-500">nothing yet — this Orb has not asked {providerName(rec.provider)} about this model</li>
+                {/each}
+              </ul>
+              {#if u.chain?.ok}<div class="mt-1 {TONE[chain.tone]}">{chain.text}</div>{/if}
+              <div class="mt-1 text-ink-500">
+                Models this Orb imported are re-checked about once a week: {u.auto ? 'on' : 'off'} ·
+                <button class="text-cursed-300 hover:underline" on:click={() => setUpstreamAuto(!u.auto)}>{u.auto ? 'turn off' : 'turn on'}</button>
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
       {#if c.tags?.length}

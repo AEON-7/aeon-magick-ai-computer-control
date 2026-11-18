@@ -2,7 +2,8 @@
 
 What two implementations must agree on to share one index and verify each
 other's models. The Orb implements all of it (`aeon-supervisor/src/ipfs.rs`,
-`ipfs/directory.rs`, `publisher.rs`, and the `aeon-modelshare` gossip daemon);
+`ipfs/directory.rs`, `ipfs/upstream.rs`, `publisher.rs`, and the
+`aeon-modelshare` gossip daemon);
 a bridge to another network implements the parts it needs. Test vectors for every signature are
 in [`model-share-vectors.json`](./model-share-vectors.json) and are checked
 against the Orb's code by `cargo test -p aeon-supervisor published_vectors`.
@@ -45,6 +46,18 @@ it is part of the directory, every mirror carries it unchanged, and replacing
 it produces a different CID — a different publication, credited to whoever
 made it.
 
+**Witness** — signed by an Orb key: "I saw `provider` publish these hashes for
+`repo` at `revision`, at `observed_ms`" (§10):
+
+    aeon-witness/1\n<provider>\n<repo>\n<revision>\n<observed_ms>\n
+    <sha256> <size> <path>\n        ← one line per file whose SHA-256 the provider
+                                      itself published, sorted by path as UTF-8 bytes
+
+A file whose hash the importer computed, because the provider published none,
+is never in a witness. A statement needs at least one line. The signature
+proves who made the statement; `observed_ms` is that signer's claim, not proof
+of when.
+
 **Peer binding** — an Orb key vouching for its own libp2p peer id:
 
     aeon-peer/1\n<orb_key>\n<peer_id>
@@ -83,9 +96,16 @@ account holder did. A verifier checks the first and must look at the second.
   "files": [ { "path": "a/b.safetensors", "size": 0, "sha256": "<hex>" } ],
   "origin": { "key": "<orb key>", "name": "", "signed_ms": 0, "sig": "<base64>",
               "delegation": { "user_key": "", "user_name": "", "orb_key": "", "issued_ms": 0, "sig": "" } },
-  "shared_by": { "id": "", "label": "" }, "created_ms": 0
+  "shared_by": { "id": "", "label": "" }, "created_ms": 0,
+  "upstream_record": { "provider": "", "repo": "", "revision": "",
+                       "files": [ { "path": "", "size": 0, "sha256": "<hex>", "hash_from": "provider" } ] },
+  "witnesses": [ { "key": "<orb key>", "observed_ms": 0, "sig": "<base64>", "delegation": { } } ]
 }
 ```
+
+`upstream_record` and `witnesses` are present only on a model imported from a
+provider (§10). They are not covered by the origin signature: the witness
+carries its own.
 
 `verified` means the publisher checked every file against the hash `source`
 publishes. It is covered by the origin signature, so it is an *attributable
@@ -105,9 +125,10 @@ mirrors the same file produces the same CID** and they all seed one swarm.
 
 `cid`, `name`, `file`, `size_bytes`, `sha256`, `card`, `added_at_ms`,
 `origin_id`, `origin_label`, `verified`, `source`, `pub_key`, `pub_name`,
-`pub_sig`, and optionally `delegation` and `btih` (BitTorrent v1 infohash of
-the same files, hex40, when the announcer also seeds them there). Unknown
-fields must be preserved when an entry is re-announced.
+`pub_sig`, and optionally `delegation`, `btih` (BitTorrent v1 infohash of
+the same files, hex40, when the announcer also seeds them there),
+`upstream_record` and `witnesses` (§10). Unknown fields must be preserved when
+an entry is re-announced.
 
 ## 5. Discovery
 
@@ -132,6 +153,13 @@ fields must be preserved when an entry is re-announced.
   chars. Record it under your own receive time; drop a peer after 15 minutes
   of silence. Keep announcements under 900 KiB (pubsub drops messages over
   1 MiB).
+- **Witnesses.** Rebuild an entry's `upstream_record` field by field; if it is
+  not well-formed, remove it and the entry's `witnesses`, and keep the entry.
+  Verify every witness signature against that record and drop each one that
+  fails. Drop a delegation that does not verify and keep its witness, credited
+  to the signing key. At most 16 witnesses per entry. The 16 KiB entry limit
+  includes them: a sender that would exceed it leaves out other publishers'
+  witnesses first, then its own, then the record.
 - **Origin seeder.** A host is a model's origin seeder when its `orb_sig`
   verifies for `(orb_key, peer_id)` and that `orb_key` is the entry's
   `pub_key`.
@@ -243,3 +271,80 @@ other peers. That is inherent to BitTorrent (an upload limit of zero also
 blocks the request messages and stalls the download), and those pieces are
 held to the torrent's own piece hashes. What the checks above control is what
 a node keeps, what it adds to IPFS, and what it goes on seeding.
+
+## 10. Upstream records and witnesses
+
+A model imported from a provider keeps a record of what that provider
+published, so that it stays checkable after the provider changes or removes
+the model.
+
+**The record.** At import the Orb pins one revision, reads the file list and
+every file at that revision only, and stores:
+
+| Field | huggingface | ollama | civitai |
+|---|---|---|---|
+| `provider` | `huggingface` | `ollama` | `civitai` |
+| `repo` | `org/model` | `namespace/model:tag` | the model id |
+| `revision` | the commit id (40 hex) | the manifest digest, `sha256:<hex>`: the SHA-256 of the manifest as the registry served it | the model-version id |
+| a file's hash is `provider` when | the file is in LFS (the LFS object id is its SHA-256) | always (the layer digest) | the version lists `hashes.SHA256` for it |
+
+`provider` is 1–32 characters of `a-z 0-9 -`; `repo` and `revision` are one
+line of at most 200 characters; `files` holds 1–512 entries with unique
+relative paths. Each file is `{path, size, sha256, hash_from}`. `hash_from` is
+`provider` when the provider itself published that SHA-256 and the downloaded
+bytes matched it, and `computed` when the provider published none and the
+importer hashed what it received. **A computed hash is never presented as the
+provider's.** Every recorded file must be a file of the model, with the same
+size and hash as in the card's `files`; a record that says otherwise is
+discarded by the receiver.
+
+**Witnesses.** In an entry and in a card, each element of `witnesses` is
+`{key, observed_ms, sig, delegation?}`: one `aeon-witness/1` signature (§2)
+over the `upstream_record` beside it and that `observed_ms`. The importing Orb
+adds its own at import. An Orb that mirrors the model and later asks the
+provider itself, and finds the same hashes at the pinned revision, adds its
+own to its copy of the entry. A witness is credited like any other signature
+(§1).
+
+Two witnesses **record the same hashes** when their records name the same
+`provider`, the same `repo`, and the same set of provider-published
+`(path, size, sha256)` lines; the revision may differ, because a later commit
+that leaves the weights alone publishes the same hashes. A node reports, per
+model, how many distinct credited identities recorded the same hashes and the
+earliest `observed_ms` among them, counting across every entry it can see,
+whatever its CID. It also reports identities that signed a *different* hash or
+size for a path at the same `provider`, `repo` and `revision`, which a pinned
+revision cannot honestly have.
+
+What this proves and what it does not: a valid witness proves that the holder
+of a key made the statement. It does not prove the time, and identities are
+free to create, so a count of witnesses is evidence in proportion to how much
+the reader trusts those identities (§7). What a node checked itself, and when,
+it knows from its own history; everything else is shown as a claim.
+
+**Re-checking.** A node may ask the provider again what it publishes for the
+recorded paths — at the pinned revision, and on the default branch (for
+Ollama, where the tag points now; for Civitai, the model's own list of
+versions). It reads metadata only. Each scope ends in one of:
+
+| Verdict | Meaning |
+|---|---|
+| `confirmed` | Every recorded provider hash is published unchanged; files without one are still listed (and, where the provider gives sizes, have the same size). |
+| `changed` | A recorded path is published with a different hash or size, or the provider stopped publishing a hash it used to publish. |
+| `removed` | The repository, the revision or a recorded file is gone, or access is now refused (401, 403, 404, 410, 451, or the repository is marked gated, private or disabled). |
+| `unreachable` | No usable answer: a network error, a timeout, a rate limit, a server error, any other status, or an answer that cannot be read. Evidence of nothing. |
+
+The result of a re-check is the most telling of its two scopes, in the order
+`changed`, `removed`, `unreachable`, `confirmed`. A changed or removed
+upstream changes nothing about the model on the network: its files, its
+manifest and its witnesses are as they were. That is the point.
+
+**The history (local, not on the wire).** Each Orb keeps its own append-only
+log, `upstream-history.jsonl`: one JSON object per line, each with `prev`, the
+SHA-256 of the previous line's bytes (64 zeros on the first line), and an
+`event` of `recorded`, `confirmed`, `changed`, `removed` or `unreachable`.
+Lines are only ever appended. A line that does not follow from the one before
+it, or cannot be read, is reported and left as found. The chain shows an edit,
+an insertion or a removal anywhere except a cut at the very end, and it does
+not stop someone with full control of the node from rebuilding the whole file;
+what they cannot rebuild are witnesses other nodes already hold.
