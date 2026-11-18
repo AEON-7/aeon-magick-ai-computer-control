@@ -1498,6 +1498,21 @@ pub fn shared_models() -> Value {
     })
 }
 
+/// Another Orb's `shared_models()` as it arrived in a fleet heartbeat, rebuilt
+/// with the types the console expects. The roster hands a peer's heartbeat to
+/// the browser as it came, and the page that unions these lists stops at the
+/// first entry it cannot read — so one malformed entry from one fleet peer
+/// would blank the whole fleet index. Entries are read one at a time, as for
+/// the gossip registry; anything that is not a usable value reads as off,
+/// empty, or no entry.
+pub fn fleet_models(raw: &Value) -> Value {
+    json!({
+        "enabled": raw.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+        "peer_id": raw.get("peer_id").and_then(Value::as_str).unwrap_or(""),
+        "models": raw.get("models").and_then(Value::as_array).map(|a| tolerant_entry_list(a)).unwrap_or_default(),
+    })
+}
+
 /// GET /api/ipfs/models — local catalog + in-flight upload/fetch phases.
 pub async fn models(State(_s): State<AppState>) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| -> Value {
@@ -1823,15 +1838,40 @@ fn discard_rejected(cid: &str) {
     let _ = run_script(&["unpin", cid]);
 }
 
+/// The body of a fetch request, or the answer to send for one that cannot be
+/// used. The entry in the body is a row of the index, so its fields began on
+/// another node: a body with a field of the wrong type gets the same
+/// `{ok: false}` answer as any other refusal, which the console can show,
+/// instead of the framework's plain-text rejection.
+fn fetch_request(req: Result<Json<FetchReq>, axum::extract::rejection::JsonRejection>) -> Result<FetchReq, Value> {
+    match req {
+        Ok(Json(req)) if valid_cid(&req.entry.cid) => Ok(req),
+        Ok(_) => Err(json!({"ok": false, "err": "invalid CID"})),
+        Err(e) => Err(json!({"ok": false, "err": format!("not a fetch request: {}", e.body_text())})),
+    }
+}
+
+/// Disk a fetch of `sz` bytes needs at its peak: the pinned blocks, a full
+/// quarantine copy for scanning, and headroom. `sz` is whatever the entry
+/// claims, so nothing here may overflow: a plain `+` panics in a debug build
+/// and in a release build wraps to a small number that passes the disk guard.
+fn fetch_peak_bytes(sz: u64) -> u64 {
+    sz.saturating_mul(2).saturating_add(512 * 1024 * 1024)
+}
+
 /// POST /api/ipfs/models/fetch — download a peer's model through a QUARANTINE
 /// sandbox: fetch to staging → validate every file's magic bytes (fake
 /// extensions / stowaway executables / pickle weights) → ClamAV scan → and only
 /// on a clean pass pin it + add to the catalog. Progress phases surface in the
 /// task map. Rejected content never reaches the live library.
-pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) -> Json<Value> {
-    if !valid_cid(&req.entry.cid) {
-        return Json(json!({"ok": false, "err": "invalid CID"}));
-    }
+pub async fn fetch_model(
+    State(_s): State<AppState>,
+    req: Result<Json<FetchReq>, axum::extract::rejection::JsonRejection>,
+) -> Json<Value> {
+    let req = match fetch_request(req) {
+        Ok(req) => req,
+        Err(refusal) => return Json(refusal),
+    };
     let cid = req.entry.cid.clone();
     task_set(&cid, "checking disk…");
     tokio::task::spawn_blocking(move || {
@@ -1855,7 +1895,7 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
         // Disk guard 1 — filesystem: pinned blocks + a full quarantine copy for
         // scanning (~2× peak) + headroom.
         let free = free_bytes(MODELS_DIR);
-        if sz > 0 && sz.saturating_mul(2) + 512 * 1024 * 1024 > free {
+        if sz > 0 && fetch_peak_bytes(sz) > free {
             return fail(&format!("not enough disk: model is {} but only {} free", human(sz), human(free)));
         }
         // Disk guard 2 — IPFS storage cap: check UP FRONT so we fail with clear
@@ -2056,7 +2096,7 @@ struct RegPeer {
     addrs: Vec<String>,
     #[serde(default)]
     updated_ms: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tolerant_entries")]
     models: Vec<ModelEntry>,
     /// CIDs this peer has starred — gossiped so every Orb can tally a
     /// community star count per model (fleet-free reputation).
@@ -2072,6 +2112,38 @@ struct RegPeer {
     /// The user identity that authorised this peer's Orb key, if it shows one.
     #[serde(default)]
     delegation: Option<crate::publisher::Delegation>,
+}
+
+/// Model entries that came from another node, read one at a time. An entry
+/// that is not an object, or has a known field of the wrong type, is left out
+/// and the rest are kept: what one peer wrote into one entry must not decide
+/// whether anyone else's models are listed.
+fn tolerant_entry_list(list: &[Value]) -> Vec<ModelEntry> {
+    list.iter().filter(|m| m.is_object()).filter_map(|m| ModelEntry::deserialize(m).ok()).collect()
+}
+
+/// `tolerant_entry_list` for a struct field. A value that is not a list at
+/// all is an error, which fails the one record it sits in.
+fn tolerant_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ModelEntry>, D::Error> {
+    Ok(tolerant_entry_list(&Vec::<Value>::deserialize(d)?))
+}
+
+/// The peers in a parsed registry.json (`{"peers": {<peer id>: {…}}}`), read
+/// one peer at a time and, inside a peer, one model entry at a time. A peer
+/// record that cannot be used is left out alone, and so is a model entry.
+///
+/// This used to be a single typed parse of the whole map, so one mistyped
+/// field in one entry of one peer (`"size_bytes": "x"`) emptied the index —
+/// and anything on the gossip topic could send that.
+fn registry_peers(doc: &Value) -> HashMap<String, RegPeer> {
+    let Some(peers) = doc.get("peers").and_then(Value::as_object) else {
+        return HashMap::new();
+    };
+    peers
+        .iter()
+        .filter(|(_, rec)| rec.is_object())
+        .filter_map(|(id, rec)| Some((id.clone(), RegPeer::deserialize(rec).ok()?)))
+        .collect()
 }
 
 /// Every model every gossiped peer currently announces, flattened.
@@ -2154,8 +2226,7 @@ fn read_registry() -> HashMap<String, RegPeer> {
     std::fs::read_to_string(REGISTRY_JSON)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.get("peers").cloned())
-        .and_then(|p| serde_json::from_value(p).ok())
+        .map(|doc| registry_peers(&doc))
         .unwrap_or_default()
 }
 
@@ -4629,6 +4700,203 @@ mod tests {
         assert!(!redact(msg, Some("s3cr3t")).contains("s3cr3t"));
         assert_eq!(redact(msg, None), msg);
         assert_eq!(redact(msg, Some("")), msg);
+    }
+
+    // ── Entries and peers that arrive malformed ─────────────────────────────
+
+    /// A model entry as an honest Orb gossips it. `future_field` stands for
+    /// something a newer Orb might add: unknown here, and no reason to drop it.
+    fn gossiped(name: &str) -> Value {
+        json!({
+            "cid": "bafytestcid000", "name": name, "file": "model.gguf", "size_bytes": 20,
+            "sha256": "ab".repeat(32),
+            "card": {"kind": "llm", "tags": ["a"], "readme": true, "nsfw": false},
+            "added_at_ms": 1_760_000_000_000_i64, "origin_id": "orb-1", "origin_label": "an orb",
+            "verified": true, "source": "https://example.test/m",
+            "pub_key": "", "pub_name": "", "pub_sig": "",
+            "future_field": {"anything": [1, "two", null]},
+        })
+    }
+
+    /// `gossiped`, with one field replaced.
+    fn with(name: &str, field: &str, value: Value) -> Value {
+        let mut e = gossiped(name);
+        e[field] = value;
+        e
+    }
+
+    /// One entry per way a field this Orb knows can have the wrong type, and
+    /// the things that are not entries at all.
+    fn mistyped_entries() -> Vec<Value> {
+        vec![
+            with("bad", "file", json!(5)), // text fields holding something else
+            with("bad", "sha256", json!(null)),
+            with("bad", "name", json!(["m"])),
+            with("bad", "btih", json!(false)),
+            with("bad", "upstream", json!({})),
+            with("bad", "size_bytes", json!("x")), // number fields
+            with("bad", "size_bytes", json!(-1)),
+            with("bad", "size_bytes", json!(1.5)),
+            with("bad", "added_at_ms", json!("yesterday")),
+            with("bad", "verified", json!("yes")), // the flag
+            with("bad", "verified", json!(1)),
+            with("bad", "card", json!("a card")), // the card, and members of it
+            with("bad", "card", json!({"tags": "llm"})),
+            with("bad", "card", json!({"tags": ["a", 7]})),
+            with("bad", "card", json!({"nsfw": "no"})),
+            with("bad", "card", json!({"kind": 3})),
+            with("bad", "delegation", json!("mine")),
+            with("bad", "delegation", json!({"user_key": 1, "orb_key": "k", "sig": "s"})),
+            json!({"name": "no cid"}),
+            json!({"cid": "bafytestcid000"}),
+            json!("not an entry"),
+            json!(["bafytestcid000", "a list is not an entry"]),
+            json!(null),
+            json!(7),
+        ]
+    }
+
+    fn names(entries: &[ModelEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_mistyped_entry_is_skipped_and_its_neighbours_are_kept() {
+        for bad in mistyped_entries() {
+            let doc = json!({"peers": {"alice": {"peer_id": "alice", "models": [gossiped("first"), bad, gossiped("last")]}}});
+            assert_eq!(names(&registry_peers(&doc)["alice"].models), ["first", "last"], "with {}", doc["peers"]["alice"]["models"][1]);
+        }
+        // A field this Orb does not know is not a reason to drop an entry, and
+        // neither is a malformed upstream record: that reads as "no record".
+        let odd = with("odd", "upstream_record", json!("junk"));
+        let doc = json!({"peers": {"alice": {"peer_id": "alice", "models": [with("odd", "witnesses", json!(5)), odd]}}});
+        let got = registry_peers(&doc);
+        assert_eq!(names(&got["alice"].models), ["odd", "odd"]);
+        assert!(got["alice"].models.iter().all(|e| e.upstream_record.is_none() && e.witnesses.is_empty()));
+    }
+
+    #[test]
+    fn one_bad_entry_and_one_bad_peer_leave_every_good_entry_listed() {
+        let mut alice = vec![gossiped("a1")];
+        alice.extend(mistyped_entries());
+        alice.push(gossiped("a2"));
+        let mut peers = serde_json::Map::new();
+        peers.insert("alice".into(), json!({
+            "peer_id": "alice", "label": "Alice", "addrs": ["203.0.113.7"], "updated_ms": 5, "sent_ms": 4,
+            "models": alice, "starred": ["bafytestcid000"],
+        }));
+        peers.insert("bob".into(), json!({"peer_id": "bob", "models": [gossiped("b1")]}));
+        // Peer records that cannot be used. Those that are objects each carry
+        // a good entry, to show the record is skipped as a whole.
+        let unusable = [
+            json!("a peer"),
+            json!(null),
+            json!(3),
+            json!([]),
+            json!({"peer_id": 9, "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "label": ["x"], "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "updated_ms": "now", "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "addrs": ["203.0.113.9", 7], "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "starred": "all of them", "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "orb_key": {}, "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "delegation": "x", "models": [gossiped("never")]}),
+            json!({"peer_id": "p", "models": "all of them"}),
+            json!({"peer_id": "p", "models": {"0": gossiped("never")}}),
+        ];
+        for (i, bad) in unusable.iter().enumerate() {
+            peers.insert(format!("bad{i}"), bad.clone());
+        }
+        let doc = json!({"peers": peers});
+        // The single typed parse this replaces cannot read this file at all,
+        // which is what used to empty the index.
+        assert!(serde_json::from_value::<HashMap<String, RegPeer>>(doc["peers"].clone()).is_err());
+
+        let got = registry_peers(&doc);
+        let mut ids: Vec<&str> = got.keys().map(String::as_str).collect();
+        ids.sort();
+        assert_eq!(ids, ["alice", "bob"]);
+        assert_eq!(names(&got["alice"].models), ["a1", "a2"]);
+        assert_eq!(names(&got["bob"].models), ["b1"]);
+        // What a kept peer says about itself is kept with it.
+        assert_eq!((got["alice"].label.as_str(), got["alice"].updated_ms), ("Alice", 5));
+        assert_eq!(got["alice"].addrs, ["203.0.113.7"]);
+        assert_eq!(got["alice"].starred, ["bafytestcid000"]);
+        // A good entry is read in full, card included.
+        let a1 = &got["alice"].models[0];
+        assert_eq!((a1.file.as_str(), a1.size_bytes, a1.verified), ("model.gguf", 20, true));
+        assert_eq!((a1.card.kind.as_str(), a1.card.tags.as_slice(), a1.card.readme), ("llm", &["a".to_string()][..], true));
+
+        // Something that is not a registry is an empty index, not an error.
+        for not_a_registry in [json!(null), json!([]), json!({}), json!({"peers": []}), json!({"peers": "x"})] {
+            assert!(registry_peers(&not_a_registry).is_empty(), "{not_a_registry}");
+        }
+    }
+
+    #[test]
+    fn a_fleet_peers_model_list_is_rebuilt_entry_by_entry() {
+        let mut models = vec![gossiped("f1")];
+        models.extend(mistyped_entries());
+        models.push(gossiped("f2"));
+        let got = fleet_models(&json!({"enabled": true, "peer_id": "12D3KooWtest", "models": models, "extra": 1}));
+        assert_eq!((got["enabled"].as_bool(), got["peer_id"].as_str()), (Some(true), Some("12D3KooWtest")));
+        let listed: Vec<&str> = got["models"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+        assert_eq!(listed, ["f1", "f2"]);
+        assert!(got.get("extra").is_none());
+        // Whatever arrives, the console gets a flag, a string and a list.
+        for raw in [json!(null), json!("x"), json!([]), json!({}), json!({"enabled": "yes", "peer_id": 5, "models": "all"}), json!({"enabled": 1, "models": {"length": 3}})] {
+            assert_eq!(fleet_models(&raw), json!({"enabled": false, "peer_id": "", "models": []}), "{raw}");
+        }
+    }
+
+    /// Run a request body through the same extractor the route uses.
+    fn fetch_body(body: &str, content_type: &str) -> Result<FetchReq, Value> {
+        use axum::extract::FromRequest;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .header("content-type", content_type)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        fetch_request(rt.block_on(Json::<FetchReq>::from_request(req, &())))
+    }
+
+    #[test]
+    fn a_fetch_request_that_cannot_be_used_is_refused_in_json() {
+        // What the console sends: a row of the index plus where to dial.
+        let row = |mut e: Value| {
+            e["addrs"] = json!(["203.0.113.7"]);
+            e["peer_id"] = json!("12D3KooWtest");
+            e["hosts"] = json!([{"label": "x"}]);
+            e.to_string()
+        };
+        let Ok(req) = fetch_body(&row(gossiped("m")), "application/json") else {
+            panic!("a well-formed row was refused");
+        };
+        assert_eq!((req.entry.name.as_str(), req.entry.size_bytes, req.peer_id.as_str()), ("m", 20, "12D3KooWtest"));
+        assert_eq!(req.addrs, ["203.0.113.7"]);
+
+        let refused = [
+            row(with("m", "size_bytes", json!("x"))),
+            row(with("m", "verified", json!("yes"))),
+            row(with("m", "card", json!({"tags": 1}))),
+            row(with("m", "cid", json!("../../etc"))),
+            row(json!({"name": "no cid"})),
+            "{".to_string(),
+            "[]".to_string(),
+            String::new(),
+        ];
+        for body in refused {
+            let refusal = fetch_body(&body, "application/json").err().unwrap_or_else(|| panic!("{body} was accepted"));
+            assert_eq!(refusal["ok"], false, "{body}");
+            assert!(refusal["err"].as_str().is_some_and(|e| !e.is_empty()), "{body}");
+        }
+        // The body must still be sent as JSON, which a form on another site cannot do.
+        assert!(fetch_body(&row(gossiped("m")), "text/plain").is_err());
+
+        // The size is whatever the entry claims; the disk estimate saturates.
+        assert_eq!(fetch_peak_bytes(1 << 30), (2 << 30) + (512 << 20));
+        assert_eq!(fetch_peak_bytes(u64::MAX / 2), u64::MAX);
+        assert_eq!(fetch_peak_bytes(u64::MAX), u64::MAX);
     }
 }
 

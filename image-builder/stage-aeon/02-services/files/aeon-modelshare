@@ -32,6 +32,7 @@ normal IPFS swarm when a peer pins the CID.
 import base64
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -73,6 +74,10 @@ MAX_SEEN_DIAL = 16        # of those, how many one announcement may make us dial
 MAX_DIAL = 256            # peers one discovery pass will consider
 MAX_PEERS = 2000          # registry size cap (oldest dropped first)
 MAX_ENTRY_BYTES = 16 * 1024      # one model entry, serialized
+# How deep lists and objects may nest inside one model entry. The supervisor's
+# JSON parser gives up on the whole registry file at 128 levels; nothing an
+# entry is known to carry needs more than 4.
+MAX_NESTING = 32
 # libp2p pubsub drops messages over 1 MiB; stay clear of it, or a large
 # catalog makes this Orb silently vanish from everyone's index.
 MAX_ANNOUNCE_BYTES = 900 * 1024
@@ -277,7 +282,58 @@ def _clean_text(s, limit):
     """Printable text, bounded. Peers choose these strings; the console shows them."""
     if not isinstance(s, str):
         return ""
-    return "".join(ch for ch in s if ch >= " " and ch != "\x7f")[:limit]
+    return "".join(ch for ch in s if ch >= " " and ch != "\x7f" and not "\ud800" <= ch <= "\udfff")[:limit]
+
+
+# ── What may be written to the registry at all ──────────────────────────────
+#
+# The registry is one JSON file and the supervisor parses it in one go. Python
+# reads and writes several things a strict parser refuses outright: NaN and
+# Infinity, numbers too large for a double, an unpaired UTF-16 surrogate
+# ("\ud800"), and nesting past the parser's depth limit. ONE such value
+# anywhere in the file makes the whole file unreadable, so every Orb's index
+# would come back empty because of what a single peer put in a single entry.
+# Nothing is merged into the registry unless it passes `wire_safe`.
+
+_I64_MIN, _I64_MAX, _U64_MAX = -(2 ** 63), 2 ** 63 - 1, 2 ** 64 - 1
+
+
+def _int_in(v, lo, hi):
+    """A whole JSON number in [lo, hi]. `True` is not a number here."""
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _plain_str(s):
+    """A string that is valid Unicode text, i.e. has no unpaired surrogate."""
+    if not isinstance(s, str):
+        return False
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def wire_safe(v, room=MAX_NESTING):
+    """True when a strict JSON parser will read `v` back as it was written:
+    finite numbers, integers that fit 64 bits, well-formed strings, and lists
+    and objects nested no more than `room` deep (docs/MODEL_SHARE_PROTOCOL.md
+    §4, "Values")."""
+    if v is None or isinstance(v, bool):
+        return True
+    if isinstance(v, int):
+        return _I64_MIN <= v <= _U64_MAX
+    if isinstance(v, float):
+        return math.isfinite(v)
+    if isinstance(v, str):
+        return _plain_str(v)
+    if room <= 0:
+        return False
+    if isinstance(v, list):
+        return all(wire_safe(x, room - 1) for x in v)
+    if isinstance(v, dict):
+        return all(_plain_str(k) and wire_safe(x, room - 1) for k, x in v.items())
+    return False
 
 
 # ── What we accept from the network ─────────────────────────────────────────
@@ -440,8 +496,10 @@ def signature_ok(key_hex, text, sig_b64, budget):
 
 def _has_control(s):
     """Any control character at all (Unicode category Cc), as the supervisor
-    judges it — a newline inside a field would forge a line of signed text."""
-    return any(unicodedata.category(ch) == "Cc" for ch in s)
+    judges it — a newline inside a field would forge a line of signed text.
+    An unpaired surrogate (Cs) counts too: it cannot be encoded as UTF-8, so
+    it can be neither signed nor stored."""
+    return any(unicodedata.category(ch) in ("Cc", "Cs") for ch in s)
 
 
 def _one_line(s, limit):
@@ -499,7 +557,11 @@ def _clean_delegation(d, orb_key, budget):
     if not isinstance(d, dict) or d.get("orb_key") != orb_key:
         return None
     user_key, sig, issued = d.get("user_key"), d.get("sig"), d.get("issued_ms")
-    if not isinstance(issued, int) or isinstance(issued, bool):
+    if not _int_in(issued, _I64_MIN, _I64_MAX):
+        return None
+    # Checked before it goes into the signed text: a key that is not hex could
+    # not be encoded, and that must cost this delegation, not the whole entry.
+    if not isinstance(user_key, str) or not _HEX64_RE.match(user_key.lower()):
         return None
     text = ("aeon-delegate/1\n%s\n%s\n%d" % (user_key, orb_key, issued)).encode("utf-8")
     if not signature_ok(user_key, text, sig, budget):
@@ -522,7 +584,7 @@ def clean_witnesses(rec, witnesses, budget):
         if not isinstance(w, dict):
             continue
         key, sig, observed = w.get("key"), w.get("sig"), w.get("observed_ms")
-        if not isinstance(observed, int) or isinstance(observed, bool) or observed <= 0:
+        if not _int_in(observed, 1, _I64_MAX):
             continue
         if not signature_ok(key, witness_text(rec, observed), sig, budget):
             continue
@@ -555,15 +617,89 @@ def clean_provenance(m, budget):
     return m
 
 
+# The fields of a catalog entry the supervisor reads into its `ModelEntry`
+# (aeon-supervisor/src/ipfs.rs), by the type it reads them as. Keep the two in
+# step. `cid` and `name` are checked on their own; `upstream_record` and
+# `witnesses` are rebuilt by `clean_provenance`.
+_ENTRY_TEXT = ("file", "sha256", "origin_id", "origin_label", "source",
+               "pub_key", "pub_name", "pub_sig", "btih", "upstream")
+_CARD_TEXT = ("kind", "base_model", "params", "quant", "license", "description",
+              "intended_use", "format", "image")
+_CARD_LISTS = ("tags", "gallery")
+_CARD_FLAGS = ("readme", "nsfw")
+
+
+def _card_ok(card):
+    if not isinstance(card, dict):
+        return False
+    return all(isinstance(card[k], str) for k in _CARD_TEXT if k in card) \
+        and all(isinstance(card[k], list) and all(isinstance(x, str) for x in card[k])
+                for k in _CARD_LISTS if k in card) \
+        and all(isinstance(card[k], bool) for k in _CARD_FLAGS if k in card)
+
+
+def _entry_delegation_ok(d):
+    """The delegation beside an entry's publication signature: absent, null,
+    or an object with its three required strings. Shape only — whether the
+    user key really signed it is the supervisor's check."""
+    if d is None:
+        return True
+    return isinstance(d, dict) \
+        and all(isinstance(d.get(k), str) for k in ("user_key", "orb_key", "sig")) \
+        and ("user_name" not in d or isinstance(d["user_name"], str)) \
+        and ("issued_ms" not in d or _int_in(d["issued_ms"], _I64_MIN, _I64_MAX))
+
+
+def known_fields_ok(m):
+    """True when every field of `m` that the supervisor knows has the type the
+    supervisor reads it as. A field that is absent is fine; a field nobody
+    here knows is not looked at."""
+    return all(isinstance(m[k], str) for k in _ENTRY_TEXT if k in m) \
+        and ("size_bytes" not in m or _int_in(m["size_bytes"], 0, _U64_MAX)) \
+        and ("added_at_ms" not in m or _int_in(m["added_at_ms"], _I64_MIN, _I64_MAX)) \
+        and ("verified" not in m or isinstance(m["verified"], bool)) \
+        and ("card" not in m or _card_ok(m["card"])) \
+        and ("delegation" not in m or _entry_delegation_ok(m["delegation"]))
+
+
+def clean_entry(m, budget):
+    """One model entry as it may be stored, or None to drop it.
+
+    An entry is dropped when it is not an object, has no usable `cid` and
+    `name`, is over the size limit, has a known field of the wrong type, or
+    holds a value that cannot be written to the registry (`wire_safe`). Its
+    upstream record and witnesses are rebuilt by `clean_provenance`. Every
+    other field, known or not, is passed on exactly as it came.
+    """
+    if not isinstance(m, dict):
+        return None
+    cid, name = m.get("cid"), m.get("name")
+    if not isinstance(cid, str) or not _CID_RE.match(cid):
+        return None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if len(json.dumps(m)) > MAX_ENTRY_BYTES:
+        return None
+    if not known_fields_ok(m):
+        return None
+    m = clean_provenance(m, budget)
+    # Last, over the whole entry as it will be stored: this is what covers the
+    # fields nobody here knows, which are passed on untouched.
+    return m if wire_safe(m) else None
+
+
 def sanitize_announcement(ann):
     """Reduce a peer's announcement to the fields and sizes we accept, or None.
 
-    Model entries pass through verbatim (the supervisor parses and verifies
-    them) but only if they are well-formed and bounded; everything else is
-    rebuilt field by field, so an unexpected or oversized key never reaches
-    the registry. The exception inside an entry is its upstream record and
-    witness statements: those are rebuilt, and each witness signature is
+    Model entries are checked one at a time (`clean_entry`) and otherwise pass
+    through as they came; the supervisor parses and verifies them. Everything
+    else is rebuilt field by field, so an unexpected or oversized key never
+    reaches the registry. The exception inside an entry is its upstream record
+    and witness statements: those are rebuilt, and each witness signature is
     checked here, so a statement nobody signed is never stored or shown.
+
+    Whatever is wrong with one entry costs that entry only: the peer's other
+    entries, and every other peer's, are kept.
     """
     if not isinstance(ann, dict):
         return None
@@ -573,44 +709,45 @@ def sanitize_announcement(ann):
     clean = []
     budget = VerifyBudget()
     for m in models[:MAX_MODELS]:
-        if not isinstance(m, dict):
-            continue
-        cid, name = m.get("cid"), m.get("name")
-        if not isinstance(cid, str) or not _CID_RE.match(cid):
-            continue
-        if not isinstance(name, str) or not name.strip():
-            continue
         try:
-            if len(json.dumps(m)) > MAX_ENTRY_BYTES:
-                continue
-        except (TypeError, ValueError):
-            continue
-        clean.append(clean_provenance(m, budget))
+            m = clean_entry(m, budget)
+        except Exception:
+            # Nothing an entry contains may take the rest of the announcement
+            # down with it, including whatever was not thought of here.
+            m = None
+        if m is not None:
+            clean.append(m)
     addrs = ann.get("addrs") if isinstance(ann.get("addrs"), list) else []
     seen = ann.get("seen") if isinstance(ann.get("seen"), list) else []
     starred = ann.get("starred") if isinstance(ann.get("starred"), list) else []
+    sent = ann.get("updated_ms")
     out = {
         "peer_id": pid,
         "label": _clean_text(ann.get("label"), 64),
-        "addrs": [a for a in addrs if isinstance(a, str) and 0 < len(a) <= 256][:16],
+        "addrs": [a for a in addrs if _plain_str(a) and 0 < len(a) <= 256][:16],
         "seen": [s for s in seen if _peer_id_shape(s)][:MAX_SEEN],
         "models": clean,
         "starred": [c for c in starred if isinstance(c, str) and _CID_RE.match(c)][:MAX_MODELS],
-        "sent_ms": ann.get("updated_ms") if isinstance(ann.get("updated_ms"), int) else 0,
+        "sent_ms": sent if _int_in(sent, _I64_MIN, _I64_MAX) else 0,
     }
     # The origin binding: opaque here, verified by the supervisor.
     key, sig = ann.get("orb_key"), ann.get("orb_sig")
-    if isinstance(key, str) and isinstance(sig, str) and len(key) == 64 and len(sig) <= 128:
+    if _plain_str(key) and _plain_str(sig) and len(key) == 64 and len(sig) <= 128:
         out["orb_key"], out["orb_sig"] = key, sig
         d = ann.get("delegation")
         if isinstance(d, dict):
-            clean = {
+            issued = d.get("issued_ms")
+            deleg = {
                 "user_key": d.get("user_key"), "orb_key": d.get("orb_key"), "sig": d.get("sig"),
                 "user_name": _clean_text(d.get("user_name"), 40),
-                "issued_ms": d.get("issued_ms") if isinstance(d.get("issued_ms"), int) else 0,
+                "issued_ms": issued if _int_in(issued, _I64_MIN, _I64_MAX) else 0,
             }
-            if all(isinstance(clean[k], str) and 0 < len(clean[k]) <= 128 for k in ("user_key", "orb_key", "sig")):
-                out["delegation"] = clean
+            if all(_plain_str(deleg[k]) and 0 < len(deleg[k]) <= 128 for k in ("user_key", "orb_key", "sig")):
+                out["delegation"] = deleg
+    # Everything above is built to be storable. Should that ever not hold for
+    # what the peer says about itself, it is this one peer that is not recorded.
+    if not wire_safe({k: v for k, v in out.items() if k != "models"}):
+        return None
     return out
 
 
@@ -623,7 +760,7 @@ def accept_message(sender, payload):
         return None, "empty"
     try:
         raw = json.loads(payload)
-    except ValueError:
+    except (ValueError, RecursionError):  # the latter: nested past what Python will parse
         return None, "not json"
     ann = sanitize_announcement(raw)
     if ann is None:
@@ -659,6 +796,13 @@ class LineBuffer:
 
 # ── The registry ────────────────────────────────────────────────────────────
 
+def _stored_ok(pid, rec):
+    """A peer record read back from disk that may be kept and written again."""
+    return _plain_str(pid) and isinstance(rec, dict) \
+        and _int_in(rec.get("updated_ms", 0), _I64_MIN, _I64_MAX) \
+        and wire_safe(rec, MAX_NESTING + 2)  # the record and its list of models sit above each entry
+
+
 class Registry:
     """Every Orb heard on the topic, keyed by peer id.
 
@@ -670,8 +814,12 @@ class Registry:
     def __init__(self, path):
         self.path = path
         self._lock = threading.Lock()
-        peers = read_json(path, {"peers": {}}).get("peers")
-        self.peers = peers if isinstance(peers, dict) else {}
+        stored = read_json(path, {"peers": {}})
+        peers = stored.get("peers") if isinstance(stored, dict) else None
+        # A record written by an older build may hold a value that makes the
+        # file unreadable to the supervisor (see `wire_safe`). Leave it behind
+        # here instead of writing it out again until the peer expires.
+        self.peers = {k: v for k, v in peers.items() if _stored_ok(k, v)} if isinstance(peers, dict) else {}
         self._content_dirty = False
         self._dirty = False
         self._flushed_at = 0.0

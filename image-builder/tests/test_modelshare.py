@@ -128,6 +128,61 @@ class Acceptance(unittest.TestCase):
             self.assertIsNone(ms.sanitize_announcement(bad))
 
 
+def entry(name="m", **over):
+    """A model entry with every field the supervisor knows, as an Orb sends it."""
+    m = {"cid": CID, "name": name, "file": "model.gguf", "size_bytes": 20, "sha256": "ab" * 32,
+         "card": {"kind": "llm", "base_model": "", "params": "8B", "quant": "q4", "license": "mit",
+                  "description": "d", "intended_use": "", "tags": ["a", "b"], "format": "gguf",
+                  "image": "", "readme": True, "nsfw": False, "gallery": []},
+         "added_at_ms": 1760000000000, "origin_id": "orb-1", "origin_label": "an orb",
+         "verified": True, "source": "https://example.test/m",
+         "pub_key": "", "pub_name": "", "pub_sig": ""}
+    m.update(over)
+    return m
+
+
+def card(**over):
+    return dict(entry()["card"], **over)
+
+
+DELEGATION = {"user_key": "cd" * 32, "user_name": "alice", "orb_key": "ab" * 32, "issued_ms": 5, "sig": "c2ln"}
+
+
+def raw_announcement(pid, models_json, head='"label": "orb", "addrs": [], "updated_ms": 1'):
+    """An announcement as TEXT, for values `json.dumps` would never produce
+    but a peer can send: NaN, a number of 400 digits, an unpaired surrogate."""
+    return '{"v": 1, "peer_id": "%s", %s, "seen": [], "starred": [], "models": [%s]}' % (pid, head, models_json)
+
+
+def strictly_readable(text):
+    """Would a strict JSON parser read this file? Written out here, on its
+    own terms, as what the supervisor's parser (serde_json) requires: no NaN
+    or Infinity, every number finite as a double, no unpaired surrogate, and
+    nesting well inside its limit of 128."""
+    def refuse(name):
+        raise ValueError(name)
+    try:
+        doc = json.loads(text, parse_constant=refuse)
+    except ValueError:
+        return False
+
+    def walk(v, depth):
+        if isinstance(v, bool) or v is None:
+            return True
+        if isinstance(v, int):
+            return v.bit_length() <= 64
+        if isinstance(v, float):
+            return v == v and v not in (float("inf"), float("-inf"))
+        if isinstance(v, str):
+            return not any(0xD800 <= ord(ch) <= 0xDFFF for ch in v)
+        if depth >= 64:
+            return False
+        if isinstance(v, list):
+            return all(walk(x, depth + 1) for x in v)
+        return all(walk(k, depth) and walk(x, depth + 1) for k, x in v.items())
+    return walk(doc, 0)
+
+
 def witnessed(**over):
     """A model entry carrying the published witness vector."""
     w = VECTORS["witness"]
@@ -293,6 +348,243 @@ class Witnesses(unittest.TestCase):
         self.assertEqual(stored["witnesses"], [good])
         self.assertEqual([f["path"] for f in stored["upstream_record"]["files"]],
                          ["example-1b-q4.gguf", "sub/tokenizer.json", "sub/weights.safetensors"])
+
+
+class EntryTypes(unittest.TestCase):
+    """One entry with a field of the wrong type used to empty every Orb's
+    index: the supervisor read the whole registry in one typed parse."""
+
+    def kept(self, *models):
+        return [m["name"] for m in accepted(*models)]
+
+    def test_a_well_typed_entry_is_passed_on_as_it_came(self):
+        for good in (entry(), entry(delegation=None), entry(delegation=dict(DELEGATION)),
+                     entry(delegation={"user_key": "k", "orb_key": "o", "sig": "s"}),
+                     entry(size_bytes=0), entry(size_bytes=2 ** 64 - 1), entry(added_at_ms=-(2 ** 63)),
+                     entry(card={}), entry(card=card(tags=[], gallery=["g.png"])),
+                     entry(btih="ab" * 20, upstream="hailo-model-zoo"), {"cid": CID, "name": "bare"}):
+            (m,) = accepted(good)
+            self.assertIs(m, good)
+
+    def test_a_known_field_of_the_wrong_type_drops_only_that_entry(self):
+        bad = [entry("bad", **{k: v}) for k in ms._ENTRY_TEXT for v in (5, None, ["x"], {"a": 1}, True)]
+        bad += [entry("bad", size_bytes=v) for v in ("x", "20", -1, 1.5, 20.0, True, None, 2 ** 64, [20])]
+        bad += [entry("bad", added_at_ms=v) for v in ("yesterday", 1.5, True, None, 2 ** 63, -(2 ** 63) - 1)]
+        bad += [entry("bad", verified=v) for v in ("yes", "true", 1, 0, None, [])]
+        bad += [entry("bad", card=v) for v in ("a card", None, [], 7, True)]
+        bad += [entry("bad", card=card(**{k: v})) for k in ms._CARD_TEXT for v in (3, None, ["x"], False)]
+        bad += [entry("bad", card=card(**{k: v})) for k in ms._CARD_LISTS for v in ("llm", None, {"a": 1}, ["a", 7], [None], [["a"]])]
+        bad += [entry("bad", card=card(**{k: v})) for k in ms._CARD_FLAGS for v in ("no", 1, 0, None)]
+        bad += [entry("bad", delegation=v) for v in (
+            "mine", [], 7, True, {}, {"user_key": "k", "orb_key": "o"},
+            dict(DELEGATION, user_key=1), dict(DELEGATION, orb_key=None), dict(DELEGATION, sig=["s"]),
+            dict(DELEGATION, user_name=5), dict(DELEGATION, issued_ms="5"), dict(DELEGATION, issued_ms=1.5),
+            dict(DELEGATION, issued_ms=2 ** 63))]
+        self.assertGreater(len(bad), 100)
+        for m in bad:
+            self.assertEqual(self.kept(entry("first"), m, entry("last")), ["first", "last"], m)
+        # All of them in one announcement, between good entries: same answer.
+        self.assertEqual(self.kept(entry("first"), *bad, entry("last")), ["first", "last"])
+
+    def test_a_field_nobody_here_knows_passes_through_untouched(self):
+        extra = {"future_field": {"anything": [1, 2.5, None, True, "two", {"deeper": []}]},
+                 "x_note": "caf\u00e9 \U0001f600", "size": "not size_bytes, so not ours to judge",
+                 "tags": 7, "kind": ["also only known inside card"]}
+        m = entry(**extra)
+        before = json.loads(json.dumps(m))
+        (out,) = accepted(m)
+        self.assertIs(out, m)
+        self.assertEqual(out, before)
+        # Unknown members of the card too.
+        (out,) = accepted(entry(card=card(future={"a": 1}, context_length=8192)))
+        self.assertEqual((out["card"]["future"], out["card"]["context_length"]), ({"a": 1}, 8192))
+        # And beside an upstream record, which IS rebuilt: the rest is not.
+        (out,) = accepted(witnessed(**extra))
+        self.assertEqual({k: out[k] for k in extra}, extra)
+        self.assertIn("upstream_record", out)
+
+    def test_the_size_and_count_limits_still_hold(self):
+        big = entry("big", card=card(description="x" * ms.MAX_ENTRY_BYTES))
+        self.assertEqual(self.kept(entry("first"), big, entry("last")), ["first", "last"])
+        many = [entry("m%d" % i) for i in range(ms.MAX_MODELS + 50)]
+        self.assertEqual(len(accepted(*many)), ms.MAX_MODELS)
+
+    def test_an_entry_that_cannot_be_processed_is_dropped_alone(self):
+        real = ms.clean_provenance
+
+        def explode(m, budget):
+            if m["name"] == "boom":
+                raise RuntimeError("something nobody thought of")
+            return real(m, budget)
+        ms.clean_provenance = explode
+        try:
+            self.assertEqual(self.kept(entry("first"), entry("boom"), entry("last")), ["first", "last"])
+        finally:
+            ms.clean_provenance = real
+
+
+class Storable(unittest.TestCase):
+    """Python reads and writes values a strict JSON parser refuses. One of them
+    anywhere in the registry makes the whole FILE unreadable to the
+    supervisor, whatever care it takes entry by entry."""
+
+    GOOD = json.dumps({"cid": CID, "name": "first"}), json.dumps({"cid": CID, "name": "last"})
+
+    def setUp(self):
+        ms._sig_cache.clear()
+
+    def stored(self, *announcements):
+        """Accept each (sender, text), merge it, write the registry, and hand
+        back the file's text and what it holds."""
+        reg = ms.Registry(os.path.join(_tmp.name, "storable-%s.json" % self.id().rsplit(".", 1)[-1]))
+        reg.peers.clear()
+        for sender, text in announcements:
+            ann, _ = ms.accept_message(sender, text)
+            if ann is not None:
+                reg.merge(ann, at_ms=5)
+        self.assertTrue(reg.flush(force=True))
+        with open(reg.path) as f:
+            text = f.read()
+        return text, json.loads(text)["peers"]
+
+    @staticmethod
+    def evil(inner):
+        return '{"cid": "%s", "name": "evil", %s}' % (CID, inner)
+
+    def test_the_strict_reader_used_here_refuses_what_it_should(self):
+        for bad in ('{"x": NaN}', '{"x": -Infinity}', '{"x": 1e400}', '{"x": %s}' % ("9" * 400),
+                    '{"x": "\\ud800"}', '{"\\udc00": 1}', '{"x": %s%s}' % ("[" * 200, "]" * 200)):
+            self.assertFalse(strictly_readable(bad), bad[:40])
+        self.assertTrue(strictly_readable('{"x": [1, -2.5, 1e300, 18446744073709551615, "\\ud83d\\ude00", null, true]}'))
+
+    def test_a_value_no_strict_parser_reads_drops_only_that_entry(self):
+        nest = lambda k: "[" * k + "]" * k
+        hostile = {
+            "NaN": '"x": NaN', "-Infinity": '"x": -Infinity', "a float out of range": '"x": 1e400',
+            "an integer of 400 digits": '"x": %s' % ("9" * 400),
+            "an integer just past 64 bits": '"x": %d' % (2 ** 64),
+            "an unpaired surrogate": '"x": "\\ud800"', "one as a key": '"\\udc00": 1',
+            "one inside the card": '"card": {"description": "a\\ud800b"}',
+            "one in a known text field": '"source": "\\udfff"',
+            "one deep inside": '"x": {"a": [{"b": "\\ud800"}]}',
+            "NaN deep inside": '"x": {"a": [1, {"b": [NaN]}]}',
+            "nesting past the limit": '"x": %s' % nest(ms.MAX_NESTING),
+            "nesting far past it": '"x": %s' % nest(200),
+        }
+        first, last = self.GOOD
+        for what, inner in hostile.items():
+            text, peers = self.stored((ALICE, raw_announcement(ALICE, "%s, %s, %s" % (first, self.evil(inner), last))),
+                                      (BOB, raw_announcement(BOB, first)))
+            self.assertEqual([m["name"] for m in peers[ALICE]["models"]], ["first", "last"], what)
+            self.assertEqual([m["name"] for m in peers[BOB]["models"]], ["first"], what)
+            self.assertTrue(strictly_readable(text), what)
+        # The same in the entry's own name: there is no good half of it to keep.
+        text, peers = self.stored((ALICE, raw_announcement(ALICE, '%s, {"cid": "%s", "name": "evil\\ud800"}, %s' % (first, CID, last))))
+        self.assertEqual([m["name"] for m in peers[ALICE]["models"]], ["first", "last"])
+        self.assertTrue(strictly_readable(text))
+        # What IS storable is kept: a pair of surrogates is one character, and
+        # nesting up to the limit is nobody's business.
+        fine = self.evil('"x": "\\ud83d\\ude00", "y": %s, "z": [1e300, -1.5, 18446744073709551615, -9223372036854775808]' % nest(ms.MAX_NESTING - 1))
+        text, peers = self.stored((ALICE, raw_announcement(ALICE, fine)))
+        (m,) = peers[ALICE]["models"]
+        self.assertEqual((m["x"], m["z"]), ("\U0001f600", [1e300, -1.5, 2 ** 64 - 1, -(2 ** 63)]))
+        self.assertTrue(strictly_readable(text))
+
+    def test_what_a_peer_says_about_itself_is_storable_too(self):
+        first, _ = self.GOOD
+        binding = '"orb_key": "%s", "orb_sig": "c2ln"' % ("ab" * 32)
+        cases = {
+            "label": '"label": "orb\\ud800!", "addrs": [], "updated_ms": 1',
+            "addrs": '"label": "orb", "addrs": ["203.0.113.7", "\\ud800", "198.51.100.9"], "updated_ms": 1',
+            "updated_ms": '"label": "orb", "addrs": [], "updated_ms": %s' % ("9" * 400),
+            "updated_ms nan": '"label": "orb", "addrs": [], "updated_ms": NaN',
+            "orb_key": '"label": "orb", "addrs": [], "updated_ms": 1, "orb_key": "%s", "orb_sig": "c2ln"' % ("\\ud800" * 64),
+            "orb_sig": '"label": "orb", "addrs": [], "updated_ms": 1, "orb_key": "%s", "orb_sig": "\\ud800"' % ("ab" * 32),
+            "delegation time": '"label": "orb", "addrs": [], "updated_ms": 1, %s, "delegation": {"user_key": "k", "orb_key": "o", "sig": "s", "issued_ms": %s}' % (binding, "9" * 400),
+            "delegation key": '"label": "orb", "addrs": [], "updated_ms": 1, %s, "delegation": {"user_key": "\\ud800", "orb_key": "o", "sig": "s", "user_name": "a\\ud800"}' % binding,
+        }
+        for what, head in cases.items():
+            text, peers = self.stored((ALICE, raw_announcement(ALICE, first, head)), (BOB, raw_announcement(BOB, first)))
+            self.assertTrue(strictly_readable(text), what)
+            # The peer is still listed with its model: only the bad part went.
+            self.assertEqual([m["name"] for m in peers[ALICE]["models"]], ["first"], what)
+            self.assertEqual([m["name"] for m in peers[BOB]["models"]], ["first"], what)
+        _, peers = self.stored((ALICE, raw_announcement(ALICE, first, cases["label"])))
+        self.assertEqual(peers[ALICE]["label"], "orb!")
+        _, peers = self.stored((ALICE, raw_announcement(ALICE, first, cases["addrs"])))
+        self.assertEqual(peers[ALICE]["addrs"], ["203.0.113.7", "198.51.100.9"])
+        _, peers = self.stored((ALICE, raw_announcement(ALICE, first, cases["updated_ms"])))
+        self.assertEqual(peers[ALICE]["sent_ms"], 0)
+        for what in ("orb_key", "orb_sig"):
+            _, peers = self.stored((ALICE, raw_announcement(ALICE, first, cases[what])))
+            self.assertNotIn("orb_key", peers[ALICE], what)
+        _, peers = self.stored((ALICE, raw_announcement(ALICE, first, cases["delegation time"])))
+        self.assertEqual(peers[ALICE]["delegation"]["issued_ms"], 0)
+        _, peers = self.stored((ALICE, raw_announcement(ALICE, first, cases["delegation key"])))
+        self.assertNotIn("delegation", peers[ALICE])
+
+    def test_a_signed_statement_with_an_unstorable_time_is_dropped_and_the_rest_kept(self):
+        # No test can sign, so every signature is taken to hold here: what is
+        # under test is what happens to a statement whose signature DOES hold.
+        real = ms.ed25519_verify
+        ms.ed25519_verify = lambda *a: True
+        try:
+            good = witnessed()["witnesses"][0]
+            deleg = {"user_key": "cd" * 32, "orb_key": good["key"], "sig": "c2ln", "issued_ms": 5}
+            (m,) = accepted(witnessed(witnesses=[dict(good, observed_ms=2 ** 63), dict(good, observed_ms=10 ** 400), good]))
+            self.assertEqual(m["witnesses"], [good])
+            for bad in (dict(deleg, issued_ms=2 ** 63), dict(deleg, issued_ms=10 ** 400),
+                        dict(deleg, user_key="\ud800" * 64), dict(deleg, user_key=5)):
+                (m,) = accepted(witnessed(witnesses=[dict(good, delegation=bad)]))
+                self.assertEqual(m["witnesses"], [good], bad)
+            (m,) = accepted(witnessed(witnesses=[dict(good, delegation=deleg)]))
+            self.assertEqual(m["witnesses"][0]["delegation"]["issued_ms"], 5)
+            # A record that cannot be encoded is not a record: it goes, with
+            # its witnesses, and the entry stays.
+            base = witnessed()["upstream_record"]
+            unencodable_path = json.loads(json.dumps(base))
+            unencodable_path["files"][0]["path"] = "a\ud800.gguf"
+            for rec in (dict(base, repo="org/\ud800"), dict(base, revision="\udfff"), unencodable_path):
+                (m,) = accepted(witnessed(upstream_record=rec))
+                self.assertNotIn("upstream_record", m)
+                self.assertNotIn("witnesses", m)
+                self.assertEqual(m["cid"], CID)
+        finally:
+            ms.ed25519_verify = real
+
+    def test_a_payload_nested_too_deep_to_parse_is_not_an_announcement(self):
+        for payload in ("[" * 100000 + "]" * 100000, '{"peer_id": "%s", "models": %s}' % (ALICE, "[" * 100000 + "]" * 100000)):
+            ann, why = ms.accept_message(ALICE, payload)
+            self.assertIsNone(ann)
+            self.assertTrue(why)
+
+    def test_a_record_that_makes_the_file_unreadable_is_not_carried_over(self):
+        # A registry written by a build from before this check, holding one
+        # peer whose entry no strict parser reads, one whose record is not a
+        # record, and two good peers.
+        path = os.path.join(_tmp.name, "carried-over.json")
+        good = '{"peer_id": "%%s", "label": "orb", "addrs": [], "updated_ms": 5, "sent_ms": 1, "models": [{"cid": "%s", "name": "kept", "size_bytes": "x"}], "starred": []}' % CID
+        poisoned = good.replace('"size_bytes": "x"', '"x": %s')
+        with open(path, "w") as f:
+            f.write('{"peers": {"%s": %s, "%s": %s, "nan": %s, "big": %s, "sur": %s, "deep": %s, "junk": 7, "time": %s}}' % (
+                ALICE, good % ALICE, BOB, good % BOB,
+                poisoned % ("nan", "NaN"), poisoned % ("big", "9" * 400), poisoned % ("sur", '"\\ud800"'),
+                poisoned % ("deep", "[" * 200 + "]" * 200), (good % "time").replace('"updated_ms": 5', '"updated_ms": "now"')))
+        with open(path) as f:
+            self.assertFalse(strictly_readable(f.read()))
+        reg = ms.Registry(path)
+        self.assertEqual(sorted(reg.peers), sorted([ALICE, BOB]))
+        # An entry with a mistyped field is left for the supervisor, which
+        # skips it alone; it does not make the file unreadable.
+        self.assertEqual(reg.peers[ALICE]["models"][0]["size_bytes"], "x")
+        self.assertTrue(reg.flush(force=True))
+        with open(path) as f:
+            self.assertTrue(strictly_readable(f.read()))
+        # A file that is not a registry at all is an empty one.
+        for junk in ("[]", "7", '{"peers": []}', "not json"):
+            with open(path, "w") as f:
+                f.write(junk)
+            self.assertEqual(ms.Registry(path).peers, {})
 
 
 class Lines(unittest.TestCase):

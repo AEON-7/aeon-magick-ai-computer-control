@@ -262,6 +262,13 @@ async fn fetch_peer(addr: &str, token: &str) -> Value {
                     if let Some(obj) = status.as_object_mut() {
                         obj.insert("online".to_string(), json!(true));
                         obj.insert("addr".to_string(), json!(addr_owned));
+                        // The peer's shared-model list is read by the console
+                        // entry by entry. Rebuild it, so a malformed entry is
+                        // left out here instead of stopping the page that
+                        // unions every Orb's list.
+                        if let Some(models) = obj.get_mut("ipfs_models") {
+                            *models = crate::ipfs::fleet_models(models);
+                        }
                     }
                     return status;
                 }

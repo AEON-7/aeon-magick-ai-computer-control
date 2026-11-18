@@ -126,9 +126,27 @@ mirrors the same file produces the same CID** and they all seed one swarm.
 `cid`, `name`, `file`, `size_bytes`, `sha256`, `card`, `added_at_ms`,
 `origin_id`, `origin_label`, `verified`, `source`, `pub_key`, `pub_name`,
 `pub_sig`, and optionally `delegation`, `btih` (BitTorrent v1 infohash of
-the same files, hex40, when the announcer also seeds them there),
+the same files, hex40, when the announcer also seeds them there), `upstream`
+(the vendor tag of §3, on a byte-identical vendor mirror),
 `upstream_record` and `witnesses` (§10). Unknown fields must be preserved when
 an entry is re-announced.
+
+**Types.** `size_bytes` is a whole number from 0 to 2^64 − 1. `added_at_ms` is
+a whole number that fits a signed 64-bit integer. `verified` is `true` or
+`false`. `card` is an object with the members of §3: text, lists of text for
+`tags` and `gallery`, `true` or `false` for `readme` and `nsfw`. `delegation`
+is the object shown in §3, with `user_key`, `orb_key` and `sig` present, or
+`null`. `upstream_record` and `witnesses` are described in §10. Every other
+field named above is text. Any field except `cid` and `name` may be left out;
+one that is present has its type. `20.0`, `"20"` and `null` are not whole
+numbers, and `null` is not text.
+
+**Values.** Everything in an entry, including fields this document does not
+name, must be JSON that a strict parser reads: no `NaN` or `Infinity`, whole
+numbers from −2^63 to 2^64 − 1, other numbers finite as a double, no unpaired
+surrogate (`"\ud800"`) in a string or a member name, and lists and objects
+nested at most 32 deep, counting the entry itself. Parsers differ on all four,
+and an index is only as readable as the strictest parser that has to read it.
 
 ## 5. Discovery
 
@@ -153,6 +171,18 @@ an entry is re-announced.
   chars. Record it under your own receive time; drop a peer after 15 minutes
   of silence. Keep announcements under 900 KiB (pubsub drops messages over
   1 MiB).
+- **One entry, one peer.** Judge each entry by itself. Drop an entry that is
+  not an object, has no usable `cid` or `name`, is over the size limit, has a
+  field named in §4 with the wrong type, or holds a value outside the limits
+  of §4 anywhere in it, including inside a field you do not know. Pass on what
+  you keep as it came: fields you do not know are neither removed nor changed.
+  **Never let one entry invalidate the rest of a peer's entries, or one peer
+  invalidate what you heard from the others.** That holds wherever the index
+  is read again later, not only on receipt: a store that is parsed in one
+  piece must be read peer by peer and entry by entry, skipping what does not
+  parse, and must never be handed a value that makes the whole of it
+  unreadable. What a peer says about itself (label, addresses, binding) is
+  rebuilt under the same limits, with the part that does not fit left out.
 - **Witnesses.** Rebuild an entry's `upstream_record` field by field; if it is
   not well-formed, remove it and the entry's `witnesses`, and keep the entry.
   Verify every witness signature against that record and drop each one that
