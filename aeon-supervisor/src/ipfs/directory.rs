@@ -776,6 +776,9 @@ fn do_pull(l: &Listing, key: &str) -> Result<(), String> {
         // that pulls the same listing lands on the same CID and seeds one swarm.
         upstream: format!("directory:{}", if l.publisher.is_empty() { "unnamed" } else { &l.publisher }),
         identity: false,
+        // A directory listing is not one of the providers an upstream record
+        // is kept for; its own file list is the check (see above).
+        provider_record: None,
     };
     let mut entry = finalize_share(staging.path(), spec, &known)?;
     entry.btih = l.btih.clone();

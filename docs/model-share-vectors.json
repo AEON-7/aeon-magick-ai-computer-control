@@ -71,5 +71,35 @@
     "sig": "1Pe125SfXNdsRbFHqO0CfrScp4QnZsJcAps62VVrRxBe1+Co3CQiMIKZ1K+L8bhskt3tCFSlxprJPoDoiKhnCA==",
     "signed_text": "aeon-publish/1\nbafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi\nExample 1B Q4\nabababababababababababababababababababababababababababababababab\n1760000000000",
     "signer": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61"
+  },
+  "witness": {
+    "domain": "aeon-witness/1",
+    "files": [
+      {
+        "hash_from": "provider",
+        "path": "example-1b-q4.gguf",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1048576
+      },
+      {
+        "hash_from": "computed",
+        "path": "sub/tokenizer.json",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "size": 2
+      },
+      {
+        "hash_from": "provider",
+        "path": "sub/weights.safetensors",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "size": 4096
+      }
+    ],
+    "observed_ms": 1760000000004,
+    "provider": "huggingface",
+    "repo": "example/example-1b",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "sig": "FUgQn9Z4yfKwXIqnIPkDz9rXyhj+n9xcMMW/Mo8v3tWv337ZqBGtdAyORz8QZNm4NQMyGoLyvYNVBzjO7xhTAQ==",
+    "signed_text": "aeon-witness/1\nhuggingface\nexample/example-1b\n0123456789abcdef0123456789abcdef01234567\n1760000000004\nabababababababababababababababababababababababababababababababab 1048576 example-1b-q4.gguf\n3333333333333333333333333333333333333333333333333333333333333333 4096 sub/weights.safetensors\n",
+    "signer": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61"
   }
 }

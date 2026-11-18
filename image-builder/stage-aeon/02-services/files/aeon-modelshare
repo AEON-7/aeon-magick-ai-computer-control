@@ -30,6 +30,7 @@ already-public model-card metadata); the weights themselves move over the
 normal IPFS swarm when a peer pins the CID.
 """
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -39,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 
 TOPIC = "aeon-model-share/v1"
 # Overridable so the logic can be exercised off-device (see tests).
@@ -78,6 +80,13 @@ FLUSH_CHANGED_S = 5       # write the registry this soon after its content chang
 FLUSH_IDLE_S = 60         # …and this often when only last-seen times moved
 DIAL_WORKERS = 4
 CONNECTED_TTL_S = 20      # how long one `swarm peers` listing is reused
+MAX_RECORD_FILES = 512    # files in one model's upstream record
+MAX_WITNESSES = 16        # witness statements carried on one model entry
+# Signature checks one announcement may cost. Each takes milliseconds in pure
+# Python on a Pi, so a peer that floods fresh signatures must not be able to
+# pin this thread. Results are remembered, so an honest catalog larger than
+# this is fully checked within a few of its (minutely) announcements.
+VERIFY_BUDGET = 64
 
 SELF_PID = ""  # our own peer id — cached in main(), used to skip self-announcements
 
@@ -310,13 +319,251 @@ def _decode_payload(data):
     return data if data.lstrip().startswith("{") else None
 
 
+# ── Ed25519 verification (RFC 8032), standard library only ──────────────────
+#
+# Witness statements are signed claims that travel with a model entry. A claim
+# whose signature does not hold must not be passed on, so the daemon checks
+# each one itself instead of leaving it all to the supervisor. Verification
+# only: there is no secret here and nothing to keep constant-time.
+
+_P = 2 ** 255 - 19
+_L = 2 ** 252 + 27742317777372353535851937790883648493
+_D = -121665 * pow(121666, _P - 2, _P) % _P
+_SQRT_M1 = pow(2, (_P - 1) // 4, _P)
+
+
+def _ed_recover_x(y, sign):
+    if y >= _P:
+        return None
+    x2 = (y * y - 1) * pow(_D * y * y + 1, _P - 2, _P) % _P
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P != 0:
+        x = x * _SQRT_M1 % _P
+    if (x * x - x2) % _P != 0:
+        return None
+    if (x & 1) != sign:
+        x = _P - x
+    return x
+
+
+_GY = 4 * pow(5, _P - 2, _P) % _P
+_GX = _ed_recover_x(_GY, 0)
+_G = (_GX, _GY, 1, _GX * _GY % _P)
+
+
+def _ed_add(p, q):
+    a = (p[1] - p[0]) * (q[1] - q[0]) % _P
+    b = (p[1] + p[0]) * (q[1] + q[0]) % _P
+    c = 2 * p[3] * q[3] * _D % _P
+    d = 2 * p[2] * q[2] % _P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _P, g * h % _P, f * g % _P, e * h % _P)
+
+
+def _ed_mul(s, p):
+    q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            q = _ed_add(q, p)
+        p = _ed_add(p, p)
+        s >>= 1
+    return q
+
+
+def _ed_decompress(b):
+    if len(b) != 32:
+        return None
+    y = int.from_bytes(b, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _ed_recover_x(y, sign)
+    if x is None:
+        return None
+    return (x, y, 1, x * y % _P)
+
+
+def ed25519_verify(pub, msg, sig):
+    """True iff `sig` (64 bytes) is `pub`'s (32 bytes) signature over `msg`."""
+    if len(pub) != 32 or len(sig) != 64:
+        return False
+    a = _ed_decompress(pub)
+    r = _ed_decompress(sig[:32])
+    if a is None or r is None:
+        return False
+    s = int.from_bytes(sig[32:], "little")
+    if s >= _L:
+        return False
+    h = int.from_bytes(hashlib.sha512(sig[:32] + pub + msg).digest(), "little") % _L
+    left = _ed_mul(s, _G)
+    right = _ed_add(r, _ed_mul(h, a))
+    return (left[0] * right[2] - right[0] * left[2]) % _P == 0 \
+        and (left[1] * right[2] - right[1] * left[2]) % _P == 0
+
+
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_PROVIDER_RE = re.compile(r"^[a-z0-9-]{1,32}$")
+_sig_cache = {}  # (key, sig, sha256 of the signed text) → bool
+
+
+class VerifyBudget:
+    """How many NEW signature checks one announcement may still cost."""
+
+    def __init__(self, left=VERIFY_BUDGET):
+        self.left = left
+
+
+def signature_ok(key_hex, text, sig_b64, budget):
+    """True / False for a checked signature, None when the budget ran out
+    before this one could be checked (try again on a later announcement)."""
+    if not (isinstance(key_hex, str) and _HEX64_RE.match(key_hex.lower())):
+        return False
+    if not isinstance(sig_b64, str) or not 0 < len(sig_b64) <= 128:
+        return False
+    cache_key = (key_hex.lower(), sig_b64, hashlib.sha256(text).hexdigest())
+    if cache_key in _sig_cache:
+        return _sig_cache[cache_key]
+    if budget.left <= 0:
+        return None
+    budget.left -= 1
+    try:
+        sig = base64.b64decode(sig_b64, validate=True)
+        ok = ed25519_verify(bytes.fromhex(key_hex), text, sig)
+    except Exception:
+        ok = False
+    if len(_sig_cache) > 20000:
+        _sig_cache.clear()
+    _sig_cache[cache_key] = ok
+    return ok
+
+
+def _has_control(s):
+    """Any control character at all (Unicode category Cc), as the supervisor
+    judges it — a newline inside a field would forge a line of signed text."""
+    return any(unicodedata.category(ch) == "Cc" for ch in s)
+
+
+def _one_line(s, limit):
+    return isinstance(s, str) and 0 < len(s) <= limit and not _has_control(s)
+
+
+def _safe_rel_path(p):
+    if not isinstance(p, str) or not p or len(p) > 1024 or p.startswith("/") or _has_control(p) or "\\" in p:
+        return False
+    return all(seg not in ("", ".", "..") for seg in p.split("/"))
+
+
+def clean_record(rec):
+    """An upstream record rebuilt field by field, files in path order — or
+    None when it is not one (docs/MODEL_SHARE_PROTOCOL.md §10)."""
+    if not isinstance(rec, dict):
+        return None
+    provider, repo, revision, files = rec.get("provider"), rec.get("repo"), rec.get("revision"), rec.get("files")
+    if not (isinstance(provider, str) and _PROVIDER_RE.match(provider)):
+        return None
+    if not _one_line(repo, 200) or not _one_line(revision, 200):
+        return None
+    if not isinstance(files, list) or not 0 < len(files) <= MAX_RECORD_FILES:
+        return None
+    clean, seen = [], set()
+    for f in files:
+        if not isinstance(f, dict):
+            return None
+        path, size, sha, source = f.get("path"), f.get("size"), f.get("sha256"), f.get("hash_from")
+        if not _safe_rel_path(path) or path in seen:
+            return None
+        if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size < 2 ** 63:
+            return None
+        if not isinstance(sha, str) or not _HEX64_RE.match(sha.lower()):
+            return None
+        if source not in ("provider", "computed"):
+            return None
+        seen.add(path)
+        clean.append({"path": path, "size": size, "sha256": sha.lower(), "hash_from": source})
+    clean.sort(key=lambda f: f["path"].encode("utf-8"))
+    return {"provider": provider, "repo": repo, "revision": revision, "files": clean}
+
+
+def witness_text(rec, observed_ms):
+    """The exact bytes an `aeon-witness/1` statement signs: only the files
+    whose SHA-256 the provider itself published, in path order (UTF-8 bytes)."""
+    lines = "".join("%s %d %s\n" % (f["sha256"], f["size"], f["path"])
+                    for f in rec["files"] if f["hash_from"] == "provider")
+    head = "aeon-witness/1\n%s\n%s\n%s\n%d\n" % (rec["provider"], rec["repo"], rec["revision"], observed_ms)
+    return (head + lines).encode("utf-8")
+
+
+def _clean_delegation(d, orb_key, budget):
+    """A delegation naming `orb_key`, if the user key really signed it."""
+    if not isinstance(d, dict) or d.get("orb_key") != orb_key:
+        return None
+    user_key, sig, issued = d.get("user_key"), d.get("sig"), d.get("issued_ms")
+    if not isinstance(issued, int) or isinstance(issued, bool):
+        return None
+    text = ("aeon-delegate/1\n%s\n%s\n%d" % (user_key, orb_key, issued)).encode("utf-8")
+    if not signature_ok(user_key, text, sig, budget):
+        return None
+    return {"user_key": user_key, "user_name": _clean_text(d.get("user_name"), 40),
+            "orb_key": orb_key, "issued_ms": issued, "sig": sig}
+
+
+def clean_witnesses(rec, witnesses, budget):
+    """The witness statements whose signature holds for `rec`, rebuilt field
+    by field. One that fails, or cannot be checked within the budget, is
+    dropped. A delegation that does not hold is dropped and the statement is
+    kept, credited to the key that signed it."""
+    out = []
+    if not isinstance(witnesses, list) or not any(f["hash_from"] == "provider" for f in rec["files"]):
+        return out
+    for w in witnesses[:MAX_WITNESSES * 4]:
+        if len(out) >= MAX_WITNESSES:
+            break
+        if not isinstance(w, dict):
+            continue
+        key, sig, observed = w.get("key"), w.get("sig"), w.get("observed_ms")
+        if not isinstance(observed, int) or isinstance(observed, bool) or observed <= 0:
+            continue
+        if not signature_ok(key, witness_text(rec, observed), sig, budget):
+            continue
+        clean = {"key": key, "observed_ms": observed, "sig": sig}
+        delegation = _clean_delegation(w.get("delegation"), key, budget)
+        if delegation:
+            clean["delegation"] = delegation
+        out.append(clean)
+    return out
+
+
+def clean_provenance(m, budget):
+    """A model entry with its upstream record and witnesses held to the rules.
+
+    Everything else in the entry passes through as it came. A record that is
+    not well-formed is removed together with its witnesses; a witness whose
+    signature does not hold for the record is removed alone.
+    """
+    if "upstream_record" not in m and "witnesses" not in m:
+        return m
+    m = dict(m)
+    rec = clean_record(m.pop("upstream_record", None))
+    witnesses = m.pop("witnesses", None)
+    if rec is None:
+        return m
+    m["upstream_record"] = rec
+    kept = clean_witnesses(rec, witnesses, budget)
+    if kept:
+        m["witnesses"] = kept
+    return m
+
+
 def sanitize_announcement(ann):
     """Reduce a peer's announcement to the fields and sizes we accept, or None.
 
     Model entries pass through verbatim (the supervisor parses and verifies
     them) but only if they are well-formed and bounded; everything else is
     rebuilt field by field, so an unexpected or oversized key never reaches
-    the registry.
+    the registry. The exception inside an entry is its upstream record and
+    witness statements: those are rebuilt, and each witness signature is
+    checked here, so a statement nobody signed is never stored or shown.
     """
     if not isinstance(ann, dict):
         return None
@@ -324,6 +571,7 @@ def sanitize_announcement(ann):
     if not _peer_id_shape(pid) or not isinstance(models, list):
         return None
     clean = []
+    budget = VerifyBudget()
     for m in models[:MAX_MODELS]:
         if not isinstance(m, dict):
             continue
@@ -337,7 +585,7 @@ def sanitize_announcement(ann):
                 continue
         except (TypeError, ValueError):
             continue
-        clean.append(m)
+        clean.append(clean_provenance(m, budget))
     addrs = ann.get("addrs") if isinstance(ann.get("addrs"), list) else []
     seen = ann.get("seen") if isinstance(ann.get("seen"), list) else []
     starred = ann.get("starred") if isinstance(ann.get("starred"), list) else []

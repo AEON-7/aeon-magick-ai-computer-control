@@ -63,6 +63,14 @@ curl -sk -X POST -H "Authorization: Bearer $AEON_TOKEN" \
 
 The **`model_import`** MCP tool wraps all three: `{source, reference}`.
 
+Every import is pinned to one revision (the HuggingFace commit, the Ollama
+manifest digest, the Civitai version id) and keeps, per file, the SHA-256 the
+provider published — or, where it published none, the hash computed here,
+marked as computed. That record travels with the model, so it stays checkable
+if the provider later changes or removes it. The operator can ask the provider
+again from the model's detail view ("Check again"); that is an admin-only
+route with no MCP tool.
+
 ## pull it here, push it to serve
 
 - **`model_pull`** — materialize a shared model into this Orb's library (fetching

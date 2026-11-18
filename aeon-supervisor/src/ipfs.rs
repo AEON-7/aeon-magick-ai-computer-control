@@ -22,6 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::api::AppState;
 
 pub mod directory;
+pub mod upstream;
 
 const CONFIG_TOML: &str = "/etc/aeon/ipfs.toml";
 const SCRIPT: &str = "/usr/local/bin/aeon-ipfs";
@@ -420,6 +421,15 @@ pub struct ModelEntry {
     /// or let the vendor's work build the Orb's reputation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub upstream: String,
+    /// For a model imported from a provider: the revision that was pinned and,
+    /// per file, the SHA-256 the provider published (or, where it published
+    /// none, the hash computed at import — marked as such). See upstream.rs.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "upstream::lenient_record")]
+    pub upstream_record: Option<upstream::UpstreamRecord>,
+    /// Signed statements over `upstream_record`: who saw the provider publish
+    /// those hashes, and when each of them says it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "upstream::lenient_witnesses")]
+    pub witnesses: Vec<upstream::Witness>,
 }
 
 fn epoch_ms() -> i64 {
@@ -438,8 +448,13 @@ fn read_catalog() -> Vec<ModelEntry> {
 
 fn write_catalog(entries: &[ModelEntry]) -> std::io::Result<()> {
     std::fs::create_dir_all(MODELS_DIR)?;
+    // The catalog is announced as it is written. An entry over the gossip
+    // size limit would be dropped whole by every peer, so one that carries
+    // more witnesses or a larger upstream record than fits gives those up.
+    let mut entries = entries.to_vec();
+    entries.iter_mut().for_each(upstream::fit_for_gossip);
     let tmp = format!("{CATALOG_JSON}.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(entries).unwrap_or_default())?;
+    std::fs::write(&tmp, serde_json::to_string_pretty(&entries).unwrap_or_default())?;
     std::fs::rename(tmp, CATALOG_JSON)
 }
 
@@ -579,6 +594,10 @@ struct CardDoc {
     files: Option<Vec<FileRec>>,
     #[serde(default)]
     origin: Option<OriginBlock>,
+    #[serde(default, deserialize_with = "upstream::lenient_record")]
+    upstream_record: Option<upstream::UpstreamRecord>,
+    #[serde(default, deserialize_with = "upstream::lenient_witnesses")]
+    witnesses: Vec<upstream::Witness>,
 }
 
 fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
@@ -662,6 +681,9 @@ struct ShareSpec {
     /// Credit the share to the signed-in publisher identity (the default).
     /// False = signed by this Orb's key alone, with no name attached.
     identity: bool,
+    /// For an import from a provider: what the provider published for these
+    /// files, and when this Orb read it. None for everything else.
+    provider_record: Option<(upstream::UpstreamRecord, i64)>,
 }
 
 /// Write model-card.json (manifest + origin statement) into `dir` and return
@@ -699,6 +721,19 @@ fn prepare_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String,
         }
     };
 
+    // What the provider published, and this Orb's signed statement that it
+    // saw it. The record may only speak about files that are in this share.
+    let (upstream_record, witnesses) = match spec.provider_record {
+        Some((rec, seen_ms)) if !vendor_mirror => {
+            if !rec.within(&files) {
+                return Err("the upstream record does not match the files being shared".into());
+            }
+            let witness = upstream::sign_witness(&rec, seen_ms, spec.identity);
+            (Some(rec), witness.into_iter().collect::<Vec<_>>())
+        }
+        _ => (None, Vec::new()),
+    };
+
     let mut doc = json!({
         "schema": "aeon-model-card/2",
         "name": spec.name,
@@ -714,6 +749,12 @@ fn prepare_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String,
     });
     if !vendor_mirror {
         doc["shared_by"] = json!({"id": origin_id, "label": origin_label});
+    }
+    if let Some(rec) = &upstream_record {
+        doc["upstream_record"] = json!(rec);
+        if !witnesses.is_empty() {
+            doc["witnesses"] = json!(witnesses);
+        }
     }
     std::fs::write(dir.join(CARD_FILE), serde_json::to_vec_pretty(&doc).unwrap_or_default())
         .map_err(|e| format!("write card: {e}"))?;
@@ -731,6 +772,8 @@ fn prepare_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String,
         verified: spec.verified,
         source: spec.source,
         upstream: spec.upstream,
+        upstream_record,
+        witnesses,
         ..Default::default()
     })
 }
@@ -765,6 +808,9 @@ fn finalize_share(dir: &std::path::Path, spec: ShareSpec, known: &HashMap<String
         checked_ms: epoch_ms(),
         ..Default::default()
     });
+    // This Orb's own memory of what the provider published: one line in the
+    // append-only history.
+    upstream::note_recorded(&entry);
     Ok(entry)
 }
 
@@ -796,6 +842,13 @@ pub struct ContentCheck {
     pub source: String,
     #[serde(default)]
     pub checked_ms: i64,
+    /// The card's upstream record, when every file it names is in the checked
+    /// manifest with the same size and hash, and the witnesses on the card
+    /// whose signatures hold for it. Passed to the caller, not stored here.
+    #[serde(skip)]
+    pub upstream_record: Option<upstream::UpstreamRecord>,
+    #[serde(skip)]
+    pub witnesses: Vec<upstream::Witness>,
 }
 
 /// Check a materialized model directory before it is trusted: no links, every
@@ -817,7 +870,7 @@ fn verify_model_dir(dir: &std::path::Path, entry: &ModelEntry) -> Result<Content
         _ => None,
     };
 
-    if let Some(CardDoc { files: Some(mut files), name, source, verified, origin }) = card {
+    if let Some(CardDoc { files: Some(mut files), name, source, verified, origin, upstream_record, witnesses }) = card {
         check.manifest = true;
         for f in &mut files {
             f.sha256 = f.sha256.to_ascii_lowercase();
@@ -833,6 +886,11 @@ fn verify_model_dir(dir: &std::path::Path, entry: &ModelEntry) -> Result<Content
             return Err(format!("rejected: the files do not match the model's signed manifest (“{odd}”)"));
         }
         check.files_ok = true;
+        // An upstream record is kept only when it describes these very files.
+        if let Some(rec) = upstream_record.filter(|r| r.within(&files)) {
+            check.witnesses = upstream::valid_witnesses(&rec, &witnesses);
+            check.upstream_record = Some(rec);
+        }
         if let Some(o) = origin {
             check.upstream = o.upstream.clone();
             if !o.sig.is_empty() {
@@ -1556,7 +1614,7 @@ pub async fn upload_model(
         card,
         verified: false,
         source: String::new(),
-        upstream: String::new(), identity: true,
+        upstream: String::new(), identity: true, provider_record: None,
     };
     let known: HashMap<String, String> = [(safe_file, sha256_hex)].into_iter().collect();
 
@@ -1911,6 +1969,16 @@ pub async fn fetch_model(State(_s): State<AppState>, Json(req): Json<FetchReq>) 
         if check.origin_ok {
             entry.source = check.source.clone();
         }
+        // The upstream record comes from the card inside the directory that
+        // was just checked, never from the request. Witnesses the caller
+        // passed along are other publishers' statements: kept when their
+        // signatures hold for that same record.
+        let heard = if entry.upstream_record == check.upstream_record { std::mem::take(&mut entry.witnesses) } else { Vec::new() };
+        entry.upstream_record = check.upstream_record.clone();
+        entry.witnesses = match &entry.upstream_record {
+            Some(rec) => upstream::valid_witnesses(rec, &[check.witnesses.clone(), heard].concat()),
+            None => Vec::new(),
+        };
         if seed_enabled() {
             catalog_add_raw(entry);
             announce();
@@ -2259,10 +2327,21 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
             }
         }
 
+        // Every signed witness in sight — this Orb's and every announcing
+        // peer's, across all CIDs — so each row can say how many separate
+        // publishers recorded the same provider hashes. Signatures that do not
+        // hold are dropped here; the gossip daemon has already dropped them once.
+        let mut witnessed = upstream::WitnessIndex::new();
+        for e in local.iter().chain(peers.values().filter(|p| p.peer_id != me).flat_map(|p| p.models.iter())) {
+            witnessed.add(e);
+        }
+
         let local_cids: std::collections::HashSet<String> = local.iter().map(|e| e.cid.clone()).collect();
         let mut out: Vec<Value> = rows
             .into_iter()
-            .map(|(cid, Acc { entry, hosts, .. })| {
+            .map(|(cid, Acc { mut entry, hosts, .. })| {
+                upstream::scrub(&mut entry);
+                let witnesses = entry.upstream_record.as_ref().map(|rec| witnessed.tally(rec));
                 let host_count = hosts.len();
                 let star_count = starrers.get(&cid).map(|s| s.len()).unwrap_or(0);
                 let id = credited.get(&cid).cloned().unwrap_or_default();
@@ -2334,6 +2413,8 @@ pub async fn models_registry(State(_s): State<AppState>) -> Json<Value> {
                     "host_count": host_count, "star_count": star_count,
                     "starred": my_stars.contains(&cid), "signature": signature,
                     "origin": origin, "blocked": blocked,
+                    // Who signed that they saw the provider publish these hashes.
+                    "witnessed": witnesses,
                 })
             })
             .collect();
@@ -2746,6 +2827,7 @@ pub async fn publish_model(State(_s): State<AppState>, Json(req): Json<PublishRe
         let known: HashMap<String, String> = [(file.clone(), sha256)].into_iter().collect();
         let spec = ShareSpec {
             name: req.name, file, card, verified: false, source: String::new(), upstream: String::new(), identity: req.sign_identity,
+            provider_record: None,
         };
         match finalize_share(&dir, spec, &known) {
             Ok(entry) => {
@@ -2904,6 +2986,20 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
             card_doc["files"] = json!(new_files);
             card_doc["origin"] = json!(origin);
         }
+        // An edit changes the card, the README and the picture, never the
+        // weights: what the provider published for them still holds, as long
+        // as every recorded file is still in the edited directory.
+        let kept_record = old.upstream_record.clone().filter(|rec| old_files.is_some() && rec.within(&new_files));
+        let kept_witnesses = match &kept_record {
+            Some(rec) => upstream::valid_witnesses(rec, &old.witnesses),
+            None => Vec::new(),
+        };
+        if let Some(rec) = &kept_record {
+            card_doc["upstream_record"] = json!(rec);
+            if !kept_witnesses.is_empty() {
+                card_doc["witnesses"] = json!(kept_witnesses);
+            }
+        }
         let card_bytes = serde_json::to_vec_pretty(&card_doc).unwrap_or_default();
         let _ = run_script(&["mfs-rm", &format!("{base}/model-card.json")]);
         if let Err(e) = run_script_stdin(&["mfs-write", &format!("{base}/model-card.json")], &card_bytes) {
@@ -2930,6 +3026,7 @@ pub async fn edit_model(State(_s): State<AppState>, Json(req): Json<EditReq>) ->
             sha256: old.sha256, card, added_at_ms: old.added_at_ms,
             origin_id: old.origin_id, origin_label: old.origin_label,
             verified: old.verified, source: old.source,
+            upstream_record: kept_record, witnesses: kept_witnesses,
             ..Default::default()
         };
         sign_entry(&mut edited); // re-signed: editing rebuilds the model (new CID)
@@ -3219,8 +3316,19 @@ fn redact(msg: &str, secret: Option<&str>) -> String {
 
 fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &str) -> Result<(), String> {
     let meta = hf_get_json(&format!("https://huggingface.co/api/models/{repo}"))?;
+    // Pin the exact commit the default branch is at right now. The file list,
+    // every download and the README are all read at this one revision, so a
+    // push that lands mid-import cannot mix two versions, and the upstream
+    // record can say precisely which revision these hashes belong to.
+    let commit = meta
+        .get("sha")
+        .and_then(|v| v.as_str())
+        .filter(|c| c.len() == 40 && c.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .ok_or("HuggingFace did not say which revision this repository is at, so the import cannot be pinned — nothing was imported")?
+        .to_string();
+    let observed_ms = epoch_ms();
     // Recursive: weights and configs often sit in subfolders (unet/, vae/, …).
-    let tree = hf_get_json(&format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true"))?;
+    let tree = hf_get_json(&format!("https://huggingface.co/api/models/{repo}/tree/{commit}?recursive=true"))?;
     let get = |f: &Value, k: &str| f.get(k).and_then(|v| v.as_str()).map(String::from);
     // (path, size, lfs sha256)
     let entries: Vec<(String, u64, Option<String>)> = tree
@@ -3279,14 +3387,20 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
     let mut prior = 0u64;
     let mut any_verifiable = false;
     let mut known: HashMap<String, String> = HashMap::new();
+    // (path, bytes received, sha256, did HuggingFace publish that sha256)
+    let mut recorded: Vec<(String, u64, String, bool)> = Vec::new();
     for (path, _size, oid) in &picks {
         let dest = dir.join(path);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
         }
-        let url = format!("https://huggingface.co/{repo}/resolve/main/{path}");
+        let url = format!("https://huggingface.co/{repo}/resolve/{commit}/{path}");
         let (sha, n) = hf_download(&url, &dest, key, path, total, prior, token.as_deref())?;
         prior += n;
+        // HuggingFace publishes a SHA-256 only for files kept in LFS (the LFS
+        // object id). For a file kept in git itself there is none: its hash is
+        // the one computed here, and is recorded as computed.
+        recorded.push((path.clone(), n, sha.clone(), oid.is_some()));
         if let Some(expected) = oid {
             any_verifiable = true;
             if !expected.eq_ignore_ascii_case(&sha) {
@@ -3312,7 +3426,7 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
 
     // README (the model card) + author avatar — best-effort.
     task_set(key, "fetching README + image…");
-    if let Ok(resp) = hf_agent().get(&format!("https://huggingface.co/{repo}/resolve/main/README.md")).call() {
+    if let Ok(resp) = hf_agent().get(&format!("https://huggingface.co/{repo}/resolve/{commit}/README.md")).call() {
         let mut text = String::new();
         use std::io::Read;
         if resp.into_reader().take(MAX_TEXT_BYTES as u64).read_to_string(&mut text).is_ok() && !text.is_empty() {
@@ -3397,6 +3511,7 @@ fn do_import_hf(repo: &str, only_file: Option<String>, model_name: &str, key: &s
         verified,
         source: format!("https://huggingface.co/{repo}"),
         upstream: String::new(), identity: true,
+        provider_record: upstream::record_from_import("huggingface", repo, &commit, recorded).map(|r| (r, observed_ms)),
     };
     let entry = finalize_share(dir, spec, &known)?;
     // Gated/private weights stay on this Orb only. Seeding off does the same
@@ -3465,9 +3580,11 @@ fn parse_ollama_ref(input: &str) -> Result<(String, String, String), String> {
     Ok((namespace, model, tag))
 }
 
-/// Fetch a model's Ollama-registry manifest. `host` lets the same code hit
-/// hailo-ollama's registry for Hailo imports.
-fn ollama_manifest(host: &str, ns: &str, model: &str, tag: &str) -> Result<Value, String> {
+/// Fetch a model's Ollama-registry manifest and its digest: the SHA-256 of the
+/// manifest exactly as the registry served it, which is what pins every layer
+/// it lists. `host` lets the same code hit hailo-ollama's registry for Hailo
+/// imports.
+fn ollama_manifest(host: &str, ns: &str, model: &str, tag: &str) -> Result<(Value, String), String> {
     let url = format!("https://{host}/v2/{ns}/{model}/manifests/{tag}");
     let resp = hf_agent()
         .get(&url)
@@ -3477,14 +3594,31 @@ fn ollama_manifest(host: &str, ns: &str, model: &str, tag: &str) -> Result<Value
             ureq::Error::Status(404, _) => format!("model not found on the registry: {ns}/{model}:{tag}"),
             other => format!("registry request failed: {other}"),
         })?;
-    resp.into_json::<Value>().map_err(|e| format!("bad manifest json: {e}"))
+    let mut body = Vec::new();
+    {
+        use std::io::Read;
+        resp.into_reader()
+            .take(MAX_TEXT_BYTES as u64 + 1)
+            .read_to_end(&mut body)
+            .map_err(|e| format!("read manifest: {e}"))?;
+    }
+    if body.len() > MAX_TEXT_BYTES {
+        return Err("the registry's manifest is implausibly large".into());
+    }
+    let manifest = serde_json::from_slice::<Value>(&body).map_err(|e| format!("bad manifest json: {e}"))?;
+    let digest = {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{}", hex::encode(Sha256::digest(&body)))
+    };
+    Ok((manifest, digest))
 }
 
 fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), String> {
     let (ns, model, tag) = parse_ollama_ref(reference)?;
     let host = "registry.ollama.ai";
     task_set(key, "resolving Ollama manifest…");
-    let manifest = ollama_manifest(host, &ns, &model, &tag)?;
+    let (manifest, manifest_digest) = ollama_manifest(host, &ns, &model, &tag)?;
+    let observed_ms = epoch_ms();
     let layers = manifest.get("layers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let find_layer = |mt: &str| layers.iter().find(|l| l.get("mediaType").and_then(|v| v.as_str()) == Some(mt)).cloned();
 
@@ -3503,7 +3637,7 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
 
     let leaf = format!("{model}-{tag}.gguf");
     let blob_url = format!("https://{host}/v2/{ns}/{model}/blobs/{digest}");
-    let (sha, _n) = hf_download(&blob_url, &dir.join(&leaf), key, &leaf, size, 0, source_token("ollama").as_deref())?;
+    let (sha, received) = hf_download(&blob_url, &dir.join(&leaf), key, &leaf, size, 0, source_token("ollama").as_deref())?;
     // The layer digest IS the blob's SHA-256; a mismatch means these are not
     // the model's bytes, so stop rather than share them marked "unverified".
     if !expected_sha.is_empty() && !expected_sha.eq_ignore_ascii_case(&sha) {
@@ -3547,9 +3681,19 @@ fn do_import_ollama(reference: &str, model_name: &str, key: &str) -> Result<(), 
     let source = format!("https://ollama.com/{ns_seg}{model}:{tag}");
     inspect_model_dir(dir)?;
     task_set(key, "adding to IPFS…");
+    // The registry publishes the weights' SHA-256 as the layer digest; the
+    // manifest digest pins that layer together with every other one.
+    let provider_record = upstream::record_from_import(
+        "ollama",
+        &format!("{ns}/{model}:{tag}"),
+        &manifest_digest,
+        [(leaf.clone(), received, sha.clone(), verified)],
+    )
+    .map(|r| (r, observed_ms));
     let known: HashMap<String, String> = [(leaf.clone(), sha)].into_iter().collect();
     let spec = ShareSpec {
         name: model_name.to_string(), file: leaf, card, verified, source, upstream: String::new(), identity: true,
+        provider_record,
     };
     let entry = finalize_share(dir, spec, &known)?;
     let cid = entry.cid.clone();
@@ -3620,6 +3764,21 @@ fn parse_civitai_ref(input: &str) -> Result<(Option<u64>, Option<u64>), String> 
     Ok((mid, vid))
 }
 
+/// The plain file name a Civitai file is saved under. The name is chosen by an
+/// uploader, so it is reduced to letters, digits, '.', '-' and '_'. The
+/// re-check uses the same rule to find the file again.
+pub(super) fn civitai_leaf(name: &str) -> String {
+    let n: String = name
+        .rsplit('/')
+        .next()
+        .unwrap_or(name)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let n = n.trim_start_matches('.').to_string();
+    if n.is_empty() { "model.safetensors".to_string() } else { n }
+}
+
 fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Result<(), String> {
     let (model_id, version_id) = parse_civitai_ref(reference)?;
     let auth = source_token("civitai");
@@ -3651,18 +3810,8 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
     };
 
     // A name chosen by an uploader: keep it to a plain file name.
-    let leaf: String = {
-        let n = file.get("name").and_then(|v| v.as_str()).unwrap_or("model.safetensors");
-        let n: String = n
-            .rsplit('/')
-            .next()
-            .unwrap_or(n)
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
-            .collect();
-        let n = n.trim_start_matches('.').to_string();
-        if n.is_empty() { "model.safetensors".to_string() } else { n }
-    };
+    let leaf: String = civitai_leaf(file.get("name").and_then(|v| v.as_str()).unwrap_or("model.safetensors"));
+    let observed_ms = epoch_ms();
     let size = (file.get("sizeKB").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1024.0) as u64;
     let expected_sha = file.get("hashes").and_then(|h| h.get("SHA256")).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let vid = version.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -3682,7 +3831,7 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
     let dir = staging.path();
     // The token rides in the URL, and a failed request's error text quotes the
     // URL — which then showed up verbatim in the task list. Strip it.
-    let (sha, _n) = hf_download(&dl, &dir.join(&leaf), key, &leaf, size, 0, None)
+    let (sha, received) = hf_download(&dl, &dir.join(&leaf), key, &leaf, size, 0, None)
         .map_err(|e| redact(&e, auth.as_deref()))?;
     if !expected_sha.is_empty() && !expected_sha.eq_ignore_ascii_case(&sha) {
         return Err("the downloaded file does not match the SHA-256 Civitai publishes for it — corrupted or altered, nothing was shared".into());
@@ -3752,8 +3901,21 @@ fn do_import_civitai(reference: &str, model_name_hint: &str, key: &str) -> Resul
     let source = format!("https://civitai.com/models/{}", model_meta.get("id").and_then(|v| v.as_u64()).unwrap_or(vid));
     inspect_model_dir(dir)?;
     task_set(key, "adding to IPFS…");
+    // Pinned to the model-version id. The model id comes from the version
+    // itself when the import was started from a version link. Without both
+    // ids there is nothing to re-check against, so no record is made.
+    let civitai_model = model_meta.get("id").and_then(|v| v.as_u64()).or_else(|| version.get("modelId").and_then(|v| v.as_u64()));
+    let provider_record = civitai_model
+        .filter(|_| vid > 0)
+        .and_then(|mid| {
+            upstream::record_from_import("civitai", &mid.to_string(), &vid.to_string(), [(leaf.clone(), received, sha.clone(), verified)])
+        })
+        .map(|r| (r, observed_ms));
     let known: HashMap<String, String> = [(leaf.clone(), sha)].into_iter().collect();
-    let spec = ShareSpec { name: m_name.clone(), file: leaf, card, verified, source, upstream: String::new(), identity: true, };
+    let spec = ShareSpec {
+        name: m_name.clone(), file: leaf, card, verified, source, upstream: String::new(), identity: true,
+        provider_record,
+    };
     let entry = finalize_share(dir, spec, &known)?;
     let cid = entry.cid.clone();
     catalog_add(entry);
@@ -4003,6 +4165,7 @@ pub fn share_vendor_file(
         source: source.to_string(),
         upstream: upstream.to_string(),
         identity: true,
+        provider_record: None,
     };
     let entry = finalize_share(staging.path(), spec, &HashMap::new())?;
     let cid = entry.cid.clone();
@@ -4175,7 +4338,7 @@ mod tests {
             card: ModelCard { kind: "llm".into(), format: "gguf".into(), ..Default::default() },
             verified: true,
             source: "https://example.test/m".into(),
-            upstream: String::new(), identity: true,
+            upstream: String::new(), identity: true, provider_record: None,
         }
     }
 
@@ -4200,6 +4363,104 @@ mod tests {
         assert_eq!(c.origin_identity, c.origin_key); // no delegation in tests
         assert!(c.claims_verified);
         assert_eq!(c.source, "https://example.test/m");
+    }
+
+    /// What an importer hands over: the provider published a SHA-256 for the
+    /// weights and none for the tokenizer.
+    fn provider_record(t: &Tmp) -> upstream::UpstreamRecord {
+        let sha = |rel: &str| sha256_file(&t.path().join(rel)).unwrap();
+        upstream::record_from_import(
+            "huggingface",
+            "org/m",
+            "0123456789abcdef0123456789abcdef01234567",
+            vec![
+                ("model.gguf".to_string(), 20, sha("model.gguf"), true),
+                ("sub/tokenizer.json".to_string(), 2, sha("sub/tokenizer.json"), false),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn imported(tag: &str) -> (Tmp, ModelEntry, upstream::UpstreamRecord) {
+        let t = Tmp::new(tag);
+        t.put("model.gguf", b"GGUF-weights-go-here");
+        t.put("README.md", b"# hello");
+        t.put("sub/tokenizer.json", b"{}");
+        let rec = provider_record(&t);
+        let mut s = spec("m", "model.gguf");
+        s.provider_record = Some((rec.clone(), 1_760_000_000_000));
+        let entry = prepare_share(t.path(), s, &HashMap::new()).unwrap();
+        (t, entry, rec)
+    }
+
+    #[test]
+    fn an_import_keeps_what_the_provider_published_on_the_entry_and_in_the_card() {
+        let (t, entry, rec) = imported("rec");
+        assert_eq!(entry.upstream_record.as_ref(), Some(&rec));
+        assert_eq!(entry.witnesses.len(), 1);
+        assert_eq!(entry.witnesses[0].key, crate::publisher::orb_pubkey());
+        assert_eq!(entry.witnesses[0].observed_ms, 1_760_000_000_000);
+        assert!(upstream::witness_ok(&rec, &entry.witnesses[0]));
+
+        let doc: Value = serde_json::from_slice(&std::fs::read(t.path().join(CARD_FILE)).unwrap()).unwrap();
+        assert_eq!(doc["upstream_record"]["revision"], "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(doc["upstream_record"]["files"][0]["hash_from"], "provider");
+        assert_eq!(doc["upstream_record"]["files"][1]["hash_from"], "computed");
+        assert_eq!(doc["witnesses"][0]["sig"], entry.witnesses[0].sig.as_str());
+
+        // A mirror reads it back out of the directory it just verified.
+        let c = verify_model_dir(t.path(), &entry).unwrap();
+        assert_eq!(c.upstream_record.as_ref(), Some(&rec));
+        assert_eq!(c.witnesses, entry.witnesses);
+        // …and none of it ends up in the stored verification result.
+        let stored = serde_json::to_value(&c).unwrap();
+        assert!(stored.get("upstream_record").is_none() && stored.get("witnesses").is_none());
+        // The entry survives gossip (a JSON round trip) with both intact.
+        let back: ModelEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(back.upstream_record, entry.upstream_record);
+        assert_eq!(back.witnesses, entry.witnesses);
+
+        // A share that is not an import has neither, on the entry or the card.
+        let (t, plain) = shared("norec");
+        assert!(plain.upstream_record.is_none() && plain.witnesses.is_empty());
+        let doc: Value = serde_json::from_slice(&std::fs::read(t.path().join(CARD_FILE)).unwrap()).unwrap();
+        assert!(doc.get("upstream_record").is_none() && doc.get("witnesses").is_none());
+    }
+
+    #[test]
+    fn an_upstream_record_may_only_describe_the_files_it_travels_with() {
+        // At import: a record naming bytes that are not in the share is a bug
+        // in the importer, and stops the share.
+        let t = Tmp::new("recbad");
+        t.put("model.gguf", b"GGUF-weights-go-here");
+        t.put("sub/tokenizer.json", b"{}");
+        let mut rec = provider_record(&t);
+        rec.files[0].sha256 = "00".repeat(32);
+        let mut s = spec("m", "model.gguf");
+        s.provider_record = Some((rec, 5));
+        assert!(prepare_share(t.path(), s, &HashMap::new()).unwrap_err().contains("upstream record"));
+
+        // On download: a card whose record was rewritten to name another hash
+        // is not believed. The files still verify; the record is dropped.
+        let (t, entry, _) = imported("recswap");
+        let card_path = t.path().join(CARD_FILE);
+        let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&card_path).unwrap()).unwrap();
+        doc["upstream_record"]["files"][0]["sha256"] = json!("00".repeat(32));
+        std::fs::write(&card_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let c = verify_model_dir(t.path(), &entry).unwrap();
+        assert!(c.files_ok && c.origin_ok);
+        assert!(c.upstream_record.is_none() && c.witnesses.is_empty());
+
+        // A record re-pointed at another repository or revision keeps its
+        // files, but the witness that came with it no longer holds for it.
+        let (t, entry, _) = imported("recmove");
+        let card_path = t.path().join(CARD_FILE);
+        let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&card_path).unwrap()).unwrap();
+        doc["upstream_record"]["repo"] = json!("famous-lab/m");
+        std::fs::write(&card_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let c = verify_model_dir(t.path(), &entry).unwrap();
+        assert_eq!(c.upstream_record.as_ref().map(|r| r.repo.as_str()), Some("famous-lab/m"));
+        assert!(c.witnesses.is_empty(), "nobody signed that they saw famous-lab publish these hashes");
     }
 
     #[test]

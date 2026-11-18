@@ -97,6 +97,45 @@ export function compareToManifest(actual, manifest) {
   return { ok: !odd && want.size === have.size, mismatch: odd ? odd.path : '' };
 }
 
+/** aeon-witness/1 — the text a witness signs: "I saw this provider publish
+ * these hashes for this repository at this revision, at this time". `record`
+ * is an upstream record ({provider, repo, revision, files}); each file carries
+ * `hash_from`, and only the files whose SHA-256 the provider itself published
+ * ("provider") are part of the statement. A hash computed by the importer is
+ * not something the provider said, so it is never signed as if it were. */
+export function witnessSigningBytes(record, observedMs) {
+  const oneLine = s => typeof s === 'string' && s.length > 0 && [...s].length <= 200 && !/[\x00-\x1f\x7f-\x9f]/.test(s);
+  if (typeof record?.provider !== 'string' || !/^[a-z0-9-]{1,32}$/.test(record.provider)) throw new Error('Invalid provider.');
+  if (!oneLine(record.repo) || !oneLine(record.revision)) throw new Error('Invalid repository or revision.');
+  if (!Number.isSafeInteger(observedMs) || observedMs <= 0) throw new Error('Invalid observation time.');
+  assertManifest(record.files);
+  if (record.files.some(f => f.hash_from !== 'provider' && f.hash_from !== 'computed')) throw new Error('Invalid hash source.');
+  const published = record.files.filter(f => f.hash_from === 'provider');
+  if (!published.length) throw new Error('The provider published no hash: there is nothing to witness.');
+  const lines = sortManifest(published).map(f => `${f.sha256.toLowerCase()} ${f.size} ${f.path}\n`).join('');
+  return Buffer.from(`aeon-witness/1\n${record.provider}\n${record.repo}\n${record.revision}\n${observedMs}\n${lines}`, 'utf8');
+}
+
+/** Verify one witness ({key, observed_ms, sig, delegation?}) against the
+ * upstream record it travels with. Returns who it is credited to and the time
+ * the signer CLAIMS: a signature proves who made the statement, not when, so
+ * `observedMs` is never evidence by itself. `ok` is false for a missing or
+ * invalid signature — never throws on untrusted input. */
+export function verifyWitness(record, witness) {
+  const none = { ok: false, signer: '', identity: '', delegated: false, name: '', observedMs: 0 };
+  if (!witness || typeof witness.sig !== 'string' || !witness.sig) return none;
+  let bytes;
+  try {
+    bytes = witnessSigningBytes(record, witness.observed_ms);
+  } catch {
+    return none;
+  }
+  if (!verifyEd25519(witness.key, bytes, witness.sig)) return none;
+  const identity = identityOf(witness.key, witness.delegation);
+  const delegated = identity !== witness.key;
+  return { ok: true, signer: witness.key, identity, delegated, name: delegated ? witness.delegation.user_name || '' : '', observedMs: witness.observed_ms };
+}
+
 /** aeon-peer/1 — an Orb key vouching for its own libp2p peer id. A host whose
  * bound key signed a model is that model's origin seeder. */
 export function verifyPeerBinding({ orbKey, peerId, orbSig }) {

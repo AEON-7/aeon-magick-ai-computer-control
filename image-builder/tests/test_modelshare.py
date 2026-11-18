@@ -2,8 +2,9 @@
 
     python3 -m unittest discover -s image-builder/tests -v
 
-Covers what does not need an IPFS node: which messages are accepted, how the
-registry ages and is written, and how dialing is rationed.
+Covers what does not need an IPFS node: which messages are accepted, which
+witness statements survive, how the registry ages and is written, and how
+dialing is rationed.
 """
 import base64
 import importlib.machinery
@@ -30,6 +31,11 @@ _loader.exec_module(ms)
 ALICE = "12D3KooWAliceAliceAliceAliceAliceAliceAliceAliceAlice"
 BOB = "12D3KooWBobBobBobBobBobBobBobBobBobBobBobBobBobBobBob"
 CID = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+
+# The published signature vectors: the same file the supervisor's own tests
+# and the JavaScript verifier are held to.
+with open(os.path.join(HERE, "..", "..", "docs", "model-share-vectors.json")) as _f:
+    VECTORS = json.load(_f)
 
 
 def announcement(pid, **over):
@@ -120,6 +126,173 @@ class Acceptance(unittest.TestCase):
         for bad in (None, [], "x", {}, {"peer_id": ALICE}, {"peer_id": "x", "models": []},
                     {"peer_id": ALICE, "models": "nope"}):
             self.assertIsNone(ms.sanitize_announcement(bad))
+
+
+def witnessed(**over):
+    """A model entry carrying the published witness vector."""
+    w = VECTORS["witness"]
+    m = {"cid": CID, "name": "m",
+         "upstream_record": {"provider": w["provider"], "repo": w["repo"], "revision": w["revision"],
+                             "files": [dict(f) for f in w["files"]]},
+         "witnesses": [{"key": w["signer"], "observed_ms": w["observed_ms"], "sig": w["sig"]}]}
+    m.update(over)
+    return m
+
+
+def accepted(*models):
+    return ms.sanitize_announcement(announcement(ALICE, models=list(models)))["models"]
+
+
+class Witnesses(unittest.TestCase):
+    def setUp(self):
+        ms._sig_cache.clear()
+
+    def test_the_verifier_agrees_with_every_published_vector(self):
+        for name in ("publication", "delegation", "origin", "peer_binding", "identity_proof", "witness"):
+            v = VECTORS[name]
+            key, text, sig = bytes.fromhex(v["signer"]), v["signed_text"].encode(), base64.b64decode(v["sig"])
+            self.assertTrue(ms.ed25519_verify(key, text, sig), name)
+            self.assertFalse(ms.ed25519_verify(key, text + b" ", sig), name)
+            self.assertFalse(ms.ed25519_verify(key, text, sig[:63] + bytes([sig[63] ^ 1])), name)
+            self.assertFalse(ms.ed25519_verify(bytes.fromhex(VECTORS["keys"]["user_key" if v["signer"] == VECTORS["keys"]["orb_key"] else "orb_key"]), text, sig), name)
+        # Not signatures at all.
+        self.assertFalse(ms.ed25519_verify(b"short", b"m", b"x" * 64))
+        self.assertFalse(ms.ed25519_verify(b"\xff" * 32, b"m", b"\xff" * 64))
+
+    def test_the_signed_text_is_rebuilt_byte_for_byte(self):
+        w = VECTORS["witness"]
+        shuffled = dict(witnessed()["upstream_record"], files=list(reversed(w["files"])))
+        rec = ms.clean_record(shuffled)
+        self.assertEqual(ms.witness_text(rec, w["observed_ms"]).decode(), w["signed_text"])
+        # Only what the provider published is in it.
+        self.assertNotIn("tokenizer.json", w["signed_text"])
+
+    def test_a_witness_whose_signature_holds_travels_with_its_entry(self):
+        (m,) = accepted(witnessed(card={"kind": "llm"}, something_new=7))
+        self.assertEqual(len(m["witnesses"]), 1)
+        self.assertEqual(m["witnesses"][0]["key"], VECTORS["witness"]["signer"])
+        self.assertEqual(m["upstream_record"]["revision"], VECTORS["witness"]["revision"])
+        # The rest of the entry passes through as it came.
+        self.assertEqual((m["card"], m["something_new"]), ({"kind": "llm"}, 7))
+
+    def test_a_bad_witness_is_dropped_and_the_entry_stays(self):
+        good = witnessed()["witnesses"][0]
+        flipped = base64.b64encode(bytes([base64.b64decode(good["sig"])[0] ^ 1]) + base64.b64decode(good["sig"])[1:]).decode()
+        for name, bad in (
+            ("another time", dict(good, observed_ms=good["observed_ms"] + 1)),
+            ("altered signature", dict(good, sig=flipped)),
+            ("someone else's key", dict(good, key=VECTORS["keys"]["user_key"])),
+            ("no signature", dict(good, sig="")),
+            ("not base64", dict(good, sig="!!!!")),
+            ("no time", {"key": good["key"], "sig": good["sig"]}),
+            ("not an object", "witness"),
+        ):
+            (m,) = accepted(witnessed(witnesses=[bad]))
+            self.assertNotIn("witnesses", m, name)
+            self.assertEqual(m["name"], "m", name)                 # the model is still listed
+            self.assertIn("upstream_record", m, name)              # so is the (unsigned) record
+        # A forged statement next to a real one: only the real one survives.
+        (m,) = accepted(witnessed(witnesses=[dict(good, observed_ms=5), good, "junk"]))
+        self.assertEqual(m["witnesses"], [good])
+
+    def test_a_witness_does_not_hold_for_a_record_it_did_not_sign(self):
+        for field, value in (("repo", "famous-lab/model"), ("revision", "f" * 40), ("provider", "civitai")):
+            rec = dict(witnessed()["upstream_record"], **{field: value})
+            (m,) = accepted(witnessed(upstream_record=rec))
+            self.assertNotIn("witnesses", m, field)
+        # A different hash for a file the provider published.
+        rec = witnessed()["upstream_record"]
+        rec["files"][0]["sha256"] = "cd" * 32
+        (m,) = accepted(witnessed(upstream_record=rec))
+        self.assertNotIn("witnesses", m)
+        # The computed file is outside the statement, so it changes nothing.
+        rec = witnessed()["upstream_record"]
+        rec["files"][1]["sha256"] = "cd" * 32
+        (m,) = accepted(witnessed(upstream_record=rec))
+        self.assertEqual(len(m["witnesses"]), 1)
+
+    def test_a_delegation_rides_on_a_witness_only_when_the_user_key_signed_it(self):
+        d = VECTORS["delegation"]
+        delegation = {"user_key": d["user_key"], "user_name": "alice\x00", "orb_key": d["orb_key"],
+                      "issued_ms": d["issued_ms"], "sig": d["sig"], "junk": 1}
+        good = witnessed()["witnesses"][0]
+        (m,) = accepted(witnessed(witnesses=[dict(good, delegation=delegation)]))
+        self.assertEqual(m["witnesses"][0]["delegation"],
+                         {"user_key": d["user_key"], "user_name": "alice", "orb_key": d["orb_key"],
+                          "issued_ms": d["issued_ms"], "sig": d["sig"]})
+        # Forged, re-dated, or for another Orb key: the statement stays, credited
+        # to the key that signed it; the borrowed name does not.
+        for bad in (dict(delegation, user_key="cd" * 32), dict(delegation, issued_ms=d["issued_ms"] + 1),
+                    dict(delegation, orb_key="ab" * 32), "x", {"user_key": 1}):
+            (m,) = accepted(witnessed(witnesses=[dict(good, delegation=bad)]))
+            self.assertEqual(m["witnesses"], [good], bad)
+
+    def test_a_malformed_record_is_removed_together_with_its_witnesses(self):
+        def with_file(**change):
+            rec = witnessed()["upstream_record"]
+            rec["files"][0].update(change)
+            return rec
+        base = witnessed()["upstream_record"]
+        bad_records = [
+            "nope", [], None, {},
+            dict(base, provider="Hugging Face"), dict(base, repo=""), dict(base, repo="a\nb"),
+            dict(base, revision="x" * 201), dict(base, files=[]), dict(base, files="x"),
+            dict(base, files=base["files"] + [dict(base["files"][0])]),            # the same path twice
+            with_file(path="../escape.gguf"), with_file(path="/etc/passwd"), with_file(path="a\\b"),
+            with_file(sha256="abc"), with_file(size=-1), with_file(size="9"), with_file(size=True),
+            with_file(hash_from="trust me"),
+        ]
+        for rec in bad_records:
+            (m,) = accepted(witnessed(upstream_record=rec))
+            self.assertNotIn("upstream_record", m, rec)
+            self.assertNotIn("witnesses", m, rec)
+            self.assertEqual(m["cid"], CID)
+        # Witnesses with no record to speak about are dropped too.
+        m = witnessed()
+        del m["upstream_record"]
+        (m,) = accepted(m)
+        self.assertNotIn("witnesses", m)
+        # An entry with neither is not touched at all.
+        plain = {"cid": CID, "name": "plain"}
+        self.assertIs(accepted(plain)[0], plain)
+
+    def test_one_announcement_cannot_buy_unlimited_signature_checks(self):
+        calls = []
+        real = ms.ed25519_verify
+        ms.ed25519_verify = lambda *a: calls.append(1) or real(*a)
+        try:
+            good = witnessed()["witnesses"][0]
+            # 40 entries, each with 16 never-seen forged statements and, last, the real one.
+            def flood(salt):
+                return [witnessed(name="m%d" % i, witnesses=[dict(good, observed_ms=salt + i * 100 + j) for j in range(1, 16)] + [good])
+                        for i in range(40)]
+            models = accepted(*flood(10 ** 6))
+            self.assertLessEqual(len(calls), ms.VERIFY_BUDGET)
+            self.assertEqual(len(models), 40)                       # every model is still listed
+            self.assertTrue(all("upstream_record" in m for m in models))
+            # Whatever could not be checked was dropped, not passed on unchecked.
+            self.assertTrue(all(w == good for m in models for w in m.get("witnesses", [])))
+            # The same announcement again costs nothing for what was already checked,
+            # so an honest catalog is verified in full after a few rounds.
+            for _ in range(12):
+                models = accepted(*flood(10 ** 6))
+            self.assertTrue(all(m.get("witnesses") == [good] for m in models))
+            # At most 16 statements ride on one entry however many are offered.
+            many = [dict(good)] * 40
+            self.assertLessEqual(len(accepted(witnessed(witnesses=many))[0]["witnesses"]), ms.MAX_WITNESSES)
+        finally:
+            ms.ed25519_verify = real
+
+    def test_a_cleaned_entry_reaches_the_registry_file(self):
+        reg = ms.Registry(os.path.join(_tmp.name, "witness-reg.json"))
+        good = witnessed()["witnesses"][0]
+        reg.merge(ms.sanitize_announcement(announcement(ALICE, models=[witnessed(witnesses=[dict(good, observed_ms=1), good])])), at_ms=5)
+        self.assertTrue(reg.flush(force=True))
+        with open(reg.path) as f:
+            stored = json.load(f)["peers"][ALICE]["models"][0]
+        self.assertEqual(stored["witnesses"], [good])
+        self.assertEqual([f["path"] for f in stored["upstream_record"]["files"]],
+                         ["example-1b-q4.gguf", "sub/tokenizer.json", "sub/weights.safetensors"])
 
 
 class Lines(unittest.TestCase):
