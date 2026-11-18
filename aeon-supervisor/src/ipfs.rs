@@ -4048,7 +4048,14 @@ pub async fn import_civitai(State(_s): State<AppState>, Json(req): Json<ImportCi
 fn find_avatar_url(html: &str) -> Option<String> {
     let needle = "cdn-avatars.huggingface.co/";
     let idx = html.find(needle)?;
-    let window = &html[idx..(idx + 400).min(html.len())];
+    // 400 is a byte count, so on a page with non-ASCII text it can land inside
+    // a character, and slicing there panics (which aborts a release build).
+    // Step back to a boundary; `idx` is one, so this stops there at the latest.
+    let mut window_end = (idx + 400).min(html.len());
+    while !html.is_char_boundary(window_end) {
+        window_end -= 1;
+    }
+    let window = &html[idx..window_end];
     let unescaped = window.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/");
     // `&` terminates the URL when it's in an HTML-entity-encoded attribute
     // (`…jpeg&quot;`); `?` drops any query string.
@@ -4897,6 +4904,79 @@ mod tests {
         assert_eq!(fetch_peak_bytes(1 << 30), (2 << 30) + (512 << 20));
         assert_eq!(fetch_peak_bytes(u64::MAX / 2), u64::MAX);
         assert_eq!(fetch_peak_bytes(u64::MAX), u64::MAX);
+    }
+
+    const AVATAR: &str = "cdn-avatars.huggingface.co/v1/production/uploads/6421/abcDEF_09.jpeg";
+
+    #[test]
+    fn an_avatar_url_is_found_when_the_window_ends_inside_a_character() {
+        // The search window is 400 bytes from the match. Shift the text after
+        // the URL one byte at a time so that offset lands on every byte of a
+        // 2-, 3- and 4-byte character in turn; the release build aborts on a
+        // panic, so slicing there would end the supervisor.
+        for filler in ["é", "模", "🤗"] {
+            let mut inside = 0;
+            for pad in 0..filler.len() {
+                let html = format!("<img src=\"https://{AVATAR}\"> {}{}", "x".repeat(pad), filler.repeat(200));
+                let idx = html.find(AVATAR).unwrap();
+                inside += usize::from(!html.is_char_boundary(idx + 400));
+                assert_eq!(find_avatar_url(&html).as_deref(), Some(format!("https://{AVATAR}").as_str()), "{filler} {pad}");
+            }
+            assert_eq!(inside, filler.len() - 1, "{filler}: the offset never landed inside a character");
+        }
+        // With nothing to end the URL, the window ends at the last whole
+        // character that fits in the 400 bytes: 31 bytes, then 184 of 'é'.
+        let open = format!("cdn-avatars.huggingface.co/v1/x{}", "é".repeat(300));
+        assert_eq!(find_avatar_url(&open), Some(format!("https://cdn-avatars.huggingface.co/v1/x{}", "é".repeat(184))));
+    }
+
+    #[test]
+    fn an_avatar_url_on_an_ascii_page_is_unchanged() {
+        let want = format!("https://{AVATAR}");
+        let found = |html: String| find_avatar_url(&html);
+        // An attribute, entity-encoded JSON, and a query string.
+        assert_eq!(found(format!("<a><img src=\"https://{AVATAR}\"></a>")), Some(want.clone()));
+        assert_eq!(found(format!("&quot;avatarUrl&quot;:&quot;https://{AVATAR}&quot;,&quot;x&quot;:1")), Some(want.clone()));
+        assert_eq!(found(format!("\"https://{AVATAR}?w=200&h=200\"")), Some(want.clone()));
+        // Slashes escaped the three ways JSON in a page escapes them.
+        for slash in ["\\/", "\\u002F", "\\u002f"] {
+            let escaped = AVATAR.replacen('/', "\u{0}", 1).replace('/', slash).replace('\u{0}', "/");
+            assert_eq!(found(format!("\"https://{escaped}\"")), Some(want.clone()), "{slash}");
+        }
+        // Every terminator, and the end of the page.
+        for end in ['"', '\'', ' ', '<', '>', ')', '\\', '\n', '?', '&'] {
+            assert_eq!(found(format!("{AVATAR}{end}tail")), Some(want.clone()), "{end:?}");
+        }
+        assert_eq!(found(format!("see {AVATAR}")), Some(want.clone()));
+        // The first one on the page wins.
+        assert_eq!(found(format!("{AVATAR} cdn-avatars.huggingface.co/other.png")), Some(want));
+        // Four characters after the host is the least that counts as a URL.
+        assert_eq!(found("cdn-avatars.huggingface.co/abc\"".into()), None);
+        assert_eq!(found("cdn-avatars.huggingface.co/abcd\"".into()).as_deref(), Some("https://cdn-avatars.huggingface.co/abcd"));
+        assert_eq!(found("<html>no avatar here</html>".into()), None);
+        // An unterminated run is still cut at 400 bytes from the match.
+        let long = found(format!("x cdn-avatars.huggingface.co/{}", "a".repeat(1000))).unwrap();
+        assert_eq!(long, format!("https://cdn-avatars.huggingface.co/{}", "a".repeat(400 - 27)));
+    }
+
+    #[test]
+    fn the_other_offset_slices_take_non_ascii_text() {
+        // parse_params slices from an ASCII digit to an ASCII suffix letter, and
+        // parse_civitai_ref slices where an ASCII match ends. Both offsets are
+        // character boundaries whatever text surrounds them.
+        assert_eq!(parse_params("模型-7B-é"), "7B");
+        assert_eq!(parse_params("é0.5b"), "0.5B");
+        assert_eq!(parse_params("模7模 12é 3Bé"), "3B");
+        assert_eq!(parse_params("é模🤗"), "");
+        assert_eq!(parse_civitai_ref("https://civitai.com/models/123/模型?modelVersionId=456é"), Ok((Some(123), Some(456))));
+        assert_eq!(parse_civitai_ref("é/api/download/models/789é"), Ok((None, Some(789))));
+        assert!(parse_civitai_ref("/models/é").is_err());
+        assert!(parse_civitai_ref("é/api/download/models/").is_err());
+        assert_eq!(
+            parse_hf("https://huggingface.co/org/model/blob/main/模型/é.gguf"),
+            Ok(("org/model".to_string(), Some("模型/é.gguf".to_string())))
+        );
+        assert!(parse_hf("é/模").is_err());
     }
 }
 
